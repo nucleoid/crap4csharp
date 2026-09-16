@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Crap4CSharp.Core/Crap4CSharp.Core.csproj" />
+    <Project Path="src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Crap4CSharp.Tests/Crap4CSharp.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>crap4csharp</ToolCommandName>
+    <PackageId>Crap4CSharp.Tool</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Crap4CSharp contributors</Authors>
+    <Description>Calculate CRAP metrics for C# methods using Roslyn and Coverlet/OpenCover reports.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/nucleoid/crap4csharp</RepositoryUrl>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Crap4CSharp.Core/Crap4CSharp.Core.csproj" />
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <InternalsVisibleTo Include="Crap4CSharp.Tests" />
+  </ItemGroup>
+</Project>
