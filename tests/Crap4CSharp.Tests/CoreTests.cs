@@ -1,4 +1,5 @@
 using System.Text;
+using System.Diagnostics;
 using Crap4CSharp.Core;
 using Xunit;
 
@@ -239,6 +240,85 @@ public sealed class CoreTests : IDisposable
         Assert.Contains("git rev-parse failed", result.Error);
     }
 
+    [Fact]
+    public async Task NoArgumentsCatchOperationalFailureAfterSourceDiscovery()
+    {
+        Write("src/OnlySource.cs", "class OnlySource { int M() => 1; }");
+
+        var result = await RunApp();
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("No solution or project found", result.Error);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("1.5")]
+    [InlineData("86401")]
+    [InlineData("not-a-number")]
+    public async Task TimeoutOptionRequiresBoundedPositiveWholeSeconds(string value)
+    {
+        var result = await RunApp("--timeout-seconds", value);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("Timeout must be a whole number of seconds from 1 through 86400", result.Error);
+    }
+
+    [Theory]
+    [InlineData("1")]
+    [InlineData("86400")]
+    public async Task TimeoutOptionAcceptsDocumentedBounds(string value)
+    {
+        var result = await RunApp("--timeout-seconds", value);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("No C# source files found", result.Output);
+    }
+
+    [Fact]
+    public async Task ChangedModeRunsGitStatusThroughNulSafeProcessPath()
+    {
+        var source = Write("src/name with spaces.cs", "class C { int M() => 1; }");
+        var report = WriteOpenCover("coverage.xml", source, "C", "C.M()", 1, 1);
+        var init = await ProcessRunner.RunAsync("git", ["init", "--quiet"], temporary, TimeSpan.FromSeconds(10), CancellationToken.None);
+        Assert.Equal(0, init.ExitCode);
+
+        var result = await RunApp("--changed", "--coverage", report);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("src/name with spaces.cs", result.Output);
+    }
+
+    [Fact]
+    public async Task ProcessRunnerTimesOutWithoutHanging()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var started = Stopwatch.StartNew();
+        var exception = await Assert.ThrowsAsync<ProcessTimeoutException>(() => ProcessRunner.RunAsync(
+            "/bin/sh", ["-c", "sleep 30"], temporary, TimeSpan.FromMilliseconds(200), CancellationToken.None));
+
+        Assert.Contains("timed out", exception.Message);
+        Assert.True(started.Elapsed < TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task ProcessRunnerCancellationKillsChildProcessTree()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var pidFile = Path.Combine(temporary, "child.pid");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ProcessRunner.RunAsync(
+            "/bin/sh", ["-c", "sleep 30 & echo $! > \"$1\"; wait", "sh", pidFile], temporary,
+            TimeSpan.FromSeconds(10), cancellation.Token));
+
+        var childPid = int.Parse(await File.ReadAllTextAsync(pidFile, TestContext.Current.CancellationToken),
+            System.Globalization.CultureInfo.InvariantCulture);
+        Assert.True(await WaitUntilProcessExits(childPid, TimeSpan.FromSeconds(3)), $"Child process {childPid} was not terminated.");
+    }
+
     private async Task<(int ExitCode, string Output, string Error)> RunApp(params string[] args)
     {
         using var output = new StringWriter();
@@ -258,5 +338,24 @@ public sealed class CoreTests : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, contents);
         return Path.GetFullPath(path);
+    }
+
+    private static async Task<bool> WaitUntilProcessExits(int processId, TimeSpan timeout)
+    {
+        var deadline = Stopwatch.StartNew();
+        while (deadline.Elapsed < timeout)
+        {
+            try
+            {
+                using var process = Process.GetProcessById(processId);
+                if (process.HasExited) return true;
+            }
+            catch (ArgumentException)
+            {
+                return true;
+            }
+            await Task.Delay(50);
+        }
+        return false;
     }
 }

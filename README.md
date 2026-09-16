@@ -36,6 +36,9 @@ crap4csharp --changed --coverage coverage.xml
 # Gate at a different threshold
 crap4csharp --threshold 15 --project MySolution.slnx
 
+# Bound each Git or dotnet child command to 10 minutes
+crap4csharp --timeout-seconds 600 --project MySolution.slnx
+
 # Explicitly permit N/A methods while still gating known scores
 crap4csharp --allow-missing-coverage --coverage coverage.xml src
 ```
@@ -47,6 +50,8 @@ dotnet test <discovered-or-specified-target> --collect:"XPlat Code Coverage" ...
 ```
 
 The project must already reference a compatible collector such as `coverlet.collector`. Crap4CSharp never installs one or changes a project. A failed test run remains exit code `1`, even if a partial report can be displayed. Tool-owned result directories are retained and printed for diagnosis; unrelated test results are never deleted.
+
+Every external command has a bounded timeout of 300 seconds by default. Set `--timeout-seconds` to a whole number from `1` through `86400` to override it. A timeout or Ctrl+C cancels the run, terminates the entire child process tree, prints a diagnostic, and exits `1`.
 
 Solutions (`.sln` or `.slnx`) are preferred when exactly one exists in the working directory, then a single `.csproj`. Use `--project` when discovery would be ambiguous. Providing any `--coverage` report skips tests and neither creates nor deletes a test-results directory. Missing, malformed, or unsupported reports fail operationally. OpenCover and Cobertura/Coverlet XML are supported; multiple reports merge the union of distinct eligible sequence points. Repeated points are counted once and are visited if any report records a visit.
 
@@ -68,7 +73,7 @@ Output is ordered by numeric CRAP score descending, followed by unknown (`N/A`) 
 ## Exit codes
 
 - `0`: analysis succeeded and no score exceeded the threshold
-- `1`: usage, discovery, test, missing/ambiguous coverage (unless opted out), or other operational failure
+- `1`: usage, discovery, test, timeout/cancellation, missing/ambiguous coverage (unless opted out), or other operational failure
 - `2`: one or more known scores strictly exceeded the threshold
 
 ## Development

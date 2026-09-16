@@ -2,7 +2,21 @@ using System.Globalization;
 using System.Text;
 using Crap4CSharp.Core;
 
-return await App.RunAsync(args, Directory.GetCurrentDirectory(), Console.Out, Console.Error, CancellationToken.None);
+using var cancellationSource = new CancellationTokenSource();
+ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
+{
+    eventArgs.Cancel = true;
+    cancellationSource.Cancel();
+};
+Console.CancelKeyPress += cancelHandler;
+try
+{
+    return await App.RunAsync(args, Directory.GetCurrentDirectory(), Console.Out, Console.Error, cancellationSource.Token);
+}
+finally
+{
+    Console.CancelKeyPress -= cancelHandler;
+}
 
 internal static class App
 {
@@ -17,6 +31,8 @@ internal static class App
                              Supplying coverage skips dotnet test.
           --project <path>   Solution or project passed to dotnet test.
           --threshold <n>    Fail when a known CRAP score is strictly greater than n (default: 8).
+          --timeout-seconds <n>
+                             Maximum time for each external command (default: 300; max: 86400).
           --allow-missing-coverage
                              Allow N/A methods; known scores still gate. By default any N/A is
                              an operational failure to prevent a false-green quality gate.
@@ -28,22 +44,22 @@ internal static class App
 
     public static async Task<int> RunAsync(string[] args, string workingDirectory, TextWriter output, TextWriter error, CancellationToken cancellationToken)
     {
-        if (args.Length == 0) return await ExecuteAsync(new Options(), workingDirectory, output, error, cancellationToken);
         if (args.Any(arg => arg is "--help" or "-h")) { await output.WriteLineAsync(Help); return 0; }
 
-        Options options;
-        try { options = Parse(args); }
+        try
+        {
+            var options = args.Length == 0 ? new Options() : Parse(args);
+            return await ExecuteAsync(options, workingDirectory, output, error, cancellationToken);
+        }
         catch (ArgumentException exception)
         {
             await error.WriteLineAsync($"error: {exception.Message}");
             await error.WriteLineAsync("Run 'crap4csharp --help' for usage.");
             return 1;
         }
-
-        try { return await ExecuteAsync(options, workingDirectory, output, error, cancellationToken); }
         catch (OperationCanceledException) { await error.WriteLineAsync("error: operation cancelled"); return 1; }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or
-            InvalidOperationException or ArgumentException or System.ComponentModel.Win32Exception)
+            InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception)
         {
             await error.WriteLineAsync($"error: {exception.Message}");
             return 1;
@@ -70,6 +86,12 @@ internal static class App
                         !double.IsFinite(threshold) || threshold < 0) throw new ArgumentException("Threshold must be a finite non-negative number.");
                     options.Threshold = threshold;
                     break;
+                case "--timeout-seconds":
+                    if (!int.TryParse(Value(), NumberStyles.None, CultureInfo.InvariantCulture, out var timeoutSeconds) ||
+                        timeoutSeconds is < 1 or > 86400)
+                        throw new ArgumentException("Timeout must be a whole number of seconds from 1 through 86400.");
+                    options.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
+                    break;
                 case "--changed": options.Changed = true; break;
                 case "--allow-missing-coverage": options.AllowMissingCoverage = true; break;
                 default:
@@ -85,7 +107,7 @@ internal static class App
     private static async Task<int> ExecuteAsync(Options options, string workingDirectory, TextWriter output, TextWriter error, CancellationToken cancellationToken)
     {
         var files = options.Changed
-            ? await ChangedFilesAsync(workingDirectory, cancellationToken)
+            ? await ChangedFilesAsync(workingDirectory, options.Timeout, cancellationToken)
             : SourceDiscovery.Discover(options.Inputs, workingDirectory);
         if (files.Count == 0) { await output.WriteLineAsync("No C# source files found."); return 0; }
 
@@ -101,7 +123,7 @@ internal static class App
             var result = await ProcessRunner.RunAsync("dotnet",
                 ["test", target, "-m:1", "--collect:XPlat Code Coverage", "--results-directory", resultsDirectory,
                  "--", "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover"],
-                workingDirectory, cancellationToken);
+                workingDirectory, options.Timeout, cancellationToken);
             if (!string.IsNullOrWhiteSpace(result.StandardOutput)) await output.WriteAsync(result.StandardOutput);
             if (!string.IsNullOrWhiteSpace(result.StandardError)) await error.WriteAsync(result.StandardError);
             testFailed = result.ExitCode != 0;
@@ -146,31 +168,18 @@ internal static class App
         return violations.Length > 0 ? 2 : 0;
     }
 
-    private static async Task<IReadOnlyList<string>> ChangedFilesAsync(string workingDirectory, CancellationToken cancellationToken)
+    private static async Task<IReadOnlyList<string>> ChangedFilesAsync(string workingDirectory, TimeSpan timeout, CancellationToken cancellationToken)
     {
-        var rootResult = await ProcessRunner.RunAsync("git", ["rev-parse", "--show-toplevel"], workingDirectory, cancellationToken);
+        var rootResult = await ProcessRunner.RunAsync("git", ["rev-parse", "--show-toplevel"], workingDirectory, timeout, cancellationToken);
         if (rootResult.ExitCode != 0)
             throw new InvalidOperationException($"git rev-parse failed: {rootResult.StandardError.Trim()}");
         var root = rootResult.StandardOutput.TrimEnd('\r', '\n');
         if (root.Length == 0) throw new InvalidOperationException("git rev-parse returned an empty repository root.");
-        var startInfo = new System.Diagnostics.ProcessStartInfo("git")
-        {
-            WorkingDirectory = root,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        };
-        startInfo.ArgumentList.Add("status");
-        startInfo.ArgumentList.Add("--porcelain=v1");
-        startInfo.ArgumentList.Add("--untracked-files=all");
-        startInfo.ArgumentList.Add("-z");
-        using var process = System.Diagnostics.Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start git.");
-        using var buffer = new MemoryStream();
-        await process.StandardOutput.BaseStream.CopyToAsync(buffer, cancellationToken);
-        var standardError = await process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken);
-        if (process.ExitCode != 0) throw new InvalidOperationException($"git status failed: {standardError.Trim()}");
-        return GitChanges.ParsePorcelainV1Z(buffer.ToArray(), root);
+        var statusResult = await ProcessRunner.RunAsync("git",
+            ["status", "--porcelain=v1", "--untracked-files=all", "-z"], root, timeout, cancellationToken);
+        if (statusResult.ExitCode != 0)
+            throw new InvalidOperationException($"git status failed: {statusResult.StandardError.Trim()}");
+        return GitChanges.ParsePorcelainV1Z(Encoding.UTF8.GetBytes(statusResult.StandardOutput), root);
     }
 
     private static string ResolveTestTarget(string? requested, string workingDirectory)
@@ -197,6 +206,7 @@ internal static class App
         public List<string> Inputs { get; } = [];
         public string? Project { get; set; }
         public double Threshold { get; set; } = 8;
+        public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(300);
         public bool Changed { get; set; }
         public bool AllowMissingCoverage { get; set; }
     }
