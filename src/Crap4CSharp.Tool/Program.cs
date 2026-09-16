@@ -109,10 +109,17 @@ internal static class App
         var files = options.Changed
             ? await ChangedFilesAsync(workingDirectory, options.Timeout, cancellationToken)
             : SourceDiscovery.Discover(options.Inputs, workingDirectory);
+        var reports = options.Coverage.Select(path => Path.GetFullPath(path, workingDirectory)).ToList();
+        IReadOnlyList<CoverageMethod>[]? coverage = null;
+        if (reports.Count > 0)
+        {
+            foreach (var report in reports)
+                if (!File.Exists(report)) throw new FileNotFoundException($"Coverage report not found: {report}", report);
+            coverage = reports.Select(CoverageReader.Read).ToArray();
+        }
         if (files.Count == 0) { await output.WriteLineAsync("No C# source files found."); return 0; }
 
         var testFailed = false;
-        var reports = options.Coverage.Select(path => Path.GetFullPath(path, workingDirectory)).ToList();
         if (reports.Count == 0)
         {
             var target = ResolveTestTarget(options.Project, workingDirectory);
@@ -139,7 +146,7 @@ internal static class App
         foreach (var report in reports)
             if (!File.Exists(report)) throw new FileNotFoundException($"Coverage report not found: {report}", report);
         var source = new SourceAnalyzer().AnalyzeFiles(files);
-        var coverage = reports.Select(CoverageReader.Read).ToArray();
+        coverage ??= reports.Select(CoverageReader.Read).ToArray();
         var metrics = CoverageMatcher.Apply(source, coverage)
             .OrderBy(metric => metric.Crap is null ? 1 : 0)
             .ThenByDescending(metric => metric.Crap)

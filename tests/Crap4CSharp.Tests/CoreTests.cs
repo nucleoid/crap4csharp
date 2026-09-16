@@ -233,6 +233,28 @@ public sealed class CoreTests : IDisposable
     }
 
     [Fact]
+    public async Task MissingExplicitCoverageFailsWithoutSourceFilesAndSkipsTests()
+    {
+        var result = await RunApp("--coverage", Path.Combine(temporary, "missing.xml"));
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("Coverage report not found", result.Error);
+        Assert.DoesNotContain("Running coverage", result.Output);
+    }
+
+    [Fact]
+    public async Task MalformedExplicitCoverageFailsWithoutSourceFilesAndSkipsTests()
+    {
+        var malformed = Write("bad.xml", "<coverage>");
+
+        var result = await RunApp("--coverage", malformed);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("Malformed coverage XML", result.Error);
+        Assert.DoesNotContain("Running coverage", result.Output);
+    }
+
+    [Fact]
     public async Task GitCommandFailureIsAnOperationalFailureWithDiagnostics()
     {
         var result = await RunApp("--changed");
@@ -287,7 +309,7 @@ public sealed class CoreTests : IDisposable
         var result = await RunApp("--changed", "--coverage", report);
 
         Assert.Equal(0, result.ExitCode);
-        Assert.Contains("src/name with spaces.cs", result.Output);
+        Assert.Contains(Path.Combine("src", "name with spaces.cs"), result.Output);
     }
 
     [Fact]
