@@ -12,6 +12,8 @@ Coverage is a fraction from 0 through 1. A method violates the gate only when it
 
 ## Install locally
 
+Prerequisite: [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0).
+
 ```bash
 dotnet pack src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj -c Release -o artifacts
 dotnet tool install --tool-path .tools --add-source artifacts Crap4CSharp.Tool
