@@ -5,7 +5,7 @@
   "type": "object",
   "required": ["schemaVersion", "toolVersion", "complexityRulesetVersion", "evaluation", "run"],
   "properties": {
-    "schemaVersion": { "const": "1.0" },
+    "schemaVersion": { "type": "string", "pattern": "^1\\.[0-9]+$" },
     "toolVersion": { "type": "string", "minLength": 1 },
     "complexityRulesetVersion": { "const": "ordinary-methods-v1" },
     "evaluation": { "$ref": "#/$defs/evaluation" },

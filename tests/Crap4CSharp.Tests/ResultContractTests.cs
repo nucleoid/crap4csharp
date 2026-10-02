@@ -107,6 +107,39 @@ public sealed class ResultContractTests : IDisposable
     }
 
     [Fact]
+    public async Task OutputCannotAliasImplicitlyDiscoveredProject()
+    {
+        var source = Write("Source.cs", "class C { int M() => 1; }");
+        var project = Write("Auto.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        var before = await File.ReadAllBytesAsync(project, TestContext.Current.CancellationToken);
+
+        var result = await RunApp("--format", "json", "--output", project, source);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Equal(before, await File.ReadAllBytesAsync(project, TestContext.Current.CancellationToken));
+        using var document = JsonDocument.Parse(result.Output);
+        Assert.Equal("output.aliasesInput", document.RootElement.GetProperty("evaluation").GetProperty("checks")[0].GetProperty("reason").GetString());
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task EarlyFailureMarksExistingOutputStaleWithoutReplacingIt(bool argumentFailure)
+    {
+        var resultPath = Write("result.json", "old result");
+        var result = argumentFailure
+            ? await RunApp("--format", "json", "--output", resultPath, "--threshold", "invalid")
+            : await RunApp("--format", "json", "--output", resultPath, "missing-directory");
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Equal("old result", await File.ReadAllTextAsync(resultPath, TestContext.Current.CancellationToken));
+        Assert.Contains("existing content may be stale", result.Error);
+        using var document = JsonDocument.Parse(result.Output);
+        Assert.Contains(document.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
+            check => check.GetProperty("reason").GetString() == "output.notWritten");
+    }
+
+    [Fact]
     public async Task NormalizedEvaluationIsStableWhileRunEnvelopeVaries()
     {
         var source = Write("unicodé source.cs", "class C { int M() => 1; }");
@@ -241,6 +274,9 @@ public sealed class ResultContractTests : IDisposable
         using var document = JsonDocument.Parse(output.ToString());
         Assert.Equal("run.timeout", document.RootElement.GetProperty("evaluation").GetProperty("checks")[0].GetProperty("reason").GetString());
         Assert.True(document.RootElement.GetProperty("run").GetProperty("cancellation").GetProperty("timedOut").GetBoolean());
+        Assert.Single(document.RootElement.GetProperty("run").GetProperty("commands").EnumerateArray());
+        Assert.Single(document.RootElement.GetProperty("run").GetProperty("artifacts").EnumerateArray());
+        Assert.Single(document.RootElement.GetProperty("evaluation").GetProperty("scope").GetProperty("sources").EnumerateArray());
     }
 
     [Fact]
@@ -261,6 +297,9 @@ public sealed class ResultContractTests : IDisposable
         Assert.Equal(output.ToString(), await File.ReadAllTextAsync(resultPath, TestContext.Current.CancellationToken));
         using var document = JsonDocument.Parse(output.ToString());
         Assert.Equal("cancelled", document.RootElement.GetProperty("run").GetProperty("status").GetString());
+        Assert.Single(document.RootElement.GetProperty("run").GetProperty("commands").EnumerateArray());
+        Assert.Single(document.RootElement.GetProperty("run").GetProperty("artifacts").EnumerateArray());
+        Assert.Equal("run.cancelled", document.RootElement.GetProperty("run").GetProperty("cancellation").GetProperty("reason").GetString());
     }
 
     [Fact]
@@ -283,7 +322,10 @@ public sealed class ResultContractTests : IDisposable
         using var document = JsonDocument.Parse(output.ToString());
         Assert.Single(document.RootElement.GetProperty("run").GetProperty("commands").EnumerateArray());
         Assert.Single(document.RootElement.GetProperty("run").GetProperty("artifacts").EnumerateArray());
-        Assert.Equal("coverage.notProduced", document.RootElement.GetProperty("evaluation").GetProperty("checks")[0].GetProperty("reason").GetString());
+        var reasons = document.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray()
+            .Select(check => check.GetProperty("reason").GetString()).ToArray();
+        Assert.Contains("tests.failed", reasons);
+        Assert.Contains("coverage.notProduced", reasons);
     }
 
     [Fact]
