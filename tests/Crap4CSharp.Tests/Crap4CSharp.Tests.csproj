@@ -7,5 +7,6 @@
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
     <ProjectReference Include="../../src/Crap4CSharp.Core/Crap4CSharp.Core.csproj" />
     <ProjectReference Include="../../src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj" />
+    <None Include="Fixtures/results/*.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

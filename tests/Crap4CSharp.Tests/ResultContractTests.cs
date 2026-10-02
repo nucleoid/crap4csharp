@@ -137,6 +137,25 @@ public sealed class ResultContractTests : IDisposable
         Assert.Contains("raw CRAP", result.Output);
     }
 
+    [Theory]
+    [InlineData("pass.json", "pass", "pass", "completed", 0)]
+    [InlineData("violation.json", "fail", "fail", "completed", 2)]
+    [InlineData("operational-error.json", "operationalError", "unknown", "operationalError", 1)]
+    [InlineData("cancelled.json", "cancelled", "unknown", "cancelled", 1)]
+    [InlineData("not-applicable.json", "notApplicable", "notApplicable", "completed", 0)]
+    public void TerminalStateSnapshotsAreVersionedAndInternallyConsistent(
+        string fixture, string checkStatus, string policyDecision, string runStatus, int exitCode)
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "results", fixture);
+        using var document = JsonDocument.Parse(File.ReadAllText(path));
+        var root = document.RootElement;
+        Assert.Equal("1.0", root.GetProperty("schemaVersion").GetString());
+        Assert.Equal(checkStatus, root.GetProperty("checkStatus").GetString());
+        Assert.Equal(policyDecision, root.GetProperty("policyDecision").GetString());
+        Assert.Equal(runStatus, root.GetProperty("runStatus").GetString());
+        Assert.Equal(exitCode, root.GetProperty("exitCode").GetInt32());
+    }
+
     private async Task<(int ExitCode, string Output, string Error)> RunApp(params string[] args)
     {
         using var output = new StringWriter();
