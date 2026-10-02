@@ -41,6 +41,7 @@ public sealed class ResultContractTests : IDisposable
         Assert.Equal("operationalError", document.RootElement.GetProperty("run").GetProperty("status").GetString());
         Assert.Equal("arguments.invalid", document.RootElement.GetProperty("evaluation").GetProperty("checks")[0].GetProperty("reason").GetString());
         Assert.DoesNotContain("error:", result.Output);
+        Assert.Contains("Threshold must be", result.Error);
     }
 
     [Fact]

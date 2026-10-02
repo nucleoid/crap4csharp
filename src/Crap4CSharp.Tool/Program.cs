@@ -97,6 +97,7 @@ internal static class App
         if (format == "json")
         {
             foreach (var diagnostic in outcome.DiagnosticLines) await error.WriteLineAsync(diagnostic);
+            if (outcome.ErrorMessage is not null) await error.WriteLineAsync($"error: {outcome.ErrorMessage}");
             try { await output.WriteAsync(json); }
             catch (Exception exception) when (exception is IOException or ObjectDisposedException)
             {
