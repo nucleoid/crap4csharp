@@ -1,3 +1,6 @@
+using System.ComponentModel;
+using System.Globalization;
+using System.Reflection;
 using System.Text.Json;
 using Crap4CSharp.Core;
 using Xunit;
@@ -25,6 +28,8 @@ public sealed class ResultContractTests : IDisposable
         var root = document.RootElement;
         Assert.Equal("1.0", root.GetProperty("schemaVersion").GetString());
         Assert.Equal("ordinary-methods-v1", root.GetProperty("complexityRulesetVersion").GetString());
+        Assert.Equal(typeof(global::App).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion,
+            root.GetProperty("toolVersion").GetString());
         Assert.Equal("legacy", root.GetProperty("evaluation").GetProperty("invocationMode").GetString());
         Assert.Equal("pass", root.GetProperty("evaluation").GetProperty("decision").GetProperty("policyDecision").GetString());
         Assert.Equal(0, root.GetProperty("run").GetProperty("exitCode").GetInt32());
@@ -155,6 +160,134 @@ public sealed class ResultContractTests : IDisposable
         Assert.NotEqual(firstDocument.RootElement.GetProperty("run").GetProperty("invocationId").GetString(),
             secondDocument.RootElement.GetProperty("run").GetProperty("invocationId").GetString());
         Assert.Contains("unicodé source.cs", first.Output);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SafeAbsentOutputIsFinalizedForEarlyFailures(bool argumentFailure)
+    {
+        var resultPath = Path.Combine(temporary, argumentFailure ? "argument-error.json" : "discovery-error.json");
+        var result = argumentFailure
+            ? await RunApp("--format", "json", "--output", resultPath, "--threshold", "invalid")
+            : await RunApp("--format", "json", "--output", resultPath, "missing-directory");
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Equal(result.Output, await File.ReadAllTextAsync(resultPath, TestContext.Current.CancellationToken));
+        using var document = JsonDocument.Parse(result.Output);
+        Assert.DoesNotContain(document.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
+            check => check.GetProperty("reason").GetString() == "output.notWritten");
+    }
+
+    [Fact]
+    public async Task GeneratedCoverageUsesStableLogicalIdentityAcrossRuns()
+    {
+        var source = Write("Source.cs", "class C { int M() => 1; }");
+        Write("Fixture.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        async Task<ProcessResult> Coverage(string _, IEnumerable<string> arguments, string __, TimeSpan ___, CancellationToken ____)
+        {
+            var values = arguments.ToArray();
+            var results = values[Array.IndexOf(values, "--results-directory") + 1];
+            Directory.CreateDirectory(results);
+            await File.WriteAllTextAsync(Path.Combine(results, "coverage.opencover.xml"),
+                File.ReadAllText(WriteOpenCover("generated.xml", source, visits: 1)), TestContext.Current.CancellationToken);
+            return new ProcessResult(0, string.Empty, string.Empty);
+        }
+
+        var first = await RunAppAt(temporary, Coverage, "--format", "json", source);
+        var second = await RunAppAt(temporary, Coverage, "--format", "json", source);
+
+        using var firstDocument = JsonDocument.Parse(first.Output);
+        using var secondDocument = JsonDocument.Parse(second.Output);
+        var firstEvaluation = firstDocument.RootElement.GetProperty("evaluation");
+        Assert.Equal(firstEvaluation.GetRawText(), secondDocument.RootElement.GetProperty("evaluation").GetRawText());
+        var coverageArtifact = Assert.Single(firstEvaluation.GetProperty("artifacts").EnumerateArray(),
+            artifact => artifact.GetProperty("kind").GetString() == "coverage");
+        Assert.StartsWith("<generated>/coverage/", coverageArtifact.GetProperty("path").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(Path.GetTempPath().Replace('\\', '/'), coverageArtifact.GetProperty("path").GetString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task OperationalExceptionAfterDiscoveryRetainsAccumulatedEvidence()
+    {
+        var source = Write("Source.cs", "class C { int M() => 1; }");
+        Write("Fixture.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        Task<ProcessResult> CannotStart(string _, IEnumerable<string> __, string ___, TimeSpan ____, CancellationToken _____) =>
+            throw new Win32Exception("dotnet unavailable");
+
+        var result = await RunAppAt(temporary, CannotStart, "--format", "json", source);
+
+        Assert.Equal(1, result.ExitCode);
+        using var document = JsonDocument.Parse(result.Output);
+        Assert.Single(document.RootElement.GetProperty("evaluation").GetProperty("scope").GetProperty("sources").EnumerateArray());
+        Assert.Single(document.RootElement.GetProperty("run").GetProperty("commands").EnumerateArray());
+        Assert.Single(document.RootElement.GetProperty("run").GetProperty("artifacts").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task CancellationTruthSurvivesCleanupException()
+    {
+        var source = Write("Source.cs", "class C { int M() => 1; }");
+        Write("Fixture.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        Task<ProcessResult> DrainFailure(string _, IEnumerable<string> __, string ___, TimeSpan ____, CancellationToken _____) =>
+            throw new InvalidOperationException("could not drain cancelled process");
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = await global::App.RunAsync(["--format", "json", source], temporary, output, error,
+            cancellation.Token, DrainFailure);
+
+        Assert.Equal(1, exitCode);
+        using var document = JsonDocument.Parse(output.ToString());
+        Assert.Equal("cancelled", document.RootElement.GetProperty("run").GetProperty("status").GetString());
+        Assert.True(document.RootElement.GetProperty("run").GetProperty("cancellation").GetProperty("cancelled").GetBoolean());
+        Assert.Equal("run.cancelled", document.RootElement.GetProperty("run").GetProperty("cancellation").GetProperty("reason").GetString());
+        Assert.Single(document.RootElement.GetProperty("run").GetProperty("commands").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task NormalizedEvaluationIsCultureInvariant()
+    {
+        var source = Write("Culture.cs", "class C { int M() => 1; }");
+        var coverage = WriteOpenCover("culture.xml", source, visits: 1);
+        var originalCulture = CultureInfo.CurrentCulture;
+        var originalUiCulture = CultureInfo.CurrentUICulture;
+        var evaluations = new List<string>();
+        try
+        {
+            foreach (var cultureName in new[] { "en-US", "fr-FR", "tr-TR" })
+            {
+                CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo(cultureName);
+                CultureInfo.CurrentUICulture = CultureInfo.GetCultureInfo(cultureName);
+                var result = await RunApp("--format", "json", "--threshold", "8.0001", "--coverage", coverage, source);
+                using var document = JsonDocument.Parse(result.Output);
+                evaluations.Add(document.RootElement.GetProperty("evaluation").GetRawText());
+            }
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = originalCulture;
+            CultureInfo.CurrentUICulture = originalUiCulture;
+        }
+
+        Assert.All(evaluations, evaluation => Assert.Equal(evaluations[0], evaluation));
+    }
+
+    [Fact]
+    public void PublishedSchemaRequiresTypedRunEvidence()
+    {
+        var repository = Path.GetFullPath("../../../../../", AppContext.BaseDirectory);
+        using var schema = JsonDocument.Parse(File.ReadAllText(Path.Combine(repository, "docs", "result-schema-v1.json")));
+        var definitions = schema.RootElement.GetProperty("$defs");
+        Assert.Equal("#/$defs/command", definitions.GetProperty("run").GetProperty("properties").GetProperty("commands").GetProperty("items").GetProperty("$ref").GetString());
+        Assert.Equal("#/$defs/runArtifact", definitions.GetProperty("run").GetProperty("properties").GetProperty("artifacts").GetProperty("items").GetProperty("$ref").GetString());
+        Assert.Equal("#/$defs/cancellation", definitions.GetProperty("run").GetProperty("properties").GetProperty("cancellation").GetProperty("$ref").GetString());
+        var required = definitions.GetProperty("cancellation").GetProperty("required").EnumerateArray().Select(item => item.GetString()).ToArray();
+        Assert.Contains("cancelled", required);
+        Assert.Contains("timedOut", required);
+        Assert.Contains("reason", required);
     }
 
     [Theory]
