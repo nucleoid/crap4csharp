@@ -1,1 +1,11 @@
-{"schemaVersion":"1.0","checkStatus":"operationalError","policyDecision":"unknown","runStatus":"operationalError","exitCode":1}
+{
+  "invocationMode": "legacy",
+  "policy": { "threshold": 8, "allowMissingCoverage": false, "comparisonOperator": "gt" },
+  "scope": { "logicalWorkspaceRoot": ".", "sources": [] },
+  "contexts": [{ "id": "legacy-syntax", "analysisMode": "syntaxOnly", "project": null, "targetFramework": null, "configuration": null, "sourceSetIdentity": null, "externalRootIdentity": null }],
+  "checks": [{ "name": "arguments", "status": "operationalError", "reason": "arguments.invalid", "required": true }],
+  "metrics": [], "findings": [],
+  "coverage": { "methods": 0, "known": 0, "unknown": 0, "reasons": {} },
+  "artifacts": [],
+  "decision": { "completed": false, "policyDecision": "unknown", "reason": "arguments.invalid" }
+}

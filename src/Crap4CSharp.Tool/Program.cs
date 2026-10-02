@@ -59,18 +59,33 @@ internal static class App
         var jsonIntent = HasJsonIntent(args);
         var requestedOutput = PreDetectValue(args, "--output");
         Options? options = null;
+        var aliasChecked = false;
         ExecutionOutcome outcome;
         try
         {
             options = args.Length == 0 ? new Options() : Parse(args);
-            outcome = await ExecuteAsync(options, workingDirectory, cancellationToken, processExecutor ?? ProcessRunner.RunAsync);
+            var rawAlias = FindOutputAlias(options.Output, workingDirectory, options.Inputs, options.Coverage, options.Project);
+            if (rawAlias is not null)
+            {
+                outcome = ExecutionOutcome.Failure("output.aliasesInput", $"Output path aliases {rawAlias}.") with
+                {
+                    OutputAliasReason = rawAlias,
+                    AliasChecked = true
+                };
+            }
+            else
+            {
+                var progress = options.Format == "json" ? error : output;
+                outcome = await ExecuteAsync(options, workingDirectory, cancellationToken,
+                    processExecutor ?? ProcessRunner.RunAsync, progress, error, () => aliasChecked = true);
+            }
         }
         catch (Exception exception) when (IsHandled(exception))
         {
             var cancelled = exception is OperationCanceledException;
             var timedOut = exception is ProcessTimeoutException;
             var reason = exception is ArgumentException ? "arguments.invalid" : cancelled ? "run.cancelled" : timedOut ? "run.timeout" : "execution.failed";
-            outcome = ExecutionOutcome.Failure(reason, exception.Message, cancelled, timedOut);
+            outcome = ExecutionOutcome.Failure(reason, exception.Message, cancelled, timedOut) with { AliasChecked = aliasChecked };
         }
 
         var format = options?.Format ?? (jsonIntent ? "json" : "human");
@@ -79,13 +94,13 @@ internal static class App
             startedAt, DateTimeOffset.UtcNow, stopwatch.Elapsed);
         var json = ResultWriter.Serialize(result);
 
-        if (options is not null && outputPath is not null && outcome.OutputAliasReason is null)
+        if (options is not null && outputPath is not null && outcome.AliasChecked && outcome.OutputAliasReason is null)
         {
             try
             {
-                await ResultWriter.WriteAtomicAsync(Path.GetFullPath(outputPath, workingDirectory), json, cancellationToken);
+                await ResultWriter.WriteAtomicAsync(Path.GetFullPath(outputPath, workingDirectory), json, CancellationToken.None);
             }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or OperationCanceledException)
             {
                 outcome = outcome.WithOperationalFailure("output.writeFailed", exception.Message);
                 result = BuildResult(outcome, options ?? new Options { Format = format, Output = outputPath }, workingDirectory,
@@ -96,7 +111,6 @@ internal static class App
 
         if (format == "json")
         {
-            foreach (var diagnostic in outcome.DiagnosticLines) await error.WriteLineAsync(diagnostic);
             if (outcome.ErrorMessage is not null) await error.WriteLineAsync($"error: {outcome.ErrorMessage}");
             try { await output.WriteAsync(json); }
             catch (Exception exception) when (exception is IOException or ObjectDisposedException)
@@ -108,7 +122,6 @@ internal static class App
         else
         {
             foreach (var line in outcome.HumanLines) await output.WriteLineAsync(line);
-            foreach (var diagnostic in outcome.DiagnosticLines) await error.WriteLineAsync(diagnostic);
             if (outcome.ErrorMessage is not null) await error.WriteLineAsync($"error: {outcome.ErrorMessage}");
             if (outcome.Reason == "arguments.invalid") await error.WriteLineAsync("Run 'crap4csharp --help' for usage.");
         }
@@ -166,12 +179,11 @@ internal static class App
     }
 
     private static async Task<ExecutionOutcome> ExecuteAsync(Options options, string workingDirectory, CancellationToken cancellationToken,
-        ProcessExecutor processExecutor)
+        ProcessExecutor processExecutor, TextWriter progress, TextWriter diagnosticOutput, Action markAliasChecked)
     {
         var lines = new List<string>();
         var commands = new List<CommandRecord>();
         var runArtifacts = new List<RunArtifact>();
-        var diagnostics = new List<string>();
         var files = options.Changed
             ? await ChangedFilesAsync(workingDirectory, options.Timeout, cancellationToken, processExecutor)
             : SourceDiscovery.Discover(options.Inputs, workingDirectory);
@@ -182,8 +194,10 @@ internal static class App
         {
             Files = files,
             Reports = reports,
-            OutputAliasReason = alias
+            OutputAliasReason = alias,
+            AliasChecked = true
         };
+        markAliasChecked();
 
         IReadOnlyList<CoverageMethod>[]? coverage = null;
         if (reports.Count > 0)
@@ -195,7 +209,7 @@ internal static class App
         if (files.Count == 0)
         {
             lines.Add("No C# source files found.");
-            return new ExecutionOutcome { Files = files, Reports = reports, HumanLines = lines, Reason = "crap.noEligibleMethods" };
+            return new ExecutionOutcome { Files = files, Reports = reports, HumanLines = lines, Reason = "crap.noEligibleMethods", AliasChecked = true };
         }
 
         var testFailed = false;
@@ -204,19 +218,32 @@ internal static class App
             var target = ResolveTestTarget(options.Project, workingDirectory);
             var resultsDirectory = Path.Combine(Path.GetTempPath(), "crap4csharp", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(resultsDirectory);
-            lines.Add($"Running coverage: dotnet test {target}");
-            lines.Add($"Coverage results: {resultsDirectory}");
+            await progress.WriteLineAsync($"Running coverage: dotnet test {target}");
+            await progress.WriteLineAsync($"Coverage results: {resultsDirectory}");
             var arguments = new[] { "test", target, "-m:1", "--collect:XPlat Code Coverage", "--results-directory", resultsDirectory,
                 "--", "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover" };
             var process = await processExecutor("dotnet", arguments, workingDirectory, options.Timeout, cancellationToken);
             commands.Add(new CommandRecord("dotnet", arguments, process.ExitCode));
-            if (!string.IsNullOrWhiteSpace(process.StandardOutput)) lines.Add(process.StandardOutput.TrimEnd());
-            if (!string.IsNullOrWhiteSpace(process.StandardError)) diagnostics.Add(process.StandardError.TrimEnd());
+            if (!string.IsNullOrWhiteSpace(process.StandardOutput)) await progress.WriteAsync(process.StandardOutput);
+            if (!string.IsNullOrWhiteSpace(process.StandardError)) await diagnosticOutput.WriteAsync(process.StandardError);
             testFailed = process.ExitCode != 0;
             reports.AddRange(Directory.EnumerateFiles(resultsDirectory, "*.xml", SearchOption.AllDirectories)
                 .Where(path => Path.GetFileName(path).Contains("coverage", StringComparison.OrdinalIgnoreCase)));
             runArtifacts.Add(new RunArtifact("coverageResults", resultsDirectory, "retained", reports.Count > 0, false));
-            if (reports.Count == 0) throw new InvalidOperationException("dotnet test produced no coverage XML. Add coverlet.collector to the test project or pass --coverage.");
+            if (reports.Count == 0)
+            {
+                return new ExecutionOutcome
+                {
+                    Files = files,
+                    Reports = reports,
+                    Checks = [new CheckResult("testExecution", "operationalError", "coverage.notProduced", true)],
+                    ErrorMessage = "dotnet test produced no coverage XML. Add coverlet.collector to the test project or pass --coverage.",
+                    Reason = "coverage.notProduced",
+                    Commands = commands,
+                    RunArtifacts = runArtifacts,
+                    AliasChecked = true
+                };
+            }
         }
 
         foreach (var report in reports)
@@ -262,34 +289,31 @@ internal static class App
         checks.Add(new CheckResult("crap", violations.Length > 0 ? "fail" : detailed.Length == 0 ? "notApplicable" : "pass",
             violations.Length > 0 ? "crap.thresholdExceeded" : detailed.Length == 0 ? "crap.noEligibleMethods" : "crap.withinThreshold", true));
 
-        string? error = testFailed ? "dotnet test failed; report shown from available coverage data." :
+        string? operationError = testFailed ? "dotnet test failed; report shown from available coverage data." :
             missing > 0 && !options.AllowMissingCoverage ? "one or more analyzed methods have N/A coverage; pass --allow-missing-coverage to gate only known scores." : null;
         return new ExecutionOutcome
         {
             Files = files, Reports = reports, SourceMethods = source, Matches = detailed, Checks = checks,
-            HumanLines = lines, DiagnosticLines = diagnostics, ErrorMessage = error, Commands = commands, RunArtifacts = runArtifacts
+            HumanLines = lines, ErrorMessage = operationError, Commands = commands, RunArtifacts = runArtifacts, AliasChecked = true
         };
     }
 
     private static ResultDocument BuildResult(ExecutionOutcome outcome, Options options, string workingDirectory,
         DateTimeOffset startedAt, DateTimeOffset finishedAt, TimeSpan duration)
     {
-        var checks = outcome.Checks.Count > 0 ? outcome.Checks :
-            [new CheckResult(outcome.Reason == "arguments.invalid" ? "arguments" : "execution",
-                outcome.Reason == "run.cancelled" ? "cancelled" : outcome.Reason == "crap.noEligibleMethods" ? "notApplicable" : "operationalError",
-                outcome.Reason ?? "execution.failed", true)];
+        var checks = EffectiveChecks(outcome);
         var metrics = outcome.Matches.Select(match =>
         {
-            var source = outcome.SourceMethods.FirstOrDefault(item => item.File == match.Metric.File && item.StartLine == match.Metric.StartLine);
             return new MetricResult("legacy-syntax", NormalizePath(workingDirectory, match.Metric.File), match.Metric.DisplayName,
-                source?.Signature, new SourceSpan(match.Metric.StartLine, match.Metric.EndLine), match.Metric.Complexity,
+                match.Source.Signature, new SourceSpan(match.Metric.StartLine, match.Metric.EndLine), match.Metric.Complexity,
                 match.Metric.Coverage, match.Metric.Crap, match.CoverageReason);
         }).OrderBy(metric => metric.ContextId, StringComparer.Ordinal).ThenBy(metric => metric.Path, StringComparer.Ordinal)
           .ThenBy(metric => metric.MethodIdentity, StringComparer.Ordinal).ThenBy(metric => metric.Span.StartLine).ToArray();
         var findings = metrics.Where(metric => metric.Crap > options.Threshold).Select(metric => new FindingResult(
             FindingIdentity.Create(metric.ContextId, metric.Path, metric.MethodIdentity, metric.Span, "crap.thresholdExceeded"),
             "crap.thresholdExceeded", "error", "complexity", metric.ContextId, metric.Path, metric.MethodIdentity,
-            metric.Signature, metric.Span, metric.Complexity, metric.Coverage, metric.Crap, options.Threshold, "gt", "fail", []))
+            metric.Signature, metric.Span, metric.Complexity, metric.Coverage, metric.Crap, metric.CoverageReason,
+            options.Threshold, "gt", "fail", []))
             .OrderBy(finding => finding.ContextId, StringComparer.Ordinal).ThenBy(finding => finding.Path, StringComparer.Ordinal)
             .ThenBy(finding => finding.MethodIdentity, StringComparer.Ordinal).ThenBy(finding => finding.Span.StartLine)
             .ThenBy(finding => finding.Code, StringComparer.Ordinal).ToArray();
@@ -328,17 +352,57 @@ internal static class App
     private static string? FindOutputAlias(string? output, string workingDirectory, IEnumerable<string> files, IEnumerable<string> reports, string? project)
     {
         if (output is null) return null;
-        var destination = CanonicalPath(Path.GetFullPath(output, workingDirectory));
-        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        var destinationPath = Path.GetFullPath(output, workingDirectory);
+        var destination = CanonicalPath(destinationPath);
+        var comparison = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
+            ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         foreach (var input in files.Concat(reports).Concat(project is null ? [] : [project]))
-            if (string.Equals(destination, CanonicalPath(Path.GetFullPath(input)), comparison)) return input;
+        {
+            var inputPath = Path.GetFullPath(input, workingDirectory);
+            var canonicalInput = CanonicalPath(inputPath);
+            if (destination is null || canonicalInput is null || string.Equals(destination, canonicalInput, comparison)) return input;
+            if (File.Exists(destinationPath) && File.Exists(inputPath) && FilesHaveSameContent(destinationPath, inputPath)) return input;
+        }
         return null;
     }
-    private static string CanonicalPath(string path)
+    private static string? CanonicalPath(string path)
     {
-        try { return new FileInfo(path).ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? path; }
-        catch (IOException) { return path; }
+        try
+        {
+            var fullPath = Path.GetFullPath(path);
+            var root = Path.GetPathRoot(fullPath);
+            if (root is null) return null;
+            var current = root;
+            foreach (var segment in fullPath[root.Length..].Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+            {
+                if (segment.Length == 0) continue;
+                var candidate = Path.Combine(current, segment);
+                FileSystemInfo info = Directory.Exists(candidate) ? new DirectoryInfo(candidate) : new FileInfo(candidate);
+                var target = info.Exists ? info.ResolveLinkTarget(returnFinalTarget: true) : null;
+                current = target?.FullName ?? candidate;
+            }
+            return Path.GetFullPath(current);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return null;
+        }
     }
+    private static bool FilesHaveSameContent(string left, string right)
+    {
+        var leftInfo = new FileInfo(left);
+        var rightInfo = new FileInfo(right);
+        if (leftInfo.Length != rightInfo.Length) return false;
+        using var leftStream = File.OpenRead(left);
+        using var rightStream = File.OpenRead(right);
+        return SHA256.HashData(leftStream).AsSpan().SequenceEqual(SHA256.HashData(rightStream));
+    }
+
+    private static IReadOnlyList<CheckResult> EffectiveChecks(ExecutionOutcome outcome) => outcome.Checks.Count > 0
+        ? outcome.Checks
+        : [new CheckResult(outcome.Reason == "arguments.invalid" ? "arguments" : "execution",
+            outcome.Reason == "run.cancelled" ? "cancelled" : outcome.Reason == "crap.noEligibleMethods" ? "notApplicable" : "operationalError",
+            outcome.Reason ?? "execution.failed", true)];
     private static bool IsHandled(Exception exception) => exception is ArgumentException or IOException or UnauthorizedAccessException or
         InvalidDataException or InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception or OperationCanceledException;
 
@@ -393,12 +457,12 @@ internal static class App
         public IReadOnlyList<CoverageMatcher.DetailedMatch> Matches { get; init; } = [];
         public IReadOnlyList<CheckResult> Checks { get; init; } = [];
         public IReadOnlyList<string> HumanLines { get; init; } = [];
-        public IReadOnlyList<string> DiagnosticLines { get; init; } = [];
         public IReadOnlyList<CommandRecord> Commands { get; init; } = [];
         public IReadOnlyList<RunArtifact> RunArtifacts { get; init; } = [];
         public string? Reason { get; init; }
         public string? ErrorMessage { get; init; }
         public string? OutputAliasReason { get; init; }
+        public bool AliasChecked { get; init; }
         public bool Cancelled { get; init; }
         public bool TimedOut { get; init; }
 
@@ -407,7 +471,7 @@ internal static class App
 
         public ExecutionOutcome WithOperationalFailure(string reason, string message) => this with
         {
-            Checks = Checks.Concat([new CheckResult("resultOutput", "operationalError", reason, true)]).ToArray(),
+            Checks = EffectiveChecks(this).Concat([new CheckResult("resultOutput", "operationalError", reason, true)]).ToArray(),
             Reason = reason,
             ErrorMessage = message
         };

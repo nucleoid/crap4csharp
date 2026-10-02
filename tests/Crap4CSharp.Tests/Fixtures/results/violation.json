@@ -1,1 +1,24 @@
-{"schemaVersion":"1.0","checkStatus":"fail","policyDecision":"fail","runStatus":"completed","exitCode":2}
+{
+  "invocationMode": "legacy",
+  "policy": { "threshold": 0.5, "allowMissingCoverage": false, "comparisonOperator": "gt" },
+  "scope": { "logicalWorkspaceRoot": ".", "sources": ["tests/Crap4CSharp.Tests/Fixtures/results/source.cs"] },
+  "contexts": [{ "id": "legacy-syntax", "analysisMode": "syntaxOnly", "project": null, "targetFramework": null, "configuration": null, "sourceSetIdentity": null, "externalRootIdentity": null }],
+  "checks": [
+    { "name": "testExecution", "status": "notApplicable", "reason": "tests.skippedExplicitCoverage", "required": false },
+    { "name": "coverage", "status": "pass", "reason": "coverage.complete", "required": true },
+    { "name": "crap", "status": "fail", "reason": "crap.thresholdExceeded", "required": true }
+  ],
+  "metrics": [{ "contextId": "legacy-syntax", "path": "tests/Crap4CSharp.Tests/Fixtures/results/source.cs", "methodIdentity": "SnapshotFixture.Value()", "signature": "Value()", "span": { "startLine": 3, "endLine": 3 }, "complexity": 1, "coverage": 1, "crap": 1, "coverageReason": null }],
+  "findings": [{
+    "id": "c87cfbf2699ebee8f0dea63a6b329f94a68b722da6582c7f54c44c688075e3f9", "code": "crap.thresholdExceeded", "severity": "error", "category": "complexity",
+    "contextId": "legacy-syntax", "path": "tests/Crap4CSharp.Tests/Fixtures/results/source.cs", "methodIdentity": "SnapshotFixture.Value()", "signature": "Value()",
+    "span": { "startLine": 3, "endLine": 3 }, "complexity": 1, "coverage": 1, "crap": 1, "coverageReason": null,
+    "threshold": 0.5, "comparisonOperator": "gt", "decision": "fail", "reasonCodes": []
+  }],
+  "coverage": { "methods": 1, "known": 1, "unknown": 0, "reasons": {} },
+  "artifacts": [
+    { "kind": "coverage", "path": "tests/Crap4CSharp.Tests/Fixtures/results/coverage.xml", "contentIdentity": "82bab82916215b6c4e3f4a39ecbac51fa68bcc55725cb4ddda6d35f285d6836c", "identityStatus": "sha256" },
+    { "kind": "source", "path": "tests/Crap4CSharp.Tests/Fixtures/results/source.cs", "contentIdentity": "b1c506b05ce0758025417a551856116c13d29457fc7ab2fd2ab404a926551b4d", "identityStatus": "sha256" }
+  ],
+  "decision": { "completed": true, "policyDecision": "fail", "reason": "crap.thresholdExceeded" }
+}

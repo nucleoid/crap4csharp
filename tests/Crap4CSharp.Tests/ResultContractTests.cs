@@ -75,6 +75,38 @@ public sealed class ResultContractTests : IDisposable
     }
 
     [Fact]
+    public async Task OutputAliasIsRejectedBeforeDiscoveryFailure()
+    {
+        var source = Write("Source.cs", "class C { int M() => 1; }");
+        var invalid = Write("notes.txt", "not C#");
+        var before = await File.ReadAllBytesAsync(source, TestContext.Current.CancellationToken);
+
+        var result = await RunApp("--format", "json", "--output", source, source, invalid);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Equal(before, await File.ReadAllBytesAsync(source, TestContext.Current.CancellationToken));
+        using var document = JsonDocument.Parse(result.Output);
+        Assert.Equal("output.aliasesInput", document.RootElement.GetProperty("evaluation").GetProperty("checks")[0].GetProperty("reason").GetString());
+    }
+
+    [Fact]
+    public async Task OutputAliasThroughSymlinkedParentIsRejected()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var real = Path.Combine(temporary, "real");
+        Directory.CreateDirectory(real);
+        var source = Path.Combine(real, "Source.cs");
+        await File.WriteAllTextAsync(source, "class C { int M() => 1; }", TestContext.Current.CancellationToken);
+        var link = Path.Combine(temporary, "link");
+        Directory.CreateSymbolicLink(link, real);
+
+        var result = await RunApp("--format", "json", "--output", Path.Combine(link, "Source.cs"), source);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Equal("class C { int M() => 1; }", await File.ReadAllTextAsync(source, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
     public async Task NormalizedEvaluationIsStableWhileRunEnvelopeVaries()
     {
         var source = Write("unicodé source.cs", "class C { int M() => 1; }");
@@ -138,23 +170,30 @@ public sealed class ResultContractTests : IDisposable
         Assert.Contains("raw CRAP", result.Output);
     }
 
-    [Theory]
-    [InlineData("pass.json", "pass", "pass", "completed", 0)]
-    [InlineData("violation.json", "fail", "fail", "completed", 2)]
-    [InlineData("operational-error.json", "operationalError", "unknown", "operationalError", 1)]
-    [InlineData("cancelled.json", "cancelled", "unknown", "cancelled", 1)]
-    [InlineData("not-applicable.json", "notApplicable", "notApplicable", "completed", 0)]
-    public void TerminalStateSnapshotsAreVersionedAndInternallyConsistent(
-        string fixture, string checkStatus, string policyDecision, string runStatus, int exitCode)
+    [Fact]
+    public async Task RealTerminalDocumentsMatchNormalizedSnapshotsAndSchema()
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "results", fixture);
-        using var document = JsonDocument.Parse(File.ReadAllText(path));
-        var root = document.RootElement;
-        Assert.Equal("1.0", root.GetProperty("schemaVersion").GetString());
-        Assert.Equal(checkStatus, root.GetProperty("checkStatus").GetString());
-        Assert.Equal(policyDecision, root.GetProperty("policyDecision").GetString());
-        Assert.Equal(runStatus, root.GetProperty("runStatus").GetString());
-        Assert.Equal(exitCode, root.GetProperty("exitCode").GetInt32());
+        var repository = Path.GetFullPath("../../../../../", AppContext.BaseDirectory);
+        const string source = "tests/Crap4CSharp.Tests/Fixtures/results/source.cs";
+        const string coverage = "tests/Crap4CSharp.Tests/Fixtures/results/coverage.xml";
+        var pass = await RunAppAt(repository, null, "--format", "json", "--coverage", coverage, source);
+        var violation = await RunAppAt(repository, null, "--format", "json", "--threshold", "0.5", "--coverage", coverage, source);
+        var operational = await RunAppAt(repository, null, "--format", "json", "--threshold", "invalid");
+        var empty = Path.Combine(temporary, "empty");
+        Directory.CreateDirectory(empty);
+        var notApplicable = await RunAppAt(empty, null, "--format", "json");
+        Task<ProcessResult> Cancel(string _, IEnumerable<string> __, string ___, TimeSpan ____, CancellationToken token) =>
+            throw new OperationCanceledException("cancelled", token);
+        var cancelled = await RunAppAt(repository, Cancel, "--format", "json", source);
+
+        Assert.Equal([0, 2, 1, 1, 0], new[] { pass.ExitCode, violation.ExitCode, operational.ExitCode, cancelled.ExitCode, notApplicable.ExitCode });
+        AssertEvaluationSnapshot("pass.json", pass.Output);
+        AssertEvaluationSnapshot("violation.json", violation.Output);
+        AssertEvaluationSnapshot("operational-error.json", operational.Output);
+        AssertEvaluationSnapshot("cancelled.json", cancelled.Output);
+        AssertEvaluationSnapshot("not-applicable.json", notApplicable.Output);
+        foreach (var json in new[] { pass.Output, violation.Output, operational.Output, cancelled.Output, notApplicable.Output })
+            AssertConformsToPublishedSchema(repository, json);
     }
 
     [Fact]
@@ -204,6 +243,77 @@ public sealed class ResultContractTests : IDisposable
         Assert.True(document.RootElement.GetProperty("run").GetProperty("cancellation").GetProperty("timedOut").GetBoolean());
     }
 
+    [Fact]
+    public async Task CancelledRunFinalizesJsonAndOutputWithIndependentToken()
+    {
+        var source = Write("Source.cs", "class C { int M() => 1; }");
+        Write("Fixture.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        var resultPath = Path.Combine(temporary, "result.json");
+        Task<ProcessResult> Cancel(string _, IEnumerable<string> __, string ___, TimeSpan ____, CancellationToken token) =>
+            throw new OperationCanceledException("cancelled", token);
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = await global::App.RunAsync(["--format", "json", "--output", resultPath, source], temporary,
+            output, error, new CancellationToken(canceled: true), Cancel);
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(output.ToString(), await File.ReadAllTextAsync(resultPath, TestContext.Current.CancellationToken));
+        using var document = JsonDocument.Parse(output.ToString());
+        Assert.Equal("cancelled", document.RootElement.GetProperty("run").GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task MissingCollectorKeepsChildDiagnosticsCommandAndArtifact()
+    {
+        var source = Write("Source.cs", "class C { int M() => 1; }");
+        Write("Fixture.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        Task<ProcessResult> NoCoverage(string _, IEnumerable<string> __, string ___, TimeSpan ____, CancellationToken _____) =>
+            Task.FromResult(new ProcessResult(1, "child stdout\n", "child stderr\n"));
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = await global::App.RunAsync(["--format", "json", source], temporary, output, error,
+            TestContext.Current.CancellationToken, NoCoverage);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("Running coverage", error.ToString());
+        Assert.Contains("child stdout", error.ToString());
+        Assert.Contains("child stderr", error.ToString());
+        using var document = JsonDocument.Parse(output.ToString());
+        Assert.Single(document.RootElement.GetProperty("run").GetProperty("commands").EnumerateArray());
+        Assert.Single(document.RootElement.GetProperty("run").GetProperty("artifacts").EnumerateArray());
+        Assert.Equal("coverage.notProduced", document.RootElement.GetProperty("evaluation").GetProperty("checks")[0].GetProperty("reason").GetString());
+    }
+
+    [Fact]
+    public async Task OutputWriteFailureRetainsOriginalTerminalReason()
+    {
+        var result = await RunApp("--format", "json", "--output", temporary);
+
+        Assert.Equal(1, result.ExitCode);
+        using var document = JsonDocument.Parse(result.Output);
+        var reasons = document.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray()
+            .Select(check => check.GetProperty("reason").GetString()).ToArray();
+        Assert.Contains("crap.noEligibleMethods", reasons);
+        Assert.Contains("output.writeFailed", reasons);
+    }
+
+    [Fact]
+    public async Task SameLineMethodsKeepTheirOwnSignatures()
+    {
+        var source = Write("SameLine.cs", "class C { int A() => 1; int B(int value) => value; }");
+        var coverage = Write("same-line.xml", $"<CoverageSession><Modules><Module><ModuleName>Fixture</ModuleName><Files><File uid=\"1\" fullPath=\"{System.Security.SecurityElement.Escape(source)}\" /></Files><Classes><Class><FullName>C</FullName><Methods><Method><Name>C.A()</Name><SequencePoints><SequencePoint vc=\"1\" sl=\"1\" sc=\"1\" el=\"1\" ec=\"20\" offset=\"0\" fileid=\"1\" /></SequencePoints><FileRef uid=\"1\" /></Method><Method><Name>C.B(System.Int32)</Name><SequencePoints><SequencePoint vc=\"1\" sl=\"1\" sc=\"21\" el=\"1\" ec=\"50\" offset=\"1\" fileid=\"1\" /></SequencePoints><FileRef uid=\"1\" /></Method></Methods></Class></Classes></Module></Modules></CoverageSession>");
+
+        var result = await RunApp("--format", "json", "--coverage", coverage, source);
+
+        Assert.Equal(0, result.ExitCode);
+        using var document = JsonDocument.Parse(result.Output);
+        var metrics = document.RootElement.GetProperty("evaluation").GetProperty("metrics").EnumerateArray().ToArray();
+        Assert.Equal("A()", metrics.Single(metric => metric.GetProperty("methodIdentity").GetString() == "C.A()").GetProperty("signature").GetString());
+        Assert.Equal("B(int)", metrics.Single(metric => metric.GetProperty("methodIdentity").GetString() == "C.B(int)").GetProperty("signature").GetString());
+    }
+
     private async Task<(int ExitCode, string Output, string Error)> RunApp(params string[] args)
     {
         using var output = new StringWriter();
@@ -211,6 +321,98 @@ public sealed class ResultContractTests : IDisposable
         var exitCode = await global::App.RunAsync(args, temporary, output, error, CancellationToken.None);
         return (exitCode, output.ToString(), error.ToString());
     }
+
+    private static async Task<(int ExitCode, string Output, string Error)> RunAppAt(
+        string workingDirectory, global::App.ProcessExecutor? processExecutor, params string[] args)
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var exitCode = await global::App.RunAsync(args, workingDirectory, output, error,
+            TestContext.Current.CancellationToken, processExecutor);
+        return (exitCode, output.ToString(), error.ToString());
+    }
+
+    private static void AssertEvaluationSnapshot(string fixture, string documentJson)
+    {
+        var repository = Path.GetFullPath("../../../../../", AppContext.BaseDirectory);
+        var path = Path.Combine(repository, "tests", "Crap4CSharp.Tests", "Fixtures", "results", fixture);
+        using var expected = JsonDocument.Parse(File.ReadAllText(path));
+        using var actual = JsonDocument.Parse(documentJson);
+        Assert.True(JsonElement.DeepEquals(expected.RootElement, actual.RootElement.GetProperty("evaluation")),
+            $"Normalized evaluation did not match {fixture}.\nExpected: {expected.RootElement}\nActual: {actual.RootElement.GetProperty("evaluation")}");
+    }
+
+    private static void AssertConformsToPublishedSchema(string repository, string documentJson)
+    {
+        using var schema = JsonDocument.Parse(File.ReadAllText(Path.Combine(repository, "docs", "result-schema-v1.json")));
+        using var document = JsonDocument.Parse(documentJson);
+        var errors = new List<string>();
+        ValidateSchema(document.RootElement, schema.RootElement, schema.RootElement, "$", errors);
+        Assert.True(errors.Count == 0, string.Join(Environment.NewLine, errors));
+    }
+
+    private static void ValidateSchema(JsonElement instance, JsonElement schema, JsonElement rootSchema, string path, List<string> errors)
+    {
+        if (schema.TryGetProperty("$ref", out var reference))
+        {
+            var target = rootSchema;
+            foreach (var segment in reference.GetString()![2..].Split('/'))
+                target = target.GetProperty(segment.Replace("~1", "/", StringComparison.Ordinal).Replace("~0", "~", StringComparison.Ordinal));
+            ValidateSchema(instance, target, rootSchema, path, errors);
+        }
+        if (schema.TryGetProperty("allOf", out var allOf))
+            foreach (var child in allOf.EnumerateArray()) ValidateSchema(instance, child, rootSchema, path, errors);
+        if (schema.TryGetProperty("const", out var constant) && !JsonElement.DeepEquals(instance, constant))
+            errors.Add($"{path}: value does not equal const {constant}.");
+        if (schema.TryGetProperty("enum", out var allowed) && !allowed.EnumerateArray().Any(item => JsonElement.DeepEquals(instance, item)))
+            errors.Add($"{path}: value is not in enum.");
+        if (schema.TryGetProperty("type", out var type))
+        {
+            var valid = type.ValueKind == JsonValueKind.Array
+                ? type.EnumerateArray().Any(item => IsType(instance, item.GetString()!))
+                : IsType(instance, type.GetString()!);
+            if (!valid) { errors.Add($"{path}: expected type {type}, got {instance.ValueKind}."); return; }
+        }
+        if (instance.ValueKind == JsonValueKind.Object)
+        {
+            if (schema.TryGetProperty("required", out var required))
+                foreach (var name in required.EnumerateArray().Select(item => item.GetString()!))
+                    if (!instance.TryGetProperty(name, out _)) errors.Add($"{path}: missing required property {name}.");
+            if (schema.TryGetProperty("properties", out var properties))
+                foreach (var property in properties.EnumerateObject())
+                    if (instance.TryGetProperty(property.Name, out var value))
+                        ValidateSchema(value, property.Value, rootSchema, $"{path}.{property.Name}", errors);
+        }
+        if (instance.ValueKind == JsonValueKind.Array && schema.TryGetProperty("items", out var items))
+        {
+            var index = 0;
+            foreach (var item in instance.EnumerateArray()) ValidateSchema(item, items, rootSchema, $"{path}[{index++}]", errors);
+        }
+        if (instance.ValueKind == JsonValueKind.String)
+        {
+            var value = instance.GetString()!;
+            if (schema.TryGetProperty("minLength", out var minLength) && value.Length < minLength.GetInt32()) errors.Add($"{path}: shorter than minLength.");
+            if (schema.TryGetProperty("pattern", out var pattern) && !System.Text.RegularExpressions.Regex.IsMatch(value, pattern.GetString()!)) errors.Add($"{path}: does not match pattern.");
+        }
+        if (instance.ValueKind == JsonValueKind.Number)
+        {
+            var value = instance.GetDouble();
+            if (schema.TryGetProperty("minimum", out var minimum) && value < minimum.GetDouble()) errors.Add($"{path}: below minimum.");
+            if (schema.TryGetProperty("maximum", out var maximum) && value > maximum.GetDouble()) errors.Add($"{path}: above maximum.");
+        }
+    }
+
+    private static bool IsType(JsonElement instance, string type) => type switch
+    {
+        "object" => instance.ValueKind == JsonValueKind.Object,
+        "array" => instance.ValueKind == JsonValueKind.Array,
+        "string" => instance.ValueKind == JsonValueKind.String,
+        "number" => instance.ValueKind == JsonValueKind.Number,
+        "integer" => instance.ValueKind == JsonValueKind.Number && instance.TryGetInt64(out _),
+        "boolean" => instance.ValueKind is JsonValueKind.True or JsonValueKind.False,
+        "null" => instance.ValueKind == JsonValueKind.Null,
+        _ => false
+    };
 
     private string WriteOpenCover(string relative, string source, int visits) =>
         Write(relative, $"""

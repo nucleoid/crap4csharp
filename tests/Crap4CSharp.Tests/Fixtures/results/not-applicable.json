@@ -1,1 +1,11 @@
-{"schemaVersion":"1.0","checkStatus":"notApplicable","policyDecision":"notApplicable","runStatus":"completed","exitCode":0}
+{
+  "invocationMode": "legacy",
+  "policy": { "threshold": 8, "allowMissingCoverage": false, "comparisonOperator": "gt" },
+  "scope": { "logicalWorkspaceRoot": ".", "sources": [] },
+  "contexts": [{ "id": "legacy-syntax", "analysisMode": "syntaxOnly", "project": null, "targetFramework": null, "configuration": null, "sourceSetIdentity": null, "externalRootIdentity": null }],
+  "checks": [{ "name": "execution", "status": "notApplicable", "reason": "crap.noEligibleMethods", "required": true }],
+  "metrics": [], "findings": [],
+  "coverage": { "methods": 0, "known": 0, "unknown": 0, "reasons": {} },
+  "artifacts": [],
+  "decision": { "completed": true, "policyDecision": "notApplicable", "reason": "crap.noEligibleMethods" }
+}

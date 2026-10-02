@@ -79,6 +79,7 @@ public sealed record FindingResult(
     int Complexity,
     double? Coverage,
     double? Crap,
+    string? CoverageReason,
     double Threshold,
     string ComparisonOperator,
     string Decision,

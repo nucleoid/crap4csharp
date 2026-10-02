@@ -2,7 +2,7 @@ namespace Crap4CSharp.Core;
 
 public static class CoverageMatcher
 {
-    public sealed record DetailedMatch(MethodMetric Metric, string? CoverageReason);
+    public sealed record DetailedMatch(SourceMethod Source, MethodMetric Metric, string? CoverageReason);
 
     public static IReadOnlyList<MethodMetric> Apply(
         IReadOnlyList<SourceMethod> sourceMethods,
@@ -33,17 +33,19 @@ public static class CoverageMatcher
 
                 var byLine = candidates.Where(source => covered.SequencePoints.Count > 0 &&
                     covered.SequencePoints.All(point => point.Line >= source.StartLine && point.Line <= source.EndLine)).ToArray();
-                SourceMethod? match = byLine.Length == 1 ? byLine[0] :
-                    covered.SequencePoints.Count == 0 && candidates.Length == 1 ? candidates[0] : null;
+                var zeroPointMatch = covered.SequencePoints.Count == 0 && candidates.Length == 1 ? candidates[0] : null;
+                SourceMethod? match = byLine.Length == 1 ? byLine[0] : zeroPointMatch;
                 if (match is null)
                 {
-                    foreach (var candidate in candidates) observations[candidate].ObservedReason = CoverageReasonCodes.AmbiguousMethod;
+                    var reason = candidates.Length > 1 ? CoverageReasonCodes.AmbiguousMethod : CoverageReasonCodes.NoMatchingMethod;
+                    foreach (var candidate in candidates) observations[candidate].ObservedReason ??= reason;
                     continue;
                 }
 
                 var observation = observations[match];
                 observation.HasMatch = true;
-                observation.ModuleIdentities.Add(covered.ModuleIdentity ?? "<unknown module>");
+                if (covered.SequencePoints.Count > 0)
+                    observation.ModuleIdentities.Add(covered.ModuleIdentity ?? "<unknown module>");
                 foreach (var point in covered.SequencePoints)
                 {
                     var identity = new PointIdentity(point.Line, point.StartColumn, point.EndLine, point.EndColumn, point.Offset);
@@ -64,7 +66,7 @@ public static class CoverageMatcher
                 ? CoverageReasonCodes.ConflictingModule
                 : observation.HasMatch ? CoverageReasonCodes.NoEligiblePoints
                 : observation.ObservedReason ?? (reportList.Length > 0 ? CoverageReasonCodes.NoMatchingMethod : CoverageReasonCodes.Unavailable);
-            return new DetailedMatch(new MethodMetric(source.File, source.TypeName, source.MethodName, source.DisplayName,
+            return new DetailedMatch(source, new MethodMetric(source.File, source.TypeName, source.MethodName, source.DisplayName,
                 source.StartLine, source.EndLine, source.Complexity, coverage), reason);
         }).ToArray();
     }
