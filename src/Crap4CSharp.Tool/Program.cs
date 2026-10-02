@@ -22,6 +22,9 @@ finally
 
 internal static class App
 {
+    internal delegate Task<ProcessResult> ProcessExecutor(string fileName, IEnumerable<string> arguments,
+        string workingDirectory, TimeSpan timeout, CancellationToken cancellationToken);
+
     private const string Help = """
         Crap4CSharp - calculate CRAP metrics for C# methods
 
@@ -46,7 +49,8 @@ internal static class App
         Exit codes: 0 success, 1 usage/operational failure, 2 threshold exceeded.
         """;
 
-    public static async Task<int> RunAsync(string[] args, string workingDirectory, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    public static async Task<int> RunAsync(string[] args, string workingDirectory, TextWriter output, TextWriter error,
+        CancellationToken cancellationToken, ProcessExecutor? processExecutor = null)
     {
         if (args.Any(arg => arg is "--help" or "-h")) { await output.WriteLineAsync(Help); return 0; }
 
@@ -59,7 +63,7 @@ internal static class App
         try
         {
             options = args.Length == 0 ? new Options() : Parse(args);
-            outcome = await ExecuteAsync(options, workingDirectory, cancellationToken);
+            outcome = await ExecuteAsync(options, workingDirectory, cancellationToken, processExecutor ?? ProcessRunner.RunAsync);
         }
         catch (Exception exception) when (IsHandled(exception))
         {
@@ -160,14 +164,15 @@ internal static class App
         return options;
     }
 
-    private static async Task<ExecutionOutcome> ExecuteAsync(Options options, string workingDirectory, CancellationToken cancellationToken)
+    private static async Task<ExecutionOutcome> ExecuteAsync(Options options, string workingDirectory, CancellationToken cancellationToken,
+        ProcessExecutor processExecutor)
     {
         var lines = new List<string>();
         var commands = new List<CommandRecord>();
         var runArtifacts = new List<RunArtifact>();
         var diagnostics = new List<string>();
         var files = options.Changed
-            ? await ChangedFilesAsync(workingDirectory, options.Timeout, cancellationToken)
+            ? await ChangedFilesAsync(workingDirectory, options.Timeout, cancellationToken, processExecutor)
             : SourceDiscovery.Discover(options.Inputs, workingDirectory);
         var reports = options.Coverage.Select(path => Path.GetFullPath(path, workingDirectory)).ToList();
         var project = options.Project is null ? null : Path.GetFullPath(options.Project, workingDirectory);
@@ -202,7 +207,7 @@ internal static class App
             lines.Add($"Coverage results: {resultsDirectory}");
             var arguments = new[] { "test", target, "-m:1", "--collect:XPlat Code Coverage", "--results-directory", resultsDirectory,
                 "--", "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover" };
-            var process = await ProcessRunner.RunAsync("dotnet", arguments, workingDirectory, options.Timeout, cancellationToken);
+            var process = await processExecutor("dotnet", arguments, workingDirectory, options.Timeout, cancellationToken);
             commands.Add(new CommandRecord("dotnet", arguments, process.ExitCode));
             if (!string.IsNullOrWhiteSpace(process.StandardOutput)) lines.Add(process.StandardOutput.TrimEnd());
             if (!string.IsNullOrWhiteSpace(process.StandardError)) diagnostics.Add(process.StandardError.TrimEnd());
@@ -336,13 +341,14 @@ internal static class App
     private static bool IsHandled(Exception exception) => exception is ArgumentException or IOException or UnauthorizedAccessException or
         InvalidDataException or InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception or OperationCanceledException;
 
-    private static async Task<IReadOnlyList<string>> ChangedFilesAsync(string workingDirectory, TimeSpan timeout, CancellationToken cancellationToken)
+    private static async Task<IReadOnlyList<string>> ChangedFilesAsync(string workingDirectory, TimeSpan timeout,
+        CancellationToken cancellationToken, ProcessExecutor processExecutor)
     {
-        var rootResult = await ProcessRunner.RunAsync("git", ["rev-parse", "--show-toplevel"], workingDirectory, timeout, cancellationToken);
+        var rootResult = await processExecutor("git", ["rev-parse", "--show-toplevel"], workingDirectory, timeout, cancellationToken);
         if (rootResult.ExitCode != 0) throw new InvalidOperationException($"git rev-parse failed: {rootResult.StandardError.Trim()}");
         var root = rootResult.StandardOutput.TrimEnd('\r', '\n');
         if (root.Length == 0) throw new InvalidOperationException("git rev-parse returned an empty repository root.");
-        var statusResult = await ProcessRunner.RunAsync("git", ["status", "--porcelain=v1", "--untracked-files=all", "-z"], root, timeout, cancellationToken);
+        var statusResult = await processExecutor("git", ["status", "--porcelain=v1", "--untracked-files=all", "-z"], root, timeout, cancellationToken);
         if (statusResult.ExitCode != 0) throw new InvalidOperationException($"git status failed: {statusResult.StandardError.Trim()}");
         return GitChanges.ParsePorcelainV1Z(Encoding.UTF8.GetBytes(statusResult.StandardOutput), root);
     }

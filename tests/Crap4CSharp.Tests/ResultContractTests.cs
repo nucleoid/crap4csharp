@@ -156,6 +156,53 @@ public sealed class ResultContractTests : IDisposable
         Assert.Equal(exitCode, root.GetProperty("exitCode").GetInt32());
     }
 
+    [Fact]
+    public async Task FailedChildRetainsKnownViolationButExitOneWins()
+    {
+        var source = Write("Source.cs", "class C { int M() => 1; }");
+        Write("Fixture.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        async Task<ProcessResult> FailedTest(string _, IEnumerable<string> arguments, string __, TimeSpan ___, CancellationToken ____)
+        {
+            var values = arguments.ToArray();
+            var results = values[Array.IndexOf(values, "--results-directory") + 1];
+            Directory.CreateDirectory(results);
+            await File.WriteAllTextAsync(Path.Combine(results, "coverage.opencover.xml"),
+                File.ReadAllText(WriteOpenCover("generated.xml", source, visits: 1)), TestContext.Current.CancellationToken);
+            return new ProcessResult(1, "failed test output", "failed test error");
+        }
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = await global::App.RunAsync(["--format", "json", "--threshold", "0", source], temporary,
+            output, error, TestContext.Current.CancellationToken, FailedTest);
+
+        Assert.Equal(1, exitCode);
+        using var document = JsonDocument.Parse(output.ToString());
+        Assert.Single(document.RootElement.GetProperty("evaluation").GetProperty("findings").EnumerateArray());
+        Assert.Equal("unknown", document.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("policyDecision").GetString());
+        Assert.Equal("operationalError", document.RootElement.GetProperty("run").GetProperty("status").GetString());
+        Assert.Contains("failed test error", error.ToString());
+    }
+
+    [Fact]
+    public async Task ChildTimeoutProducesOneStructuredOperationalDocument()
+    {
+        var source = Write("Source.cs", "class C { int M() => 1; }");
+        Write("Fixture.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        Task<ProcessResult> Timeout(string fileName, IEnumerable<string> _, string __, TimeSpan timeout, CancellationToken ___) =>
+            throw new ProcessTimeoutException(fileName, timeout);
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = await global::App.RunAsync(["--format", "json", source], temporary, output, error,
+            TestContext.Current.CancellationToken, Timeout);
+
+        Assert.Equal(1, exitCode);
+        using var document = JsonDocument.Parse(output.ToString());
+        Assert.Equal("run.timeout", document.RootElement.GetProperty("evaluation").GetProperty("checks")[0].GetProperty("reason").GetString());
+        Assert.True(document.RootElement.GetProperty("run").GetProperty("cancellation").GetProperty("timedOut").GetBoolean());
+    }
+
     private async Task<(int ExitCode, string Output, string Error)> RunApp(params string[] args)
     {
         using var output = new StringWriter();
