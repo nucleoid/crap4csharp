@@ -24,8 +24,9 @@ public sealed class PackagedResultTests : IDisposable
         var pack = await Run("dotnet", ["pack", Path.Combine(repository, "src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj"),
             "-c", configuration, "--no-build", "-o", packages], repository);
         AssertSuccess("pack", pack);
+        var nugetConfig = Write("NuGet.Config", $"<configuration><packageSources><clear /><add key=\"local\" value=\"{System.Security.SecurityElement.Escape(packages)}\" /></packageSources></configuration>");
         var install = await Run("dotnet", ["tool", "install", "--tool-path", tools, "--add-source", packages,
-            "--ignore-failed-sources", "Crap4CSharp.Tool"], repository);
+            "--configfile", nugetConfig, "Crap4CSharp.Tool"], repository);
         AssertSuccess("install", install);
 
         var source = Write("Source.cs", "class C { int M() => 1; }");
@@ -35,7 +36,7 @@ public sealed class PackagedResultTests : IDisposable
         var executable = Path.Combine(tools, OperatingSystem.IsWindows() ? "crap4csharp.exe" : "crap4csharp");
 
         var pass = await Run(executable, ["--format", "json", "--coverage", coverage, source], temporary);
-        AssertDocument(pass, 0);
+        AssertDocument(repository, pass, 0);
         using (var document = JsonDocument.Parse(pass.Output))
         {
             Assert.Equal("1.0", document.RootElement.GetProperty("schemaVersion").GetString());
@@ -44,21 +45,21 @@ public sealed class PackagedResultTests : IDisposable
         }
 
         var missing = await Run(executable, ["--format", "json", "--coverage", "missing.xml", source], temporary);
-        AssertDocument(missing, 1);
+        AssertDocument(repository, missing, 1);
         var malformedResult = await Run(executable, ["--format", "json", "--coverage", malformed, source], temporary);
-        AssertDocument(malformedResult, 1);
+        AssertDocument(repository, malformedResult, 1);
 
         var fakeDotnet = await BuildFakeDotnet(repository);
         var fakePath = Path.GetDirectoryName(fakeDotnet)! + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH");
         var noCoverage = await Run(executable, ["--format", "json", "--project", project, source], temporary,
             new Dictionary<string, string?> { ["PATH"] = fakePath, ["FAKE_DOTNET_MODE"] = "success" });
-        AssertDocument(noCoverage, 1, "tests.passed", "coverage.notProduced");
+        AssertDocument(repository, noCoverage, 1, "tests.passed", "coverage.notProduced");
         var failed = await Run(executable, ["--format", "json", "--project", project, source], temporary,
             new Dictionary<string, string?> { ["PATH"] = fakePath, ["FAKE_DOTNET_MODE"] = "failed" });
-        AssertDocument(failed, 1, "tests.failed", "coverage.notProduced");
+        AssertDocument(repository, failed, 1, "tests.failed", "coverage.notProduced");
         var timeout = await Run(executable, ["--format", "json", "--timeout-seconds", "1", "--project", project, source], temporary,
             new Dictionary<string, string?> { ["PATH"] = fakePath, ["FAKE_DOTNET_MODE"] = "timeout" });
-        AssertDocument(timeout, 1, "run.timeout");
+        AssertDocument(repository, timeout, 1, "run.timeout");
     }
 
     private async Task<string> BuildFakeDotnet(string repository)
@@ -66,7 +67,7 @@ public sealed class PackagedResultTests : IDisposable
         var root = Path.Combine(temporary, "fake-dotnet");
         Directory.CreateDirectory(root);
         var project = Write(Path.Combine("fake-dotnet", "FakeDotnet.csproj"),
-            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><OutputType>Exe</OutputType><AssemblyName>dotnet</AssemblyName><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>");
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><OutputType>Exe</OutputType><AssemblyName>dotnet</AssemblyName><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>");
         Write(Path.Combine("fake-dotnet", "Program.cs"),
             "var mode = Environment.GetEnvironmentVariable(\"FAKE_DOTNET_MODE\"); if (mode == \"timeout\") await Task.Delay(TimeSpan.FromSeconds(30)); return mode == \"failed\" ? 1 : 0;");
         var build = await Run("dotnet", ["build", project, "-c", "Release", "--nologo", "-m:1"], repository);
@@ -74,9 +75,11 @@ public sealed class PackagedResultTests : IDisposable
         return Path.Combine(root, "bin", "Release", "net10.0", OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet");
     }
 
-    private static void AssertDocument((int ExitCode, string Output, string Error) result, int exitCode, params string[] reasons)
+    private static void AssertDocument(string repository, (int ExitCode, string Output, string Error) result,
+        int exitCode, params string[] reasons)
     {
         Assert.Equal(exitCode, result.ExitCode);
+        ResultContractTests.AssertConformsToPublishedSchema(repository, result.Output);
         using var document = JsonDocument.Parse(result.Output);
         Assert.Equal(exitCode, document.RootElement.GetProperty("run").GetProperty("exitCode").GetInt32());
         Assert.DoesNotContain("CRAP", result.Output);

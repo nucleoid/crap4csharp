@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using Crap4CSharp.Core;
@@ -59,7 +60,10 @@ internal static class App
         var jsonIntent = HasJsonIntent(args);
         var requestedOutput = PreDetectValue(args, "--output");
         Options? options = null;
+        var rawAliasChecked = false;
         var aliasChecked = false;
+        var absentPreParsedOutputIsSafe = IsAbsentOutputDestination(requestedOutput, workingDirectory) &&
+            args.Count(arg => arg == "--output") == 1;
         ExecutionOutcome outcome;
         try
         {
@@ -78,6 +82,7 @@ internal static class App
             }
             else
             {
+                rawAliasChecked = true;
                 var progress = options.Format == "json" ? error : output;
                 outcome = await ExecuteAsync(options, workingDirectory, cancellationToken,
                     processExecutor ?? ProcessRunner.RunAsync, progress, error, () => aliasChecked = true);
@@ -93,13 +98,15 @@ internal static class App
 
         var format = options?.Format ?? (jsonIntent ? "json" : "human");
         var outputPath = options?.Output ?? requestedOutput;
-        if (outputPath is not null && !outcome.AliasChecked)
+        var canWriteResult = outputPath is not null && outcome.OutputAliasReason is null &&
+            (outcome.AliasChecked || ((rawAliasChecked || options is null) && absentPreParsedOutputIsSafe));
+        if (outputPath is not null && outcome.OutputAliasReason is null && !canWriteResult)
             outcome = outcome.WithOutputNotWritten(outputPath);
         var result = BuildResult(outcome, options ?? new Options { Format = format, Output = outputPath }, workingDirectory,
             startedAt, DateTimeOffset.UtcNow, stopwatch.Elapsed);
         var json = ResultWriter.Serialize(result);
 
-        if (options is not null && outputPath is not null && outcome.AliasChecked && outcome.OutputAliasReason is null)
+        if (outputPath is not null && canWriteResult)
         {
             try
             {
@@ -189,6 +196,7 @@ internal static class App
         var lines = new List<string>();
         var commands = new List<CommandRecord>();
         var runArtifacts = new List<RunArtifact>();
+        var generatedReports = new List<string>();
         var files = options.Changed
             ? await ChangedFilesAsync(workingDirectory, options.Timeout, cancellationToken, processExecutor)
             : SourceDiscovery.Discover(options.Inputs, workingDirectory);
@@ -205,133 +213,152 @@ internal static class App
         };
         markAliasChecked();
 
-        IReadOnlyList<CoverageMethod>[]? coverage = null;
-        if (reports.Count > 0)
+        IReadOnlyList<SourceMethod> source = [];
+        CoverageMatcher.DetailedMatch[] detailed = [];
+        var checks = new List<CheckResult>();
+        try
         {
-            foreach (var report in reports)
-                if (!File.Exists(report)) throw new FileNotFoundException($"Coverage report not found: {report}", report);
-            coverage = reports.Select(CoverageReader.Read).ToArray();
-        }
-        if (files.Count == 0)
-        {
-            lines.Add("No C# source files found.");
-            return new ExecutionOutcome { Files = files, Reports = reports, HumanLines = lines, Reason = "crap.noEligibleMethods", AliasChecked = true };
-        }
+            IReadOnlyList<CoverageMethod>[]? coverage = null;
+            if (reports.Count > 0)
+            {
+                foreach (var report in reports)
+                    if (!File.Exists(report)) throw new FileNotFoundException($"Coverage report not found: {report}", report);
+                coverage = reports.Select(CoverageReader.Read).ToArray();
+            }
+            if (files.Count == 0)
+            {
+                lines.Add("No C# source files found.");
+                return new ExecutionOutcome { Files = files, Reports = reports, HumanLines = lines, Reason = "crap.noEligibleMethods", AliasChecked = true };
+            }
 
-        var testFailed = false;
-        if (reports.Count == 0)
-        {
-            var target = ResolveTestTarget(options.Project, workingDirectory);
-            var resultsDirectory = Path.Combine(Path.GetTempPath(), "crap4csharp", Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(resultsDirectory);
-            await progress.WriteLineAsync($"Running coverage: dotnet test {target}");
-            await progress.WriteLineAsync($"Coverage results: {resultsDirectory}");
-            var arguments = new[] { "test", target, "-m:1", "--collect:XPlat Code Coverage", "--results-directory", resultsDirectory,
-                "--", "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover" };
-            commands.Add(new CommandRecord("dotnet", arguments, null));
-            runArtifacts.Add(new RunArtifact("coverageResults", resultsDirectory, "retained", false, false));
-            ProcessResult process;
-            try
-            {
-                process = await processExecutor("dotnet", arguments, workingDirectory, options.Timeout, cancellationToken);
-            }
-            catch (Exception exception) when (exception is ProcessTimeoutException or OperationCanceledException)
-            {
-                var cancelled = exception is OperationCanceledException;
-                var reason = cancelled ? "run.cancelled" : "run.timeout";
-                return new ExecutionOutcome
-                {
-                    Files = files,
-                    Reports = reports,
-                    Checks = [new CheckResult("testExecution", cancelled ? "cancelled" : "operationalError", reason, true)],
-                    ErrorMessage = exception.Message,
-                    Reason = reason,
-                    CancellationReason = reason,
-                    Commands = commands,
-                    RunArtifacts = runArtifacts,
-                    AliasChecked = true,
-                    Cancelled = cancelled,
-                    TimedOut = !cancelled
-                };
-            }
-            commands[^1] = new CommandRecord("dotnet", arguments, process.ExitCode);
-            if (!string.IsNullOrWhiteSpace(process.StandardOutput)) await progress.WriteAsync(process.StandardOutput);
-            if (!string.IsNullOrWhiteSpace(process.StandardError)) await diagnosticOutput.WriteAsync(process.StandardError);
-            testFailed = process.ExitCode != 0;
-            reports.AddRange(Directory.EnumerateFiles(resultsDirectory, "*.xml", SearchOption.AllDirectories)
-                .Where(path => Path.GetFileName(path).Contains("coverage", StringComparison.OrdinalIgnoreCase)));
-            runArtifacts[^1] = new RunArtifact("coverageResults", resultsDirectory, "retained", reports.Count > 0, false);
+            var testFailed = false;
             if (reports.Count == 0)
             {
-                var noCoverageChecks = new List<CheckResult>
+                var target = ResolveTestTarget(options.Project, workingDirectory);
+                var resultsDirectory = Path.Combine(Path.GetTempPath(), "crap4csharp", Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(resultsDirectory);
+                await progress.WriteLineAsync($"Running coverage: dotnet test {target}");
+                await progress.WriteLineAsync($"Coverage results: {resultsDirectory}");
+                var arguments = new[] { "test", target, "-m:1", "--collect:XPlat Code Coverage", "--results-directory", resultsDirectory,
+                "--", "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover" };
+                commands.Add(new CommandRecord("dotnet", arguments, null));
+                runArtifacts.Add(new RunArtifact("coverageResults", resultsDirectory, "retained", false, false));
+                var process = await processExecutor("dotnet", arguments, workingDirectory, options.Timeout, cancellationToken);
+                commands[^1] = new CommandRecord("dotnet", arguments, process.ExitCode);
+                if (!string.IsNullOrWhiteSpace(process.StandardOutput)) await progress.WriteAsync(process.StandardOutput);
+                if (!string.IsNullOrWhiteSpace(process.StandardError)) await diagnosticOutput.WriteAsync(process.StandardError);
+                testFailed = process.ExitCode != 0;
+                generatedReports.AddRange(Directory.EnumerateFiles(resultsDirectory, "*.xml", SearchOption.AllDirectories)
+                    .Where(path => Path.GetFileName(path).Contains("coverage", StringComparison.OrdinalIgnoreCase)));
+                reports.AddRange(generatedReports);
+                runArtifacts[^1] = new RunArtifact("coverageResults", resultsDirectory, "retained", reports.Count > 0, false);
+                if (reports.Count == 0)
+                {
+                    var noCoverageChecks = new List<CheckResult>
                 {
                     new("testExecution", testFailed ? "operationalError" : "pass", testFailed ? "tests.failed" : "tests.passed", true),
                     new("coverage", "operationalError", "coverage.notProduced", true)
                 };
-                return new ExecutionOutcome
-                {
-                    Files = files,
-                    Reports = reports,
-                    Checks = noCoverageChecks,
-                    ErrorMessage = "dotnet test produced no coverage XML. Add coverlet.collector to the test project or pass --coverage.",
-                    Reason = "coverage.notProduced",
-                    Commands = commands,
-                    RunArtifacts = runArtifacts,
-                    AliasChecked = true
-                };
+                    return new ExecutionOutcome
+                    {
+                        Files = files,
+                        Reports = reports,
+                        Checks = noCoverageChecks,
+                        ErrorMessage = "dotnet test produced no coverage XML. Add coverlet.collector to the test project or pass --coverage.",
+                        Reason = "coverage.notProduced",
+                        Commands = commands,
+                        RunArtifacts = runArtifacts,
+                        GeneratedReports = generatedReports,
+                        AliasChecked = true
+                    };
+                }
             }
+
+            foreach (var report in reports)
+                if (!File.Exists(report)) throw new FileNotFoundException($"Coverage report not found: {report}", report);
+            source = new SourceAnalyzer().AnalyzeFiles(files);
+            coverage ??= reports.Select(CoverageReader.Read).ToArray();
+            detailed = CoverageMatcher.ApplyDetailed(source, coverage)
+                .OrderBy(result => result.Metric.File, StringComparer.Ordinal)
+                .ThenBy(result => result.Metric.DisplayName, StringComparer.Ordinal)
+                .ThenBy(result => result.Metric.StartLine)
+                .ToArray();
+            var display = detailed.Select(result => result.Metric)
+                .OrderBy(metric => metric.Crap is null ? 1 : 0).ThenByDescending(metric => metric.Crap)
+                .ThenBy(metric => metric.File, StringComparer.Ordinal).ThenBy(metric => metric.StartLine).ToArray();
+
+            lines.Add("CRAP      CC  Coverage  Method");
+            foreach (var metric in display)
+            {
+                var obscuredViolation = metric.Crap is double raw && raw > options.Threshold &&
+                    raw.ToString("0.00", CultureInfo.InvariantCulture) == options.Threshold.ToString("0.00", CultureInfo.InvariantCulture);
+                var crap = metric.Crap?.ToString("0.00", CultureInfo.InvariantCulture) ?? "N/A";
+                if (obscuredViolation) crap += ">";
+                var coverageText = metric.Coverage is double value ? value.ToString("P1", CultureInfo.InvariantCulture) : "N/A";
+                var relative = Path.GetRelativePath(workingDirectory, metric.File);
+                lines.Add($"{crap,8} {metric.Complexity,3} {coverageText,9}  {relative}:{metric.StartLine} {metric.DisplayName}");
+                if (obscuredViolation)
+                    lines.Add($"> raw CRAP {metric.Crap!.Value.ToString("R", CultureInfo.InvariantCulture)} > threshold {options.Threshold.ToString("R", CultureInfo.InvariantCulture)}");
+            }
+            var violations = detailed.Where(result => result.Metric.Crap > options.Threshold).ToArray();
+            var missing = detailed.Count(result => result.Metric.Coverage is null);
+            lines.Add($"Methods: {detailed.Length}; known coverage: {detailed.Length - missing}; missing coverage: {missing}; violations (> {options.Threshold.ToString(CultureInfo.InvariantCulture)}): {violations.Length}");
+
+            checks.Add(testFailed
+                ? new CheckResult("testExecution", "operationalError", "tests.failed", true)
+                : new CheckResult("testExecution", reports.Count == options.Coverage.Count ? "notApplicable" : "pass",
+                    reports.Count == options.Coverage.Count ? "tests.skippedExplicitCoverage" : "tests.passed", reports.Count != options.Coverage.Count));
+            if (missing > 0)
+                checks.Add(options.AllowMissingCoverage
+                    ? new CheckResult("coverage", "skipped", "coverage.missingAllowed", false)
+                    : new CheckResult("coverage", "operationalError", detailed.First(result => result.CoverageReason is not null).CoverageReason!, true));
+            else checks.Add(new CheckResult("coverage", "pass", "coverage.complete", true));
+            checks.Add(new CheckResult("crap", violations.Length > 0 ? "fail" : detailed.Length == 0 ? "notApplicable" : "pass",
+                violations.Length > 0 ? "crap.thresholdExceeded" : detailed.Length == 0 ? "crap.noEligibleMethods" : "crap.withinThreshold", true));
+
+            string? operationError = testFailed ? "dotnet test failed; report shown from available coverage data." :
+                missing > 0 && !options.AllowMissingCoverage ? "one or more analyzed methods have N/A coverage; pass --allow-missing-coverage to gate only known scores." : null;
+            return new ExecutionOutcome
+            {
+                Files = files,
+                Reports = reports,
+                SourceMethods = source,
+                Matches = detailed,
+                Checks = checks,
+                HumanLines = lines,
+                ErrorMessage = operationError,
+                Commands = commands,
+                RunArtifacts = runArtifacts,
+                GeneratedReports = generatedReports,
+                AliasChecked = true
+            };
         }
-
-        foreach (var report in reports)
-            if (!File.Exists(report)) throw new FileNotFoundException($"Coverage report not found: {report}", report);
-        var source = new SourceAnalyzer().AnalyzeFiles(files);
-        coverage ??= reports.Select(CoverageReader.Read).ToArray();
-        var detailed = CoverageMatcher.ApplyDetailed(source, coverage)
-            .OrderBy(result => result.Metric.File, StringComparer.Ordinal)
-            .ThenBy(result => result.Metric.DisplayName, StringComparer.Ordinal)
-            .ThenBy(result => result.Metric.StartLine)
-            .ToArray();
-        var display = detailed.Select(result => result.Metric)
-            .OrderBy(metric => metric.Crap is null ? 1 : 0).ThenByDescending(metric => metric.Crap)
-            .ThenBy(metric => metric.File, StringComparer.Ordinal).ThenBy(metric => metric.StartLine).ToArray();
-
-        lines.Add("CRAP      CC  Coverage  Method");
-        foreach (var metric in display)
+        catch (Exception exception) when (IsHandled(exception))
         {
-            var obscuredViolation = metric.Crap is double raw && raw > options.Threshold &&
-                raw.ToString("0.00", CultureInfo.InvariantCulture) == options.Threshold.ToString("0.00", CultureInfo.InvariantCulture);
-            var crap = metric.Crap?.ToString("0.00", CultureInfo.InvariantCulture) ?? "N/A";
-            if (obscuredViolation) crap += ">";
-            var coverageText = metric.Coverage is double value ? value.ToString("P1", CultureInfo.InvariantCulture) : "N/A";
-            var relative = Path.GetRelativePath(workingDirectory, metric.File);
-            lines.Add($"{crap,8} {metric.Complexity,3} {coverageText,9}  {relative}:{metric.StartLine} {metric.DisplayName}");
-            if (obscuredViolation)
-                lines.Add($"> raw CRAP {metric.Crap!.Value.ToString("R", CultureInfo.InvariantCulture)} > threshold {options.Threshold.ToString("R", CultureInfo.InvariantCulture)}");
+            var cancelled = exception is OperationCanceledException || cancellationToken.IsCancellationRequested;
+            var timedOut = !cancelled && exception is ProcessTimeoutException;
+            var reason = cancelled ? "run.cancelled" : timedOut ? "run.timeout" : "execution.failed";
+            var failureCheck = new CheckResult(commands.Count > 0 ? "testExecution" : "execution",
+                cancelled ? "cancelled" : "operationalError", reason, true);
+            return new ExecutionOutcome
+            {
+                Files = files,
+                Reports = reports,
+                GeneratedReports = generatedReports,
+                SourceMethods = source,
+                Matches = detailed,
+                Checks = checks.Concat([failureCheck]).ToArray(),
+                HumanLines = lines,
+                ErrorMessage = exception.Message,
+                Reason = reason,
+                CancellationReason = cancelled || timedOut ? reason : null,
+                Commands = commands,
+                RunArtifacts = runArtifacts,
+                AliasChecked = true,
+                Cancelled = cancelled,
+                TimedOut = timedOut
+            };
         }
-        var violations = detailed.Where(result => result.Metric.Crap > options.Threshold).ToArray();
-        var missing = detailed.Count(result => result.Metric.Coverage is null);
-        lines.Add($"Methods: {detailed.Length}; known coverage: {detailed.Length - missing}; missing coverage: {missing}; violations (> {options.Threshold.ToString(CultureInfo.InvariantCulture)}): {violations.Length}");
-
-        var checks = new List<CheckResult>();
-        checks.Add(testFailed
-            ? new CheckResult("testExecution", "operationalError", "tests.failed", true)
-            : new CheckResult("testExecution", reports.Count == options.Coverage.Count ? "notApplicable" : "pass",
-                reports.Count == options.Coverage.Count ? "tests.skippedExplicitCoverage" : "tests.passed", reports.Count != options.Coverage.Count));
-        if (missing > 0)
-            checks.Add(options.AllowMissingCoverage
-                ? new CheckResult("coverage", "skipped", "coverage.missingAllowed", false)
-                : new CheckResult("coverage", "operationalError", detailed.First(result => result.CoverageReason is not null).CoverageReason!, true));
-        else checks.Add(new CheckResult("coverage", "pass", "coverage.complete", true));
-        checks.Add(new CheckResult("crap", violations.Length > 0 ? "fail" : detailed.Length == 0 ? "notApplicable" : "pass",
-            violations.Length > 0 ? "crap.thresholdExceeded" : detailed.Length == 0 ? "crap.noEligibleMethods" : "crap.withinThreshold", true));
-
-        string? operationError = testFailed ? "dotnet test failed; report shown from available coverage data." :
-            missing > 0 && !options.AllowMissingCoverage ? "one or more analyzed methods have N/A coverage; pass --allow-missing-coverage to gate only known scores." : null;
-        return new ExecutionOutcome
-        {
-            Files = files, Reports = reports, SourceMethods = source, Matches = detailed, Checks = checks,
-            HumanLines = lines, ErrorMessage = operationError, Commands = commands, RunArtifacts = runArtifacts, AliasChecked = true
-        };
     }
 
     private static ResultDocument BuildResult(ExecutionOutcome outcome, Options options, string workingDirectory,
@@ -356,10 +383,13 @@ internal static class App
         var reduced = EvaluationDecisionReducer.Reduce(checks, findings.Length > 0);
         var reasonCounts = metrics.Where(metric => metric.CoverageReason is not null).GroupBy(metric => metric.CoverageReason!, StringComparer.Ordinal)
             .OrderBy(group => group.Key, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
-        var artifacts = outcome.Files.Select(path => Artifact(path, "source", workingDirectory))
-            .Concat(outcome.Reports.Select(path => Artifact(path, "coverage", workingDirectory)))
+        var generatedReports = outcome.GeneratedReports.ToHashSet(OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        var artifacts = outcome.Files.Select(path => Artifact(path, "source", workingDirectory, generated: false))
+            .Concat(outcome.Reports.Select(path => Artifact(path, "coverage", workingDirectory, generatedReports.Contains(path))))
+            .Distinct()
             .OrderBy(artifact => artifact.Kind, StringComparer.Ordinal).ThenBy(artifact => artifact.Path, StringComparer.Ordinal).ToArray();
-        return new ResultDocument(ResultContract.SchemaVersion, "0.1.0", ResultContract.ComplexityRulesetVersion,
+        return new ResultDocument(ResultContract.SchemaVersion, ToolVersion, ResultContract.ComplexityRulesetVersion,
             new EvaluationSection("legacy", new PolicyOptions(options.Threshold, options.AllowMissingCoverage),
                 new EvaluationScope(".", outcome.Files.Select(path => NormalizePath(workingDirectory, path)).Order(StringComparer.Ordinal).ToArray()),
                 [new EvaluationContext("legacy-syntax", "syntaxOnly", null, null, null, null, null)], checks, metrics, findings,
@@ -371,11 +401,25 @@ internal static class App
                 reduced.Status, reduced.ExitCode));
     }
 
-    private static ArtifactIdentity Artifact(string path, string kind, string workingDirectory)
+    private static ArtifactIdentity Artifact(string path, string kind, string workingDirectory, bool generated)
     {
-        try { return new ArtifactIdentity(kind, NormalizePath(workingDirectory, path), Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant(), "sha256"); }
-        catch { return new ArtifactIdentity(kind, NormalizePath(workingDirectory, path), null, "unavailable"); }
+        try
+        {
+            var contentIdentity = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
+            var logicalPath = generated ? $"<generated>/coverage/{contentIdentity}.xml" : NormalizePath(workingDirectory, path);
+            return new ArtifactIdentity(kind, logicalPath, contentIdentity, "sha256");
+        }
+        catch
+        {
+            var logicalPath = generated ? "<generated>/coverage/unavailable.xml" : NormalizePath(workingDirectory, path);
+            return new ArtifactIdentity(kind, logicalPath, null, "unavailable");
+        }
     }
+
+    private static string ToolVersion => typeof(App).Assembly
+        .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+        ?? typeof(App).Assembly.GetName().Version?.ToString()
+        ?? "unknown";
 
     private static string NormalizePath(string root, string path) => Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/');
     private static bool HasJsonIntent(string[] args) => args.Select((value, index) => (value, index))
@@ -384,6 +428,19 @@ internal static class App
     {
         for (var index = 0; index + 1 < args.Length; index++) if (args[index] == option) return args[index + 1];
         return null;
+    }
+    private static bool IsAbsentOutputDestination(string? output, string workingDirectory)
+    {
+        if (output is null) return false;
+        try
+        {
+            var path = Path.GetFullPath(output, workingDirectory);
+            return !File.Exists(path) && !Directory.Exists(path);
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
     private static string? FindOutputAlias(string? output, string workingDirectory, IEnumerable<string> files, IEnumerable<string> reports, string? project)
     {
@@ -501,6 +558,7 @@ internal static class App
         public IReadOnlyList<string> HumanLines { get; init; } = [];
         public IReadOnlyList<CommandRecord> Commands { get; init; } = [];
         public IReadOnlyList<RunArtifact> RunArtifacts { get; init; } = [];
+        public IReadOnlyList<string> GeneratedReports { get; init; } = [];
         public string? Reason { get; init; }
         public string? ErrorMessage { get; init; }
         public string? OutputAliasReason { get; init; }
@@ -510,8 +568,14 @@ internal static class App
         public bool TimedOut { get; init; }
 
         public static ExecutionOutcome Failure(string reason, string message, bool cancelled = false, bool timedOut = false) =>
-            new() { Reason = reason, ErrorMessage = message, CancellationReason = cancelled || timedOut ? reason : null,
-                Cancelled = cancelled, TimedOut = timedOut };
+            new()
+            {
+                Reason = reason,
+                ErrorMessage = message,
+                CancellationReason = cancelled || timedOut ? reason : null,
+                Cancelled = cancelled,
+                TimedOut = timedOut
+            };
 
         public ExecutionOutcome WithOperationalFailure(string reason, string message) => this with
         {

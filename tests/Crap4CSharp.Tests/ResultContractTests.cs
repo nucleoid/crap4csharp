@@ -517,7 +517,7 @@ public sealed class ResultContractTests : IDisposable
             $"Normalized evaluation did not match {fixture}.\nExpected: {expected.RootElement}\nActual: {actual.RootElement.GetProperty("evaluation")}");
     }
 
-    private static void AssertConformsToPublishedSchema(string repository, string documentJson)
+    internal static void AssertConformsToPublishedSchema(string repository, string documentJson)
     {
         using var schema = JsonDocument.Parse(File.ReadAllText(Path.Combine(repository, "docs", "result-schema-v1.json")));
         using var document = JsonDocument.Parse(documentJson);

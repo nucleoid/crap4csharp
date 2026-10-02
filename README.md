@@ -82,7 +82,7 @@ Output is ordered by numeric CRAP score descending, followed by unknown (`N/A`) 
 
 `--format human|json` controls console rendering (`human` is the default). JSON stdout contains exactly one UTF-8 document followed by a newline; progress and child diagnostics are routed to stderr. `--output <path>` always writes the JSON document through a unique sibling temporary file and atomic replacement, independent of console format. Destinations that alias source, project, or coverage inputs are rejected before any write.
 
-The v1 document separates deterministic `evaluation` evidence from volatile `run` metadata. It preserves raw finite score precision, stable finding IDs/order, explicit null coverage, conservative coverage reason codes, check status, policy decision, and actual 0/1/2 exit semantics. See [the result contract](docs/results.md) and [JSON Schema](docs/result-schema-v1.json). Incompatible major schema versions must be rejected; additive fields within major version 1 may be ignored by readers.
+The v1 document separates deterministic `evaluation` evidence from volatile `run` metadata. Generated coverage uses a content-addressed logical identity in `evaluation`; its temporary physical location remains in `run`. The document reports the executing assembly's informational version, preserves raw finite score precision, stable finding IDs/order, explicit null coverage, conservative coverage reason codes, check status, policy decision, and actual 0/1/2 exit semantics. See [the result contract](docs/results.md) and [JSON Schema](docs/result-schema-v1.json). Incompatible major schema versions must be rejected; additive fields within major version 1 may be ignored by readers.
 
 ## Exit codes
 

@@ -101,13 +101,36 @@
       "properties": { "completed": { "type": "boolean" }, "policyDecision": { "enum": ["pass", "fail", "notApplicable", "unknown"] }, "reason": { "type": "string" } },
       "additionalProperties": true
     },
+    "command": {
+      "type": "object", "required": ["fileName", "arguments", "exitCode"],
+      "properties": {
+        "fileName": { "type": "string", "minLength": 1 },
+        "arguments": { "type": "array", "items": { "type": "string" } },
+        "exitCode": { "type": ["integer", "null"] }
+      }, "additionalProperties": true
+    },
+    "runArtifact": {
+      "type": "object", "required": ["kind", "path", "retention", "complete", "reusable"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1 }, "path": { "type": "string", "minLength": 1 },
+        "retention": { "type": "string", "minLength": 1 }, "complete": { "type": "boolean" },
+        "reusable": { "type": "boolean" }
+      }, "additionalProperties": true
+    },
+    "cancellation": {
+      "type": "object", "required": ["cancelled", "timedOut", "reason"],
+      "properties": {
+        "cancelled": { "type": "boolean" }, "timedOut": { "type": "boolean" },
+        "reason": { "type": ["string", "null"] }
+      }, "additionalProperties": true
+    },
     "run": {
       "type": "object", "required": ["invocationId", "startedAt", "finishedAt", "durationMilliseconds", "commands", "diagnosticLocations", "artifacts", "cancellation", "status", "exitCode"],
       "properties": {
         "invocationId": { "type": "string", "format": "uuid" }, "startedAt": { "type": "string", "format": "date-time" },
         "finishedAt": { "type": "string", "format": "date-time" }, "durationMilliseconds": { "type": "number", "minimum": 0 },
-        "commands": { "type": "array" }, "diagnosticLocations": { "type": "array", "items": { "type": "string" } },
-        "artifacts": { "type": "array" }, "cancellation": { "type": "object" },
+        "commands": { "type": "array", "items": { "$ref": "#/$defs/command" } }, "diagnosticLocations": { "type": "array", "items": { "type": "string" } },
+        "artifacts": { "type": "array", "items": { "$ref": "#/$defs/runArtifact" } }, "cancellation": { "$ref": "#/$defs/cancellation" },
         "status": { "enum": ["completed", "operationalError", "cancelled"] }, "exitCode": { "enum": [0, 1, 2] }
       }, "additionalProperties": true
     }

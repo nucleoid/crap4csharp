@@ -4,9 +4,11 @@ Crap4CSharp can render its legacy evaluation as one UTF-8 JSON document with `--
 
 ## Versioning and determinism
 
-The top-level `schemaVersion` is currently `1.0`. Readers must reject unsupported major versions and should ignore unknown additive fields within a supported major version. The v1 schema accepts `1.x` minor versions. `complexityRulesetVersion` is `ordinary-methods-v1`, which names the existing ordinary-method syntax walker; this contract does not broaden callable analysis.
+The top-level `schemaVersion` is currently `1.0`. Readers must reject unsupported major versions and should ignore unknown additive fields within a supported major version. The v1 schema accepts `1.x` minor versions. `toolVersion` comes from the executing assembly's informational version, including build metadata when present. `complexityRulesetVersion` is `ordinary-methods-v1`, which names the existing ordinary-method syntax walker; this contract does not broaden callable analysis.
 
 `evaluation` is normalized evidence. With identical source bytes, coverage observations, policy, and logical paths, it is stable across invocations and cultures. `run` is deliberately volatile and contains the invocation ID, timestamps, elapsed duration, child commands, diagnostic/artifact locations, cancellation details, actual terminal status, and exit code.
+
+Explicit coverage inputs retain their normalized workspace-relative paths. Coverage produced in an invocation-owned temporary directory uses a content-addressed logical path under `<generated>/coverage/` in `evaluation.artifacts`; its physical temporary location appears only in `run.artifacts`.
 
 Legacy syntax-only contexts use `analysisMode: "syntaxOnly"` and null project, target framework, configuration, source-set identity, and external-root identity. The tool's own `net10.0` target is not presented as the analyzed consumer's target.
 
@@ -39,6 +41,6 @@ Specific reasons are emitted only from observed evidence. Unknown coverage remai
 
 ## Output safety
 
-The explicit destination is written to a unique sibling temporary file and atomically replaced only after the final document is complete. Existing output remains untouched if persistence fails. Destinations that alias source, explicitly supplied or automatically discovered project/solution, or coverage inputs are rejected before any write. If an early parse/discovery failure prevents alias safety from being established, stdout includes `output.notWritten`, stderr warns that an existing destination may be stale, and the old file is preserved. Help takes precedence and performs no discovery or output write. A graceful cancellation emits a cancelled result where possible; forced process or OS termination cannot guarantee delivery.
+The explicit destination is written to a unique sibling temporary file and atomically replaced only after the final document is complete. Existing output remains untouched if persistence fails. Destinations that alias source, explicitly supplied or automatically discovered project/solution, or coverage inputs are rejected before any write. An absent destination can safely receive an early parse/discovery error document. If an existing destination cannot be proven safe before discovery completes, stdout includes `output.notWritten`, stderr warns that the destination may be stale, and the old file is preserved. Help takes precedence and performs no discovery or output write. A graceful cancellation emits a cancelled result where possible; forced process or OS termination cannot guarantee delivery.
 
 The authoritative machine contract is [result-schema-v1.json](result-schema-v1.json).
