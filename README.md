@@ -43,6 +43,12 @@ crap4csharp --timeout-seconds 600 --project MySolution.slnx
 
 # Explicitly permit N/A methods while still gating known scores
 crap4csharp --allow-missing-coverage --coverage coverage.xml src
+
+# Emit one versioned machine-readable result document
+crap4csharp --format json --coverage coverage.xml src
+
+# Atomically persist the same JSON contract while retaining human console output
+crap4csharp --output artifacts/crap-result.json --coverage coverage.xml src
 ```
 
 With no `--coverage`, the tool creates a unique directory beneath the OS temporary directory and runs:
@@ -71,6 +77,12 @@ Solutions (`.sln` or `.slnx`) are preferred when exactly one exists in the worki
 - `--changed` consumes NUL-delimited Git porcelain v1, including spaces, untracked files, renames/copies, and deletions. Deleted files are ignored.
 
 Output is ordered by numeric CRAP score descending, followed by unknown (`N/A`) entries. Ties are deterministic by path and line.
+
+## Machine-readable results
+
+`--format human|json` controls console rendering (`human` is the default). JSON stdout contains exactly one UTF-8 document followed by a newline; progress and child diagnostics are routed to stderr. `--output <path>` always writes the JSON document through a unique sibling temporary file and atomic replacement, independent of console format. Destinations that alias source, project, or coverage inputs are rejected before any write.
+
+The v1 document separates deterministic `evaluation` evidence from volatile `run` metadata. It preserves raw finite score precision, stable finding IDs/order, explicit null coverage, conservative coverage reason codes, check status, policy decision, and actual 0/1/2 exit semantics. See [the result contract](docs/results.md) and [JSON Schema](docs/result-schema-v1.json). Incompatible major schema versions must be rejected; additive fields within major version 1 may be ignored by readers.
 
 ## Exit codes
 

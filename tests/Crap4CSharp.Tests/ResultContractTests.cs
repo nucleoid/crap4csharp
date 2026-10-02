@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Crap4CSharp.Core;
 using Xunit;
 
 namespace Crap4CSharp.Tests;
@@ -70,6 +71,70 @@ public sealed class ResultContractTests : IDisposable
         Assert.Equal("output.aliasesInput", document.RootElement.GetProperty("evaluation").GetProperty("checks")[0].GetProperty("reason").GetString());
         Assert.Equal(before, await File.ReadAllBytesAsync(source, TestContext.Current.CancellationToken));
         Assert.Equal(timestamp, File.GetLastWriteTimeUtc(source));
+    }
+
+    [Fact]
+    public async Task NormalizedEvaluationIsStableWhileRunEnvelopeVaries()
+    {
+        var source = Write("unicodé source.cs", "class C { int M() => 1; }");
+        var coverage = WriteOpenCover("coverage.xml", source, visits: 1);
+
+        var first = await RunApp("--format", "json", "--coverage", coverage, source);
+        var second = await RunApp("--format", "json", "--coverage", coverage, source);
+
+        using var firstDocument = JsonDocument.Parse(first.Output);
+        using var secondDocument = JsonDocument.Parse(second.Output);
+        Assert.Equal(firstDocument.RootElement.GetProperty("evaluation").GetRawText(),
+            secondDocument.RootElement.GetProperty("evaluation").GetRawText());
+        Assert.NotEqual(firstDocument.RootElement.GetProperty("run").GetProperty("invocationId").GetString(),
+            secondDocument.RootElement.GetProperty("run").GetProperty("invocationId").GetString());
+        Assert.Contains("unicodé source.cs", first.Output);
+    }
+
+    [Theory]
+    [InlineData("--format")]
+    [InlineData("--output")]
+    public async Task MachineOutputFlagsCannotBeRepeated(string option)
+    {
+        var value = option == "--format" ? "json" : "a.json";
+        var second = option == "--format" ? "human" : "b.json";
+        var result = await RunApp("--format", "json", option, value, option, second);
+        Assert.Equal(1, result.ExitCode);
+        using var document = JsonDocument.Parse(result.Output);
+        Assert.Equal("arguments.invalid", document.RootElement.GetProperty("evaluation").GetProperty("checks")[0].GetProperty("reason").GetString());
+    }
+
+    [Fact]
+    public void DetailedCoverageRetainsConservativeUnknownReasons()
+    {
+        var sourcePath = Write("Reasons.cs", "class C { int A() => 1; int B() => 2; }");
+        var source = new SourceAnalyzer().AnalyzeFiles([sourcePath]);
+        var report = new[]
+        {
+            new CoverageMethod(sourcePath, "C", "A", 0, [], "Fixture"),
+            new CoverageMethod(sourcePath, "C", "B", 0, [new CoveragePoint(1, 1)], "One"),
+            new CoverageMethod(sourcePath, "C", "B", 0, [new CoveragePoint(1, 1)], "Two")
+        };
+
+        var detailed = CoverageMatcher.ApplyDetailed(source, [report]);
+
+        Assert.Equal(CoverageReasonCodes.NoEligiblePoints, detailed.Single(item => item.Metric.MethodName == "A").CoverageReason);
+        Assert.Equal(CoverageReasonCodes.ConflictingModule, detailed.Single(item => item.Metric.MethodName == "B").CoverageReason);
+    }
+
+    [Fact]
+    public async Task PrecisionIsNotRoundedAwayAtTheHumanGate()
+    {
+        var source = Write("Precision.cs", "class C { int M(int x) { if(x>0){} if(x>1){} if(x>2){} if(x>3){} if(x>4){} if(x>5){} if(x>6){} return x; } }");
+        var points = string.Join(string.Empty, Enumerable.Range(0, 86).Select(index =>
+            $"<SequencePoint vc=\"{(index == 0 ? 0 : 1)}\" sl=\"1\" sc=\"1\" el=\"1\" ec=\"120\" offset=\"{index}\" fileid=\"1\" />"));
+        var coverage = Write("precision.xml", $"<CoverageSession><Modules><Module><ModuleName>Fixture</ModuleName><Files><File uid=\"1\" fullPath=\"{System.Security.SecurityElement.Escape(source)}\" /></Files><Classes><Class><FullName>C</FullName><Methods><Method><Name>C.M(System.Int32)</Name><SequencePoints>{points}</SequencePoints><FileRef uid=\"1\" /></Method></Methods></Class></Classes></Module></Modules></CoverageSession>");
+
+        var result = await RunApp("--coverage", coverage, source);
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.Contains("8.00>", result.Output);
+        Assert.Contains("raw CRAP", result.Output);
     }
 
     private async Task<(int ExitCode, string Output, string Error)> RunApp(params string[] args)

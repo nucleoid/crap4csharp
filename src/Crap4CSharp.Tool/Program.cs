@@ -75,7 +75,7 @@ internal static class App
             startedAt, DateTimeOffset.UtcNow, stopwatch.Elapsed);
         var json = ResultWriter.Serialize(result);
 
-        if (outputPath is not null && outcome.OutputAliasReason is null)
+        if (options is not null && outputPath is not null && outcome.OutputAliasReason is null)
         {
             try
             {
@@ -83,7 +83,7 @@ internal static class App
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
             {
-                outcome = ExecutionOutcome.Failure("output.writeFailed", exception.Message);
+                outcome = outcome.WithOperationalFailure("output.writeFailed", exception.Message);
                 result = BuildResult(outcome, options ?? new Options { Format = format, Output = outputPath }, workingDirectory,
                     startedAt, DateTimeOffset.UtcNow, stopwatch.Elapsed);
                 json = ResultWriter.Serialize(result);
@@ -92,6 +92,7 @@ internal static class App
 
         if (format == "json")
         {
+            foreach (var diagnostic in outcome.DiagnosticLines) await error.WriteLineAsync(diagnostic);
             try { await output.WriteAsync(json); }
             catch (Exception exception) when (exception is IOException or ObjectDisposedException)
             {
@@ -102,6 +103,7 @@ internal static class App
         else
         {
             foreach (var line in outcome.HumanLines) await output.WriteLineAsync(line);
+            foreach (var diagnostic in outcome.DiagnosticLines) await error.WriteLineAsync(diagnostic);
             if (outcome.ErrorMessage is not null) await error.WriteLineAsync($"error: {outcome.ErrorMessage}");
             if (outcome.Reason == "arguments.invalid") await error.WriteLineAsync("Run 'crap4csharp --help' for usage.");
         }
@@ -111,6 +113,8 @@ internal static class App
     private static Options Parse(string[] args)
     {
         var options = new Options();
+        var seenFormat = false;
+        var seenOutput = false;
         for (var index = 0; index < args.Length; index++)
         {
             var arg = args[index];
@@ -136,10 +140,16 @@ internal static class App
                 case "--changed": options.Changed = true; break;
                 case "--allow-missing-coverage": options.AllowMissingCoverage = true; break;
                 case "--format":
+                    if (seenFormat) throw new ArgumentException("--format may be specified only once.");
+                    seenFormat = true;
                     options.Format = Value();
                     if (options.Format is not ("human" or "json")) throw new ArgumentException("Format must be human or json.");
                     break;
-                case "--output": options.Output = Value(); break;
+                case "--output":
+                    if (seenOutput) throw new ArgumentException("--output may be specified only once.");
+                    seenOutput = true;
+                    options.Output = Value();
+                    break;
                 default:
                     if (arg.StartsWith("-", StringComparison.Ordinal)) throw new ArgumentException($"Unknown option: {arg}");
                     options.Inputs.Add(arg);
@@ -155,6 +165,7 @@ internal static class App
         var lines = new List<string>();
         var commands = new List<CommandRecord>();
         var runArtifacts = new List<RunArtifact>();
+        var diagnostics = new List<string>();
         var files = options.Changed
             ? await ChangedFilesAsync(workingDirectory, options.Timeout, cancellationToken)
             : SourceDiscovery.Discover(options.Inputs, workingDirectory);
@@ -194,6 +205,7 @@ internal static class App
             var process = await ProcessRunner.RunAsync("dotnet", arguments, workingDirectory, options.Timeout, cancellationToken);
             commands.Add(new CommandRecord("dotnet", arguments, process.ExitCode));
             if (!string.IsNullOrWhiteSpace(process.StandardOutput)) lines.Add(process.StandardOutput.TrimEnd());
+            if (!string.IsNullOrWhiteSpace(process.StandardError)) diagnostics.Add(process.StandardError.TrimEnd());
             testFailed = process.ExitCode != 0;
             reports.AddRange(Directory.EnumerateFiles(resultsDirectory, "*.xml", SearchOption.AllDirectories)
                 .Where(path => Path.GetFileName(path).Contains("coverage", StringComparison.OrdinalIgnoreCase)));
@@ -249,7 +261,7 @@ internal static class App
         return new ExecutionOutcome
         {
             Files = files, Reports = reports, SourceMethods = source, Matches = detailed, Checks = checks,
-            HumanLines = lines, ErrorMessage = error, Commands = commands, RunArtifacts = runArtifacts
+            HumanLines = lines, DiagnosticLines = diagnostics, ErrorMessage = error, Commands = commands, RunArtifacts = runArtifacts
         };
     }
 
@@ -310,11 +322,16 @@ internal static class App
     private static string? FindOutputAlias(string? output, string workingDirectory, IEnumerable<string> files, IEnumerable<string> reports, string? project)
     {
         if (output is null) return null;
-        var destination = Path.GetFullPath(output, workingDirectory);
+        var destination = CanonicalPath(Path.GetFullPath(output, workingDirectory));
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         foreach (var input in files.Concat(reports).Concat(project is null ? [] : [project]))
-            if (string.Equals(destination, Path.GetFullPath(input), comparison)) return input;
+            if (string.Equals(destination, CanonicalPath(Path.GetFullPath(input)), comparison)) return input;
         return null;
+    }
+    private static string CanonicalPath(string path)
+    {
+        try { return new FileInfo(path).ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? path; }
+        catch (IOException) { return path; }
     }
     private static bool IsHandled(Exception exception) => exception is ArgumentException or IOException or UnauthorizedAccessException or
         InvalidDataException or InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception or OperationCanceledException;
@@ -369,6 +386,7 @@ internal static class App
         public IReadOnlyList<CoverageMatcher.DetailedMatch> Matches { get; init; } = [];
         public IReadOnlyList<CheckResult> Checks { get; init; } = [];
         public IReadOnlyList<string> HumanLines { get; init; } = [];
+        public IReadOnlyList<string> DiagnosticLines { get; init; } = [];
         public IReadOnlyList<CommandRecord> Commands { get; init; } = [];
         public IReadOnlyList<RunArtifact> RunArtifacts { get; init; } = [];
         public string? Reason { get; init; }
@@ -379,5 +397,12 @@ internal static class App
 
         public static ExecutionOutcome Failure(string reason, string message, bool cancelled = false, bool timedOut = false) =>
             new() { Reason = reason, ErrorMessage = message, Cancelled = cancelled, TimedOut = timedOut };
+
+        public ExecutionOutcome WithOperationalFailure(string reason, string message) => this with
+        {
+            Checks = Checks.Concat([new CheckResult("resultOutput", "operationalError", reason, true)]).ToArray(),
+            Reason = reason,
+            ErrorMessage = message
+        };
     }
 }

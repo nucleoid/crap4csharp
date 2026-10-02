@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/nucleoid/crap4csharp/blob/main/docs/result-schema-v1.json",
+  "title": "Crap4CSharp result v1",
+  "type": "object",
+  "required": ["schemaVersion", "toolVersion", "complexityRulesetVersion", "evaluation", "run"],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "toolVersion": { "type": "string", "minLength": 1 },
+    "complexityRulesetVersion": { "const": "ordinary-methods-v1" },
+    "evaluation": { "$ref": "#/$defs/evaluation" },
+    "run": { "$ref": "#/$defs/run" }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "evaluation": {
+      "type": "object",
+      "required": ["invocationMode", "policy", "scope", "contexts", "checks", "metrics", "findings", "coverage", "artifacts", "decision"],
+      "properties": {
+        "invocationMode": { "type": "string", "enum": ["legacy", "check", "analyze", "baseline"] },
+        "policy": {
+          "type": "object", "required": ["threshold", "allowMissingCoverage", "comparisonOperator"],
+          "properties": {
+            "threshold": { "type": "number", "minimum": 0 },
+            "allowMissingCoverage": { "type": "boolean" },
+            "comparisonOperator": { "const": "gt" }
+          }, "additionalProperties": true
+        },
+        "scope": {
+          "type": "object", "required": ["logicalWorkspaceRoot", "sources"],
+          "properties": { "logicalWorkspaceRoot": { "type": "string" }, "sources": { "type": "array", "items": { "type": "string" } } },
+          "additionalProperties": true
+        },
+        "contexts": { "type": "array", "items": { "$ref": "#/$defs/context" } },
+        "checks": { "type": "array", "items": { "$ref": "#/$defs/check" } },
+        "metrics": { "type": "array", "items": { "$ref": "#/$defs/metric" } },
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+        "coverage": { "$ref": "#/$defs/coverageSummary" },
+        "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact" } },
+        "decision": { "$ref": "#/$defs/decision" }
+      }, "additionalProperties": true
+    },
+    "context": {
+      "type": "object", "required": ["id", "analysisMode", "project", "targetFramework", "configuration", "sourceSetIdentity", "externalRootIdentity"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 }, "analysisMode": { "enum": ["syntaxOnly", "project"] },
+        "project": { "type": ["string", "null"] }, "targetFramework": { "type": ["string", "null"] },
+        "configuration": { "type": ["string", "null"] }, "sourceSetIdentity": { "type": ["string", "null"] },
+        "externalRootIdentity": { "type": ["string", "null"] }
+      }, "additionalProperties": true
+    },
+    "check": {
+      "type": "object", "required": ["name", "status", "reason", "required"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["pass", "fail", "operationalError", "cancelled", "skipped", "notApplicable"] },
+        "reason": { "type": "string", "minLength": 1 }, "required": { "type": "boolean" }
+      }, "additionalProperties": true
+    },
+    "span": {
+      "type": "object", "required": ["startLine", "endLine"],
+      "properties": { "startLine": { "type": "integer", "minimum": 1 }, "endLine": { "type": "integer", "minimum": 1 } },
+      "additionalProperties": true
+    },
+    "metric": {
+      "type": "object", "required": ["contextId", "path", "methodIdentity", "signature", "span", "complexity", "coverage", "crap", "coverageReason"],
+      "properties": {
+        "contextId": { "type": "string" }, "path": { "type": "string" }, "methodIdentity": { "type": "string" },
+        "signature": { "type": ["string", "null"] }, "span": { "$ref": "#/$defs/span" },
+        "complexity": { "type": "integer", "minimum": 1 }, "coverage": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "crap": { "type": ["number", "null"], "minimum": 0 },
+        "coverageReason": { "type": ["string", "null"] }
+      }, "additionalProperties": true
+    },
+    "finding": {
+      "allOf": [
+        { "$ref": "#/$defs/metric" },
+        { "type": "object", "required": ["id", "code", "severity", "category", "threshold", "comparisonOperator", "decision", "reasonCodes"],
+          "properties": {
+            "id": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "code": { "type": "string" },
+            "severity": { "type": "string" }, "category": { "type": "string" }, "threshold": { "type": "number", "minimum": 0 },
+            "comparisonOperator": { "const": "gt" }, "decision": { "type": "string" },
+            "reasonCodes": { "type": "array", "items": { "type": "string" } }
+          } }
+      ]
+    },
+    "coverageSummary": {
+      "type": "object", "required": ["methods", "known", "unknown", "reasons"],
+      "properties": {
+        "methods": { "type": "integer", "minimum": 0 }, "known": { "type": "integer", "minimum": 0 },
+        "unknown": { "type": "integer", "minimum": 0 }, "reasons": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } }
+      }, "additionalProperties": true
+    },
+    "artifact": {
+      "type": "object", "required": ["kind", "path", "contentIdentity", "identityStatus"],
+      "properties": { "kind": { "type": "string" }, "path": { "type": "string" }, "contentIdentity": { "type": ["string", "null"] }, "identityStatus": { "type": "string" } },
+      "additionalProperties": true
+    },
+    "decision": {
+      "type": "object", "required": ["completed", "policyDecision", "reason"],
+      "properties": { "completed": { "type": "boolean" }, "policyDecision": { "enum": ["pass", "fail", "notApplicable", "unknown"] }, "reason": { "type": "string" } },
+      "additionalProperties": true
+    },
+    "run": {
+      "type": "object", "required": ["invocationId", "startedAt", "finishedAt", "durationMilliseconds", "commands", "diagnosticLocations", "artifacts", "cancellation", "status", "exitCode"],
+      "properties": {
+        "invocationId": { "type": "string", "format": "uuid" }, "startedAt": { "type": "string", "format": "date-time" },
+        "finishedAt": { "type": "string", "format": "date-time" }, "durationMilliseconds": { "type": "number", "minimum": 0 },
+        "commands": { "type": "array" }, "diagnosticLocations": { "type": "array", "items": { "type": "string" } },
+        "artifacts": { "type": "array" }, "cancellation": { "type": "object" },
+        "status": { "enum": ["completed", "operationalError", "cancelled"] }, "exitCode": { "enum": [0, 1, 2] }
+      }, "additionalProperties": true
+    }
+  }
+}
