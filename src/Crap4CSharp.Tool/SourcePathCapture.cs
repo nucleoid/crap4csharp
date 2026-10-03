@@ -32,6 +32,8 @@ internal static class SourcePathCapture
                     throw new DirectoryNotFoundException($"Selected source root does not exist: {path}");
                 return new CoverageSourceRoot(path, ResolvePhysical(path, pathPolicy), rootIdentities[path]);
             }).ToList();
+        var declaredSelectionRoots = roots.ToArray();
+        var implicitRoots = new Dictionary<string, CoverageSourceRoot>(pathPolicy.Comparer);
 
         foreach (var localRootValue in mappingLocalRoots)
         {
@@ -53,16 +55,18 @@ internal static class SourcePathCapture
         foreach (var fileValue in files.Order(StringComparer.Ordinal))
         {
             var file = pathPolicy.Normalize(fileValue);
-            var root = roots.Where(candidate => pathPolicy.Contains(candidate.LocalPath, file))
+            var root = declaredSelectionRoots.Where(candidate => pathPolicy.Contains(candidate.LocalPath, file))
                 .OrderByDescending(candidate => candidate.LocalPath.Length).FirstOrDefault();
             if (root is null)
             {
                 var parent = Path.GetDirectoryName(file)!;
-                var relativeParent = Path.GetRelativePath(invocationRoot, parent)
-                    .Replace(Path.DirectorySeparatorChar, '/');
-                root = new CoverageSourceRoot(parent, ResolvePhysical(parent, pathPolicy),
-                    ExternalId($"implicit:{relativeParent}"));
-                roots.Add(root);
+                if (!implicitRoots.TryGetValue(parent, out root))
+                {
+                    root = new CoverageSourceRoot(parent, ResolvePhysical(parent, pathPolicy),
+                        ExternalId($"implicit:{RelativeIdentity(invocationRoot, parent)}"));
+                    implicitRoots.Add(parent, root);
+                    roots.Add(root);
+                }
             }
 
             var physicalFile = ResolvePhysical(file, pathPolicy);
@@ -88,7 +92,7 @@ internal static class SourcePathCapture
             entries.Add(new CoverageSourceEntry(file, logical, root.LocalPath, physicalFile, physicalRoot, externalRootId));
         }
 
-        return new CoverageSourceInventory(pathPolicy, entries, roots);
+        return new CoverageSourceInventory(pathPolicy, entries, roots, invocationRoot);
     }
 
     private static string ResolvePhysical(string value, PathIdentityPolicy pathPolicy)
@@ -148,8 +152,17 @@ internal static class SourcePathCapture
         if (Path.IsPathFullyQualified(relative))
         {
             var root = Path.GetPathRoot(relative) ?? string.Empty;
-            relative = relative[root.Length..].TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var suffix = relative[root.Length..].TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            relative = suffix.Length == 0 ? StableRootToken(root) : $"{StableRootToken(root)}/{suffix}";
         }
         return relative.Replace(Path.DirectorySeparatorChar, '/');
+    }
+
+    internal static string StableRootToken(string root)
+    {
+        var normalized = root.Replace('\\', '/').TrimEnd('/');
+        return normalized.StartsWith("//", StringComparison.Ordinal)
+            ? normalized.ToLowerInvariant()
+            : normalized.ToUpperInvariant();
     }
 }

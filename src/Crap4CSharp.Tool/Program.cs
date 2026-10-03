@@ -257,6 +257,8 @@ internal static class App
             : SourceDiscovery.Discover(options.Inputs, workingDirectory);
         var sourceInventory = SourcePathCapture.Capture(files, declaredRoots, explicitFiles,
             preparedMappings.Select(mapping => mapping.LocalRoot), workingDirectory: workingDirectory);
+        var sourceLogicalPaths = sourceInventory.Entries.ToDictionary(
+            entry => entry.LocalPath, entry => entry.LogicalPath, PathIdentityPolicy.Current.Comparer);
         var pathResolver = new CoveragePathResolver(PathIdentityPolicy.Current, sourceInventory,
             preparedMappings, options.CoveragePathCase);
         options.ValidatedCoveragePathMappings = pathResolver.MappingIdentities;
@@ -268,6 +270,7 @@ internal static class App
         {
             Files = files,
             Reports = reports,
+            SourceLogicalPaths = sourceLogicalPaths,
             OutputAliasReason = alias,
             AliasChecked = true
         };
@@ -297,6 +300,7 @@ internal static class App
                 {
                     Files = files,
                     Reports = reports,
+                    SourceLogicalPaths = sourceLogicalPaths,
                     HumanLines = lines,
                     Reason = "crap.noEligibleMethods",
                     CoverageDiagnostics = coverageDiagnostics,
@@ -337,6 +341,7 @@ internal static class App
                     {
                         Files = files,
                         Reports = reports,
+                        SourceLogicalPaths = sourceLogicalPaths,
                         Checks = noCoverageChecks,
                         ErrorMessage = "dotnet test produced no coverage XML. Add coverlet.collector to the test project or pass --coverage.",
                         Reason = "coverage.notProduced",
@@ -350,11 +355,9 @@ internal static class App
 
             foreach (var report in reports)
                 if (!File.Exists(report)) throw new FileNotFoundException($"Coverage report not found: {report}", report);
-            var logicalSourcePaths = sourceInventory.Entries.ToDictionary(
-                entry => entry.LocalPath, entry => entry.LogicalPath, PathIdentityPolicy.Current.Comparer);
             source = new SourceAnalyzer().AnalyzeFiles(files).Select(method => method with
             {
-                LogicalPath = logicalSourcePaths[PathIdentityPolicy.Current.Normalize(method.File)]
+                LogicalPath = sourceLogicalPaths[PathIdentityPolicy.Current.Normalize(method.File)]
             }).ToArray();
             if (coverage is null)
             {
@@ -412,6 +415,7 @@ internal static class App
             {
                 Files = files,
                 Reports = reports,
+                SourceLogicalPaths = sourceLogicalPaths,
                 SourceMethods = source,
                 Matches = detailed,
                 Checks = checks,
@@ -437,6 +441,7 @@ internal static class App
             {
                 Files = files,
                 Reports = reports,
+                SourceLogicalPaths = sourceLogicalPaths,
                 GeneratedReports = generatedReports,
                 SourceMethods = source,
                 Matches = detailed,
@@ -460,13 +465,7 @@ internal static class App
         DateTimeOffset startedAt, DateTimeOffset finishedAt, TimeSpan duration)
     {
         var checks = EffectiveChecks(outcome);
-        var sourceLogicalPaths = outcome.SourceMethods
-            .GroupBy(method => PathIdentityPolicy.Current.Normalize(method.File), PathIdentityPolicy.Current.Comparer)
-            .ToDictionary(group => group.Key,
-                group => group.Select(method => method.LogicalPath).FirstOrDefault(path => path is not null) ??
-                    NormalizePath(workingDirectory, group.First().File),
-                PathIdentityPolicy.Current.Comparer);
-        string ResultPath(string path) => sourceLogicalPaths.TryGetValue(PathIdentityPolicy.Current.Normalize(path), out var logical)
+        string ResultPath(string path) => outcome.SourceLogicalPaths.TryGetValue(PathIdentityPolicy.Current.Normalize(path), out var logical)
             ? logical
             : NormalizePath(workingDirectory, path);
         var metrics = outcome.Matches.Select(match =>
@@ -724,6 +723,8 @@ internal static class App
     {
         public IReadOnlyList<string> Files { get; init; } = [];
         public IReadOnlyList<string> Reports { get; init; } = [];
+        public IReadOnlyDictionary<string, string> SourceLogicalPaths { get; init; } =
+            new Dictionary<string, string>(PathIdentityPolicy.Current.Comparer);
         public IReadOnlyList<SourceMethod> SourceMethods { get; init; } = [];
         public IReadOnlyList<CoverageMatcher.DetailedMatch> Matches { get; init; } = [];
         public IReadOnlyList<CheckResult> Checks { get; init; } = [];

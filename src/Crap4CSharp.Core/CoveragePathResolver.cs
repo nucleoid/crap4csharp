@@ -23,7 +23,8 @@ public sealed class CoverageSourceInventory
     public CoverageSourceInventory(
         PathIdentityPolicy pathPolicy,
         IEnumerable<CoverageSourceEntry> entries,
-        IEnumerable<CoverageSourceRoot> roots)
+        IEnumerable<CoverageSourceRoot> roots,
+        string? logicalWorkspaceRoot = null)
     {
         PathPolicy = pathPolicy ?? throw new ArgumentNullException(nameof(pathPolicy));
         Entries = entries.Select(entry => entry with
@@ -39,6 +40,7 @@ public sealed class CoverageSourceInventory
             LocalPath = pathPolicy.Normalize(root.LocalPath),
             PhysicalPath = pathPolicy.Normalize(root.PhysicalPath)
         }).OrderBy(root => root.LocalPath, StringComparer.Ordinal).ToArray();
+        LogicalWorkspaceRoot = logicalWorkspaceRoot is null ? null : pathPolicy.Normalize(logicalWorkspaceRoot);
 
         _ = pathPolicy.DistinctOrThrow(Entries.Select(entry => entry.LocalPath), "coverage source inventory");
         foreach (var entry in Entries)
@@ -53,6 +55,7 @@ public sealed class CoverageSourceInventory
     public PathIdentityPolicy PathPolicy { get; }
     public IReadOnlyList<CoverageSourceEntry> Entries { get; }
     public IReadOnlyList<CoverageSourceRoot> Roots { get; }
+    public string? LogicalWorkspaceRoot { get; }
 }
 
 public sealed class CoveragePathResolver
@@ -205,15 +208,27 @@ public sealed class CoveragePathResolver
                 throw new CoveragePathException(CoverageReasonCodes.PathMappingConflict,
                     $"Equivalent coverage report roots map to different local roots: {mapping.ReportRoot}");
             if (equivalent.Length > 0) continue;
-            var rootIdentity = inventory.Roots.First(root => localPolicy.Contains(root.LocalPath, localRoot));
-            var logicalDestination = rootIdentity.ExternalRootId ??
-                Path.GetRelativePath(rootIdentity.LocalPath, localRoot).Replace(Path.DirectorySeparatorChar, '/');
+            var rootIdentity = inventory.Roots.Where(root => localPolicy.Contains(root.LocalPath, localRoot))
+                .OrderByDescending(root => root.LocalPath.Length).First();
+            var logicalDestination = LogicalDestination(rootIdentity, localRoot);
             var identityText = $"{CanonicalForIdentity(reportRoot)}\n{logicalDestination}\n{pathCase}";
             var id = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identityText))).ToLowerInvariant();
             output.Add(new MappingRule(reportRoot, localRoot, id));
         }
         return output.OrderBy(rule => CanonicalForIdentity(rule.ReportRoot), StringComparer.Ordinal)
             .ThenBy(rule => rule.Id, StringComparer.Ordinal);
+    }
+
+    private string LogicalDestination(CoverageSourceRoot root, string localRoot)
+    {
+        if (inventory.LogicalWorkspaceRoot is not null &&
+            localPolicy.Contains(inventory.LogicalWorkspaceRoot, localRoot))
+            return Path.GetRelativePath(inventory.LogicalWorkspaceRoot, localRoot)
+                .Replace(Path.DirectorySeparatorChar, '/');
+
+        var suffix = Path.GetRelativePath(root.LocalPath, localRoot).Replace(Path.DirectorySeparatorChar, '/');
+        if (root.ExternalRootId is null) return suffix;
+        return suffix == "." ? $"../{root.ExternalRootId}" : $"../{root.ExternalRootId}/{suffix}";
     }
 
     private CoveragePathResolution Failure(CoveragePathResolutionStatus status, string code, string message,
