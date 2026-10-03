@@ -59,6 +59,8 @@ public sealed record EvaluationSection(
     public IReadOnlyList<CoverageDiagnostic> CoverageDiagnostics { get; init; } = [];
     public IReadOnlyList<CallableResult> Callables { get; init; } = [];
     public IReadOnlyList<CallableFamilyMetric> Families { get; init; } = [];
+    public IReadOnlyList<CallableExemptionMatch> CallableExemptions { get; init; } = [];
+    public IReadOnlyList<string> ExemptionErrors { get; init; } = [];
 }
 
 public sealed record CallableResult(

@@ -308,7 +308,7 @@ internal static class App
         var metrics = callables.Select(item => new MetricResult(item.ContextId, item.Path, item.CallableId, null,
             new SourceSpan(item.Span.StartLine, item.Span.EndLine), item.Complexity ?? 0, item.Coverage, item.Crap,
             item.CoverageReason)).ToArray();
-        var findings = callables.Where(item => item.Crap > options.Threshold).Select(item =>
+        var thresholdFindings = callables.Where(item => item.Crap > options.Threshold).Select(item =>
         {
             var span = new SourceSpan(item.Span.StartLine, item.Span.EndLine);
             return new FindingResult(FindingIdentity.Create(item.ContextId, item.Path, item.CallableId, span, "crap.thresholdExceeded"),
@@ -322,19 +322,41 @@ internal static class App
             return new FindingResult(FindingIdentity.Create(contextId, root.Path, item.FamilyId, span, CallableFamilyEvaluator.Rule),
                 item.FamilyId, CallableFamilyEvaluator.Rule, "error", "complexity", contextId, root.Path,
                 item.FamilyId, null, span, item.Complexity, item.Coverage, item.Crap, null, options.Threshold, "gt", "fail", []);
-        })).OrderBy(item => item.Id, StringComparer.Ordinal).ToArray();
+        })).ToArray();
         var unknown = callables.Where(item => item.Applicability == "applicable" && item.CoverageStatus != "known").ToArray();
+        var unsupportedFindings = unknown.Where(item => item.CoverageReason is
+                CoverageReasonCodes.UnsupportedGeneratedMapping or CoverageReasonCodes.UnsupportedCallable or
+                CoverageReasonCodes.AmbiguousCallableOwnership).Select(item =>
+        {
+            var code = item.CoverageReason!;
+            var span = new SourceSpan(item.Span.StartLine, item.Span.EndLine);
+            return new FindingResult(FindingIdentity.Create(item.ContextId, item.Path, item.ObservationId, span, code),
+                item.CallableId, code, "error", "completeness", item.ContextId, item.Path, item.CallableId, null,
+                span, item.Complexity ?? 0, null, null, code, options.Threshold, "gt", "unknown", [code]);
+        }).ToArray();
+        var findings = thresholdFindings.Concat(unsupportedFindings)
+            .OrderBy(item => item.Id, StringComparer.Ordinal).ToArray();
+        var exemptionValidation = options.Exemptions is null
+            ? new CallableExemptionValidation([], [], false)
+            : CallableExemptions.Validate(File.ReadAllBytes(Path.GetFullPath(options.Exemptions, workingDirectory)),
+                ExemptionTrust.LocalUnreviewed, inventory, resolved.Observations, families);
+        var unsupported = unknown.Any(item => item.CoverageReason is CoverageReasonCodes.UnsupportedGeneratedMapping or
+            CoverageReasonCodes.UnsupportedCallable or CoverageReasonCodes.AmbiguousCallableOwnership);
         var checks = new List<CheckResult>
         {
             new("testExecution", "notApplicable", "tests.skippedSyntaxOnly", false),
-            unknown.Length == 0 ? new("coverage", "pass", "coverage.complete", true) : options.AllowMissingCoverage
+            exemptionValidation.Errors.Count > 0
+                ? new("callableExemptions", "operationalError", exemptionValidation.Errors[0], true)
+                : new("callableExemptions", "notApplicable", options.Exemptions is null
+                    ? "exemption.none" : "exemption.localUnreviewed", false),
+            unknown.Length == 0 ? new("coverage", "pass", "coverage.complete", true) : options.AllowMissingCoverage && !unsupported
                 ? new("coverage", "skipped", "coverage.missingAllowed", false)
                 : new("coverage", "operationalError", unknown[0].CoverageReason ?? CoverageReasonCodes.Unavailable, true),
-            new("crap", findings.Length > 0 ? "fail" : callables.Any(item => item.Crap is not null) ? "pass" : "notApplicable",
-                findings.Length > 0 ? "crap.thresholdExceeded" : callables.Any(item => item.Crap is not null)
+            new("crap", thresholdFindings.Length > 0 ? "fail" : callables.Any(item => item.Crap is not null) ? "pass" : "notApplicable",
+                thresholdFindings.Length > 0 ? "crap.thresholdExceeded" : callables.Any(item => item.Crap is not null)
                     ? "crap.withinThreshold" : "crap.noKnownScores", true)
         };
-        var reduced = EvaluationDecisionReducer.Reduce(checks, findings.Length > 0);
+        var reduced = EvaluationDecisionReducer.Reduce(checks, thresholdFindings.Length > 0);
         var reasonCounts = unknown.GroupBy(item => item.CoverageReason ?? CoverageReasonCodes.Unavailable, StringComparer.Ordinal)
             .OrderBy(item => item.Key, StringComparer.Ordinal).ToDictionary(item => item.Key, item => item.Count(), StringComparer.Ordinal);
         var artifacts = files.Select(path => Artifact(path, "source", workingDirectory, false))
@@ -348,6 +370,8 @@ internal static class App
         {
             Callables = callables,
             Families = families,
+            CallableExemptions = exemptionValidation.Matches,
+            ExemptionErrors = exemptionValidation.Errors,
             CoverageDiagnostics = reads.SelectMany(item => item.Diagnostics).Concat(resolved.Diagnostics)
                 .GroupBy(item => item.Id, StringComparer.Ordinal).Select(item => item.First())
                 .OrderBy(item => item.Code, StringComparer.Ordinal).ThenBy(item => item.Id, StringComparer.Ordinal).ToArray()
