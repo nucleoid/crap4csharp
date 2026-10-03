@@ -14,15 +14,28 @@ public sealed class SourceAnalyzer
             var fullPath = Path.GetFullPath(file);
             var text = File.ReadAllText(fullPath);
             var tree = CSharpSyntaxTree.ParseText(text, path: fullPath);
+            methods.AddRange(AnalyzeTree(tree));
+        }
+
+        return methods;
+    }
+
+    public IReadOnlyList<SourceMethod> AnalyzeText(string text, string logicalPath, CSharpParseOptions parseOptions) =>
+        AnalyzeTree(CSharpSyntaxTree.ParseText(text, parseOptions, logicalPath));
+
+    public IReadOnlyList<SourceMethod> AnalyzeTree(SyntaxTree tree)
+    {
+        var methods = new List<SourceMethod>();
+        var fullPath = tree.FilePath;
             var errors = tree.GetDiagnostics().Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error).ToArray();
             if (errors.Length > 0)
             {
                 var first = errors[0];
                 var position = first.Location.GetLineSpan().StartLinePosition;
                 throw new InvalidDataException($"C# parse error in {fullPath}:{position.Line + 1}:{position.Character + 1}: {first.GetMessage()}");
-            }
+        }
 
-            var root = tree.GetRoot();
+        var root = tree.GetRoot();
             foreach (var method in root.DescendantNodes().OfType<MethodDeclarationSyntax>())
             {
                 if (method.Body is null && method.ExpressionBody is null) continue;
@@ -63,7 +76,6 @@ public sealed class SourceAnalyzer
                     CoverageTypeName = coverageTypeName,
                     CanonicalSignature = canonicalSignature
                 });
-            }
         }
 
         return methods;

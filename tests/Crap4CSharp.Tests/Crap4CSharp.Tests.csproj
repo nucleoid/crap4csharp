@@ -2,6 +2,7 @@
   <PropertyGroup><IsPackable>false</IsPackable></PropertyGroup>
   <ItemGroup>
     <Compile Remove="Fixtures/results/source.cs" />
+    <Compile Remove="Fixtures/ProjectContexts/**/*.cs" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" />
     <PackageReference Include="xunit.v3" Version="3.2.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
@@ -11,5 +12,6 @@
     <None Include="Fixtures/results/*.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures/results/source.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures/results/coverage.xml" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures/ProjectContexts/**/*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -5,6 +5,9 @@ using System.Security.Cryptography;
 using System.Text;
 using Crap4CSharp.Core;
 
+if (args.Length == 3 && args[0] == ProjectContextLoader.LoaderCommand)
+    return await MsBuildLoaderBootstrap.RunAsync(args[1], args[2], CancellationToken.None);
+
 using var cancellationSource = new CancellationTokenSource();
 ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
 {

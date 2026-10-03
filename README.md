@@ -22,6 +22,8 @@ dotnet tool install --tool-path .tools --add-source artifacts Crap4CSharp.Tool
 
 No global install, source-tree modification, or package injection is performed by the tool.
 
+The existing command shown below is **syntax-only legacy analysis**. Project-aware MSBuild/Roslyn context capture is now available as an internal adapter for the forthcoming verified `check` workflow; it is not yet a public `check` or `analyze` command. See [the project context contract](docs/project-context.md) and [measured loader proof](docs/project-loading-proof.md).
+
 ## Usage
 
 ```bash
@@ -66,6 +68,7 @@ Solutions (`.sln` or `.slnx`) are preferred when exactly one exists in the worki
 ## Analysis policy
 
 - Roslyn syntax trees are used; source is never analyzed with regular expressions.
+- Legacy invocations use filesystem discovery and default parser settings and remain explicitly labelled `syntaxOnly`. They do not claim the effective project's `Compile` items, links, target framework, symbols, language version, imports, generated inputs, or compiler binding.
 - Included: concrete ordinary methods, including block-bodied and expression-bodied, async, generic, overloaded, and methods on nested types.
 - Excluded: constructors, destructors, properties, accessors, operators, local functions, lambdas, and anonymous methods. Decisions inside excluded nested functions do not increase their containing method's complexity.
 - Cyclomatic complexity starts at 1 and increments for conditionals, loops, catches, switch cases/arms, `?:`, `&&`, `||`, and `??`.

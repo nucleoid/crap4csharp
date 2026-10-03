@@ -3,6 +3,23 @@ namespace Crap4CSharp.Core;
 public static class CoverageMatcher
 {
     public sealed record DetailedMatch(SourceMethod Source, MethodMetric Metric, string? CoverageReason);
+    public sealed record ContextualDetailedMatch(string ContextId, SourceMethod Source, MethodMetric Metric, string? CoverageReason);
+
+    public static IReadOnlyList<ContextualDetailedMatch> ApplyDetailed(
+        IReadOnlyList<ContextualSourceMethod> sourceMethods,
+        IEnumerable<ContextualCoverageReport> reports)
+    {
+        var reportGroups = reports.GroupBy(report => report.ContextId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Select(report => report.Methods).ToArray(), StringComparer.Ordinal);
+        return sourceMethods.GroupBy(source => source.ContextId, StringComparer.Ordinal).SelectMany(group =>
+        {
+            var compatible = reportGroups.TryGetValue(group.Key, out var value) ? value : [];
+            return ApplyDetailed(group.Select(source => source.Method).ToArray(), compatible)
+                .Select(match => new ContextualDetailedMatch(group.Key, match.Source, match.Metric, match.CoverageReason));
+        }).OrderBy(match => match.ContextId, StringComparer.Ordinal)
+          .ThenBy(match => match.Metric.File, StringComparer.Ordinal)
+          .ThenBy(match => match.Metric.StartLine).ToArray();
+    }
 
     public static IReadOnlyList<MethodMetric> Apply(
         IReadOnlyList<SourceMethod> sourceMethods,
