@@ -7,7 +7,7 @@ using Crap4CSharp.Core;
 internal static partial class GitScopeResolver
 {
     private static readonly string[] SafeGitPrefix =
-        ["-c", "core.quotepath=false", "-c", "diff.external=", "-c", "diff.renameLimit=0",
+        ["--no-optional-locks", "-c", "core.quotepath=false", "-c", "diff.external=", "-c", "diff.renameLimit=0",
          "-c", "diff.algorithm=myers", "-c", "diff.indentHeuristic=false"];
 
     public static async Task<CapturedChangeScope> CaptureAsync(GitScopeRequest request, string workingDirectory,
@@ -57,15 +57,26 @@ internal static partial class GitScopeResolver
         var records = await ReadChanges(request, root, baseline, resolvedHead, timeout, cancellationToken);
         var files = new List<ChangedFile>();
         foreach (var record in records.Where(record => Eligible(record.OldPath) || Eligible(record.NewPath)))
-            files.Add(await CaptureFile(request, root, baseline, resolvedHead, record, timeout, cancellationToken));
+        {
+            var file = await CaptureFile(request, root, baseline, resolvedHead, record, timeout, cancellationToken);
+            if (file.Kind == ScopeChangeKind.Modified && file.OldIdentity == file.NewIdentity) continue;
+            files.Add(file);
+        }
         files = CoalesceExactWorktreeRenames(files);
 
+        var capturesWorktree = request.Mode == ChangeScopeMode.Worktree ||
+            request.Mode == ChangeScopeMode.Base && request.SourceState == ScopeSourceState.Worktree;
+        if (capturesWorktree)
+        {
+            var recordsAfter = await ReadChanges(request, root, baseline, resolvedHead, timeout, cancellationToken);
+            if (!records.SequenceEqual(recordsAfter))
+                throw new ScopeException("scope.changedDuringCapture", "the set of worktree changes changed during capture.");
+        }
         var currentHeadAfter = await TryResolveCommit(root, "HEAD", timeout, cancellationToken);
         var indexAfter = await IndexIdentity(root, timeout, cancellationToken);
         if (currentHead != currentHeadAfter || indexBefore != indexAfter)
             throw new ScopeException("scope.changedDuringCapture", "HEAD or index changed during capture.");
-        if (request.Mode == ChangeScopeMode.Worktree ||
-            request.Mode == ChangeScopeMode.Base && request.SourceState == ScopeSourceState.Worktree)
+        if (capturesWorktree)
             VerifyWorktreeBytes(root, files);
 
         var diagnostics = new List<string>
@@ -82,20 +93,27 @@ internal static partial class GitScopeResolver
                 ? $"scope.excludedChangedSource:{path}"
                 : $"scope.unclassifiedChangedInput:{path}");
         }
-        if (diagnostics.Any(diagnostic => diagnostic.StartsWith("scope.", StringComparison.Ordinal)))
+        var contextIncomplete = diagnostics.Any(diagnostic => diagnostic.StartsWith("scope.", StringComparison.Ordinal));
+        if (contextIncomplete)
             diagnostics.Add("scope.contextIncomplete");
+        diagnostics.AddRange(files.Where(file => file.OldSource is not null && file.NewSource is not null &&
+                file.OldIdentity != file.NewIdentity && file.AddedRanges.Count == 0 && file.DeletedRanges.Count == 0 &&
+                NormalizeForDiff(file.OldSource.Text) == NormalizeForDiff(file.NewSource.Text))
+            .Select(file => $"scope.lineEndingOnly:{file.NewPath ?? file.OldPath}"));
         diagnostics = diagnostics.Distinct(StringComparer.Ordinal).ToList();
         return new CapturedChangeScope(request.Mode, request.SourceState, root,
             new ScopeRevision(request.BaseRef, request.HeadRef ?? (request.Mode == ChangeScopeMode.Base ? "HEAD" : null),
                 resolvedBase, resolvedHead, currentHead, mergeBase, indexBefore),
             files.OrderBy(file => file.NewPath ?? file.OldPath, PathComparer()).ToArray(), diagnostics,
-            diagnostics.Contains("scope.contextIncomplete") ? ScopeCompleteness.ContextIncomplete : ScopeCompleteness.Complete);
+            contextIncomplete ? ScopeCompleteness.ContextIncomplete : ScopeCompleteness.Complete);
     }
 
     private static async Task<IReadOnlyList<PathChange>> ReadChanges(GitScopeRequest request, string root, string baseline,
         string? resolvedHead, TimeSpan timeout, CancellationToken cancellationToken)
     {
-        var arguments = new List<string> { "diff", "--name-status", "-z", "--no-ext-diff", "--no-textconv", "--find-renames=50%", "--find-copies=50%" };
+        var capturesWorktree = request.Mode == ChangeScopeMode.Worktree ||
+            request.Mode == ChangeScopeMode.Base && request.SourceState == ScopeSourceState.Worktree;
+        var arguments = new List<string> { capturesWorktree ? "diff-index" : "diff", "--name-status", "-z", "--no-ext-diff", "--no-textconv", "--find-renames=50%", "--find-copies=50%" };
         if (request.Mode == ChangeScopeMode.Staged) arguments.Add("--cached");
         arguments.Add(baseline);
         if (request.Mode == ChangeScopeMode.Base && request.SourceState == ScopeSourceState.Head) arguments.Add(resolvedHead!);
@@ -165,6 +183,9 @@ internal static partial class GitScopeResolver
         string root, PathChange record, CapturedSource oldSource, CapturedSource newSource,
         TimeSpan timeout, CancellationToken cancellationToken)
     {
+        if (NormalizeForDiff(oldSource.Text) == NormalizeForDiff(newSource.Text))
+            return ([], []);
+
         var temporary = Directory.CreateTempSubdirectory("crap4csharp-scope-");
         string patch;
         try
@@ -385,6 +406,7 @@ internal static partial class GitScopeResolver
             RedirectStandardError = true,
             UseShellExecute = false
         };
+        startInfo.Environment["GIT_OPTIONAL_LOCKS"] = "0";
         foreach (var argument in SafeGitPrefix.Concat(arguments)) startInfo.ArgumentList.Add(argument);
         using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start git.");
         if (input is not null)
