@@ -68,6 +68,7 @@ public sealed record SourceSpan(int StartLine, int EndLine);
 
 public sealed record FindingResult(
     string Id,
+    string EntityKey,
     string Code,
     string Severity,
     string Category,
@@ -131,6 +132,15 @@ public static class FindingIdentity
         var identity = string.Join("\n", contextId, path, methodIdentity,
             span.StartLine.ToString(System.Globalization.CultureInfo.InvariantCulture),
             span.EndLine.ToString(System.Globalization.CultureInfo.InvariantCulture), code);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity))).ToLowerInvariant();
+    }
+}
+
+public static class EntityIdentity
+{
+    public static string Create(string contextId, string path, string methodIdentity, string code)
+    {
+        var identity = string.Join("\n", contextId, path, methodIdentity, code);
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity))).ToLowerInvariant();
     }
 }

@@ -22,11 +22,11 @@ Precedence is fixed:
 2. Otherwise a completed threshold violation exits `2`.
 3. Otherwise the invocation exits `0`.
 
-No eligible ordinary methods is `notApplicable`, not `pass`, and preserves the legacy exit `0`. Failed test execution remains operational failure/exit `1` even when usable coverage also proves threshold findings.
+No eligible ordinary methods, or no methods with a known CRAP score under the explicit missing-coverage opt-out, is `notApplicable`, not `pass`, and preserves the legacy exit `0`. Failed test execution remains operational failure/exit `1` even when usable coverage also proves threshold findings.
 
 ## Metrics, findings, and coverage
 
-`metrics` inventories passing, failing, and unknown methods. `findings` contains policy violations in stable ordinal order by context, normalized `/`-separated path, method identity, span, and code. A finding ID hashes those identity fields; it excludes scores, messages, timestamps, and absolute temporary paths. JSON writes finite raw doubles without display rounding. Missing coverage and CRAP are `null`, never `0` or NaN.
+`metrics` inventories passing, failing, and unknown methods. `findings` contains policy violations in stable ordinal order by context, normalized `/`-separated path, method identity, span, and code. `entityKey` hashes the legacy syntax context, normalized path, overload-distinguishing method identity, and finding code; it deliberately excludes content identities and line positions. It does not claim future project/TFM semantics. `id` is the observation ID and additionally binds the current source span. Both exclude scores, messages, timestamps, and absolute temporary paths. JSON writes finite raw doubles without display rounding. Missing coverage and CRAP are `null`, never `0` or NaN.
 
 Coverage reason codes are:
 
@@ -41,6 +41,6 @@ Specific reasons are emitted only from observed evidence. Unknown coverage remai
 
 ## Output safety
 
-The explicit destination is written to a unique sibling temporary file and atomically replaced only after the final document is complete. Existing output remains untouched if persistence fails. Destinations that alias source, explicitly supplied or automatically discovered project/solution, or coverage inputs are rejected before any write. An absent destination can safely receive an early parse/discovery error document. If an existing destination cannot be proven safe before discovery completes, stdout includes `output.notWritten`, stderr warns that the destination may be stale, and the old file is preserved. Help takes precedence and performs no discovery or output write. A graceful cancellation emits a cancelled result where possible; forced process or OS termination cannot guarantee delivery.
+The explicit destination is written to a unique sibling temporary file and atomically replaced only after the final document is complete. Existing output remains untouched if persistence fails. Destinations that alias source, explicitly supplied or automatically discovered project/solution, or coverage inputs are rejected before any write; project/build input extensions are protected even when referenced indirectly by a solution. Byte equality alone is not treated as aliasing because atomic replacement does not write through an unrelated or hard-linked inode. An absent destination can safely receive an early parse/discovery error document. If an existing destination cannot be proven safe before discovery completes, stdout includes `output.notWritten`, stderr warns that the destination may be stale, and the old file is preserved. The file is finalized before terminal stdout, so it records the pre-stdout outcome; if terminal output subsequently fails, the process returns `1` and diagnoses that failure on stderr where possible, but the already-atomic file is not rewritten. Help takes precedence and performs no discovery or output write. A graceful cancellation emits a cancelled result where possible; forced process or OS termination cannot guarantee delivery.
 
 The authoritative machine contract is [result-schema-v1.json](result-schema-v1.json).

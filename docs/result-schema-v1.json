@@ -75,9 +75,10 @@
     "finding": {
       "allOf": [
         { "$ref": "#/$defs/metric" },
-        { "type": "object", "required": ["id", "code", "severity", "category", "threshold", "comparisonOperator", "decision", "reasonCodes"],
+        { "type": "object", "required": ["id", "entityKey", "code", "severity", "category", "threshold", "comparisonOperator", "decision", "reasonCodes"],
           "properties": {
             "id": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "code": { "type": "string" },
+            "entityKey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "severity": { "type": "string" }, "category": { "type": "string" }, "threshold": { "type": "number", "minimum": 0 },
             "comparisonOperator": { "const": "gt" }, "decision": { "type": "string" },
             "reasonCodes": { "type": "array", "items": { "type": "string" } }

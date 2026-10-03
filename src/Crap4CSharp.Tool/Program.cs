@@ -97,7 +97,9 @@ internal static class App
         }
 
         var format = options?.Format ?? (jsonIntent ? "json" : "human");
-        var outputPath = options?.Output ?? requestedOutput;
+        // A pre-detected value is only evidence when parsing failed. Once parsing succeeds,
+        // only the value accepted by the parser may select a write destination.
+        var outputPath = options is not null ? options.Output : requestedOutput;
         var canWriteResult = outputPath is not null && outcome.OutputAliasReason is null &&
             (outcome.AliasChecked || ((rawAliasChecked || options is null) && absentPreParsedOutputIsSafe));
         if (outputPath is not null && outcome.OutputAliasReason is null && !canWriteResult)
@@ -121,21 +123,25 @@ internal static class App
             }
         }
 
-        if (format == "json")
+        try
         {
-            if (outcome.ErrorMessage is not null) await error.WriteLineAsync($"error: {outcome.ErrorMessage}");
-            try { await output.WriteAsync(json); }
-            catch (Exception exception) when (exception is IOException or ObjectDisposedException)
+            if (format == "json")
             {
-                await error.WriteLineAsync($"error: unable to write JSON result: {exception.Message}");
-                return 1;
+                if (outcome.ErrorMessage is not null) await error.WriteLineAsync($"error: {outcome.ErrorMessage}");
+                await output.WriteAsync(json);
+            }
+            else
+            {
+                foreach (var line in outcome.HumanLines) await output.WriteLineAsync(line);
+                if (outcome.ErrorMessage is not null) await error.WriteLineAsync($"error: {outcome.ErrorMessage}");
+                if (outcome.Reason == "arguments.invalid") await error.WriteLineAsync("Run 'crap4csharp --help' for usage.");
             }
         }
-        else
+        catch (Exception exception) when (exception is IOException or ObjectDisposedException or UnauthorizedAccessException)
         {
-            foreach (var line in outcome.HumanLines) await output.WriteLineAsync(line);
-            if (outcome.ErrorMessage is not null) await error.WriteLineAsync($"error: {outcome.ErrorMessage}");
-            if (outcome.Reason == "arguments.invalid") await error.WriteLineAsync("Run 'crap4csharp --help' for usage.");
+            try { await error.WriteLineAsync($"error: unable to write terminal output: {exception.Message}"); }
+            catch (Exception diagnosticException) when (diagnosticException is IOException or ObjectDisposedException or UnauthorizedAccessException) { }
+            return 1;
         }
         return result.Run.ExitCode;
     }
@@ -151,6 +157,8 @@ internal static class App
             string Value()
             {
                 if (++index >= args.Length) throw new ArgumentException($"Missing value for {arg}.");
+                if (args[index].StartsWith("--", StringComparison.Ordinal))
+                    throw new ArgumentException($"Missing value for {arg}.");
                 return args[index];
             }
             switch (arg)
@@ -313,8 +321,9 @@ internal static class App
                     ? new CheckResult("coverage", "skipped", "coverage.missingAllowed", false)
                     : new CheckResult("coverage", "operationalError", detailed.First(result => result.CoverageReason is not null).CoverageReason!, true));
             else checks.Add(new CheckResult("coverage", "pass", "coverage.complete", true));
-            checks.Add(new CheckResult("crap", violations.Length > 0 ? "fail" : detailed.Length == 0 ? "notApplicable" : "pass",
-                violations.Length > 0 ? "crap.thresholdExceeded" : detailed.Length == 0 ? "crap.noEligibleMethods" : "crap.withinThreshold", true));
+            var knownScores = detailed.Count(result => result.Metric.Crap is not null);
+            checks.Add(new CheckResult("crap", violations.Length > 0 ? "fail" : knownScores == 0 ? "notApplicable" : "pass",
+                violations.Length > 0 ? "crap.thresholdExceeded" : knownScores == 0 ? "crap.noKnownScores" : "crap.withinThreshold", true));
 
             string? operationError = testFailed ? "dotnet test failed; report shown from available coverage data." :
                 missing > 0 && !options.AllowMissingCoverage ? "one or more analyzed methods have N/A coverage; pass --allow-missing-coverage to gate only known scores." : null;
@@ -374,6 +383,7 @@ internal static class App
           .ThenBy(metric => metric.MethodIdentity, StringComparer.Ordinal).ThenBy(metric => metric.Span.StartLine).ToArray();
         var findings = metrics.Where(metric => metric.Crap > options.Threshold).Select(metric => new FindingResult(
             FindingIdentity.Create(metric.ContextId, metric.Path, metric.MethodIdentity, metric.Span, "crap.thresholdExceeded"),
+            EntityIdentity.Create(metric.ContextId, metric.Path, metric.MethodIdentity, "crap.thresholdExceeded"),
             "crap.thresholdExceeded", "error", "complexity", metric.ContextId, metric.Path, metric.MethodIdentity,
             metric.Signature, metric.Span, metric.Complexity, metric.Coverage, metric.Crap, metric.CoverageReason,
             options.Threshold, "gt", "fail", []))
@@ -446,6 +456,7 @@ internal static class App
     {
         if (output is null) return null;
         var destinationPath = Path.GetFullPath(output, workingDirectory);
+        if (IsProjectInputExtension(destinationPath)) return destinationPath;
         var destination = CanonicalPath(destinationPath);
         var comparison = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
             ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
@@ -454,10 +465,12 @@ internal static class App
             var inputPath = Path.GetFullPath(input, workingDirectory);
             var canonicalInput = CanonicalPath(inputPath);
             if (destination is null || canonicalInput is null || string.Equals(destination, canonicalInput, comparison)) return input;
-            if (File.Exists(destinationPath) && File.Exists(inputPath) && FilesHaveSameContent(destinationPath, inputPath)) return input;
         }
         return null;
     }
+
+    private static bool IsProjectInputExtension(string path) => Path.GetExtension(path).ToLowerInvariant() is
+        ".csproj" or ".sln" or ".slnx" or ".props" or ".targets";
     private static string? CanonicalPath(string path)
     {
         try
@@ -481,16 +494,6 @@ internal static class App
             return null;
         }
     }
-    private static bool FilesHaveSameContent(string left, string right)
-    {
-        var leftInfo = new FileInfo(left);
-        var rightInfo = new FileInfo(right);
-        if (leftInfo.Length != rightInfo.Length) return false;
-        using var leftStream = File.OpenRead(left);
-        using var rightStream = File.OpenRead(right);
-        return SHA256.HashData(leftStream).AsSpan().SequenceEqual(SHA256.HashData(rightStream));
-    }
-
     private static IReadOnlyList<string> PotentialTestTargets(string workingDirectory) =>
         Directory.EnumerateFiles(workingDirectory, "*.sln", SearchOption.TopDirectoryOnly)
             .Concat(Directory.EnumerateFiles(workingDirectory, "*.slnx", SearchOption.TopDirectoryOnly))

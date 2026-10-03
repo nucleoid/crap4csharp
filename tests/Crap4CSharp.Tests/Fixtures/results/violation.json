@@ -10,7 +10,7 @@
   ],
   "metrics": [{ "contextId": "legacy-syntax", "path": "tests/Crap4CSharp.Tests/Fixtures/results/source.cs", "methodIdentity": "SnapshotFixture.Value()", "signature": "Value()", "span": { "startLine": 3, "endLine": 3 }, "complexity": 1, "coverage": 1, "crap": 1, "coverageReason": null }],
   "findings": [{
-    "id": "c87cfbf2699ebee8f0dea63a6b329f94a68b722da6582c7f54c44c688075e3f9", "code": "crap.thresholdExceeded", "severity": "error", "category": "complexity",
+    "id": "c87cfbf2699ebee8f0dea63a6b329f94a68b722da6582c7f54c44c688075e3f9", "entityKey": "ba0429be73c151c76f1323c8b218f2a30c4574e68fb6a80364938c02d15708a9", "code": "crap.thresholdExceeded", "severity": "error", "category": "complexity",
     "contextId": "legacy-syntax", "path": "tests/Crap4CSharp.Tests/Fixtures/results/source.cs", "methodIdentity": "SnapshotFixture.Value()", "signature": "Value()",
     "span": { "startLine": 3, "endLine": 3 }, "complexity": 1, "coverage": 1, "crap": 1, "coverageReason": null,
     "threshold": 0.5, "comparisonOperator": "gt", "decision": "fail", "reasonCodes": []
