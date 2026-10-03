@@ -12,6 +12,27 @@ public sealed class PathIdentityTests : IDisposable
     public void Dispose() => Directory.Delete(temporary, recursive: true);
 
     [Fact]
+    public void ExistingPathCanonicalizerReusesDirectoryEntriesAcrossManyFiles()
+    {
+        var directory = Path.Combine(temporary, "many");
+        Directory.CreateDirectory(directory);
+        var files = Enumerable.Range(0, 25).Select(index =>
+        {
+            var path = Path.Combine(directory, $"File{index}.cs");
+            File.WriteAllText(path, "class C { }");
+            return path;
+        }).ToArray();
+        var canonicalizer = new ExistingPathCanonicalizer(PathIdentityPolicy.Sensitive);
+
+        _ = canonicalizer.NormalizeExisting(files[0]);
+        var cachedAfterFirst = canonicalizer.CachedDirectoryCount;
+        foreach (var file in files.Skip(1)) _ = canonicalizer.NormalizeExisting(file);
+
+        Assert.True(cachedAfterFirst > 0);
+        Assert.Equal(cachedAfterFirst, canonicalizer.CachedDirectoryCount);
+    }
+
+    [Fact]
     public void SensitiveDiscoveryKeepsCaseDistinctFiles()
     {
         var upper = Write("Foo.cs", "class Upper { }");

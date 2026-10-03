@@ -540,6 +540,37 @@ public sealed class CoreTests : IDisposable
     }
 
     [Fact]
+    public async Task ExternalMappingEvaluationUsesLogicalDestination()
+    {
+        var workspace = Path.Combine(temporary, "mapping-workspace");
+        var externalRoot = Path.Combine(temporary, "mapping-outside", "shared");
+        Directory.CreateDirectory(workspace);
+        Directory.CreateDirectory(externalRoot);
+        var source = Path.Combine(externalRoot, "C.cs");
+        File.WriteAllText(source, "class C { int M() => 1; }");
+        var report = Write("external-map.xml", """
+            <CoverageSession><Modules><Module><Files><File uid="1" fullPath="C:\agent\repo\C.cs" /></Files>
+            <Classes><Class><FullName>C</FullName><Methods><Method><Name>C.M()</Name><SequencePoints>
+            <SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method></Methods></Class></Classes>
+            </Module></Modules></CoverageSession>
+            """);
+
+        var result = await RunAppFrom(workspace, "--format", "json", "--coverage-path-map",
+            @"C:\agent\repo", externalRoot, "--coverage", report, source);
+        using var document = JsonDocument.Parse(result.Output);
+        var localRoot = document.RootElement.GetProperty("evaluation").GetProperty("coveragePathPolicy")
+            .GetProperty("mappings")[0].GetProperty("localRoot").GetString();
+        var sourcePath = Assert.Single(document.RootElement.GetProperty("evaluation").GetProperty("scope")
+            .GetProperty("sources").EnumerateArray()).GetString();
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.StartsWith("../external-", localRoot, StringComparison.Ordinal);
+        Assert.StartsWith(localRoot, sourcePath, StringComparison.Ordinal);
+        Assert.DoesNotContain("mapping-outside", localRoot, StringComparison.Ordinal);
+        Assert.DoesNotContain(temporary, localRoot, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task HardCoverageFailureStillUsesInventoryPathForScopeAndArtifact()
     {
         var workspace = Path.Combine(temporary, "failure-workspace");
