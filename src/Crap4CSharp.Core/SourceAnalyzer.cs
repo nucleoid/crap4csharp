@@ -90,36 +90,5 @@ public sealed class SourceAnalyzer
         AnalyzeText(text, logicalPath, CSharpParseOptions.Default);
 
     public static int CalculateComplexity(MethodDeclarationSyntax method)
-    {
-        var walker = new ComplexityWalker();
-        walker.Visit(method.Body ?? (SyntaxNode?)method.ExpressionBody?.Expression);
-        return walker.Complexity;
-    }
-
-    private sealed class ComplexityWalker : CSharpSyntaxWalker
-    {
-        public int Complexity { get; private set; } = 1;
-
-        public override void VisitIfStatement(IfStatementSyntax node) { Complexity++; base.VisitIfStatement(node); }
-        public override void VisitForStatement(ForStatementSyntax node) { Complexity++; base.VisitForStatement(node); }
-        public override void VisitForEachStatement(ForEachStatementSyntax node) { Complexity++; base.VisitForEachStatement(node); }
-        public override void VisitWhileStatement(WhileStatementSyntax node) { Complexity++; base.VisitWhileStatement(node); }
-        public override void VisitDoStatement(DoStatementSyntax node) { Complexity++; base.VisitDoStatement(node); }
-        public override void VisitCatchClause(CatchClauseSyntax node) { Complexity++; base.VisitCatchClause(node); }
-        public override void VisitConditionalExpression(ConditionalExpressionSyntax node) { Complexity++; base.VisitConditionalExpression(node); }
-        public override void VisitSwitchExpressionArm(SwitchExpressionArmSyntax node) { Complexity++; base.VisitSwitchExpressionArm(node); }
-        public override void VisitCaseSwitchLabel(CaseSwitchLabelSyntax node) { Complexity++; base.VisitCaseSwitchLabel(node); }
-        public override void VisitCasePatternSwitchLabel(CasePatternSwitchLabelSyntax node) { Complexity++; base.VisitCasePatternSwitchLabel(node); }
-        public override void VisitBinaryExpression(BinaryExpressionSyntax node)
-        {
-            if (node.IsKind(SyntaxKind.LogicalAndExpression) || node.IsKind(SyntaxKind.LogicalOrExpression) ||
-                node.IsKind(SyntaxKind.CoalesceExpression)) Complexity++;
-            base.VisitBinaryExpression(node);
-        }
-
-        public override void VisitLocalFunctionStatement(LocalFunctionStatementSyntax node) { }
-        public override void VisitSimpleLambdaExpression(SimpleLambdaExpressionSyntax node) { }
-        public override void VisitParenthesizedLambdaExpression(ParenthesizedLambdaExpressionSyntax node) { }
-        public override void VisitAnonymousMethodExpression(AnonymousMethodExpressionSyntax node) { }
-    }
+        => ComplexityRules.Legacy.Calculate(method.Body ?? (SyntaxNode?)method.ExpressionBody?.Expression);
 }
