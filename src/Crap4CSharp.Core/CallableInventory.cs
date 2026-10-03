@@ -65,7 +65,10 @@ public sealed record CallableInventoryResult(
     string Ruleset,
     string ContextId,
     string SourceContentIdentity,
-    IReadOnlyList<CallableEntry> Callables);
+    IReadOnlyList<CallableEntry> Callables)
+{
+    public string? TargetFramework { get; init; }
+}
 
 public static class CallableInventory
 {
@@ -125,7 +128,10 @@ public static class CallableInventory
                 : item.Entry)
             .OrderBy(item => item.Path, StringComparer.Ordinal).ThenBy(item => item.Span.Start)
             .ThenBy(item => item.Kind).ThenBy(item => item.CallableId, StringComparer.Ordinal).ToArray();
-        return new CallableInventoryResult(ComplexityRules.CallablesV1, context.ContextId, contentIdentity, entries);
+        return new CallableInventoryResult(ComplexityRules.CallablesV1, context.ContextId, contentIdentity, entries)
+        {
+            TargetFramework = context.TargetFramework
+        };
     }
 
     private static List<Candidate> Discover(CompilationUnitSyntax root, SyntaxTree tree)
