@@ -59,6 +59,7 @@ public sealed record CallableEntry(
     string? CoverageReason)
 {
     public CallableSemanticIdentity? SemanticIdentity { get; init; }
+    public string? ContextId { get; init; }
 }
 
 public sealed record CallableInventoryResult(
@@ -115,7 +116,7 @@ public static class CallableInventory
                 candidate.Applicable ? CallableApplicability.Applicable : CallableApplicability.NotApplicable,
                 candidate.Applicable ? null : "callable.noAuthoredBody", ComplexityRules.CallablesV1,
                 semanticKey, candidate.BodyFingerprint, false, coverage.Capability, coverage.Reason);
-            entry = entry with { SemanticIdentity = semanticIdentity };
+            entry = entry with { SemanticIdentity = semanticIdentity, ContextId = context.ContextId };
             built.Add((candidate, entry));
         }
 

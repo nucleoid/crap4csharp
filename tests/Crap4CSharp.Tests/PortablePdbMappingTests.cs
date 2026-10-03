@@ -6,6 +6,7 @@ using Crap4CSharp.Core;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Emit;
+using Microsoft.CodeAnalysis.Text;
 using Xunit;
 
 namespace Crap4CSharp.Tests;
@@ -31,7 +32,7 @@ public sealed class PortablePdbMappingTests
         foreach (var callable in inventory.Callables.Where(item => item.Name is "Async" or "Iterator"))
         {
             var result = PortablePdbCallableMapper.Map(callable, artifacts.Pe, artifacts.Pdb, binding);
-            Assert.Equal("supported", result.Status);
+            Assert.True(result.Status == "supported", result.Reason);
             Assert.Equal("portablePdbStateMachine", result.EvidenceKind);
             Assert.NotNull(result.KickoffMethodToken);
             Assert.NotNull(result.GeneratedMethodToken);
@@ -89,7 +90,8 @@ public sealed class PortablePdbMappingTests
 
     private static Artifacts Compile(string source)
     {
-        var tree = CSharpSyntaxTree.ParseText(source, path: "Fixture.cs", encoding: Encoding.UTF8);
+        var sourceText = SourceText.From(source, new UTF8Encoding(false), SourceHashAlgorithm.Sha256);
+        var tree = CSharpSyntaxTree.ParseText(sourceText, path: "Fixture.cs");
         var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator)
             .Select(path => MetadataReference.CreateFromFile(path));
         var compilation = CSharpCompilation.Create("Fixture", [tree], references,
