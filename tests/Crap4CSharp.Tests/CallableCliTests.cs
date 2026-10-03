@@ -77,6 +77,35 @@ public sealed class CallableCliTests : IDisposable
         Assert.Contains("analyze --syntax-only", result.Output);
     }
 
+    [Fact]
+    public async Task LocalExactExemptionRemainsUnreviewedAndCannotMakeUnsupportedScopePass()
+    {
+        var source = Write("Exempt.cs", "class C { int M() { System.Func<int> f = () => 1; return 1; } }");
+        var coverage = WriteCoverage(source, 1);
+        var first = await Run(null, "analyze", "--syntax-only", "--format", "json", "--coverage", coverage, source);
+        using var firstDocument = JsonDocument.Parse(first.Output);
+        var evaluation = firstDocument.RootElement.GetProperty("evaluation");
+        var contextId = evaluation.GetProperty("contexts")[0].GetProperty("id").GetString();
+        var lambda = Assert.Single(evaluation.GetProperty("callables").EnumerateArray(),
+            item => item.GetProperty("kind").GetString() == "lambda");
+        var familyId = Assert.Single(evaluation.GetProperty("families").EnumerateArray())
+            .GetProperty("familyId").GetString();
+        var exemption = Write("exemptions.json", $$"""
+            {"version":"callable-exemptions-v1","entries":[{"ruleset":"callables-v1","contextId":"{{contextId}}","targetFramework":"net10.0","callableId":"{{lambda.GetProperty("callableId").GetString()}}","bodyChecksum":"{{lambda.GetProperty("bodyChecksum").GetString()}}","reasonCode":"coverage.unsupportedGeneratedMapping","justification":"inspected locally","reviewReference":"local-review","familyIds":["{{familyId}}"]}]}
+            """);
+
+        var result = await Run(null, "analyze", "--syntax-only", "--format", "json", "--coverage", coverage,
+            "--callable-exemptions", exemption, source);
+
+        Assert.Equal(1, result.ExitCode);
+        using var document = JsonDocument.Parse(result.Output);
+        var match = Assert.Single(document.RootElement.GetProperty("evaluation").GetProperty("callableExemptions").EnumerateArray());
+        Assert.Equal("local-unreviewed", match.GetProperty("status").GetString());
+        Assert.False(match.GetProperty("approvedForEnforcement").GetBoolean());
+        Assert.Contains(document.RootElement.GetProperty("evaluation").GetProperty("findings").EnumerateArray(),
+            item => item.GetProperty("code").GetString() == CoverageReasonCodes.UnsupportedGeneratedMapping);
+    }
+
     private async Task<(int ExitCode, string Output, string Error)> Run(global::App.ProcessExecutor? executor, params string[] args)
     {
         using var output = new StringWriter();
