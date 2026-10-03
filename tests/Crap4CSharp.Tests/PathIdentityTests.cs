@@ -6,10 +6,10 @@ namespace Crap4CSharp.Tests;
 
 public sealed class PathIdentityTests : IDisposable
 {
-    private readonly string temporary = Path.Combine(Path.GetTempPath(), "crap4csharp-path-identity", Guid.NewGuid().ToString("N"));
+    private readonly TestDirectory fixture = TestDirectory.Create("crap4csharp-path-identity");
+    private string temporary => fixture.Path;
 
-    public PathIdentityTests() => Directory.CreateDirectory(temporary);
-    public void Dispose() => Directory.Delete(temporary, recursive: true);
+    public void Dispose() => fixture.Dispose();
 
     [Fact]
     public void ExistingPathCanonicalizerReusesDirectoryEntriesAcrossManyFiles()
@@ -35,8 +35,7 @@ public sealed class PathIdentityTests : IDisposable
     [Fact]
     public void SensitiveDiscoveryKeepsCaseDistinctFiles()
     {
-        var upper = Write("Foo.cs", "class Upper { }");
-        var lower = Write("foo.cs", "class Lower { }");
+        if (!TryCreateCaseDistinctFiles(out var upper, out var lower)) return;
 
         var files = SourceDiscovery.Discover([], temporary, PathIdentityPolicy.Sensitive);
 
@@ -46,11 +45,22 @@ public sealed class PathIdentityTests : IDisposable
     [Fact]
     public void InsensitiveDiscoveryRejectsDistinctSpellingsInsteadOfDroppingOne()
     {
-        Write("Foo.cs", "class Upper { }");
-        Write("foo.cs", "class Lower { }");
+        if (!TryCreateCaseDistinctFiles(out _, out _)) return;
 
         var exception = Assert.Throws<InvalidDataException>(() =>
             SourceDiscovery.Discover([], temporary, PathIdentityPolicy.Insensitive));
+
+        Assert.Contains("collision", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void InsensitivePolicyRejectsDistinctLogicalSpellingsWithoutFilesystemAssumptions()
+    {
+        var upper = Path.Combine(temporary, "Policy", "Foo.cs");
+        var lower = Path.Combine(temporary, "Policy", "foo.cs");
+
+        var exception = Assert.Throws<InvalidDataException>(() =>
+            PathIdentityPolicy.Insensitive.DistinctOrThrow([upper, lower], "injected inventory"));
 
         Assert.Contains("collision", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
@@ -98,8 +108,7 @@ public sealed class PathIdentityTests : IDisposable
     {
         var repository = Path.Combine(temporary, "repo");
         Directory.CreateDirectory(repository);
-        var source = Path.Combine(repository, "line\nbreak.cs");
-        File.WriteAllText(source, "class C { }");
+        if (!TryWrite("repo/line\nbreak.cs", "class C { }", out var source)) return;
         var bytes = Encoding.UTF8.GetBytes("?? line\nbreak.cs\0");
 
         var files = GitChanges.ParsePorcelainV1Z(bytes, repository, PathIdentityPolicy.Sensitive);
@@ -107,11 +116,28 @@ public sealed class PathIdentityTests : IDisposable
         Assert.Equal([source], files);
     }
 
-    private string Write(string relative, string contents)
+    private bool TryCreateCaseDistinctFiles(out string upper, out string lower)
     {
-        var path = Path.Combine(temporary, relative);
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        File.WriteAllText(path, contents);
-        return Path.GetFullPath(path);
+        upper = fixture.Write("case-distinct/Foo.cs", "class Upper { }");
+        lower = fixture.Write("case-distinct/foo.cs", "class Lower { }");
+        var names = Directory.EnumerateFiles(Path.GetDirectoryName(upper)!)
+            .Select(Path.GetFileName).ToHashSet(StringComparer.Ordinal);
+        return names.Contains("Foo.cs") && names.Contains("foo.cs");
     }
+
+    private bool TryWrite(string relative, string contents, out string path)
+    {
+        try
+        {
+            path = fixture.Write(relative, contents);
+            return File.Exists(path);
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException)
+        {
+            path = string.Empty;
+            return false;
+        }
+    }
+
+    private string Write(string relative, string contents) => fixture.Write(relative, contents);
 }
