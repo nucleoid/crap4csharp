@@ -88,7 +88,7 @@ public sealed class GitScopeTests : IDisposable
     }
 
     [Fact]
-    public async Task WorktreeIncludesUntrackedUnicodeAndNewlinePathWithExactBytes()
+    public async Task WorktreeIncludesUntrackedUnicodeAndSpacePathWithExactBytesOnAllPlatforms()
     {
         await Git("init", "--quiet");
         await Git("config", "user.email", "scope@example.invalid");
@@ -96,7 +96,33 @@ public sealed class GitScopeTests : IDisposable
         Write("seed.txt", "seed");
         await Git("add", "--", "seed.txt");
         await Git("commit", "--quiet", "-m", "base");
-        const string path = "unicodé name\npart.cs";
+        const string path = "unicodé name part.cs";
+        Write(path, "class Exact { int M() => 1; }\n");
+
+        var scope = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Worktree), temporary,
+            TimeSpan.FromSeconds(10), CancellationToken.None);
+
+        var file = Assert.Single(scope.Files);
+        Assert.Equal(path, file.NewPath);
+        Assert.Equal("class Exact { int M() => 1; }\n", file.NewSource!.Text);
+        Assert.Equal(ProjectAnalysisContext.ContentHash(System.Text.Encoding.UTF8.GetBytes(file.NewSource.Text)),
+            file.NewIdentity);
+    }
+
+    [Fact]
+    public async Task WorktreeIncludesUntrackedNewlinePathWithExactBytesWhenFilesystemSupportsIt()
+    {
+        // Windows forbids control characters in file names, so this Git -z parsing case is Unix-only.
+        if (OperatingSystem.IsWindows())
+            return;
+
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("seed.txt", "seed");
+        await Git("add", "--", "seed.txt");
+        await Git("commit", "--quiet", "-m", "base");
+        const string path = "name\npart.cs";
         Write(path, "class Exact { int M() => 1; }\n");
 
         var scope = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Worktree), temporary,
