@@ -118,10 +118,11 @@ public static class EvaluationDecisionReducer
                 checks.Any(check => check.Status == "cancelled") ? "cancelled" : "operationalError", 1);
         if (hasViolations)
             return (new EvaluationDecision(true, "fail", "crap.thresholdExceeded"), "completed", 2);
-        var applicable = checks.Any(check => check.Name == "crap" && check.Status is "pass" or "fail");
+        var crapCheck = checks.FirstOrDefault(check => check.Name == "crap");
+        var applicable = crapCheck?.Status is "pass" or "fail";
         return applicable
             ? (new EvaluationDecision(true, "pass", "crap.withinThreshold"), "completed", 0)
-            : (new EvaluationDecision(true, "notApplicable", "crap.noEligibleMethods"), "completed", 0);
+            : (new EvaluationDecision(true, "notApplicable", crapCheck?.Reason ?? "crap.noEligibleMethods"), "completed", 0);
     }
 }
 
@@ -138,9 +139,9 @@ public static class FindingIdentity
 
 public static class EntityIdentity
 {
-    public static string Create(string contextId, string path, string methodIdentity, string code)
+    public static string Create(string contextId, string path, string canonicalSignature, string code)
     {
-        var identity = string.Join("\n", contextId, path, methodIdentity, code);
+        var identity = string.Join("\n", contextId, path, canonicalSignature, code, ResultContract.ComplexityRulesetVersion);
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity))).ToLowerInvariant();
     }
 }

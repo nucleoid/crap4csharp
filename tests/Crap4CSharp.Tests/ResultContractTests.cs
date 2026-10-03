@@ -579,7 +579,7 @@ public sealed class ResultContractTests : IDisposable
 
         var methods = new SourceAnalyzer().AnalyzeFiles([source]);
 
-        Assert.Equal(methods.Count, methods.Select(method => method.EntityIdentity).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(methods.Count, methods.Select(method => method.CanonicalSignature).Distinct(StringComparer.Ordinal).Count());
     }
 
     [Fact]

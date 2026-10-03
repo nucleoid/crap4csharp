@@ -381,12 +381,17 @@ internal static class App
                 match.Metric.Coverage, match.Metric.Crap, match.CoverageReason);
         }).OrderBy(metric => metric.ContextId, StringComparer.Ordinal).ThenBy(metric => metric.Path, StringComparer.Ordinal)
           .ThenBy(metric => metric.MethodIdentity, StringComparer.Ordinal).ThenBy(metric => metric.Span.StartLine).ToArray();
-        var findings = metrics.Where(metric => metric.Crap > options.Threshold).Select(metric => new FindingResult(
-            FindingIdentity.Create(metric.ContextId, metric.Path, metric.MethodIdentity, metric.Span, "crap.thresholdExceeded"),
-            EntityIdentity.Create(metric.ContextId, metric.Path, metric.MethodIdentity, "crap.thresholdExceeded"),
-            "crap.thresholdExceeded", "error", "complexity", metric.ContextId, metric.Path, metric.MethodIdentity,
-            metric.Signature, metric.Span, metric.Complexity, metric.Coverage, metric.Crap, metric.CoverageReason,
-            options.Threshold, "gt", "fail", []))
+        var findings = outcome.Matches.Where(match => match.Metric.Crap > options.Threshold).Select(match =>
+        {
+            var path = NormalizePath(workingDirectory, match.Metric.File);
+            var span = new SourceSpan(match.Metric.StartLine, match.Metric.EndLine);
+            return new FindingResult(
+            FindingIdentity.Create("legacy-syntax", path, match.Metric.DisplayName, span, "crap.thresholdExceeded"),
+            EntityIdentity.Create("legacy-syntax", path, match.Source.CanonicalSignature, "crap.thresholdExceeded"),
+            "crap.thresholdExceeded", "error", "complexity", "legacy-syntax", path, match.Metric.DisplayName,
+            match.Source.Signature, span, match.Metric.Complexity, match.Metric.Coverage, match.Metric.Crap, match.CoverageReason,
+            options.Threshold, "gt", "fail", []);
+        })
             .OrderBy(finding => finding.ContextId, StringComparer.Ordinal).ThenBy(finding => finding.Path, StringComparer.Ordinal)
             .ThenBy(finding => finding.MethodIdentity, StringComparer.Ordinal).ThenBy(finding => finding.Span.StartLine)
             .ThenBy(finding => finding.Code, StringComparer.Ordinal).ToArray();
