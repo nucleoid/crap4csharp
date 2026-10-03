@@ -1,5 +1,12 @@
 # Development log
 
+## 2026-10-03 — Versioned callable rules
+
+- Preserved `ordinary-methods-v1` byte-for-byte result compatibility and added opt-in `callables-v1` inventory, exact ownership, family risk, semantic matching, and fail-closed generated mappings.
+- Added pure `analyze --syntax-only`, exact local exemption inspection, and additive callable JSON fields. Full `check` orchestration remains owned by issue #10.
+- Added bounded PE/portable-PDB state-machine validation with real async/iterator positive fixtures and identity/checksum/malformed negative fixtures.
+- Expanded the real Coverlet 6.0.4 sample across Debug/Release, OpenCover/Cobertura, accessors, generics, state machines, local functions, and lambdas. Unsupported generated shapes remain visible rather than guessed.
+
 ## 2026-09-16T21:00:00Z — Initial implementation
 
 - Created a .NET 10 solution with a packable tool, focused analysis library, xUnit tests, and a Coverlet-enabled fixture.

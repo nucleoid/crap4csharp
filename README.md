@@ -2,7 +2,7 @@
 
 > **Attribution:** This is an independently authored C# implementation inspired by the observable behaviour and documentation of Robert C. Martin's [`unclebob/crap4java`](https://github.com/unclebob/crap4java) at commit `69b561209f130ece728f19b0001e90df5a117c3a`. That repository's README credits `crap4clj`. The referenced repository does not state a license, so no source, tests, or prose from it were copied or translated. See [ATTRIBUTION.md](ATTRIBUTION.md).
 
-Crap4CSharp is a .NET tool that calculates the Change Risk Anti-Patterns (CRAP) metric for concrete C# methods:
+Crap4CSharp is a .NET tool that calculates the Change Risk Anti-Patterns (CRAP) metric for C# executable code:
 
 ```text
 CRAP = CC² × (1 − coverage)³ + CC
@@ -22,7 +22,9 @@ dotnet tool install --tool-path .tools --add-source artifacts Crap4CSharp.Tool
 
 No global install, source-tree modification, or package injection is performed by the tool.
 
-The existing command shown below is **syntax-only legacy analysis**. Project-aware MSBuild/Roslyn context capture is now available as an internal adapter for the forthcoming verified `check` workflow; it is not yet a public `check` or `analyze` command. See [the project context contract](docs/project-context.md) and [measured loader proof](docs/project-loading-proof.md).
+The option-only command remains the exact **`ordinary-methods-v1` legacy dialect**. The opt-in
+`analyze --syntax-only` command uses **`callables-v1`** by default and performs no build, restore,
+test, Git, or other child process. Full project-aware `check` orchestration remains deferred.
 
 ## Usage
 
@@ -55,6 +57,15 @@ crap4csharp --format json --coverage coverage.xml src
 
 # Atomically persist the same JSON contract while retaining human console output
 crap4csharp --output artifacts/crap-result.json --coverage coverage.xml src
+
+# Inventory all authored callable regions without launching any process
+crap4csharp analyze --syntax-only --coverage coverage.opencover.xml src
+
+# Inspect the exact legacy dialect through the pure analyze adapter
+crap4csharp analyze --syntax-only --ruleset ordinary-methods-v1 --coverage coverage.xml src
+
+# Load exact local exemptions for inspection (never trusted approval)
+crap4csharp analyze --syntax-only --callable-exemptions exemptions.json --coverage coverage.xml src
 ```
 
 With no `--coverage`, the tool creates a unique directory beneath the OS temporary directory and runs:
@@ -74,19 +85,25 @@ The local map root must be inside one of the selected source inputs; map the pro
 
 ## Analysis policy
 
+Ruleset details and the measured mapping matrix are documented in
+[complexity rules](docs/complexity-rules.md) and [callable support](docs/callable-support.md).
+
 - Roslyn syntax trees are used; source is never analyzed with regular expressions.
 - Legacy invocations use filesystem discovery and default parser settings and remain explicitly labelled `syntaxOnly`. They do not claim the effective project's `Compile` items, links, target framework, symbols, language version, imports, generated inputs, or compiler binding.
-- Included: concrete ordinary methods, including block-bodied and expression-bodied, async, generic, overloaded, and methods on nested types.
-- Excluded: constructors, destructors, properties, accessors, operators, local functions, lambdas, and anonymous methods. Decisions inside excluded nested functions do not increase their containing method's complexity.
+- `ordinary-methods-v1` includes only concrete ordinary methods and preserves every historical exclusion and score.
+- `callables-v1` inventories methods, authored constructors and initializer regions, destructors, accessors, operators/conversions, local functions, lambdas, anonymous methods, and top-level code. Bodyless declarations remain explicit `not-applicable` entries.
+- Every decision belongs to exactly one innermost authored leaf. A separately labelled `crap.nestedFamilyRisk` guard unions owned points and decisions for nested families; it is not a method or an inventory total.
 - Cyclomatic complexity starts at 1 and increments for conditionals, loops, catches, switch cases/arms, `?:`, `&&`, `||`, and `??`.
 - Coverage uses method sequence points, not a type-level or file-level percentage. Hidden points are excluded; a method with zero eligible points is `N/A`. Point identity includes its line and available column/end/offset coordinates so duplicate reports do not inflate the denominator.
 - Report methods are matched conservatively by exact normalized source path, namespace/nested/generic type identity, method name, compatible arity, and a unique source span. There is no nearest-name fallback. Ambiguous overloads and conflicting module/assembly candidates for the same source method remain `N/A`.
-- Compiler-generated async/iterator state-machine `MoveNext` methods are not reassigned to their source methods, so async or iterator source methods may remain `N/A` when a report exposes only state-machine coverage. This is intentionally conservative.
+- Ordinary authored members use semantic identity and exclusive source ownership. Generated names are never guessed. A bounded, byte-only PE/portable-PDB mapper validates MVID, PDB association, source checksum, exact kickoff MethodDef, and public state-machine links. Reports without sufficient token/context evidence remain explicit `coverage.unsupportedGeneratedMapping`.
+- Local functions, lambdas, anonymous methods, top-level lowering, initializer lowering, ambiguous anonymous fingerprints, and unsupported generated report shapes stay visible and fail closed. `--allow-missing-coverage` cannot waive unsupported modern scope.
+- `--callable-exemptions` uses exact ruleset/context/TFM/callable/body/reason matching. A CLI-selected file is always `local-unreviewed`; it cannot turn incomplete scope into reviewed enforcement or suppress a known threshold violation.
 - Default recursive discovery excludes `.git`, `bin`, `obj`, `packages`, `TestResults`, `node_modules`, `test`, `tests`, and `*.Test(s)` directories, plus common generated names (`*.g.cs`, `*.generated.cs`, `*.designer.cs`, assembly info, and global usings). Explicit eligible `.cs` files are accepted even if they are under an excluded directory; explicit directories retain exclusions. An existing explicit input that is not an eligible `.cs` source file fails instead of becoming an empty success.
 - C# syntax errors are operational failures; malformed syntax trees are never scored.
 - `--changed` consumes NUL-delimited Git porcelain v1, including spaces, newlines, untracked files, renames/copies, and deletions. Deleted files are ignored and paths escaping the repository root are rejected. This is the legacy whole-file worktree mode; it does not detect already committed changes and is not an alias for the future captured scope selectors.
 
-The repository also contains tested captured Git scope and changed-method selection adapters for future command orchestration. They distinguish exact worktree, index, and commit bytes and preserve resolved ref/object identities. The future `check`/`analyze` commands and public `--scope`, `--base`, `--head`, `--source-state`, and `--granularity` grammar are not implemented by the current CLI. See [captured change scopes](docs/change-scopes.md) for the contract, limitations, and current-worktree-only execution boundary.
+The repository also contains tested captured Git scope and changed-method selection adapters for future command orchestration. They distinguish exact worktree, index, and commit bytes and preserve resolved ref/object identities. Public project-aware `check` plus `--scope`, `--base`, `--head`, `--source-state`, and `--granularity` orchestration is not implemented by issue #7. See [captured change scopes](docs/change-scopes.md).
 
 Output is ordered by numeric CRAP score descending, followed by unknown (`N/A`) entries. Ties are deterministic by path and line.
 
@@ -98,8 +115,8 @@ The v1 document separates deterministic `evaluation` evidence from volatile `run
 
 ## Exit codes
 
-- `0`: analysis succeeded and no score exceeded the threshold
-- `1`: usage, discovery, test, timeout/cancellation, missing/ambiguous coverage (unless opted out), or other operational failure
+- `0`: analysis succeeded with complete admitted evidence and no score exceeded the threshold
+- `1`: usage, discovery, test, timeout/cancellation, required unknown/unsupported/ambiguous coverage, invalid exemptions, or other operational failure
 - `2`: one or more known scores strictly exceeded the threshold
 
 ## Development
