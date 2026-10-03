@@ -244,6 +244,34 @@ public sealed class GitScopeTests : IDisposable
     }
 
     [Fact]
+    public async Task CopyFromModifiedProductionFileIntoTestsDoesNotDeleteProductionSource()
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("src/A.cs", "class A { int M() => 1; }\n");
+        await Git("add", "--", ".");
+        await Git("commit", "--quiet", "-m", "base");
+        var @base = (await Git("rev-parse", "HEAD")).StandardOutput.Trim();
+        Write("src/A.cs", "class A { int M() => 2; }\n");
+        Write("tests/ACopy.cs", "class A { int M() => 1; }\n");
+        await Git("add", "--", ".");
+        await Git("commit", "--quiet", "-m", "modify and copy");
+        var head = (await Git("rev-parse", "HEAD")).StandardOutput.Trim();
+        var nameStatus = (await Git("diff", "--name-status", "--find-copies=50%", @base, head, "--")).StandardOutput;
+        Assert.Contains("C100\tsrc/A.cs\ttests/ACopy.cs", nameStatus);
+
+        var scope = await GitScopeResolver.CaptureAsync(
+            new GitScopeRequest(ChangeScopeMode.Base, @base, head, ScopeSourceState.Head), temporary,
+            TimeSpan.FromSeconds(10), CancellationToken.None);
+
+        var file = Assert.Single(scope.Files);
+        Assert.Equal(ScopeChangeKind.Modified, file.Kind);
+        Assert.Equal("src/A.cs", file.NewPath);
+        Assert.DoesNotContain(scope.Files, item => item.Kind == ScopeChangeKind.Deleted);
+    }
+
+    [Fact]
     public async Task CommittedHeadCaptureAllowsSkipWorktreeEntries()
     {
         await Git("init", "--quiet");
