@@ -66,6 +66,25 @@ public sealed class CallableCliTests : IDisposable
     }
 
     [Fact]
+    public async Task AnalyzeCanExplicitlyInspectTheLegacyRulesetWithoutLaunchingProcesses()
+    {
+        var source = Write("LegacyAnalyze.cs", "class C { int M() => 1; }");
+        var coverage = WriteCoverage(source, 1);
+        var launches = 0;
+
+        var result = await Run((_, _, _, _, _) => { launches++; throw new InvalidOperationException("process forbidden"); },
+            "analyze", "--syntax-only", "--ruleset", "ordinary-methods-v1", "--format", "json",
+            "--coverage", coverage, source);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(0, launches);
+        using var document = JsonDocument.Parse(result.Output);
+        Assert.Equal("ordinary-methods-v1", document.RootElement.GetProperty("complexityRulesetVersion").GetString());
+        Assert.Equal("analyze", document.RootElement.GetProperty("evaluation").GetProperty("invocationMode").GetString());
+        Assert.False(document.RootElement.GetProperty("evaluation").TryGetProperty("callables", out _));
+    }
+
+    [Fact]
     public async Task HelpExposesRulesetAndExemptionContractsWithoutLaunchingAnything()
     {
         var launches = 0;
