@@ -111,6 +111,24 @@ public sealed class ChangedMethodSelectorTests
     }
 
     [Fact]
+    public void IfDirectiveOnlyActivationAndDeactivationCannotProduceEmptyCompleteSelection()
+    {
+        AssertDirectiveInventoryChange(
+            "#if X\nclass C { int Conditional() => 1; }\n#endif",
+            "#if !X\nclass C { int Conditional() => 1; }\n#endif",
+            directiveLine: 1);
+    }
+
+    [Fact]
+    public void DefineAndUndefOnlyActivationAndDeactivationCannotProduceEmptyCompleteSelection()
+    {
+        AssertDirectiveInventoryChange(
+            "#undef X\n#if X\nclass C { int Conditional() => 1; }\n#endif",
+            "#define X\n#if X\nclass C { int Conditional() => 1; }\n#endif",
+            directiveLine: 1);
+    }
+
+    [Fact]
     public void DeletionOnlySignatureEditSelectsSurvivingMethod()
     {
         const string oldText = "class C {\n int M(\n  int removed,\n  int kept) => kept;\n}";
@@ -126,5 +144,36 @@ public sealed class ChangedMethodSelectorTests
 
         Assert.Equal("M", Assert.Single(selection.Methods).MethodName);
         Assert.Empty(selection.Removals);
+    }
+
+    private static void AssertDirectiveInventoryChange(string inactiveText, string activeText, int directiveLine)
+    {
+        var analyzer = new SourceAnalyzer();
+        var inactiveSource = CapturedSource.Create("src/C.cs", Encoding.UTF8.GetBytes(inactiveText));
+        var activeSource = CapturedSource.Create("src/C.cs", Encoding.UTF8.GetBytes(activeText));
+
+        var activation = new ChangedFile("src/C.cs", "src/C.cs", ScopeChangeKind.Modified,
+            inactiveSource.ContentIdentity, activeSource.ContentIdentity, inactiveSource, activeSource,
+            [new LineRange(directiveLine, directiveLine)], [new LineRange(directiveLine, directiveLine)]);
+        var activated = ChangedMethodSelector.Select(activation,
+            analyzer.AnalyzeCaptured(inactiveSource.LogicalPath, inactiveSource.Bytes),
+            analyzer.AnalyzeCaptured(activeSource.LogicalPath, activeSource.Bytes), ScopeGranularity.Method);
+
+        Assert.Equal("Conditional", Assert.Single(activated.Methods).MethodName);
+        Assert.Empty(activated.Removals);
+        Assert.Contains(activated.ScopeLimitations, limitation =>
+            limitation.Code == "scope.contextIncomplete" && limitation.SyntaxKind.EndsWith("DirectiveTrivia", StringComparison.Ordinal));
+
+        var deactivation = new ChangedFile("src/C.cs", "src/C.cs", ScopeChangeKind.Modified,
+            activeSource.ContentIdentity, inactiveSource.ContentIdentity, activeSource, inactiveSource,
+            [new LineRange(directiveLine, directiveLine)], [new LineRange(directiveLine, directiveLine)]);
+        var deactivated = ChangedMethodSelector.Select(deactivation,
+            analyzer.AnalyzeCaptured(activeSource.LogicalPath, activeSource.Bytes),
+            analyzer.AnalyzeCaptured(inactiveSource.LogicalPath, inactiveSource.Bytes), ScopeGranularity.Method);
+
+        Assert.Empty(deactivated.Methods);
+        Assert.Equal("Conditional", Assert.Single(deactivated.Removals).MethodName);
+        Assert.Contains(deactivated.ScopeLimitations, limitation =>
+            limitation.Code == "scope.contextIncomplete" && limitation.SyntaxKind.EndsWith("DirectiveTrivia", StringComparison.Ordinal));
     }
 }
