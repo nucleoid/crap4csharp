@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using Crap4CSharp.Core;
+using Microsoft.CodeAnalysis.CSharp;
 
 if (args.Length == 3 && args[0] == ProjectContextLoader.LoaderCommand)
     return await MsBuildLoaderBootstrap.RunAsync(args[1], args[2], CancellationToken.None);
@@ -30,10 +31,12 @@ internal static class App
         string workingDirectory, TimeSpan timeout, CancellationToken cancellationToken);
 
     private const string Help = """
-        Crap4CSharp - calculate CRAP metrics for C# methods
+        Crap4CSharp - calculate CRAP metrics for C# authored callables
 
         Usage:
           crap4csharp [options] [file-or-directory ...]
+          crap4csharp analyze --syntax-only [options] [file-or-directory ...]
+          crap4csharp check --ruleset callables-v1 [options]
 
         Options:
           --coverage <xml>   Use an OpenCover or Cobertura/Coverlet XML report; repeatable.
@@ -52,6 +55,12 @@ internal static class App
                              Allow N/A methods; known scores still gate. By default any N/A is
                              an operational failure to prevent a false-green quality gate.
           --changed          Analyze changed/untracked C# files from git porcelain status.
+          --ruleset <id>     Select ordinary-methods-v1 (legacy option-only invocation) or
+                             callables-v1 (analyze/check commands; analyze default).
+          --callable-exemptions <json>
+                             Load exact-match callable exemptions. CLI files are untrusted
+                             local input and cannot approve enforcement by themselves.
+          --syntax-only      Analyze captured source and coverage without launching child processes.
           --format <value>   Render human (default) or json output.
           --output <path>    Atomically write the versioned JSON result document to path.
           -h, --help         Show help and perform no discovery, tests, or writes.
@@ -63,6 +72,8 @@ internal static class App
         CancellationToken cancellationToken, ProcessExecutor? processExecutor = null)
     {
         if (args.Any(arg => arg is "--help" or "-h")) { await output.WriteLineAsync(Help); return 0; }
+        if (args.Length > 0 && args[0] is "analyze" or "check")
+            return await RunCallableCommandAsync(args, workingDirectory, output, error, cancellationToken);
 
         var startedAt = DateTimeOffset.UtcNow;
         var stopwatch = Stopwatch.StartNew();
@@ -162,6 +173,211 @@ internal static class App
             return 1;
         }
         return result.Run.ExitCode;
+    }
+
+    private static async Task<int> RunCallableCommandAsync(string[] args, string workingDirectory,
+        TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        var startedAt = DateTimeOffset.UtcNow;
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            var options = ParseModern(args);
+            if (options.Command == "check")
+                throw new ArgumentException(options.Ruleset == ComplexityRules.OrdinaryMethodsV1
+                    ? "check requires callables-v1; ordinary-methods-v1 is available through the legacy option-only invocation."
+                    : "check orchestration is reserved for issue #10; use analyze --syntax-only for the issue #7 adapter.");
+            cancellationToken.ThrowIfCancellationRequested();
+            var result = AnalyzeCapturedInputs(options, workingDirectory, startedAt, stopwatch);
+            var json = ResultWriter.Serialize(result);
+            if (options.Output is not null)
+            {
+                var inputs = options.Inputs.Concat(options.Coverage)
+                    .Concat(options.Exemptions is null ? [] : [options.Exemptions]);
+                if (FindOutputAlias(options.Output, workingDirectory, inputs, [], null) is not null)
+                    throw new ArgumentException("Output path aliases a source, coverage, or exemption input.");
+                await ResultWriter.WriteAtomicAsync(Path.GetFullPath(options.Output, workingDirectory), json,
+                    CancellationToken.None);
+            }
+            if (options.Format == "json") await output.WriteAsync(json);
+            else RenderCallableHuman(result, output);
+            return result.Run.ExitCode;
+        }
+        catch (Exception exception) when (IsHandled(exception))
+        {
+            await error.WriteLineAsync($"error: {exception.Message}");
+            return 1;
+        }
+    }
+
+    private static ModernOptions ParseModern(string[] args)
+    {
+        var options = new ModernOptions { Command = args[0] };
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        for (var index = 1; index < args.Length; index++)
+        {
+            var arg = args[index];
+            string Value()
+            {
+                if (++index >= args.Length || args[index].StartsWith("--", StringComparison.Ordinal))
+                    throw new ArgumentException($"Missing value for {arg}.");
+                return args[index];
+            }
+            switch (arg)
+            {
+                case "--syntax-only": options.SyntaxOnly = true; break;
+                case "--coverage": options.Coverage.Add(Value()); break;
+                case "--ruleset":
+                    if (!seen.Add(arg)) throw new ArgumentException("--ruleset may be specified only once.");
+                    options.Ruleset = Value();
+                    break;
+                case "--callable-exemptions":
+                    if (!seen.Add(arg)) throw new ArgumentException("--callable-exemptions may be specified only once.");
+                    options.Exemptions = Value();
+                    break;
+                case "--threshold":
+                    if (!double.TryParse(Value(), NumberStyles.Float, CultureInfo.InvariantCulture, out var threshold) ||
+                        !double.IsFinite(threshold) || threshold < 0)
+                        throw new ArgumentException("Threshold must be a finite non-negative number.");
+                    options.Threshold = threshold;
+                    break;
+                case "--allow-missing-coverage": options.AllowMissingCoverage = true; break;
+                case "--format":
+                    if (!seen.Add(arg)) throw new ArgumentException("--format may be specified only once.");
+                    options.Format = Value();
+                    if (options.Format is not ("human" or "json")) throw new ArgumentException("Format must be human or json.");
+                    break;
+                case "--output":
+                    if (!seen.Add(arg)) throw new ArgumentException("--output may be specified only once.");
+                    options.Output = Value();
+                    break;
+                default:
+                    if (arg.StartsWith("-", StringComparison.Ordinal)) throw new ArgumentException($"Unknown option: {arg}");
+                    options.Inputs.Add(arg);
+                    break;
+            }
+        }
+        if (options.Ruleset is not (ComplexityRules.CallablesV1 or ComplexityRules.OrdinaryMethodsV1))
+            throw new ArgumentException($"Unknown ruleset '{options.Ruleset}'.");
+        if (options.Command == "analyze" && options.Ruleset != ComplexityRules.CallablesV1)
+            throw new ArgumentException("analyze uses callables-v1; ordinary-methods-v1 remains the legacy option-only contract.");
+        if (options.Command == "analyze" && !options.SyntaxOnly)
+            throw new ArgumentException("Issue #7 analyze requires --syntax-only; project build orchestration is deferred to issue #10.");
+        return options;
+    }
+
+    private static ResultDocument AnalyzeCapturedInputs(ModernOptions options, string workingDirectory,
+        DateTimeOffset startedAt, Stopwatch stopwatch)
+    {
+        var canonicalizer = new ExistingPathCanonicalizer(PathIdentityPolicy.Current);
+        var files = SourceDiscovery.Discover(options.Inputs, workingDirectory, PathIdentityPolicy.Current, canonicalizer);
+        if (files.Count == 0) throw new ArgumentException("No C# source files found.");
+        var reports = options.Coverage.Select(path => Path.GetFullPath(path, workingDirectory)).ToArray();
+        foreach (var report in reports)
+            if (!File.Exists(report)) throw new FileNotFoundException($"Coverage report not found: {report}", report);
+        var contextId = StableId("syntax-only", Path.GetFullPath(workingDirectory), "net10.0", "Debug", "AnyCPU");
+        var context = new CallableAnalysisContext(Path.GetFullPath(workingDirectory), "net10.0", "Debug", "AnyCPU",
+            contextId, CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.Preview));
+        var inventories = files.Select(path => CallableInventory.Analyze(File.ReadAllText(path), path, context)).ToArray();
+        var inventory = new CallableInventoryResult(ComplexityRules.CallablesV1, contextId,
+            StableId(inventories.Select(item => item.SourceContentIdentity).ToArray()),
+            inventories.SelectMany(item => item.Callables).OrderBy(item => item.Path, StringComparer.Ordinal)
+                .ThenBy(item => item.Span.Start).ToArray()) { TargetFramework = "net10.0" };
+
+        var roots = files.Select(path => Path.GetDirectoryName(path)!).Distinct(PathIdentityPolicy.Current.Comparer).ToArray();
+        var captured = SourcePathCapture.Capture(files, roots, files, [], workingDirectory: workingDirectory);
+        var resolver = new CoveragePathResolver(PathIdentityPolicy.Current, captured, [], CoveragePathCase.Auto);
+        var reads = reports.Select(report => CoverageReader.ReadDetailed(report, resolver)).ToArray();
+        ThrowHardCoverageDiagnostic(reads.SelectMany(read => read.Diagnostics));
+        var methods = reads.SelectMany(read => read.Methods).Select(method => method with { ContextId = contextId }).ToArray();
+        var resolved = CallableCoverageResolver.Resolve(inventory, methods);
+        var byId = resolved.Observations.ToDictionary(item => item.CallableId, StringComparer.Ordinal);
+        var callables = inventory.Callables.Select(item =>
+        {
+            var observation = byId[item.CallableId];
+            var coverage = observation.Status == "known" && observation.Points.Count > 0
+                ? (double)observation.Points.Count(point => point.Visited) / observation.Points.Count : (double?)null;
+            var crap = item.Complexity is int complexity && coverage is double known
+                ? CrapCalculator.Calculate(complexity, known) : (double?)null;
+            return new CallableResult(item.CallableId, item.ObservationId, KindName(item.Kind), item.ParentId,
+                contextId, NormalizePath(workingDirectory, item.Path), item.Span, item.Complexity,
+                item.Applicability == CallableApplicability.Applicable ? "applicable" : "not-applicable",
+                observation.Status, coverage, crap, observation.Reason, item.CoverageCapability, item.BodyChecksum);
+        }).OrderBy(item => item.Path, StringComparer.Ordinal).ThenBy(item => item.Span.Start).ToArray();
+        var families = CallableFamilyEvaluator.Evaluate(inventory, resolved.Observations, options.Threshold);
+        var metrics = callables.Select(item => new MetricResult(item.ContextId, item.Path, item.CallableId, null,
+            new SourceSpan(item.Span.StartLine, item.Span.EndLine), item.Complexity ?? 0, item.Coverage, item.Crap,
+            item.CoverageReason)).ToArray();
+        var findings = callables.Where(item => item.Crap > options.Threshold).Select(item =>
+        {
+            var span = new SourceSpan(item.Span.StartLine, item.Span.EndLine);
+            return new FindingResult(FindingIdentity.Create(item.ContextId, item.Path, item.CallableId, span, "crap.thresholdExceeded"),
+                item.CallableId, "crap.thresholdExceeded", "error", "complexity", item.ContextId, item.Path,
+                item.CallableId, null, span, item.Complexity ?? 0, item.Coverage, item.Crap, item.CoverageReason,
+                options.Threshold, "gt", "fail", []);
+        }).Concat(families.Where(item => item.IsViolation).Select(item =>
+        {
+            var root = callables.Single(callable => callable.CallableId == item.RootCallableId);
+            var span = new SourceSpan(root.Span.StartLine, root.Span.EndLine);
+            return new FindingResult(FindingIdentity.Create(contextId, root.Path, item.FamilyId, span, CallableFamilyEvaluator.Rule),
+                item.FamilyId, CallableFamilyEvaluator.Rule, "error", "complexity", contextId, root.Path,
+                item.FamilyId, null, span, item.Complexity, item.Coverage, item.Crap, null, options.Threshold, "gt", "fail", []);
+        })).OrderBy(item => item.Id, StringComparer.Ordinal).ToArray();
+        var unknown = callables.Where(item => item.Applicability == "applicable" && item.CoverageStatus != "known").ToArray();
+        var checks = new List<CheckResult>
+        {
+            new("testExecution", "notApplicable", "tests.skippedSyntaxOnly", false),
+            unknown.Length == 0 ? new("coverage", "pass", "coverage.complete", true) : options.AllowMissingCoverage
+                ? new("coverage", "skipped", "coverage.missingAllowed", false)
+                : new("coverage", "operationalError", unknown[0].CoverageReason ?? CoverageReasonCodes.Unavailable, true),
+            new("crap", findings.Length > 0 ? "fail" : callables.Any(item => item.Crap is not null) ? "pass" : "notApplicable",
+                findings.Length > 0 ? "crap.thresholdExceeded" : callables.Any(item => item.Crap is not null)
+                    ? "crap.withinThreshold" : "crap.noKnownScores", true)
+        };
+        var reduced = EvaluationDecisionReducer.Reduce(checks, findings.Length > 0);
+        var reasonCounts = unknown.GroupBy(item => item.CoverageReason ?? CoverageReasonCodes.Unavailable, StringComparer.Ordinal)
+            .OrderBy(item => item.Key, StringComparer.Ordinal).ToDictionary(item => item.Key, item => item.Count(), StringComparer.Ordinal);
+        var artifacts = files.Select(path => Artifact(path, "source", workingDirectory, false))
+            .Concat(reports.Select(path => Artifact(path, "coverage", workingDirectory, false)))
+            .OrderBy(item => item.Kind, StringComparer.Ordinal).ThenBy(item => item.Path, StringComparer.Ordinal).ToArray();
+        var evaluation = new EvaluationSection("analyze", new PolicyOptions(options.Threshold, options.AllowMissingCoverage),
+            new EvaluationScope(".", files.Select(path => NormalizePath(workingDirectory, path)).Order(StringComparer.Ordinal).ToArray()),
+            [new EvaluationContext(contextId, "syntaxOnly", null, "net10.0", "Debug", null, null)], checks, metrics,
+            findings, new CoverageSummary(callables.Length, callables.Count(item => item.CoverageStatus == "known"), unknown.Length,
+                reasonCounts), artifacts, reduced.Decision)
+        {
+            Callables = callables,
+            Families = families,
+            CoverageDiagnostics = reads.SelectMany(item => item.Diagnostics).Concat(resolved.Diagnostics)
+                .GroupBy(item => item.Id, StringComparer.Ordinal).Select(item => item.First())
+                .OrderBy(item => item.Code, StringComparer.Ordinal).ThenBy(item => item.Id, StringComparer.Ordinal).ToArray()
+        };
+        var run = new RunSection(Guid.NewGuid().ToString("D"), startedAt, DateTimeOffset.UtcNow,
+            stopwatch.Elapsed.TotalMilliseconds, [], [], [], new CancellationDetails(false, false, null),
+            reduced.Status, reduced.ExitCode);
+        return new ResultDocument(ResultContract.SchemaVersion, ToolVersion, ComplexityRules.CallablesV1, evaluation, run);
+    }
+
+    private static string StableId(params string[] values) => Convert.ToHexString(
+        SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", values)))).ToLowerInvariant();
+
+    private static string KindName(CallableKind kind) => kind switch
+    {
+        CallableKind.PropertyGet => "property-get", CallableKind.PropertySet => "property-set",
+        CallableKind.PropertyInit => "property-init", CallableKind.IndexerGet => "indexer-get",
+        CallableKind.IndexerSet => "indexer-set", CallableKind.IndexerInit => "indexer-init",
+        CallableKind.EventAdd => "event-add", CallableKind.EventRemove => "event-remove",
+        CallableKind.LocalFunction => "local-function", CallableKind.AnonymousMethod => "anonymous-method",
+        CallableKind.TopLevel => "top-level", CallableKind.FieldInitializer => "field-initializer",
+        CallableKind.EventInitializer => "event-initializer", CallableKind.PropertyInitializer => "property-initializer",
+        CallableKind.PrimaryConstructorBaseArguments => "primary-constructor-base-arguments",
+        _ => kind.ToString().ToLowerInvariant()
+    };
+
+    private static void RenderCallableHuman(ResultDocument result, TextWriter output)
+    {
+        foreach (var item in result.Evaluation.Callables)
+            output.WriteLine($"{item.Path}:{item.Span.StartLine} {item.Kind} {item.CallableId} CRAP={item.Crap?.ToString("0.00", CultureInfo.InvariantCulture) ?? "N/A"}");
     }
 
     private static Options Parse(string[] args)
@@ -719,6 +935,20 @@ internal static class App
         if (projects.Length == 1) return projects[0];
         if (projects.Length > 1) throw new InvalidOperationException("Multiple projects found; specify --project.");
         throw new InvalidOperationException("No solution or project found in the working directory; specify --project.");
+    }
+
+    private sealed class ModernOptions
+    {
+        public required string Command { get; init; }
+        public string Ruleset { get; set; } = ComplexityRules.CallablesV1;
+        public bool SyntaxOnly { get; set; }
+        public double Threshold { get; set; } = 8;
+        public bool AllowMissingCoverage { get; set; }
+        public string Format { get; set; } = "human";
+        public string? Output { get; set; }
+        public string? Exemptions { get; set; }
+        public List<string> Coverage { get; } = [];
+        public List<string> Inputs { get; } = [];
     }
 
     private sealed class Options

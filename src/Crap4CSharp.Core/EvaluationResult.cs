@@ -57,7 +57,26 @@ public sealed record EvaluationSection(
 {
     public CoveragePathPolicyResult CoveragePathPolicy { get; init; } = new("auto", []);
     public IReadOnlyList<CoverageDiagnostic> CoverageDiagnostics { get; init; } = [];
+    public IReadOnlyList<CallableResult> Callables { get; init; } = [];
+    public IReadOnlyList<CallableFamilyMetric> Families { get; init; } = [];
 }
+
+public sealed record CallableResult(
+    string CallableId,
+    string ObservationId,
+    string Kind,
+    string? ParentId,
+    string ContextId,
+    string Path,
+    CallableSourceSpan Span,
+    int? Complexity,
+    string Applicability,
+    string CoverageStatus,
+    double? Coverage,
+    double? Crap,
+    string? CoverageReason,
+    string CoverageCapability,
+    string BodyChecksum);
 
 public sealed record PolicyOptions(double Threshold, bool AllowMissingCoverage, string ComparisonOperator = "gt");
 

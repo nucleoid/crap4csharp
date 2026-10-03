@@ -22,7 +22,7 @@ public sealed class CallableCliTests : IDisposable
         var result = await Run((_, _, _, _, _) => { launches++; throw new InvalidOperationException("process forbidden"); },
             "analyze", "--syntax-only", "--format", "json", "--coverage", coverage, source);
 
-        Assert.Equal(0, result.ExitCode);
+        Assert.True(result.ExitCode == 0, result.Error + result.Output);
         Assert.Equal(0, launches);
         Assert.Equal(before, Snapshot(source, coverage));
         using var document = JsonDocument.Parse(result.Output);
@@ -86,7 +86,7 @@ public sealed class CallableCliTests : IDisposable
     }
 
     private string WriteCoverage(string source, int visits) => Write("coverage.xml", $"""
-        <CoverageSession><Modules><Module><ModuleName>Fixture</ModuleName><Files><File uid="1" fullPath="{System.Security.SecurityElement.Escape(source)}" /></Files><Classes><Class><FullName>C</FullName><Methods><Method><Name>System.Int32 C::M()</Name><SequencePoints><SequencePoint vc="{visits}" sl="1" sc="11" el="1" ec="25" offset="0" fileid="1" /></SequencePoints><FileRef uid="1" /></Method></Methods></Class></Classes></Module></Modules></CoverageSession>
+        <CoverageSession><Modules><Module><ModuleName>Fixture</ModuleName><Files><File uid="1" fullPath="{System.Security.SecurityElement.Escape(source)}" /></Files><Classes><Class><FullName>C</FullName><Methods><Method><Name>System.Int32 C::M()</Name><SequencePoints><SequencePoint vc="{visits}" sl="1" sc="11" el="1" ec="24" offset="0" fileid="1" /></SequencePoints><FileRef uid="1" /></Method></Methods></Class></Classes></Module></Modules></CoverageSession>
         """);
 
     private string Write(string relative, string contents)
