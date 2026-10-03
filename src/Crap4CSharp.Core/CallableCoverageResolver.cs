@@ -83,6 +83,25 @@ public static class CallableCoverageResolver
             }
 
             var accumulator = observations[candidate.ObservationId];
+            if (string.IsNullOrWhiteSpace(report.ModuleIdentity))
+            {
+                accumulator.Reasons.Add(CoverageReasonCodes.ContextUnbound);
+                diagnostics.Add(Diagnostic(CoverageReasonCodes.ContextUnbound, report, [candidate],
+                    "Coverage observation has no module identity and cannot join a callable context."));
+                continue;
+            }
+            if (accumulator.ModuleIdentity is not null &&
+                !string.Equals(accumulator.ModuleIdentity, report.ModuleIdentity, StringComparison.Ordinal))
+            {
+                accumulator.Points.Clear();
+                accumulator.Reasons.Add(CoverageReasonCodes.ConflictingModule);
+                accumulator.ModuleConflict = true;
+                diagnostics.Add(Diagnostic(CoverageReasonCodes.ConflictingModule, report, [candidate],
+                    "Coverage observations from distinct modules cannot be unioned."));
+                continue;
+            }
+            accumulator.ModuleIdentity ??= report.ModuleIdentity;
+            if (accumulator.ModuleConflict) continue;
             foreach (var point in report.SequencePoints)
             {
                 var document = report.DocumentIdentities.SingleOrDefault() ?? report.File ?? "<unknown-document>";
@@ -192,6 +211,8 @@ public static class CallableCoverageResolver
     {
         public Dictionary<PointKey, CallableCoveragePoint> Points { get; } = [];
         public HashSet<string> Reasons { get; } = new(StringComparer.Ordinal);
+        public string? ModuleIdentity { get; set; }
+        public bool ModuleConflict { get; set; }
     }
 
     private readonly record struct PointKey(string ContextId, string DocumentIdentity, int StartLine,

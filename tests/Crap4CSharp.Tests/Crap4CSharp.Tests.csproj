@@ -13,6 +13,7 @@
     <None Include="Fixtures/results/source.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures/results/coverage.xml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures/CoveragePaths/*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures/legacy-1.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures/ProjectContexts/**/*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

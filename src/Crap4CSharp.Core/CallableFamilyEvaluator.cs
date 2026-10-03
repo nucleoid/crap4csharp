@@ -35,7 +35,11 @@ public sealed record CallableFamilyMetric(
     bool IsViolation,
     IReadOnlyList<string> MemberCallableIds,
     IReadOnlyList<string> IncompleteCallableIds,
-    IReadOnlyList<string> IncompleteReasons);
+    IReadOnlyList<string> IncompleteReasons)
+{
+    public IReadOnlyList<string> MemberObservationIds { get; init; } = [];
+    public IReadOnlyList<string> IncompleteObservationIds { get; init; } = [];
+}
 
 public static class CallableFamilyEvaluator
 {
@@ -60,6 +64,7 @@ public static class CallableFamilyEvaluator
             var complexity = 1 + members.Sum(item => (item.Complexity ?? 1) - 1);
             var points = new Dictionary<PointIdentity, bool>();
             var incomplete = new List<string>();
+            var incompleteObservations = new List<string>();
             var reasons = new List<string>();
             foreach (var member in members)
             {
@@ -68,6 +73,7 @@ public static class CallableFamilyEvaluator
                 if (memberObservations.Length == 0 || memberObservations.Any(item => item.Status != "known"))
                 {
                     incomplete.Add(member.CallableId);
+                    incompleteObservations.Add(member.ObservationId);
                     reasons.AddRange(memberObservations?.Select(item => item.Reason).Where(item => item is not null).Cast<string>()
                         ?? [CoverageReasonCodes.Unavailable]);
                     continue;
@@ -81,6 +87,7 @@ public static class CallableFamilyEvaluator
                 if (memberObservations.All(item => item.Points.Count == 0))
                 {
                     incomplete.Add(member.CallableId);
+                    incompleteObservations.Add(member.ObservationId);
                     reasons.Add(CoverageReasonCodes.NoEligiblePoints);
                 }
             }
@@ -95,7 +102,12 @@ public static class CallableFamilyEvaluator
                 fraction is null ? null : points.Count(item => item.Value), crap, crap > threshold,
                 members.Select(item => item.CallableId).Order(StringComparer.Ordinal).ToArray(),
                 incomplete.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
-                reasons.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray()));
+                reasons.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray())
+            {
+                MemberObservationIds = members.Select(item => item.ObservationId).Order(StringComparer.Ordinal).ToArray(),
+                IncompleteObservationIds = incompleteObservations.Distinct(StringComparer.Ordinal)
+                    .Order(StringComparer.Ordinal).ToArray()
+            });
         }
         return output.OrderBy(item => item.FamilyId, StringComparer.Ordinal).ToArray();
     }

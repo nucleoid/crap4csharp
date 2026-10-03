@@ -355,7 +355,9 @@ public static class CoverageReader
     {
         var beforeParameters = signature.Split('(', 2)[0];
         var tick = beforeParameters.LastIndexOf('`');
-        if (tick < 0) return 0;
+        // OpenCover/Cobertura often omit generic arity entirely. Absence is unknown,
+        // not evidence that the method is non-generic.
+        if (tick < 0) return null;
         var digits = new string(beforeParameters[(tick + 1)..].TakeWhile(char.IsAsciiDigit).ToArray());
         return int.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out var value) ? value : null;
     }

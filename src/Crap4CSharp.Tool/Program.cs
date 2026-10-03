@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using Crap4CSharp.Core;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 
 if (args.Length == 3 && args[0] == ProjectContextLoader.LoaderCommand)
@@ -299,10 +300,12 @@ internal static class App
         var reports = options.Coverage.Select(path => Path.GetFullPath(path, workingDirectory)).ToArray();
         foreach (var report in reports)
             if (!File.Exists(report)) throw new FileNotFoundException($"Coverage report not found: {report}", report);
-        var contextId = StableId("syntax-only", Path.GetFullPath(workingDirectory), "net10.0", "Debug", "AnyCPU");
-        var context = new CallableAnalysisContext(Path.GetFullPath(workingDirectory), "net10.0", "Debug", "AnyCPU",
+        var contextId = StableId("syntax-only", "net10.0", "Debug", "AnyCPU", ComplexityRules.CallablesV1);
+        var context = new CallableAnalysisContext(".", "net10.0", "Debug", "AnyCPU",
             contextId, CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.Preview));
-        var inventories = files.Select(path => CallableInventory.Analyze(File.ReadAllText(path), path, context)).ToArray();
+        var references = CaptureSyntaxReferences();
+        var inventories = files.Select(path => CallableInventory.Analyze(File.ReadAllText(path),
+            NormalizePath(workingDirectory, path), context, references)).ToArray();
         var inventory = new CallableInventoryResult(ComplexityRules.CallablesV1, contextId,
             StableId(inventories.Select(item => item.SourceContentIdentity).ToArray()),
             inventories.SelectMany(item => item.Callables).OrderBy(item => item.Path, StringComparer.Ordinal)
@@ -313,7 +316,13 @@ internal static class App
         var resolver = new CoveragePathResolver(PathIdentityPolicy.Current, captured, [], CoveragePathCase.Auto);
         var reads = reports.Select(report => CoverageReader.ReadDetailed(report, resolver)).ToArray();
         ThrowHardCoverageDiagnostic(reads.SelectMany(read => read.Diagnostics));
-        var methods = reads.SelectMany(read => read.Methods).Select(method => method with { ContextId = contextId }).ToArray();
+        var logicalPaths = captured.Entries.ToDictionary(item => item.LocalPath, item => item.LogicalPath,
+            PathIdentityPolicy.Current.Comparer);
+        var methods = reads.SelectMany(read => read.Methods).Select(method => method with
+        {
+            ContextId = contextId,
+            File = method.File is not null && logicalPaths.TryGetValue(method.File, out var logical) ? logical : method.File
+        }).ToArray();
         var resolved = CallableCoverageResolver.Resolve(inventory, methods);
         var byId = resolved.Observations.ToDictionary(item => item.ObservationId!, StringComparer.Ordinal);
         var callables = inventory.Callables.Select(item =>
@@ -324,11 +333,22 @@ internal static class App
             var crap = item.Complexity is int complexity && coverage is double known
                 ? CrapCalculator.Calculate(complexity, known) : (double?)null;
             return new CallableResult(item.CallableId, item.ObservationId, KindName(item.Kind), item.ParentId,
-                contextId, NormalizePath(workingDirectory, item.Path), item.Span, item.Complexity,
+                contextId, item.Path.Replace('\\', '/'), item.Span, item.Complexity,
                 item.Applicability == CallableApplicability.Applicable ? "applicable" : "not-applicable",
-                observation.Status, coverage, crap, observation.Reason, item.CoverageCapability, item.BodyChecksum);
+                observation.Status, coverage, crap, observation.Reason, item.CoverageCapability, item.BodyChecksum)
+            {
+                Ruleset = item.Ruleset,
+                SemanticSignature = item.SemanticIdentity?.ReportSignature,
+                Documents = [item.Path.Replace('\\', '/')],
+                MappingEvidenceKind = observation.Status == "known" ? "semanticSourceIdentity" : null
+            };
         }).OrderBy(item => item.Path, StringComparer.Ordinal).ThenBy(item => item.Span.Start).ToArray();
         var families = CallableFamilyEvaluator.Evaluate(inventory, resolved.Observations, options.Threshold);
+        callables = callables.Select(item => item with
+        {
+            FamilyIds = families.Where(family => family.MemberObservationIds.Contains(item.ObservationId, StringComparer.Ordinal))
+                .Select(family => family.FamilyId).Order(StringComparer.Ordinal).ToArray()
+        }).ToArray();
         var metrics = callables.Select(item => new MetricResult(item.ContextId, item.Path, item.CallableId, null,
             new SourceSpan(item.Span.StartLine, item.Span.EndLine), item.Complexity ?? 0, item.Coverage, item.Crap,
             item.CoverageReason)).ToArray();
@@ -408,6 +428,14 @@ internal static class App
 
     private static string StableId(params string[] values) => Convert.ToHexString(
         SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", values)))).ToLowerInvariant();
+
+    private static IReadOnlyList<MetadataReference> CaptureSyntaxReferences() => new[]
+        {
+            typeof(object).Assembly.Location,
+            typeof(Enumerable).Assembly.Location,
+            typeof(Task).Assembly.Location
+        }.Where(path => !string.IsNullOrWhiteSpace(path)).Distinct(StringComparer.Ordinal)
+        .Select(path => MetadataReference.CreateFromImage(File.ReadAllBytes(path))).ToArray();
 
     private static string KindName(CallableKind kind) => kind switch
     {

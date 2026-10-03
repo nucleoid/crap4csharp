@@ -83,7 +83,14 @@ public sealed record CallableResult(
     double? Crap,
     string? CoverageReason,
     string CoverageCapability,
-    string BodyChecksum);
+    string BodyChecksum)
+{
+    public string Ruleset { get; init; } = ComplexityRules.CallablesV1;
+    public string? SemanticSignature { get; init; }
+    public IReadOnlyList<string> Documents { get; init; } = [];
+    public string? MappingEvidenceKind { get; init; }
+    public IReadOnlyList<string> FamilyIds { get; init; } = [];
+}
 
 public sealed record PolicyOptions(double Threshold, bool AllowMissingCoverage, string ComparisonOperator = "gt");
 

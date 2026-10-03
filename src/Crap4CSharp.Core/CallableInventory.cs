@@ -74,7 +74,8 @@ public sealed record CallableInventoryResult(
 
 public static class CallableInventory
 {
-    public static CallableInventoryResult Analyze(string text, string logicalPath, CallableAnalysisContext context)
+    public static CallableInventoryResult Analyze(string text, string logicalPath, CallableAnalysisContext context,
+        IEnumerable<MetadataReference>? references = null)
     {
         ArgumentNullException.ThrowIfNull(text);
         ArgumentException.ThrowIfNullOrWhiteSpace(logicalPath);
@@ -83,7 +84,8 @@ public static class CallableInventory
         var errors = tree.GetDiagnostics().Where(item => item.Severity == DiagnosticSeverity.Error).ToArray();
         if (errors.Length > 0) throw new InvalidDataException(errors[0].ToString());
         var root = tree.GetCompilationUnitRoot();
-        var semanticModel = CSharpCompilation.Create("Crap4CSharp.CallableInventory", [tree]).GetSemanticModel(tree);
+        var semanticModel = CSharpCompilation.Create("Crap4CSharp.CallableInventory", [tree], references ?? [])
+            .GetSemanticModel(tree);
         var contentIdentity = ProjectAnalysisContext.ContentHash(text);
         var candidates = Discover(root, tree).OrderBy(item => item.Span.Start).ThenByDescending(item => item.Span.Length)
             .ThenBy(item => item.Kind).ToList();
