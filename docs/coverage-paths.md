@@ -9,8 +9,8 @@ Crap4CSharp resolves every report filename against the selected source inventory
 `--coverage-path-case auto|sensitive|insensitive` controls only report-root and report-path comparisons. `auto` compares Windows drive/UNC paths without case and POSIX paths with case. The selected local inventory keeps the host's local identity policy; a foreign insensitive comparison that exposes two case-distinct local files is ambiguous.
 
 ```bash
-crap4csharp --coverage-path-map 'C:\agent\repo' "$PWD" --coverage windows.opencover.xml src
-crap4csharp --coverage-path-map /agent/repo "$PWD" --coverage container.cobertura.xml src
+crap4csharp --coverage-path-map 'C:\agent\repo\src' "$PWD/src" --coverage windows.opencover.xml src
+crap4csharp --coverage-path-map /agent/repo/src "$PWD/src" --coverage container.cobertura.xml src
 ```
 
 Rules match complete path components. The longest matching report root wins, independent of option order. `/agent/src` does not match `/agent/src2`. Once a rule wins, a missing translated file remains missing; shorter rules and native/basename fallbacks are not attempted. Equivalent roots with different destinations are `coverage.pathMappingConflict` before tests or other child processes run.

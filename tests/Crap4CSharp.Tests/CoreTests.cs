@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using System.Diagnostics;
 using Crap4CSharp.Core;
 using Xunit;
@@ -396,6 +397,51 @@ public sealed class CoreTests : IDisposable
         Assert.True(mapped.ExitCode == 0, $"stdout: {mapped.Output} stderr: {mapped.Error}");
         Assert.Equal(1, unmappedStrict.ExitCode);
         Assert.Equal(0, unmappedAllowed.ExitCode);
+    }
+
+    [Fact]
+    public async Task DocumentedSelectedSourceMappingFormSucceeds()
+    {
+        var source = Write("src/C.cs", "class C { int M() => 1; }");
+        var report = Write("documented-map.xml", """
+            <CoverageSession><Modules><Module><ModuleName>Fixture</ModuleName><Files><File uid="1" fullPath="C:\agent\repo\src\C.cs" /></Files>
+            <Classes><Class><FullName>C</FullName><Methods><Method><Name>C.M()</Name><SequencePoints><SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method></Methods></Class></Classes>
+            </Module></Modules></CoverageSession>
+            """);
+
+        var result = await RunApp("--coverage-path-map", @"C:\agent\repo\src", Path.Combine(temporary, "src"),
+            "--coverage", report, Path.Combine(temporary, "src"));
+
+        Assert.True(result.ExitCode == 0, $"stdout: {result.Output} stderr: {result.Error}");
+        Assert.Contains(source, Directory.EnumerateFiles(Path.Combine(temporary, "src")));
+    }
+
+    [Fact]
+    public async Task SameNamedMethodsAcrossSelectedRootsKeepDistinctLogicalDiagnostics()
+    {
+        var first = Write("App1/Program.cs", "class Program { static void Main() { } }");
+        var second = Write("App2/Program.cs", "class Program { static void Main() { } }");
+        var report = Write("multi-root.xml", $"""
+            <CoverageSession><Modules><Module><ModuleName>Fixture</ModuleName><Files>
+            <File uid="1" fullPath="{System.Security.SecurityElement.Escape(first)}" />
+            <File uid="2" fullPath="{System.Security.SecurityElement.Escape(second)}" />
+            </Files><Classes><Class><FullName>Program</FullName><Methods>
+            <Method><Name>Program.Main(System.Int32)</Name><SequencePoints><SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method>
+            <Method><Name>Program.Main(System.Int32)</Name><SequencePoints><SequencePoint vc="1" sl="1" fileid="2" /></SequencePoints><FileRef uid="2" /></Method>
+            </Methods></Class></Classes></Module></Modules></CoverageSession>
+            """);
+
+        var result = await RunApp("--format", "json", "--allow-missing-coverage", "--coverage", report,
+            Path.Combine(temporary, "App1"), Path.Combine(temporary, "App2"));
+        using var document = JsonDocument.Parse(result.Output);
+        var metrics = document.RootElement.GetProperty("evaluation").GetProperty("metrics").EnumerateArray().ToArray();
+        var diagnostics = document.RootElement.GetProperty("evaluation").GetProperty("coverageDiagnostics").EnumerateArray()
+            .Where(item => item.GetProperty("scope").GetString() == "method").ToArray();
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(["App1/Program.cs", "App2/Program.cs"], metrics.Select(item => item.GetProperty("path").GetString()).Order());
+        Assert.Equal(2, diagnostics.Select(item => item.GetProperty("path").GetString()).Distinct().Count());
+        Assert.Equal(2, diagnostics.Select(item => item.GetProperty("id").GetString()).Distinct().Count());
     }
 
     [Fact]

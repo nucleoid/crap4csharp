@@ -248,7 +248,7 @@ internal static class App
         if (options.Changed)
         {
             var preflightInventory = SourcePathCapture.Capture([], declaredRoots, [],
-                preparedMappings.Select(mapping => mapping.LocalRoot));
+                preparedMappings.Select(mapping => mapping.LocalRoot), workingDirectory: workingDirectory);
             _ = new CoveragePathResolver(PathIdentityPolicy.Current, preflightInventory,
                 preparedMappings, options.CoveragePathCase);
         }
@@ -256,7 +256,7 @@ internal static class App
             ? await ChangedFilesAsync(workingDirectory, options.Timeout, cancellationToken, processExecutor)
             : SourceDiscovery.Discover(options.Inputs, workingDirectory);
         var sourceInventory = SourcePathCapture.Capture(files, declaredRoots, explicitFiles,
-            preparedMappings.Select(mapping => mapping.LocalRoot));
+            preparedMappings.Select(mapping => mapping.LocalRoot), workingDirectory: workingDirectory);
         var pathResolver = new CoveragePathResolver(PathIdentityPolicy.Current, sourceInventory,
             preparedMappings, options.CoveragePathCase);
         options.ValidatedCoveragePathMappings = pathResolver.MappingIdentities;
@@ -460,9 +460,18 @@ internal static class App
         DateTimeOffset startedAt, DateTimeOffset finishedAt, TimeSpan duration)
     {
         var checks = EffectiveChecks(outcome);
+        var sourceLogicalPaths = outcome.SourceMethods
+            .GroupBy(method => PathIdentityPolicy.Current.Normalize(method.File), PathIdentityPolicy.Current.Comparer)
+            .ToDictionary(group => group.Key,
+                group => group.Select(method => method.LogicalPath).FirstOrDefault(path => path is not null) ??
+                    NormalizePath(workingDirectory, group.First().File),
+                PathIdentityPolicy.Current.Comparer);
+        string ResultPath(string path) => sourceLogicalPaths.TryGetValue(PathIdentityPolicy.Current.Normalize(path), out var logical)
+            ? logical
+            : NormalizePath(workingDirectory, path);
         var metrics = outcome.Matches.Select(match =>
         {
-            return new MetricResult("legacy-syntax", NormalizePath(workingDirectory, match.Metric.File), match.Metric.DisplayName,
+            return new MetricResult("legacy-syntax", ResultPath(match.Metric.File), match.Metric.DisplayName,
                 match.Source.Signature, new SourceSpan(match.Metric.StartLine, match.Metric.EndLine), match.Metric.Complexity,
                 match.Metric.Coverage, match.Metric.Crap, match.CoverageReason)
             {
@@ -472,7 +481,7 @@ internal static class App
           .ThenBy(metric => metric.MethodIdentity, StringComparer.Ordinal).ThenBy(metric => metric.Span.StartLine).ToArray();
         var findings = outcome.Matches.Where(match => match.Metric.Crap > options.Threshold).Select(match =>
         {
-            var path = NormalizePath(workingDirectory, match.Metric.File);
+            var path = ResultPath(match.Metric.File);
             var span = new SourceSpan(match.Metric.StartLine, match.Metric.EndLine);
             return new FindingResult(
             FindingIdentity.Create("legacy-syntax", path, match.Metric.DisplayName, span, "crap.thresholdExceeded"),
@@ -492,7 +501,7 @@ internal static class App
             .OrderBy(group => group.Key, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
         var generatedReports = outcome.GeneratedReports.ToHashSet(OperatingSystem.IsWindows()
             ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
-        var artifacts = outcome.Files.Select(path => Artifact(path, "source", workingDirectory, generated: false))
+        var artifacts = outcome.Files.Select(path => Artifact(path, "source", workingDirectory, generated: false, ResultPath(path)))
             .Concat(outcome.Reports.Select(path => Artifact(path, "coverage", workingDirectory, generatedReports.Contains(path))))
             .Distinct()
             .OrderBy(artifact => artifact.Kind, StringComparer.Ordinal).ThenBy(artifact => artifact.Path, StringComparer.Ordinal).ToArray();
@@ -500,7 +509,7 @@ internal static class App
             mapping.ReportRoot, NormalizePath(workingDirectory, mapping.LocalRoot), mapping.Id))
             .OrderBy(mapping => mapping.ReportRoot, StringComparer.Ordinal).ThenBy(mapping => mapping.LocalRoot, StringComparer.Ordinal).ToArray();
         var evaluation = new EvaluationSection("legacy", new PolicyOptions(options.Threshold, options.AllowMissingCoverage),
-                new EvaluationScope(".", outcome.Files.Select(path => NormalizePath(workingDirectory, path)).Order(StringComparer.Ordinal).ToArray()),
+                new EvaluationScope(".", outcome.Files.Select(ResultPath).Order(StringComparer.Ordinal).ToArray()),
                 [new EvaluationContext("legacy-syntax", "syntaxOnly", null, null, null, null, null)], checks, metrics, findings,
                 new CoverageSummary(metrics.Length, metrics.Count(metric => metric.Coverage is not null), metrics.Count(metric => metric.Coverage is null), reasonCounts),
                 artifacts, reduced.Decision)
@@ -521,17 +530,17 @@ internal static class App
             evaluation, run);
     }
 
-    private static ArtifactIdentity Artifact(string path, string kind, string workingDirectory, bool generated)
+    private static ArtifactIdentity Artifact(string path, string kind, string workingDirectory, bool generated, string? logicalOverride = null)
     {
         try
         {
             var contentIdentity = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
-            var logicalPath = generated ? $"<generated>/coverage/{contentIdentity}.xml" : NormalizePath(workingDirectory, path);
+            var logicalPath = generated ? $"<generated>/coverage/{contentIdentity}.xml" : logicalOverride ?? NormalizePath(workingDirectory, path);
             return new ArtifactIdentity(kind, logicalPath, contentIdentity, "sha256");
         }
         catch
         {
-            var logicalPath = generated ? "<generated>/coverage/unavailable.xml" : NormalizePath(workingDirectory, path);
+            var logicalPath = generated ? "<generated>/coverage/unavailable.xml" : logicalOverride ?? NormalizePath(workingDirectory, path);
             return new ArtifactIdentity(kind, logicalPath, null, "unavailable");
         }
     }

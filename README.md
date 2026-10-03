@@ -33,8 +33,8 @@ crap4csharp --coverage TestResults/coverage.opencover.xml src
 crap4csharp --coverage linux.xml --coverage windows.xml src
 
 # Translate a report produced on another host/container (two operands per map)
-crap4csharp --coverage-path-map 'C:\agent\repo' "$PWD" --coverage windows.xml src
-crap4csharp --coverage-path-map /agent/repo "$PWD" --coverage container.xml src
+crap4csharp --coverage-path-map 'C:\agent\repo\src' "$PWD/src" --coverage windows.xml src
+crap4csharp --coverage-path-map /agent/repo/src "$PWD/src" --coverage container.xml src
 
 # Analyze changed and untracked C# files
 crap4csharp --changed --coverage coverage.xml
@@ -68,6 +68,7 @@ Every external command has a bounded timeout of 300 seconds by default. Set `--t
 Solutions (`.sln` or `.slnx`) are preferred when exactly one exists in the working directory, then a single `.csproj`. Use `--project` when discovery would be ambiguous. Providing any `--coverage` report skips tests and neither creates nor deletes a test-results directory. Missing, malformed, or unsupported reports fail operationally. OpenCover and Cobertura/Coverlet XML are supported; multiple reports merge the union of distinct eligible sequence points. Repeated points are counted once and are visited if any report records a visit.
 
 Coverage paths are parsed independently of the host OS. Repeatable `--coverage-path-map <report-root> <local-root>` translates foreign POSIX, drive, or UNC roots; `--coverage-path-case auto|sensitive|insensitive` controls only foreign comparisons (`auto` is drive/UNC insensitive and POSIX sensitive). Mappings are validated before test execution, use longest complete-component prefix precedence, and can resolve only files already present in the selected inventory. See [coverage source paths and diagnostics](docs/coverage-paths.md).
+The local map root must be inside one of the selected source inputs; map the producer's source root to the corresponding selected local directory.
 
 ## Analysis policy
 

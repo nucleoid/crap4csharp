@@ -94,4 +94,52 @@ public sealed class SourcePathCaptureTests : IDisposable
         Assert.Equal(aloneEntry.LogicalPath, togetherEntry.LogicalPath);
         Assert.DoesNotContain(temporary, aloneEntry.ExternalRootId, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void MultipleSelectedRootsUseWorkspaceRelativeLogicalPaths()
+    {
+        var workspace = Path.Combine(temporary, "workspace");
+        var firstRoot = Path.Combine(workspace, "App1");
+        var secondRoot = Path.Combine(workspace, "App2");
+        Directory.CreateDirectory(firstRoot);
+        Directory.CreateDirectory(secondRoot);
+        var first = Path.Combine(firstRoot, "Program.cs");
+        var second = Path.Combine(secondRoot, "Program.cs");
+        File.WriteAllText(first, "class Program { static void Main() { } }");
+        File.WriteAllText(second, "class Program { static void Main() { } }");
+
+        var inventory = SourcePathCapture.Capture([first, second], [firstRoot, secondRoot], [], [],
+            workingDirectory: workspace);
+
+        Assert.Equal(["App1/Program.cs", "App2/Program.cs"],
+            inventory.Entries.Select(entry => entry.LogicalPath).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void SameNamedExplicitLinksInDifferentDirectoriesHaveDistinctLogicalPaths()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var workspace = Path.Combine(temporary, "workspace");
+        var firstDirectory = Path.Combine(workspace, "App1");
+        var secondDirectory = Path.Combine(workspace, "App2");
+        var external = Path.Combine(temporary, "external");
+        Directory.CreateDirectory(firstDirectory);
+        Directory.CreateDirectory(secondDirectory);
+        Directory.CreateDirectory(external);
+        var firstTarget = Path.Combine(external, "First.cs");
+        var secondTarget = Path.Combine(external, "Second.cs");
+        File.WriteAllText(firstTarget, "class Program { }");
+        File.WriteAllText(secondTarget, "class Program { }");
+        var firstLink = Path.Combine(firstDirectory, "Program.cs");
+        var secondLink = Path.Combine(secondDirectory, "Program.cs");
+        File.CreateSymbolicLink(firstLink, firstTarget);
+        File.CreateSymbolicLink(secondLink, secondTarget);
+
+        var inventory = SourcePathCapture.Capture([firstLink, secondLink], [workspace], [firstLink, secondLink], [],
+            workingDirectory: workspace);
+        var entries = inventory.Entries.OrderBy(entry => entry.LocalPath, StringComparer.Ordinal).ToArray();
+
+        Assert.NotEqual(entries[0].ExternalRootId, entries[1].ExternalRootId);
+        Assert.NotEqual(entries[0].LogicalPath, entries[1].LogicalPath);
+    }
 }

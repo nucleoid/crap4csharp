@@ -9,16 +9,29 @@ internal static class SourcePathCapture
         IEnumerable<string> declaredRoots,
         IEnumerable<string> explicitFiles,
         IEnumerable<string> mappingLocalRoots,
-        PathIdentityPolicy? pathPolicy = null)
+        PathIdentityPolicy? pathPolicy = null,
+        string? workingDirectory = null)
     {
         pathPolicy ??= PathIdentityPolicy.Current;
+        var invocationRoot = pathPolicy.Normalize(workingDirectory ?? Directory.GetCurrentDirectory());
         var explicitSet = explicitFiles.Select(path => pathPolicy.Normalize(path)).ToHashSet(pathPolicy.Comparer);
-        var roots = declaredRoots.Select(path => pathPolicy.Normalize(path)).Distinct(pathPolicy.Comparer)
-            .Order(StringComparer.Ordinal).Select(path =>
+        var rootIdentities = new Dictionary<string, string?>(pathPolicy.Comparer);
+        var normalizedRoots = new List<string>();
+        foreach (var rootValue in declaredRoots)
+        {
+            var normalized = pathPolicy.Normalize(rootValue);
+            if (rootIdentities.ContainsKey(normalized)) continue;
+            var ordinal = rootIdentities.Count;
+            rootIdentities.Add(normalized, pathPolicy.Contains(invocationRoot, normalized)
+                ? null
+                : ExternalId($"root:{ordinal}"));
+            normalizedRoots.Add(normalized);
+        }
+        var roots = normalizedRoots.Order(StringComparer.Ordinal).Select(path =>
             {
                 if (!Directory.Exists(path))
                     throw new DirectoryNotFoundException($"Selected source root does not exist: {path}");
-                return new CoverageSourceRoot(path, ResolvePhysical(path, pathPolicy));
+                return new CoverageSourceRoot(path, ResolvePhysical(path, pathPolicy), rootIdentities[path]);
             }).ToList();
 
         foreach (var localRootValue in mappingLocalRoots)
@@ -46,8 +59,10 @@ internal static class SourcePathCapture
             if (root is null)
             {
                 var parent = Path.GetDirectoryName(file)!;
+                var relativeParent = Path.GetRelativePath(invocationRoot, parent)
+                    .Replace(Path.DirectorySeparatorChar, '/');
                 root = new CoverageSourceRoot(parent, ResolvePhysical(parent, pathPolicy),
-                    ExternalId($"root:{Path.GetFileName(parent)}"));
+                    ExternalId($"implicit:{relativeParent}"));
                 roots.Add(root);
             }
 
@@ -60,12 +75,16 @@ internal static class SourcePathCapture
                     throw new CoveragePathException(CoverageReasonCodes.PathOutsideRoot,
                         $"Selected source resolves outside its recursive source root: {file}");
                 physicalRoot = Path.GetDirectoryName(physicalFile)!;
-                var linkIdentity = Path.GetRelativePath(root.LocalPath, file).Replace(Path.DirectorySeparatorChar, '/');
+                var linkIdentity = pathPolicy.Contains(invocationRoot, file)
+                    ? Path.GetRelativePath(invocationRoot, file).Replace(Path.DirectorySeparatorChar, '/')
+                    : $"{root.ExternalRootId}:{Path.GetRelativePath(root.LocalPath, file).Replace(Path.DirectorySeparatorChar, '/')}";
                 externalRootId ??= ExternalId($"link:{linkIdentity}");
             }
-            var logical = pathPolicy.Contains(root.LocalPath, file)
-                ? Path.GetRelativePath(root.LocalPath, file).Replace(Path.DirectorySeparatorChar, '/')
-                : Path.GetFileName(file);
+            var logical = externalRootId is null && pathPolicy.Contains(invocationRoot, file)
+                ? Path.GetRelativePath(invocationRoot, file).Replace(Path.DirectorySeparatorChar, '/')
+                : pathPolicy.Contains(root.LocalPath, file)
+                    ? Path.GetRelativePath(root.LocalPath, file).Replace(Path.DirectorySeparatorChar, '/')
+                    : Path.GetFileName(file);
             if (externalRootId is not null) logical = $"../{externalRootId}/{logical}";
             entries.Add(new CoverageSourceEntry(file, logical, root.LocalPath, physicalFile, physicalRoot, externalRootId));
         }
