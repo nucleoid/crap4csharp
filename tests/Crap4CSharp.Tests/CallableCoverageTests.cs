@@ -78,6 +78,21 @@ public sealed class CallableCoverageTests
     }
 
     [Fact]
+    public void DistinctReportedModulesNeverUnionWhenNoExpectedModuleWasDeclared()
+    {
+        var inventory = Inventory("class C { int M() => 1; }");
+        var target = Assert.Single(inventory.Callables);
+        var first = Report(target, [new CoveragePoint(1, 1)]) with { ModuleIdentity = "module-a" };
+        var second = Report(target, [new CoveragePoint(1, 1)]) with { ModuleIdentity = "module-b" };
+
+        var resolved = CallableCoverageResolver.Resolve(inventory, [first, second]);
+
+        Assert.Equal("unknown", Assert.Single(resolved.Observations).Status);
+        Assert.Equal(CoverageReasonCodes.ConflictingModule, Assert.Single(resolved.Observations).Reason);
+        Assert.Contains(resolved.Diagnostics, item => item.Code == CoverageReasonCodes.ConflictingModule);
+    }
+
+    [Fact]
     public void GeneratedNamesRemainExplicitlyUnsupported()
     {
         var inventory = Inventory("class C { async System.Threading.Tasks.Task<int> M() => await System.Threading.Tasks.Task.FromResult(1); }");
