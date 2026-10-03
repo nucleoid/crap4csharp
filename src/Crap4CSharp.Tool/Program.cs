@@ -188,7 +188,9 @@ internal static class App
                     ? "check requires callables-v1; ordinary-methods-v1 is available through the legacy option-only invocation."
                     : "check orchestration is reserved for issue #10; use analyze --syntax-only for the issue #7 adapter.");
             cancellationToken.ThrowIfCancellationRequested();
-            var result = AnalyzeCapturedInputs(options, workingDirectory, startedAt, stopwatch);
+            var result = options.Ruleset == ComplexityRules.OrdinaryMethodsV1
+                ? await AnalyzeLegacyCapturedInputsAsync(options, workingDirectory, startedAt, stopwatch, cancellationToken)
+                : AnalyzeCapturedInputs(options, workingDirectory, startedAt, stopwatch);
             var json = ResultWriter.Serialize(result);
             if (options.Output is not null)
             {
@@ -259,11 +261,33 @@ internal static class App
         }
         if (options.Ruleset is not (ComplexityRules.CallablesV1 or ComplexityRules.OrdinaryMethodsV1))
             throw new ArgumentException($"Unknown ruleset '{options.Ruleset}'.");
-        if (options.Command == "analyze" && options.Ruleset != ComplexityRules.CallablesV1)
-            throw new ArgumentException("analyze uses callables-v1; ordinary-methods-v1 remains the legacy option-only contract.");
         if (options.Command == "analyze" && !options.SyntaxOnly)
             throw new ArgumentException("Issue #7 analyze requires --syntax-only; project build orchestration is deferred to issue #10.");
         return options;
+    }
+
+    private static async Task<ResultDocument> AnalyzeLegacyCapturedInputsAsync(ModernOptions modern,
+        string workingDirectory, DateTimeOffset startedAt, Stopwatch stopwatch, CancellationToken cancellationToken)
+    {
+        if (modern.Coverage.Count == 0)
+            throw new ArgumentException("Legacy syntax-only analyze requires at least one explicit --coverage report.");
+        if (modern.Exemptions is not null)
+            throw new ArgumentException("--callable-exemptions is not applicable to ordinary-methods-v1.");
+        var options = new Options
+        {
+            Threshold = modern.Threshold,
+            AllowMissingCoverage = modern.AllowMissingCoverage,
+            Format = modern.Format,
+            Output = modern.Output,
+            InvocationMode = "analyze",
+            Ruleset = ComplexityRules.OrdinaryMethodsV1
+        };
+        options.Inputs.AddRange(modern.Inputs);
+        options.Coverage.AddRange(modern.Coverage);
+        var outcome = await ExecuteAsync(options, workingDirectory, cancellationToken,
+            (_, _, _, _, _) => throw new InvalidOperationException("syntax-only analyze cannot launch child processes"),
+            TextWriter.Null, TextWriter.Null, () => { });
+        return BuildResult(outcome, options, workingDirectory, startedAt, DateTimeOffset.UtcNow, stopwatch.Elapsed);
     }
 
     private static ResultDocument AnalyzeCapturedInputs(ModernOptions options, string workingDirectory,
@@ -756,7 +780,7 @@ internal static class App
         var pathMappings = options.ValidatedCoveragePathMappings.Select(mapping => new CoveragePathMappingResult(
             mapping.ReportRoot, mapping.LocalRoot, mapping.Id))
             .OrderBy(mapping => mapping.ReportRoot, StringComparer.Ordinal).ThenBy(mapping => mapping.LocalRoot, StringComparer.Ordinal).ToArray();
-        var evaluation = new EvaluationSection("legacy", new PolicyOptions(options.Threshold, options.AllowMissingCoverage),
+        var evaluation = new EvaluationSection(options.InvocationMode, new PolicyOptions(options.Threshold, options.AllowMissingCoverage),
                 new EvaluationScope(".", outcome.Files.Select(ResultPath).Order(StringComparer.Ordinal).ToArray()),
                 [new EvaluationContext("legacy-syntax", "syntaxOnly", null, null, null, null, null)], checks, metrics, findings,
                 new CoverageSummary(metrics.Length, metrics.Count(metric => metric.Coverage is not null), metrics.Count(metric => metric.Coverage is null), reasonCounts),
@@ -774,7 +798,7 @@ internal static class App
         {
             CoverageEvidence = outcome.CoverageEvidence.OrderBy(item => item.Id, StringComparer.Ordinal).ToArray()
         };
-        return new ResultDocument(ResultContract.SchemaVersion, ToolVersion, ResultContract.ComplexityRulesetVersion,
+        return new ResultDocument(ResultContract.SchemaVersion, ToolVersion, options.Ruleset,
             evaluation, run);
     }
 
@@ -989,6 +1013,8 @@ internal static class App
         public IReadOnlyList<CoveragePathMappingIdentity> ValidatedCoveragePathMappings { get; set; } = [];
         public string Format { get; set; } = "human";
         public string? Output { get; set; }
+        public string InvocationMode { get; set; } = "legacy";
+        public string Ruleset { get; set; } = ComplexityRules.OrdinaryMethodsV1;
     }
 
     private sealed record ExecutionOutcome

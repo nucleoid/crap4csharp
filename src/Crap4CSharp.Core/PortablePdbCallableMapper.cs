@@ -160,8 +160,7 @@ public static class PortablePdbCallableMapper
     }
 
     private static bool PathEqual(string left, string right) => string.Equals(
-        left.Replace('\\', '/'), right.Replace('\\', '/'), StringComparison.Ordinal) ||
-        string.Equals(Path.GetFileName(left), Path.GetFileName(right), StringComparison.Ordinal);
+        left.Replace('\\', '/'), right.Replace('\\', '/'), StringComparison.Ordinal);
     private static bool TypesEqual(string left, string right) => left == right || left.Replace('+', '.') == right.Replace('+', '.');
     private static string NormalizeType(string value) => value.Replace("global::", string.Empty, StringComparison.Ordinal)
         .Replace(" ", string.Empty, StringComparison.Ordinal).TrimEnd('?');
