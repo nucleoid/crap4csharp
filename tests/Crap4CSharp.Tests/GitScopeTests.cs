@@ -192,6 +192,108 @@ public sealed class GitScopeTests : IDisposable
     }
 
     [Fact]
+    public async Task DocumentationAndTestChangesDoNotMakeProductionScopeIncomplete()
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("src/Code.cs", "class C { int M() => 1; }");
+        Write("tests/TestCode.cs", "class T { int Test() => 1; }");
+        Write("README.md", "before\n");
+        await Git("add", "--", ".");
+        await Git("commit", "--quiet", "-m", "base");
+        Write("src/Code.cs", "class C { int M() => 2; }");
+        Write("tests/TestCode.cs", "class T { int Test() => 2; }");
+        Write("README.md", "after\n");
+
+        var scope = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Worktree), temporary,
+            TimeSpan.FromSeconds(10), CancellationToken.None);
+
+        Assert.Equal(ScopeCompleteness.Complete, scope.Completeness);
+        Assert.Contains("scope.excludedTestSource:tests/TestCode.cs", scope.Diagnostics);
+        Assert.Contains("scope.unclassifiedChangedInput:README.md", scope.Diagnostics);
+        Assert.DoesNotContain("scope.contextIncomplete", scope.Diagnostics);
+    }
+
+    [Fact]
+    public async Task RenameFromExcludedTestDirectoryBecomesProductionAddition()
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("tests/Helper.cs", "class Helper { int M() => 1; }\n");
+        await Git("add", "--", ".");
+        await Git("commit", "--quiet", "-m", "base");
+        var @base = (await Git("rev-parse", "HEAD")).StandardOutput.Trim();
+        Directory.CreateDirectory(Path.Combine(temporary, "src"));
+        File.Move(Path.Combine(temporary, "tests", "Helper.cs"), Path.Combine(temporary, "src", "Helper.cs"));
+        await Git("add", "--", ".");
+        await Git("commit", "--quiet", "-m", "move to production");
+        var head = (await Git("rev-parse", "HEAD")).StandardOutput.Trim();
+
+        var scope = await GitScopeResolver.CaptureAsync(
+            new GitScopeRequest(ChangeScopeMode.Base, @base, head, ScopeSourceState.Head), temporary,
+            TimeSpan.FromSeconds(10), CancellationToken.None);
+
+        var file = Assert.Single(scope.Files);
+        Assert.Equal(ScopeChangeKind.Added, file.Kind);
+        Assert.Null(file.OldPath);
+        var methods = new SourceAnalyzer().AnalyzeCaptured(file.NewPath!, file.NewSource!.Bytes);
+        Assert.Equal("M", Assert.Single(ChangedMethodSelector.Select(file, [], methods, ScopeGranularity.Method).Methods).MethodName);
+    }
+
+    [Fact]
+    public async Task CommittedHeadCaptureAllowsSkipWorktreeEntries()
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("Code.cs", "class C { int Before() => 1; }");
+        await Git("add", "--", "Code.cs");
+        await Git("commit", "--quiet", "-m", "base");
+        var @base = (await Git("rev-parse", "HEAD")).StandardOutput.Trim();
+        Write("Code.cs", "class C { int After() => 2; }");
+        await Git("commit", "--quiet", "-am", "head");
+        var head = (await Git("rev-parse", "HEAD")).StandardOutput.Trim();
+        await Git("update-index", "--skip-worktree", "Code.cs");
+
+        var scope = await GitScopeResolver.CaptureAsync(
+            new GitScopeRequest(ChangeScopeMode.Base, @base, head, ScopeSourceState.Head), temporary,
+            TimeSpan.FromSeconds(10), CancellationToken.None);
+
+        Assert.Contains("After", Assert.Single(scope.Files).NewSource!.Text);
+    }
+
+    [Fact]
+    public async Task MissingHeadObjectIsNotMisreportedAsUnborn()
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("Code.cs", "class C { int M() => 1; }");
+        await Git("add", "--", "Code.cs");
+        await Git("commit", "--quiet", "-m", "base");
+        var head = (await Git("rev-parse", "HEAD")).StandardOutput.Trim();
+        File.Delete(Path.Combine(temporary, ".git", "objects", head[..2], head[2..]));
+
+        var error = await Assert.ThrowsAsync<ScopeException>(() => GitScopeResolver.CaptureAsync(
+            new GitScopeRequest(ChangeScopeMode.Base, "HEAD", "HEAD", ScopeSourceState.Head), temporary,
+            TimeSpan.FromSeconds(10), CancellationToken.None));
+
+        Assert.Equal("scope.gitFailed", error.Reason);
+    }
+
+    [Fact]
+    public void CapturedAndProjectContextContentIdentitiesUseTheSameFormat()
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes("class C { }");
+
+        var captured = CapturedSource.Create("Code.cs", bytes);
+
+        Assert.Equal(ProjectAnalysisContext.ContentHash(bytes), captured.ContentIdentity);
+    }
+
+    [Fact]
     public async Task UnbornWorktreeAndStagedScopesTreatSourcesAsAdditions()
     {
         await Git("init", "--quiet");
