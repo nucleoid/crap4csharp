@@ -6,4 +6,5 @@
     <Compile Include="../Shared/Linked.cs" Link="Linked/Linked.cs" />
     <Compile Include="Generated.g.cs" />
   </ItemGroup>
+  <ItemGroup><ProjectReference Include="../Referenced/Library.csproj" /></ItemGroup>
 </Project>

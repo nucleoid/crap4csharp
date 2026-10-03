@@ -16,6 +16,8 @@ public sealed record ProjectContextLoadRequest(
     public string? SdkPath { get; init; }
     public string? SdkVersion { get; init; }
     public string? MsBuildVersion { get; init; }
+    public string? DotNetRoot { get; init; }
+    public string? DotNetHostPath { get; init; }
 }
 
 public sealed record ProjectContextLoadResult(
@@ -69,21 +71,43 @@ public static class ProjectContextLoader
     {
         var target = ProjectTargetSelector.Select(Path.GetDirectoryName(Path.GetFullPath(request.Target))!, request.Target);
         var root = Path.GetDirectoryName(target)!;
-        var sdk = await ResolveSdkAsync(root, request.Timeout, cancellationToken);
-        var effective = request with { Target = target, SdkPath = sdk.Path, SdkVersion = sdk.Version, MsBuildVersion = sdk.MsBuildVersion };
         var before = SnapshotAuthoredInputs(root);
+        using var overallTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        overallTimeout.CancelAfter(request.Timeout);
+        var operationToken = overallTimeout.Token;
+        (string Version, string Path, string MsBuildVersion, string DotNetRoot, string HostPath) sdk;
+        try
+        {
+            sdk = await ResolveSdkAsync(root, request.Timeout, operationToken);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && overallTimeout.IsCancellationRequested)
+        {
+            return SnapshotFailure(root, before, "context.loaderTimeout", $"Project context loading exceeded {request.Timeout.TotalSeconds:0.###} seconds.");
+        }
+        var effective = request with
+        {
+            Target = target, SdkPath = sdk.Path, SdkVersion = sdk.Version, MsBuildVersion = sdk.MsBuildVersion,
+            DotNetRoot = sdk.DotNetRoot, DotNetHostPath = sdk.HostPath
+        };
         var scratch = Path.Combine(Path.GetTempPath(), "crap4csharp-context", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(scratch);
         var requestPath = Path.Combine(scratch, "request.json");
         var responsePath = Path.Combine(scratch, "response.json");
-        await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(effective, JsonOptions), cancellationToken);
+        await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(effective, JsonOptions), operationToken);
         var assembly = typeof(ProjectContextLoader).Assembly.Location;
         try
         {
-            var result = await ProcessRunner.RunAsync(DotNetHost, [assembly, LoaderCommand, requestPath, responsePath], root, request.Timeout, cancellationToken);
+            var environment = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["DOTNET_ROOT"] = sdk.DotNetRoot,
+                ["DOTNET_HOST_PATH"] = sdk.HostPath,
+                ["PATH"] = sdk.DotNetRoot + Path.PathSeparator + (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+            };
+            var result = await ProcessRunner.RunWithEnvironmentAsync(sdk.HostPath, [assembly, LoaderCommand, requestPath, responsePath],
+                root, request.Timeout, operationToken, environment);
             ProjectContextLoadResult loaded;
             if (File.Exists(responsePath))
-                loaded = JsonSerializer.Deserialize<ProjectContextLoadResult>(await File.ReadAllTextAsync(responsePath, cancellationToken), JsonOptions)
+                loaded = JsonSerializer.Deserialize<ProjectContextLoadResult>(await File.ReadAllTextAsync(responsePath, operationToken), JsonOptions)
                     ?? new ProjectContextLoadResult(false, [], ["Loader returned an empty response."], "context.protocolInvalid");
             else
                 loaded = new ProjectContextLoadResult(false, [], SplitDiagnostics(result), "context.loaderFailed");
@@ -97,7 +121,11 @@ public static class ProjectContextLoader
         }
         catch (JsonException exception)
         {
-            return new ProjectContextLoadResult(false, [], [exception.Message], "context.protocolInvalid");
+            return SnapshotFailure(root, before, "context.protocolInvalid", exception.Message);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && overallTimeout.IsCancellationRequested)
+        {
+            return SnapshotFailure(root, before, "context.loaderTimeout", $"Project context loading exceeded {request.Timeout.TotalSeconds:0.###} seconds.");
         }
         finally
         {
@@ -105,9 +133,18 @@ public static class ProjectContextLoader
         }
     }
 
+    private static ProjectContextLoadResult SnapshotFailure(string root, IReadOnlyDictionary<string, string> before,
+        string reason, string diagnostic)
+    {
+        var after = SnapshotAuthoredInputs(root);
+        return before.OrderBy(pair => pair.Key, StringComparer.Ordinal).SequenceEqual(after.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+            ? new ProjectContextLoadResult(false, [], [diagnostic], reason)
+            : new ProjectContextLoadResult(false, [], [diagnostic, "Authored inputs changed while project context was loading."], "context.inputsMutated");
+    }
+
     private static string DotNetHost => Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet";
 
-    private static async Task<(string Version, string Path, string MsBuildVersion)> ResolveSdkAsync(string root, TimeSpan timeout, CancellationToken cancellationToken)
+    private static async Task<(string Version, string Path, string MsBuildVersion, string DotNetRoot, string HostPath)> ResolveSdkAsync(string root, TimeSpan timeout, CancellationToken cancellationToken)
     {
         var versionResult = await ProcessRunner.RunAsync(DotNetHost, ["--version"], root, timeout, cancellationToken);
         if (versionResult.ExitCode != 0) throw new ProjectContextException("context.sdkResolutionFailed", versionResult.StandardError);
@@ -122,7 +159,11 @@ public static class ProjectContextLoader
         var msbuild = await ProcessRunner.RunAsync(DotNetHost, ["msbuild", "-version", "-nologo", "-nr:false"], root, timeout, cancellationToken);
         if (msbuild.ExitCode != 0) throw new ProjectContextException("context.sdkResolutionFailed", msbuild.StandardError);
         var msbuildVersion = msbuild.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Last();
-        return (version, Path.Combine(sdkRoot, version), msbuildVersion);
+        var dotnetRoot = Directory.GetParent(sdkRoot)?.FullName
+            ?? throw new ProjectContextException("context.sdkResolutionFailed", $"Could not determine dotnet root from {sdkRoot}.");
+        var hostPath = Path.Combine(dotnetRoot, OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet");
+        if (!File.Exists(hostPath)) throw new ProjectContextException("context.sdkResolutionFailed", $"Resolved dotnet host is unavailable: {hostPath}");
+        return (version, Path.Combine(sdkRoot, version), msbuildVersion, dotnetRoot, hostPath);
     }
 
     private static string[] SplitDiagnostics(ProcessResult result) =>

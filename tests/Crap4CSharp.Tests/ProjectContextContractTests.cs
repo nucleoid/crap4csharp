@@ -60,7 +60,7 @@ public sealed class ProjectContextContractTests
         var context = ProjectAnalysisContext.Create("App.csproj", "App", "net10.0", "Debug", "AnyCPU",
             LanguageVersion.CSharp14, [], SourceCodeKind.Regular, [], [source],
             new ProjectExclusionPolicy(false, false), new ProjectAdapterIdentity("10.0.103", "18.0.11", "5.0.0"));
-        var evidence = new CompiledInputEvidence(context.ContextId, "missing.dll", null,
+        var evidence = new CompiledInputEvidence(context.ContextId, "missing.dll", "missing-hash", null, null,
             [new CompiledInputIdentity("A.cs", "different", false)], true, null);
 
         var capability = CompiledInputCapture.Validate(context, evidence);

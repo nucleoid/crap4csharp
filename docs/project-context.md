@@ -13,13 +13,13 @@ The loader does not restore, build, add packages, run tests, or call Roslyn's mu
 
 `MSBuildWorkspace` design-time documents establish `DesignTimeComplete` only. `CompiledInputBindingComplete` stays false until sanitized compiler observations and output identities are supplied and `CompiledInputCapture.Validate` proves an exact context/source match. `ReuseRecipeComplete` is separate and remains false in this slice. Unknown, drifted, or incomplete evidence fails closed.
 
-The selected consumer SDK is resolved by `dotnet` from the consumer target directory, so a consumer `global.json` participates. MSBuild is registered from that exact SDK before any workspace type is used. Each target framework is loaded in a separate workspace with its own global properties.
+The selected consumer SDK is resolved by `dotnet` from the consumer target directory, so a consumer `global.json` participates. The child and its BuildHost receive the resolved host, `DOTNET_ROOT`, and `PATH`; MSBuild is registered from that exact SDK before any workspace type is used. Every selected project directory is rechecked and a nested SDK disagreement fails `context.sdkMismatch`. Each target framework is loaded in a separate workspace with its own global properties.
 
 ## Identity and exclusions
 
 Context identity is a length-prefixed canonical SHA-256 manifest over logical project identity, assembly, TFM, effective configuration/platform, language/source kind, sorted symbols, raw-byte content-addressed evaluated imports, included source physical/logical identities and hashes, exclusions and policy, plus adapter versions. Absolute temporary roots, timestamps, and Roslyn project IDs are excluded. Linked inputs retain separate physical and logical identities.
 
-The full workspace compile inventory is observed before policy filtering. Test projects (from evaluated `IsTestProject`) and generated documents are disclosed as exclusions unless explicitly included. Generated inclusion requests compilation-backed syntax trees; inability to produce them is an operational failure. Directory names alone do not classify projects as tests.
+The full workspace compile inventory is observed before policy filtering. Test projects (from evaluated `IsTestProject`) and generated documents are disclosed as exclusions unless explicitly included. Generated inclusion requests compilation-backed syntax trees; unresolved analyzer/generator references, load failures, and generator diagnostics are operational failures. Directory names alone do not classify projects as tests. SolutionPersistence enumerates `.slnx` entries and mappings; classic MSBuild solution APIs do the same for `.sln`, and non-C# or configuration-disabled projects become explicit exclusions.
 
 ## Trust and mutation
 
