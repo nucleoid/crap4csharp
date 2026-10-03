@@ -118,7 +118,7 @@ public sealed class CoveragePathTests : IDisposable
 
         var result = CoverageReader.ReadDetailed(report, resolver);
 
-        Assert.Empty(result.Diagnostics.Where(diagnostic => diagnostic.Severity == CoverageDiagnosticSeverity.Error));
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == CoverageDiagnosticSeverity.Error);
         Assert.Equal(source, Assert.Single(result.Methods).File);
     }
 
@@ -132,13 +132,14 @@ public sealed class CoveragePathTests : IDisposable
             <packages><package><classes><class name="C" filename="C.cs"><methods><method name="M" signature="()"><lines><line number="1" hits="1" /></lines></method></methods></class></classes></package></packages></coverage>
             """);
         var inventory = new CoverageSourceInventory(PathIdentityPolicy.Sensitive,
-            [Entry(first, Path.GetDirectoryName(first)!), Entry(second, Path.GetDirectoryName(second)!)],
+            [new(first, "one/C.cs", Path.GetDirectoryName(first)!, first, Path.GetDirectoryName(first)!, null),
+             new(second, "two/C.cs", Path.GetDirectoryName(second)!, second, Path.GetDirectoryName(second)!, null)],
             [new(Path.GetDirectoryName(first)!, Path.GetDirectoryName(first)!), new(Path.GetDirectoryName(second)!, Path.GetDirectoryName(second)!)]);
         var resolver = new CoveragePathResolver(PathIdentityPolicy.Sensitive, inventory, [], CoveragePathCase.Auto);
 
         var result = CoverageReader.ReadDetailed(report, resolver);
 
-        Assert.Empty(result.Methods.Where(method => method.File is not null));
+        Assert.DoesNotContain(result.Methods, method => method.File is not null);
         var diagnostic = Assert.Single(result.Diagnostics, diagnostic => diagnostic.Code == CoverageReasonCodes.AmbiguousPath);
         Assert.Equal(2, diagnostic.CandidatePaths.Count);
     }

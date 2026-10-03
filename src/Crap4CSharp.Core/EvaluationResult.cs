@@ -11,11 +11,22 @@ public static class ResultContract
 
 public static class CoverageReasonCodes
 {
+    public const string MissingPath = "coverage.missingPath";
+    public const string InvalidPath = "coverage.invalidPath";
+    public const string PathOutsideRoot = "coverage.pathOutsideRoot";
+    public const string PathMappingConflict = "coverage.pathMappingConflict";
+    public const string AmbiguousPath = "coverage.ambiguousPath";
+    public const string TypeMismatch = "coverage.typeMismatch";
+    public const string SignatureMismatch = "coverage.signatureMismatch";
+    public const string SpanMismatch = "coverage.spanMismatch";
     public const string NoMatchingMethod = "coverage.noMatchingMethod";
     public const string AmbiguousMethod = "coverage.ambiguousMethod";
     public const string ConflictingModule = "coverage.conflictingModule";
     public const string NoEligiblePoints = "coverage.noEligiblePoints";
     public const string UnsupportedGeneratedMapping = "coverage.unsupportedGeneratedMapping";
+    public const string UnsupportedMultiDocumentMapping = "coverage.unsupportedMultiDocumentMapping";
+    public const string ContextMismatch = "coverage.contextMismatch";
+    public const string ContextUnbound = "coverage.contextUnbound";
     public const string Unavailable = "coverage.unavailable";
 }
 
@@ -36,9 +47,16 @@ public sealed record EvaluationSection(
     IReadOnlyList<FindingResult> Findings,
     CoverageSummary Coverage,
     IReadOnlyList<ArtifactIdentity> Artifacts,
-    EvaluationDecision Decision);
+    EvaluationDecision Decision)
+{
+    public CoveragePathPolicyResult CoveragePathPolicy { get; init; } = new("auto", []);
+    public IReadOnlyList<CoverageDiagnostic> CoverageDiagnostics { get; init; } = [];
+}
 
 public sealed record PolicyOptions(double Threshold, bool AllowMissingCoverage, string ComparisonOperator = "gt");
+
+public sealed record CoveragePathPolicyResult(string Case, IReadOnlyList<CoveragePathMappingResult> Mappings);
+public sealed record CoveragePathMappingResult(string ReportRoot, string LocalRoot, string Id);
 
 public sealed record EvaluationScope(string LogicalWorkspaceRoot, IReadOnlyList<string> Sources);
 
@@ -62,7 +80,10 @@ public sealed record MetricResult(
     int Complexity,
     double? Coverage,
     double? Crap,
-    string? CoverageReason);
+    string? CoverageReason)
+{
+    public MethodCoverageStatus? CoverageStatus { get; init; }
+}
 
 public sealed record SourceSpan(int StartLine, int EndLine);
 
@@ -84,7 +105,10 @@ public sealed record FindingResult(
     double Threshold,
     string ComparisonOperator,
     string Decision,
-    IReadOnlyList<string> ReasonCodes);
+    IReadOnlyList<string> ReasonCodes)
+{
+    public MethodCoverageStatus? CoverageStatus { get; init; }
+}
 
 public sealed record CoverageSummary(int Methods, int Known, int Unknown, IReadOnlyDictionary<string, int> Reasons);
 
@@ -102,7 +126,19 @@ public sealed record RunSection(
     IReadOnlyList<RunArtifact> Artifacts,
     CancellationDetails Cancellation,
     string Status,
-    int ExitCode);
+    int ExitCode)
+{
+    public IReadOnlyList<CoverageRunEvidence> CoverageEvidence { get; init; } = [];
+}
+
+public sealed record CoverageRunEvidence(
+    string Id,
+    string? ReportId,
+    string? ObservationId,
+    string? ReportedPath,
+    string? LocalPath,
+    string Status,
+    string? MappingId);
 
 public sealed record CommandRecord(string FileName, IReadOnlyList<string> Arguments, int? ExitCode);
 public sealed record RunArtifact(string Kind, string Path, string Retention, bool Complete, bool Reusable);

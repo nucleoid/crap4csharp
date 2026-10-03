@@ -366,7 +366,7 @@ public sealed class CoreTests : IDisposable
         var unmappedStrict = await RunApp("--coverage", report, source);
         var unmappedAllowed = await RunApp("--allow-missing-coverage", "--coverage", report, source);
 
-        Assert.Equal(0, mapped.ExitCode);
+        Assert.True(mapped.ExitCode == 0, $"stdout: {mapped.Output} stderr: {mapped.Error}");
         Assert.Equal(1, unmappedStrict.ExitCode);
         Assert.Equal(0, unmappedAllowed.ExitCode);
     }

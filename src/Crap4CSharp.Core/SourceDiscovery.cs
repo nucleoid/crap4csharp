@@ -7,13 +7,21 @@ public static class SourceDiscovery
         ".git", "bin", "obj", "packages", "TestResults", "node_modules"
     };
 
-    public static IReadOnlyList<string> Discover(IEnumerable<string> inputs, string workingDirectory)
+    public static IReadOnlyList<string> Discover(IEnumerable<string> inputs, string workingDirectory) =>
+        Discover(inputs, workingDirectory, PathIdentityPolicy.Current);
+
+    public static IReadOnlyList<string> Discover(
+        IEnumerable<string> inputs,
+        string workingDirectory,
+        PathIdentityPolicy pathPolicy)
     {
-        var resolvedInputs = inputs.Any() ? inputs : [workingDirectory];
-        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        ArgumentNullException.ThrowIfNull(pathPolicy);
+        var inputList = inputs.ToArray();
+        var resolvedInputs = inputList.Length > 0 ? inputList : [workingDirectory];
+        var files = new List<string>();
         foreach (var input in resolvedInputs)
         {
-            var path = Path.GetFullPath(input, workingDirectory);
+            var path = pathPolicy.Normalize(input, workingDirectory);
             if (File.Exists(path))
             {
                 if (!IsSource(path)) throw new ArgumentException($"Explicit input is not an eligible C# source file: {input}");
@@ -24,11 +32,11 @@ public static class SourceDiscovery
             if (!Directory.Exists(path)) throw new DirectoryNotFoundException($"Input does not exist: {input}");
             foreach (var file in Directory.EnumerateFiles(path, "*.cs", SearchOption.AllDirectories))
             {
-                if (IsSource(file) && !IsExcludedByDirectory(file, path)) files.Add(Path.GetFullPath(file));
+                if (IsSource(file) && !IsExcludedByDirectory(file, path)) files.Add(pathPolicy.Normalize(file));
             }
         }
 
-        return files.Order(StringComparer.Ordinal).ToArray();
+        return pathPolicy.DistinctOrThrow(files, "selected source inventory");
     }
 
     public static bool IsSource(string path)

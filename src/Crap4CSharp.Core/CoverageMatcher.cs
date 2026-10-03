@@ -2,7 +2,11 @@ namespace Crap4CSharp.Core;
 
 public static class CoverageMatcher
 {
-    public sealed record DetailedMatch(SourceMethod Source, MethodMetric Metric, string? CoverageReason);
+    public sealed record DetailedMatch(SourceMethod Source, MethodMetric Metric, string? CoverageReason)
+    {
+        public IReadOnlyList<string> ReasonCodes { get; init; } = [];
+        public IReadOnlyList<string> DiagnosticIds { get; init; } = [];
+    }
 
     public static IReadOnlyList<MethodMetric> Apply(
         IReadOnlyList<SourceMethod> sourceMethods,
@@ -11,41 +15,81 @@ public static class CoverageMatcher
 
     public static IReadOnlyList<DetailedMatch> ApplyDetailed(
         IReadOnlyList<SourceMethod> sourceMethods,
-        IEnumerable<IReadOnlyList<CoverageMethod>> reports)
+        IEnumerable<IReadOnlyList<CoverageMethod>> reports) =>
+        ApplyDetailedResult(sourceMethods, reports).Matches;
+
+    public static CoverageMatchResult ApplyDetailedResult(
+        IReadOnlyList<SourceMethod> sourceMethods,
+        IEnumerable<IReadOnlyList<CoverageMethod>> reports,
+        PathIdentityPolicy? pathPolicy = null)
     {
+        pathPolicy ??= PathIdentityPolicy.Current;
         var reportList = reports.ToArray();
         var observations = sourceMethods.ToDictionary(method => method, _ => new Observation());
+        var diagnostics = new List<CoverageDiagnostic>();
         foreach (var report in reportList)
         {
             foreach (var covered in report)
             {
+                if (covered.PathResolution?.Diagnostic is { } pathDiagnostic) diagnostics.Add(pathDiagnostic);
                 if (covered.File is null) continue;
-                foreach (var source in sourceMethods.Where(source => PathsEqual(source.File, covered.File) &&
-                    covered.MethodName == "MoveNext" && covered.TypeName.Contains($"<{source.MethodName}>d__", StringComparison.Ordinal)))
-                    observations[source].ObservedReason ??= CoverageReasonCodes.UnsupportedGeneratedMapping;
-                var candidates = sourceMethods.Where(source =>
-                        PathsEqual(source.File, covered.File) &&
-                        source.MethodName == covered.MethodName &&
-                        TypesEqual(source.CoverageTypeName, covered.TypeName) &&
-                        (covered.ParameterCount is null || ParameterCount(source.Signature) == covered.ParameterCount))
-                    .ToArray();
-                if (candidates.Length == 0) continue;
-
-                var byLine = candidates.Where(source => covered.SequencePoints.Count > 0 &&
-                    covered.SequencePoints.All(point => point.Line >= source.StartLine && point.Line <= source.EndLine)).ToArray();
-                var zeroPointMatch = covered.SequencePoints.Count == 0 && candidates.Length == 1 ? candidates[0] : null;
-                SourceMethod? match = byLine.Length == 1 ? byLine[0] : zeroPointMatch;
-                if (match is null)
+                var byPath = sourceMethods.Where(source => PathsEqual(pathPolicy, source.File, covered.File)).ToArray();
+                if (covered.MethodName == "MoveNext" && IsGeneratedStateMachine(covered.TypeName))
                 {
-                    var reason = candidates.Length > 1 ? CoverageReasonCodes.AmbiguousMethod : CoverageReasonCodes.NoMatchingMethod;
-                    foreach (var candidate in candidates) observations[candidate].ObservedReason ??= reason;
+                    diagnostics.Add(CoverageDiagnostic.Create(CoverageReasonCodes.UnsupportedGeneratedMapping,
+                        CoverageDiagnosticStage.Generated, CoverageDiagnosticSeverity.Warning, CoverageDiagnosticScope.Observation,
+                        covered.ReportId, covered.ObservationId, reportedType: covered.TypeName,
+                        reportedMethodName: covered.MethodName, reportedParameterCount: covered.ParameterCount,
+                        moduleIdentities: covered.ModuleIdentity is null ? [] : [covered.ModuleIdentity],
+                        message: "Generated MoveNext coverage cannot be associated without authoritative metadata."));
+                    continue;
+                }
+                if (byPath.Length == 0) continue;
+
+                var byType = byPath.Where(source => TypesEqual(source.CoverageTypeName, covered.TypeName)).ToArray();
+                if (byType.Length == 0)
+                {
+                    RecordRejection(byPath, covered, CoverageReasonCodes.TypeMismatch, CoverageDiagnosticStage.Method,
+                        observations, diagnostics);
                     continue;
                 }
 
+                var bySignature = byType.Where(source => source.MethodName == covered.MethodName &&
+                    (covered.ParameterCount is null || ParameterCount(source.Signature) == covered.ParameterCount)).ToArray();
+                if (bySignature.Length == 0)
+                {
+                    RecordRejection(byType, covered, CoverageReasonCodes.SignatureMismatch, CoverageDiagnosticStage.Method,
+                        observations, diagnostics);
+                    continue;
+                }
+
+                if (covered.SequencePoints.Count == 0)
+                {
+                    RecordRejection(bySignature, covered, CoverageReasonCodes.NoEligiblePoints, CoverageDiagnosticStage.Points,
+                        observations, diagnostics);
+                    foreach (var source in bySignature) observations[source].HasCompatibleObservation = true;
+                    continue;
+                }
+
+                var byLine = bySignature.Where(source => covered.SequencePoints.All(point =>
+                    point.Line >= source.StartLine && point.Line <= source.EndLine)).ToArray();
+                if (byLine.Length == 0)
+                {
+                    RecordRejection(bySignature, covered, CoverageReasonCodes.SpanMismatch, CoverageDiagnosticStage.Points,
+                        observations, diagnostics);
+                    continue;
+                }
+                if (byLine.Length > 1)
+                {
+                    RecordRejection(byLine, covered, CoverageReasonCodes.AmbiguousMethod, CoverageDiagnosticStage.Method,
+                        observations, diagnostics);
+                    continue;
+                }
+
+                var match = byLine[0];
                 var observation = observations[match];
-                observation.HasMatch = true;
-                if (covered.SequencePoints.Count > 0)
-                    observation.ModuleIdentities.Add(covered.ModuleIdentity ?? "<unknown module>");
+                observation.HasCompatibleObservation = true;
+                observation.ModuleIdentities.Add(covered.ModuleIdentity ?? "<unknown module>");
                 foreach (var point in covered.SequencePoints)
                 {
                     var identity = new PointIdentity(point.Line, point.StartColumn, point.EndLine, point.EndColumn, point.Offset);
@@ -56,30 +100,100 @@ public static class CoverageMatcher
             }
         }
 
-        return sourceMethods.Select(source =>
+        foreach (var pair in observations.Where(pair => pair.Value.ModuleIdentities.Count > 1))
+        {
+            var source = pair.Key;
+            var observation = pair.Value;
+            observation.Reasons.Add(CoverageReasonCodes.ConflictingModule);
+            diagnostics.Add(CoverageDiagnostic.Create(CoverageReasonCodes.ConflictingModule,
+                CoverageDiagnosticStage.Module, CoverageDiagnosticSeverity.Error, CoverageDiagnosticScope.Method,
+                methodId: source.CanonicalSignature, span: new SourceSpan(source.StartLine, source.EndLine),
+                moduleIdentities: observation.ModuleIdentities,
+                message: "Compatible observations identify conflicting modules."));
+        }
+
+        var matches = sourceMethods.Select(source =>
         {
             var observation = observations[source];
             double? coverage = observation.ModuleIdentities.Count > 1 || observation.Points.Count == 0
                 ? null
                 : (double)observation.Points.Count(point => point.Value) / observation.Points.Count;
-            var reason = coverage is not null ? null : observation.ModuleIdentities.Count > 1
-                ? CoverageReasonCodes.ConflictingModule
-                : observation.HasMatch ? CoverageReasonCodes.NoEligiblePoints
-                : observation.ObservedReason ?? (reportList.Length > 0 ? CoverageReasonCodes.NoMatchingMethod : CoverageReasonCodes.Unavailable);
-            return new DetailedMatch(source, new MethodMetric(source.File, source.TypeName, source.MethodName, source.DisplayName,
-                source.StartLine, source.EndLine, source.Complexity, coverage), reason);
+            if (coverage is null && observation.HasCompatibleObservation && observation.Points.Count == 0)
+                observation.Reasons.Add(CoverageReasonCodes.NoEligiblePoints);
+            if (coverage is null && observation.Reasons.Count == 0)
+                observation.Reasons.Add(reportList.Length > 0 ? CoverageReasonCodes.NoMatchingMethod : CoverageReasonCodes.Unavailable);
+            var reasons = observation.Reasons.Order(StringComparer.Ordinal).ToArray();
+            var primary = coverage is null ? PrimaryReason(reasons) : null;
+            var supporting = diagnostics.Where(diagnostic => diagnostic.MethodId == source.CanonicalSignature)
+                .Select(diagnostic => diagnostic.Id).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+            var status = coverage is double known
+                ? new MethodCoverageStatus("known", known, observation.Points.Count, observation.Points.Count(point => point.Value), null, [], supporting)
+                : new MethodCoverageStatus("unknown", null, null, null, primary, reasons, supporting);
+            var metric = new MethodMetric(source.File, source.TypeName, source.MethodName, source.DisplayName,
+                source.StartLine, source.EndLine, source.Complexity, coverage) { CoverageStatus = status };
+            return new DetailedMatch(source, metric, primary) { ReasonCodes = reasons, DiagnosticIds = supporting };
         }).ToArray();
+
+        var orderedDiagnostics = diagnostics.GroupBy(diagnostic => diagnostic.Id, StringComparer.Ordinal)
+            .Select(group => group.First()).OrderBy(diagnostic => diagnostic.Code, StringComparer.Ordinal)
+            .ThenBy(diagnostic => diagnostic.MethodId, StringComparer.Ordinal).ThenBy(diagnostic => diagnostic.Id, StringComparer.Ordinal)
+            .ToArray();
+        return new CoverageMatchResult(matches, orderedDiagnostics);
     }
 
-    private static bool PathsEqual(string left, string right)
+    private static void RecordRejection(IEnumerable<SourceMethod> sources, CoverageMethod covered, string code,
+        CoverageDiagnosticStage stage, IReadOnlyDictionary<SourceMethod, Observation> observations,
+        ICollection<CoverageDiagnostic> diagnostics)
     {
-        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-        try { return string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), comparison); }
-        catch { return false; }
+        var candidates = sources.OrderBy(source => source.CanonicalSignature, StringComparer.Ordinal).ToArray();
+        foreach (var source in candidates) observations[source].Reasons.Add(code);
+        diagnostics.Add(CoverageDiagnostic.Create(code, stage, CoverageDiagnosticSeverity.Warning,
+            CoverageDiagnosticScope.Observation, covered.ReportId, covered.ObservationId,
+            candidateMethodIds: candidates.Select(source => source.CanonicalSignature),
+            reportedType: covered.TypeName, reportedMethodName: covered.MethodName,
+            reportedParameterCount: covered.ParameterCount,
+            moduleIdentities: covered.ModuleIdentity is null ? [] : [covered.ModuleIdentity],
+            message: $"Coverage observation rejected at {stage.ToString().ToLowerInvariant()} stage."));
+        foreach (var source in candidates)
+            diagnostics.Add(CoverageDiagnostic.Create(code, stage, CoverageDiagnosticSeverity.Warning,
+                CoverageDiagnosticScope.Method, covered.ReportId, covered.ObservationId,
+                methodId: source.CanonicalSignature, span: new SourceSpan(source.StartLine, source.EndLine),
+                reportedType: covered.TypeName, reportedMethodName: covered.MethodName,
+                reportedParameterCount: covered.ParameterCount,
+                moduleIdentities: covered.ModuleIdentity is null ? [] : [covered.ModuleIdentity],
+                message: $"Coverage observation rejected for {source.CanonicalSignature}."));
     }
 
-    private static bool TypesEqual(string source, string covered) =>
-        source == covered.Replace('+', '.');
+    private static string PrimaryReason(IReadOnlyCollection<string> reasons)
+    {
+        foreach (var code in new[]
+        {
+            CoverageReasonCodes.ConflictingModule,
+            CoverageReasonCodes.AmbiguousMethod,
+            CoverageReasonCodes.SpanMismatch,
+            CoverageReasonCodes.NoEligiblePoints,
+            CoverageReasonCodes.SignatureMismatch,
+            CoverageReasonCodes.TypeMismatch,
+            CoverageReasonCodes.AmbiguousPath,
+            CoverageReasonCodes.PathOutsideRoot,
+            CoverageReasonCodes.InvalidPath,
+            CoverageReasonCodes.MissingPath,
+            CoverageReasonCodes.NoMatchingMethod,
+            CoverageReasonCodes.Unavailable
+        })
+            if (reasons.Contains(code, StringComparer.Ordinal)) return code;
+        return CoverageReasonCodes.Unavailable;
+    }
+
+    private static bool PathsEqual(PathIdentityPolicy policy, string left, string right)
+    {
+        try { return policy.Comparer.Equals(policy.Normalize(left), policy.Normalize(right)); }
+        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException) { return false; }
+    }
+
+    private static bool TypesEqual(string source, string covered) => source == covered.Replace('+', '.');
+    private static bool IsGeneratedStateMachine(string typeName) =>
+        typeName.Contains(">d__", StringComparison.Ordinal) && typeName.Contains('<', StringComparison.Ordinal);
 
     private static int? ParameterCount(string? signature)
     {
@@ -104,8 +218,8 @@ public static class CoverageMatcher
     {
         public Dictionary<PointIdentity, bool> Points { get; } = [];
         public HashSet<string> ModuleIdentities { get; } = new(StringComparer.Ordinal);
-        public bool HasMatch { get; set; }
-        public string? ObservedReason { get; set; }
+        public HashSet<string> Reasons { get; } = new(StringComparer.Ordinal);
+        public bool HasCompatibleObservation { get; set; }
     }
 
     private readonly record struct PointIdentity(int Line, int? StartColumn, int? EndLine, int? EndColumn, int? Offset);

@@ -32,6 +32,10 @@ crap4csharp
 crap4csharp --coverage TestResults/coverage.opencover.xml src
 crap4csharp --coverage linux.xml --coverage windows.xml src
 
+# Translate a report produced on another host/container (two operands per map)
+crap4csharp --coverage-path-map 'C:\agent\repo' "$PWD" --coverage windows.xml src
+crap4csharp --coverage-path-map /agent/repo "$PWD" --coverage container.xml src
+
 # Analyze changed and untracked C# files
 crap4csharp --changed --coverage coverage.xml
 
@@ -63,6 +67,8 @@ Every external command has a bounded timeout of 300 seconds by default. Set `--t
 
 Solutions (`.sln` or `.slnx`) are preferred when exactly one exists in the working directory, then a single `.csproj`. Use `--project` when discovery would be ambiguous. Providing any `--coverage` report skips tests and neither creates nor deletes a test-results directory. Missing, malformed, or unsupported reports fail operationally. OpenCover and Cobertura/Coverlet XML are supported; multiple reports merge the union of distinct eligible sequence points. Repeated points are counted once and are visited if any report records a visit.
 
+Coverage paths are parsed independently of the host OS. Repeatable `--coverage-path-map <report-root> <local-root>` translates foreign POSIX, drive, or UNC roots; `--coverage-path-case auto|sensitive|insensitive` controls only foreign comparisons (`auto` is drive/UNC insensitive and POSIX sensitive). Mappings are validated before test execution, use longest complete-component prefix precedence, and can resolve only files already present in the selected inventory. See [coverage source paths and diagnostics](docs/coverage-paths.md).
+
 ## Analysis policy
 
 - Roslyn syntax trees are used; source is never analyzed with regular expressions.
@@ -74,7 +80,7 @@ Solutions (`.sln` or `.slnx`) are preferred when exactly one exists in the worki
 - Compiler-generated async/iterator state-machine `MoveNext` methods are not reassigned to their source methods, so async or iterator source methods may remain `N/A` when a report exposes only state-machine coverage. This is intentionally conservative.
 - Default recursive discovery excludes `.git`, `bin`, `obj`, `packages`, `TestResults`, `node_modules`, `test`, `tests`, and `*.Test(s)` directories, plus common generated names (`*.g.cs`, `*.generated.cs`, `*.designer.cs`, assembly info, and global usings). Explicit eligible `.cs` files are accepted even if they are under an excluded directory; explicit directories retain exclusions. An existing explicit input that is not an eligible `.cs` source file fails instead of becoming an empty success.
 - C# syntax errors are operational failures; malformed syntax trees are never scored.
-- `--changed` consumes NUL-delimited Git porcelain v1, including spaces, untracked files, renames/copies, and deletions. Deleted files are ignored.
+- `--changed` consumes NUL-delimited Git porcelain v1, including spaces, newlines, untracked files, renames/copies, and deletions. Deleted files are ignored; paths escaping the repository root are rejected.
 
 Output is ordered by numeric CRAP score descending, followed by unknown (`N/A`) entries. Ties are deterministic by path and line.
 

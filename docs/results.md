@@ -30,14 +30,25 @@ No eligible ordinary methods, or no methods with a known CRAP score under the ex
 
 Coverage reason codes are:
 
+- `coverage.missingPath`
+- `coverage.invalidPath`
+- `coverage.pathOutsideRoot`
+- `coverage.pathMappingConflict`
+- `coverage.ambiguousPath`
+- `coverage.typeMismatch`
+- `coverage.signatureMismatch`
+- `coverage.spanMismatch`
 - `coverage.noMatchingMethod`
 - `coverage.ambiguousMethod`
 - `coverage.conflictingModule`
 - `coverage.noEligiblePoints`
 - `coverage.unsupportedGeneratedMapping`
+- `coverage.unsupportedMultiDocumentMapping`
+- `coverage.contextMismatch`
+- `coverage.contextUnbound`
 - `coverage.unavailable`
 
-Specific reasons are emitted only from observed evidence. Unknown coverage remains conservative. Human output marks a violation hidden by two-decimal display rounding with `>` and prints the round-trip raw score and threshold.
+Each metric additionally has a typed `coverageStatus` with `known|unknown`, nullable point counts/fraction, one primary reason, sorted reason codes, and supporting diagnostic IDs. `evaluation.coveragePathPolicy` records canonical mapping inputs; `evaluation.coverageDiagnostics` records stable logical diagnostic identities. Absolute/raw report paths and captured local destinations appear only in `run.coverageEvidence`. Specific reasons are emitted only from observed evidence. Unknown coverage remains conservative. Human output marks a violation hidden by two-decimal display rounding with `>` and prints the round-trip raw score and threshold. The full path grammar and diagnostic catalog are in [coverage-paths.md](coverage-paths.md).
 
 ## Output safety
 

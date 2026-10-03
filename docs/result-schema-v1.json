@@ -15,7 +15,7 @@
   "$defs": {
     "evaluation": {
       "type": "object",
-      "required": ["invocationMode", "policy", "scope", "contexts", "checks", "metrics", "findings", "coverage", "artifacts", "decision"],
+      "required": ["invocationMode", "policy", "scope", "contexts", "checks", "metrics", "findings", "coverage", "artifacts", "decision", "coveragePathPolicy", "coverageDiagnostics"],
       "properties": {
         "invocationMode": { "type": "string", "enum": ["legacy", "check", "analyze", "baseline"] },
         "policy": {
@@ -37,7 +37,9 @@
         "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
         "coverage": { "$ref": "#/$defs/coverageSummary" },
         "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact" } },
-        "decision": { "$ref": "#/$defs/decision" }
+        "decision": { "$ref": "#/$defs/decision" },
+        "coveragePathPolicy": { "$ref": "#/$defs/coveragePathPolicy" },
+        "coverageDiagnostics": { "type": "array", "items": { "$ref": "#/$defs/coverageDiagnostic" } }
       }, "additionalProperties": true
     },
     "context": {
@@ -63,13 +65,14 @@
       "additionalProperties": true
     },
     "metric": {
-      "type": "object", "required": ["contextId", "path", "methodIdentity", "signature", "span", "complexity", "coverage", "crap", "coverageReason"],
+      "type": "object", "required": ["contextId", "path", "methodIdentity", "signature", "span", "complexity", "coverage", "crap", "coverageReason", "coverageStatus"],
       "properties": {
         "contextId": { "type": "string" }, "path": { "type": "string" }, "methodIdentity": { "type": "string" },
         "signature": { "type": ["string", "null"] }, "span": { "$ref": "#/$defs/span" },
         "complexity": { "type": "integer", "minimum": 1 }, "coverage": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "crap": { "type": ["number", "null"], "minimum": 0 },
-        "coverageReason": { "type": ["string", "null"] }
+        "coverageReason": { "type": ["string", "null"] },
+        "coverageStatus": { "$ref": "#/$defs/methodCoverageStatus" }
       }, "additionalProperties": true
     },
     "finding": {
@@ -102,6 +105,56 @@
       "properties": { "completed": { "type": "boolean" }, "policyDecision": { "enum": ["pass", "fail", "notApplicable", "unknown"] }, "reason": { "type": "string" } },
       "additionalProperties": true
     },
+    "methodCoverageStatus": {
+      "type": ["object", "null"],
+      "required": ["status", "fraction", "eligiblePoints", "visitedPoints", "primaryReasonCode", "reasonCodes", "diagnosticIds"],
+      "properties": {
+        "status": { "enum": ["known", "unknown"] },
+        "fraction": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "eligiblePoints": { "type": ["integer", "null"], "minimum": 0 },
+        "visitedPoints": { "type": ["integer", "null"], "minimum": 0 },
+        "primaryReasonCode": { "type": ["string", "null"] },
+        "reasonCodes": { "type": "array", "items": { "type": "string" } },
+        "diagnosticIds": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }
+      }, "additionalProperties": true
+    },
+    "coveragePathPolicy": {
+      "type": "object", "required": ["case", "mappings"],
+      "properties": {
+        "case": { "enum": ["auto", "sensitive", "insensitive"] },
+        "mappings": { "type": "array", "items": { "$ref": "#/$defs/coveragePathMapping" } }
+      }, "additionalProperties": true
+    },
+    "coveragePathMapping": {
+      "type": "object", "required": ["reportRoot", "localRoot", "id"],
+      "properties": {
+        "reportRoot": { "type": "string" }, "localRoot": { "type": "string" },
+        "id": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }, "additionalProperties": true
+    },
+    "coverageDiagnostic": {
+      "type": "object",
+      "required": ["id", "code", "stage", "severity", "scope", "contextId", "reportId", "observationId", "path", "externalRootId", "methodId", "span", "candidatePaths", "candidateMethodIds", "reportedType", "reportedMethodName", "reportedParameterCount", "moduleIdentities", "mappingId", "evidenceRefs", "remediationCode", "message"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "code": { "type": "string", "minLength": 1 },
+        "stage": { "enum": ["path", "context", "method", "points", "module", "generated"] },
+        "severity": { "enum": ["info", "warning", "error"] },
+        "scope": { "enum": ["report", "observation", "method"] },
+        "contextId": { "type": ["string", "null"] }, "reportId": { "type": ["string", "null"] },
+        "observationId": { "type": ["string", "null"] }, "path": { "type": ["string", "null"] },
+        "externalRootId": { "type": ["string", "null"] }, "methodId": { "type": ["string", "null"] },
+        "span": { "anyOf": [{ "$ref": "#/$defs/span" }, { "type": "null" }] },
+        "candidatePaths": { "type": "array", "items": { "type": "string" } },
+        "candidateMethodIds": { "type": "array", "items": { "type": "string" } },
+        "reportedType": { "type": ["string", "null"] }, "reportedMethodName": { "type": ["string", "null"] },
+        "reportedParameterCount": { "type": ["integer", "null"] },
+        "moduleIdentities": { "type": "array", "items": { "type": "string" } },
+        "mappingId": { "type": ["string", "null"] },
+        "evidenceRefs": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" } },
+        "remediationCode": { "type": "string" }, "message": { "type": "string" }
+      }, "additionalProperties": true
+    },
     "command": {
       "type": "object", "required": ["fileName", "arguments", "exitCode"],
       "properties": {
@@ -126,13 +179,24 @@
       }, "additionalProperties": true
     },
     "run": {
-      "type": "object", "required": ["invocationId", "startedAt", "finishedAt", "durationMilliseconds", "commands", "diagnosticLocations", "artifacts", "cancellation", "status", "exitCode"],
+      "type": "object", "required": ["invocationId", "startedAt", "finishedAt", "durationMilliseconds", "commands", "diagnosticLocations", "artifacts", "cancellation", "status", "exitCode", "coverageEvidence"],
       "properties": {
         "invocationId": { "type": "string", "format": "uuid" }, "startedAt": { "type": "string", "format": "date-time" },
         "finishedAt": { "type": "string", "format": "date-time" }, "durationMilliseconds": { "type": "number", "minimum": 0 },
         "commands": { "type": "array", "items": { "$ref": "#/$defs/command" } }, "diagnosticLocations": { "type": "array", "items": { "type": "string" } },
         "artifacts": { "type": "array", "items": { "$ref": "#/$defs/runArtifact" } }, "cancellation": { "$ref": "#/$defs/cancellation" },
-        "status": { "enum": ["completed", "operationalError", "cancelled"] }, "exitCode": { "enum": [0, 1, 2] }
+        "status": { "enum": ["completed", "operationalError", "cancelled"] }, "exitCode": { "enum": [0, 1, 2] },
+        "coverageEvidence": { "type": "array", "items": { "$ref": "#/$defs/coverageEvidence" } }
+      }, "additionalProperties": true
+    },
+    "coverageEvidence": {
+      "type": "object", "required": ["id", "reportId", "observationId", "reportedPath", "localPath", "status", "mappingId"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "reportId": { "type": ["string", "null"] }, "observationId": { "type": ["string", "null"] },
+        "reportedPath": { "type": ["string", "null"] }, "localPath": { "type": ["string", "null"] },
+        "status": { "type": "string", "minLength": 1 },
+        "mappingId": { "type": ["string", "null"] }
       }, "additionalProperties": true
     }
   }
