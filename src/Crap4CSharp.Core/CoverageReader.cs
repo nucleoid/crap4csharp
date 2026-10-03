@@ -16,6 +16,11 @@ public sealed record CoverageMethod(string? File, string TypeName, string Method
     public string? ObservationId { get; init; }
     public string? ReportedFile { get; init; }
     public CoveragePathResolution? PathResolution { get; init; }
+    public string? ContextId { get; init; }
+    public string? RawSignature { get; init; }
+    public string? MethodToken { get; init; }
+    public int? GenericArity { get; init; }
+    public IReadOnlyList<string> DocumentIdentities { get; init; } = [];
 }
 
 public static class CoverageReader
@@ -100,6 +105,7 @@ public static class CoverageReader
                     .Elements().FirstOrDefault(element => element.Name.LocalName == "FullName")?.Value ?? string.Empty;
                 var methodName = ParseMethodName(fullName);
                 var parameterCount = ParseParameterCount(fullName);
+                var genericArity = ParseGenericArity(fullName);
                 var rawPoints = method.Descendants().Where(element => element.Name.LocalName == "SequencePoint")
                     .Select(element => new OpenCoverPoint(IntAttr(element, "sl"), IntAttr(element, "vc"),
                         IntAttr(element, "sc"), IntAttr(element, "el"), IntAttr(element, "ec"), IntAttr(element, "offset"),
@@ -138,7 +144,11 @@ public static class CoverageReader
                         reportedParameterCount: parameterCount, moduleIdentities: moduleIdentity is null ? [] : [moduleIdentity],
                         message: fileId is null ? "OpenCover method has no usable file reference." : $"OpenCover file ID '{fileId}' is missing."));
                     output.Add(new CoverageMethod(null, typeName, methodName, parameterCount, points, moduleIdentity)
-                    { ReportId = reportId, ObservationId = observationId });
+                    {
+                        ReportId = reportId, ObservationId = observationId, RawSignature = fullName,
+                        MethodToken = Attr(method, "metadataToken"), GenericArity = genericArity,
+                        DocumentIdentities = documentIds
+                    });
                     continue;
                 }
 
@@ -153,6 +163,8 @@ public static class CoverageReader
                 output.Add(new CoverageMethod(resolution.LocalPath, typeName, methodName, parameterCount, points, moduleIdentity)
                 {
                     ReportId = reportId, ObservationId = observationId, ReportedFile = reportedFile, PathResolution = resolution
+                    , RawSignature = fullName, MethodToken = Attr(method, "metadataToken"), GenericArity = genericArity,
+                    DocumentIdentities = documentIds
                 });
             }
         }
@@ -209,6 +221,8 @@ public static class CoverageReader
                 output.Add(new CoverageMethod(resolution?.LocalPath, typeName, name, parameterCount, points, moduleIdentity)
                 {
                     ReportId = reportId, ObservationId = observationId, ReportedFile = filename, PathResolution = resolution
+                    , RawSignature = signature, GenericArity = ParseGenericArity(name),
+                    DocumentIdentities = filename is null ? [] : [filename]
                 });
             }
         }
@@ -335,6 +349,15 @@ public static class CoverageReader
             else if (character == ',' && depth == 0) count++;
         }
         return count;
+    }
+
+    private static int? ParseGenericArity(string signature)
+    {
+        var beforeParameters = signature.Split('(', 2)[0];
+        var tick = beforeParameters.LastIndexOf('`');
+        if (tick < 0) return 0;
+        var digits = new string(beforeParameters[(tick + 1)..].TakeWhile(char.IsAsciiDigit).ToArray());
+        return int.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out var value) ? value : null;
     }
 
     private static string? Attr(XElement element, string name) => element.Attribute(name)?.Value;

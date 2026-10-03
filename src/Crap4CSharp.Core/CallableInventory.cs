@@ -28,6 +28,18 @@ public sealed record CallableAnalysisContext(
 
 public sealed record CallableSourceSpan(int StartLine, int StartColumn, int EndLine, int EndColumn, int Start, int Length);
 
+public sealed record CallableParameterIdentity(string RefKind, string Type);
+
+public sealed record CallableSemanticIdentity(
+    string TypeName,
+    string MetadataName,
+    int GenericArity,
+    IReadOnlyList<CallableParameterIdentity> Parameters,
+    string ReturnType,
+    bool IsStatic,
+    string ReportSignature,
+    string StableKey);
+
 public sealed record CallableEntry(
     string CallableId,
     string ObservationId,
@@ -44,7 +56,10 @@ public sealed record CallableEntry(
     string BodyChecksum,
     bool IdentityAmbiguous,
     string CoverageCapability,
-    string? CoverageReason);
+    string? CoverageReason)
+{
+    public CallableSemanticIdentity? SemanticIdentity { get; init; }
+}
 
 public sealed record CallableInventoryResult(
     string Ruleset,
@@ -63,6 +78,7 @@ public static class CallableInventory
         var errors = tree.GetDiagnostics().Where(item => item.Severity == DiagnosticSeverity.Error).ToArray();
         if (errors.Length > 0) throw new InvalidDataException(errors[0].ToString());
         var root = tree.GetCompilationUnitRoot();
+        var semanticModel = CSharpCompilation.Create("Crap4CSharp.CallableInventory", [tree]).GetSemanticModel(tree);
         var contentIdentity = ProjectAnalysisContext.ContentHash(text);
         var candidates = Discover(root, tree).OrderBy(item => item.Span.Start).ThenByDescending(item => item.Span.Length)
             .ThenBy(item => item.Kind).ToList();
@@ -80,9 +96,10 @@ public static class CallableInventory
                     IsExecutableParent(item.Candidate.Kind))
                 .OrderBy(item => item.Candidate.OwnershipSpan.Length).FirstOrDefault();
             var anonymous = IsAnonymous(candidate.Kind);
+            var semanticIdentity = SemanticIdentity(candidate, semanticModel);
             var semanticKey = anonymous
                 ? $"{parent.Entry?.CallableId ?? "<root>"}:{candidate.Kind}:{candidate.SemanticKey}:{candidate.BodyFingerprint}"
-                : candidate.SemanticKey;
+                : semanticIdentity?.StableKey ?? candidate.SemanticKey;
             var callableId = Hash(context.Project.Replace('\\', '/'), context.TargetFramework, context.Configuration,
                 context.Platform, ComplexityRules.CallablesV1, candidate.Kind.ToString(), semanticKey);
             var observationId = Hash(callableId, context.ContextId, contentIdentity, logicalPath.Replace('\\', '/'),
@@ -95,6 +112,7 @@ public static class CallableInventory
                 candidate.Applicable ? CallableApplicability.Applicable : CallableApplicability.NotApplicable,
                 candidate.Applicable ? null : "callable.noAuthoredBody", ComplexityRules.CallablesV1,
                 semanticKey, candidate.BodyFingerprint, false, coverage.Capability, coverage.Reason);
+            entry = entry with { SemanticIdentity = semanticIdentity };
             built.Add((candidate, entry));
         }
 
@@ -226,6 +244,56 @@ public static class CallableInventory
             candidate.Node.DescendantNodes().Any(node => node is YieldStatementSyntax))
             return ("portable-pdb-required", "coverage.unsupportedGeneratedMapping");
         return ("semantic-ordinary", null);
+    }
+
+    private static CallableSemanticIdentity? SemanticIdentity(Candidate candidate, SemanticModel model)
+    {
+        IMethodSymbol? symbol = candidate.Node switch
+        {
+            MethodDeclarationSyntax method => model.GetDeclaredSymbol(method),
+            ConstructorDeclarationSyntax constructor => model.GetDeclaredSymbol(constructor),
+            DestructorDeclarationSyntax destructor => model.GetDeclaredSymbol(destructor),
+            OperatorDeclarationSyntax op => model.GetDeclaredSymbol(op),
+            ConversionOperatorDeclarationSyntax conversion => model.GetDeclaredSymbol(conversion),
+            LocalFunctionStatementSyntax local => model.GetDeclaredSymbol(local),
+            AccessorDeclarationSyntax accessor => model.GetDeclaredSymbol(accessor),
+            _ => candidate.Node.AncestorsAndSelf().OfType<PropertyDeclarationSyntax>().FirstOrDefault() is { } property
+                ? model.GetDeclaredSymbol(property)?.GetMethod
+                : candidate.Node.AncestorsAndSelf().OfType<IndexerDeclarationSyntax>().FirstOrDefault() is { } indexer
+                    ? model.GetDeclaredSymbol(indexer)?.GetMethod
+                    : null
+        };
+        if (symbol is null || candidate.Kind is CallableKind.LocalFunction) return symbol is null ? null : FromSymbol(symbol);
+        return FromSymbol(symbol);
+    }
+
+    private static CallableSemanticIdentity FromSymbol(IMethodSymbol symbol)
+    {
+        var typeName = MetadataTypeName(symbol.ContainingType);
+        var parameters = symbol.Parameters.Select(parameter => new CallableParameterIdentity(
+            parameter.RefKind.ToString().ToLowerInvariant(), TypeName(parameter.Type))).ToArray();
+        var returnType = TypeName(symbol.ReturnType);
+        var reportSignature = $"{returnType} {typeName}::{symbol.MetadataName}({string.Join(",", parameters.Select(item => item.Type))})";
+        var stable = $"{typeName}::{symbol.MetadataName}`{symbol.Arity}({string.Join(",", parameters.Select(item => item.RefKind + ":" + item.Type))})->{returnType}:{(symbol.IsStatic ? "static" : "instance")}";
+        return new CallableSemanticIdentity(typeName, symbol.MetadataName, symbol.Arity, parameters, returnType,
+            symbol.IsStatic, reportSignature, stable);
+    }
+
+    private static string MetadataTypeName(INamedTypeSymbol? type)
+    {
+        if (type is null) return "<global>";
+        var types = new Stack<string>();
+        for (var current = type; current is not null; current = current.ContainingType) types.Push(current.MetadataName);
+        var prefix = type.ContainingNamespace is { IsGlobalNamespace: false } ns ? ns.ToDisplayString() + "." : string.Empty;
+        return prefix + string.Join("+", types);
+    }
+
+    private static string TypeName(ITypeSymbol type)
+    {
+        if (type.SpecialType != SpecialType.None)
+            return type.SpecialType.ToString().Replace("System_", "System.", StringComparison.Ordinal);
+        return type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)
+            .Replace("global::", string.Empty, StringComparison.Ordinal).TrimEnd('?');
     }
 
     private static bool IsAnonymous(CallableKind kind) => kind is CallableKind.Lambda or CallableKind.AnonymousMethod or

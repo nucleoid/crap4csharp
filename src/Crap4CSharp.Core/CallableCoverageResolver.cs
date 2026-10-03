@@ -1,0 +1,197 @@
+namespace Crap4CSharp.Core;
+
+public sealed record CallableCoverageResolution(
+    IReadOnlyList<CallableCoverageObservation> Observations,
+    IReadOnlyList<CoverageDiagnostic> Diagnostics);
+
+public static class CallableCoverageResolver
+{
+    public static CallableCoverageResolution Resolve(
+        CallableInventoryResult inventory,
+        IEnumerable<CoverageMethod> reports,
+        string? expectedModuleIdentity = null)
+    {
+        ArgumentNullException.ThrowIfNull(inventory);
+        var observations = inventory.Callables.ToDictionary(item => item.CallableId,
+            _ => new Accumulator(), StringComparer.Ordinal);
+        var diagnostics = new List<CoverageDiagnostic>();
+
+        foreach (var report in reports)
+        {
+            if (!string.Equals(report.ContextId, inventory.ContextId, StringComparison.Ordinal))
+            {
+                diagnostics.Add(Diagnostic(CoverageReasonCodes.ContextMismatch, report, [],
+                    "Coverage observation belongs to a different or unbound compilation context."));
+                continue;
+            }
+            if (expectedModuleIdentity is not null &&
+                !string.Equals(report.ModuleIdentity, expectedModuleIdentity, StringComparison.Ordinal))
+            {
+                diagnostics.Add(Diagnostic(CoverageReasonCodes.ConflictingModule, report, [],
+                    "Coverage observation does not identify the expected module."));
+                continue;
+            }
+            if (IsGenerated(report))
+            {
+                diagnostics.Add(Diagnostic(CoverageReasonCodes.UnsupportedGeneratedMapping, report, [],
+                    "Generated callable coverage requires an authoritative PE/portable-PDB mapping."));
+                continue;
+            }
+
+            var byPath = inventory.Callables.Where(item => item.Applicability == CallableApplicability.Applicable &&
+                PathsEqual(item.Path, report.File)).ToArray();
+            var byIdentity = byPath.Where(item => SemanticMatches(item.SemanticIdentity, report)).ToArray();
+            var candidates = byIdentity.Length > 0 ? byIdentity : byPath.Where(item =>
+                item.CoverageCapability == "semantic-ordinary" && SpanContains(item.Span, report.SequencePoints)).ToArray();
+
+            if (byIdentity.Length == 0 && report.MethodName.Length > 0)
+                candidates = [];
+            if (candidates.Length != 1)
+            {
+                var code = candidates.Length > 1 || byPath.Length > 1 && report.MethodName.Length == 0
+                    ? CoverageReasonCodes.AmbiguousCallableOwnership
+                    : CoverageReasonCodes.NoMatchingMethod;
+                var affected = candidates.Length > 0 ? candidates : byPath;
+                diagnostics.Add(Diagnostic(code, report, affected, candidates.Length > 1
+                    ? "Coverage point ownership is not exclusive."
+                    : "Coverage observation does not identify a supported callable."));
+                foreach (var item in affected) observations[item.CallableId].Reasons.Add(code);
+                continue;
+            }
+
+            var candidate = candidates[0];
+            if (candidate.CoverageCapability != "semantic-ordinary")
+            {
+                observations[candidate.CallableId].Reasons.Add(candidate.CoverageReason ?? CoverageReasonCodes.UnsupportedGeneratedMapping);
+                diagnostics.Add(Diagnostic(candidate.CoverageReason ?? CoverageReasonCodes.UnsupportedGeneratedMapping,
+                    report, [candidate], "Callable coverage capability is unsupported without authoritative generated mapping."));
+                continue;
+            }
+            if (report.SequencePoints.Count == 0)
+            {
+                observations[candidate.CallableId].Reasons.Add(CoverageReasonCodes.NoEligiblePoints);
+                diagnostics.Add(Diagnostic(CoverageReasonCodes.NoEligiblePoints, report, [candidate],
+                    "Coverage observation contains no eligible sequence points."));
+                continue;
+            }
+            if (!SpanContains(candidate.Span, report.SequencePoints))
+            {
+                observations[candidate.CallableId].Reasons.Add(CoverageReasonCodes.SpanMismatch);
+                diagnostics.Add(Diagnostic(CoverageReasonCodes.SpanMismatch, report, [candidate],
+                    "Coverage points fall outside the authored callable span."));
+                continue;
+            }
+
+            var accumulator = observations[candidate.CallableId];
+            foreach (var point in report.SequencePoints)
+            {
+                var document = report.DocumentIdentities.SingleOrDefault() ?? report.File ?? "<unknown-document>";
+                var value = new CallableCoveragePoint(inventory.ContextId, document, point.Line,
+                    point.StartColumn ?? 0, point.EndLine ?? point.Line, point.EndColumn ?? 0,
+                    point.Offset ?? -1, point.Visits > 0);
+                var key = new PointKey(value.ContextId, value.DocumentIdentity, value.StartLine, value.StartColumn,
+                    value.EndLine, value.EndColumn, value.Offset);
+                accumulator.Points[key] = accumulator.Points.TryGetValue(key, out var existing)
+                    ? existing with { Visited = existing.Visited || value.Visited }
+                    : value;
+            }
+        }
+
+        var resolved = inventory.Callables.Select(item =>
+        {
+            var value = observations[item.CallableId];
+            if (value.Points.Count > 0)
+                return new CallableCoverageObservation(item.CallableId, "known",
+                    value.Points.OrderBy(pair => pair.Key).Select(pair => pair.Value).ToArray(), null);
+            var reason = value.Reasons.Order(StringComparer.Ordinal).FirstOrDefault() ?? item.CoverageReason ??
+                (item.Applicability == CallableApplicability.NotApplicable ? item.ApplicabilityReason : CoverageReasonCodes.Unavailable);
+            return new CallableCoverageObservation(item.CallableId,
+                item.Applicability == CallableApplicability.NotApplicable ? "not-applicable" : "unknown", [], reason);
+        }).OrderBy(item => item.CallableId, StringComparer.Ordinal).ToArray();
+        return new CallableCoverageResolution(resolved,
+            diagnostics.GroupBy(item => item.Id, StringComparer.Ordinal).Select(group => group.First())
+                .OrderBy(item => item.Code, StringComparer.Ordinal).ThenBy(item => item.Id, StringComparer.Ordinal).ToArray());
+    }
+
+    private static bool SemanticMatches(CallableSemanticIdentity? semantic, CoverageMethod report)
+    {
+        if (semantic is null || semantic.MetadataName != report.MethodName ||
+            !TypesEqual(semantic.TypeName, report.TypeName) ||
+            report.ParameterCount is int count && count != semantic.Parameters.Count ||
+            report.GenericArity is int arity && arity != semantic.GenericArity) return false;
+        if (string.IsNullOrWhiteSpace(report.RawSignature)) return true;
+        if (Normalize(report.RawSignature) == Normalize(semantic.ReportSignature)) return true;
+        var parameters = ParameterTypes(report.RawSignature);
+        return parameters is not null && parameters.SequenceEqual(
+            semantic.Parameters.Select(item => Normalize(item.Type)), StringComparer.Ordinal);
+    }
+
+    private static IReadOnlyList<string>? ParameterTypes(string signature)
+    {
+        var open = signature.IndexOf('(');
+        var close = signature.LastIndexOf(')');
+        if (open < 0 || close < open) return null;
+        var value = signature[(open + 1)..close];
+        if (string.IsNullOrWhiteSpace(value)) return [];
+        var output = new List<string>();
+        var start = 0;
+        var depth = 0;
+        for (var index = 0; index <= value.Length; index++)
+        {
+            if (index == value.Length || value[index] == ',' && depth == 0)
+            {
+                output.Add(Normalize(value[start..index]));
+                start = index + 1;
+            }
+            else if (value[index] is '<' or '[' or '(') depth++;
+            else if (value[index] is '>' or ']' or ')') depth--;
+        }
+        return output;
+    }
+
+    private static string Normalize(string value) => value.Replace(" ", string.Empty, StringComparison.Ordinal)
+        .Replace("class", string.Empty, StringComparison.Ordinal)
+        .Replace("valuetype", string.Empty, StringComparison.Ordinal)
+        .Replace("global::", string.Empty, StringComparison.Ordinal).TrimEnd('&');
+    private static bool TypesEqual(string left, string right) =>
+        string.Equals(left, right, StringComparison.Ordinal) ||
+        string.Equals(left.Replace('+', '.'), right.Replace('+', '.'), StringComparison.Ordinal);
+    private static bool PathsEqual(string left, string? right) => right is not null &&
+        string.Equals(left.Replace('\\', '/'), right.Replace('\\', '/'), StringComparison.Ordinal);
+    private static bool IsGenerated(CoverageMethod report) => report.MethodName == "MoveNext" ||
+        report.MethodName.StartsWith("<", StringComparison.Ordinal) || report.TypeName.Contains("<>c", StringComparison.Ordinal);
+
+    private static bool SpanContains(CallableSourceSpan span, IReadOnlyList<CoveragePoint> points) => points.All(point =>
+    {
+        var endLine = point.EndLine ?? point.Line;
+        if (point.Line < span.StartLine || endLine > span.EndLine) return false;
+        if (point.StartColumn is int start && point.Line == span.StartLine && start < span.StartColumn) return false;
+        if (point.EndColumn is int end && endLine == span.EndLine && end > span.EndColumn) return false;
+        return true;
+    });
+
+    private static CoverageDiagnostic Diagnostic(string code, CoverageMethod report,
+        IEnumerable<CallableEntry> candidates, string message) => CoverageDiagnostic.Create(code,
+            code == CoverageReasonCodes.ContextMismatch ? CoverageDiagnosticStage.Context :
+            code == CoverageReasonCodes.ConflictingModule ? CoverageDiagnosticStage.Module :
+            code == CoverageReasonCodes.UnsupportedGeneratedMapping ? CoverageDiagnosticStage.Generated :
+            CoverageDiagnosticStage.Method,
+            CoverageDiagnosticSeverity.Warning, CoverageDiagnosticScope.Observation,
+            report.ReportId, report.ObservationId, report.File,
+            candidateMethodIds: candidates.Select(item => item.CallableId), reportedType: report.TypeName,
+            reportedMethodName: report.MethodName, reportedParameterCount: report.ParameterCount,
+            moduleIdentities: report.ModuleIdentity is null ? [] : [report.ModuleIdentity], contextId: report.ContextId,
+            message: message);
+
+    private sealed class Accumulator
+    {
+        public Dictionary<PointKey, CallableCoveragePoint> Points { get; } = [];
+        public HashSet<string> Reasons { get; } = new(StringComparer.Ordinal);
+    }
+
+    private readonly record struct PointKey(string ContextId, string DocumentIdentity, int StartLine,
+        int StartColumn, int EndLine, int EndColumn, int Offset) : IComparable<PointKey>
+    {
+        public int CompareTo(PointKey other) => string.CompareOrdinal(ToString(), other.ToString());
+    }
+}

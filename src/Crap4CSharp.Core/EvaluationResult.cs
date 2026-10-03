@@ -27,6 +27,8 @@ public static class CoverageReasonCodes
     public const string UnsupportedMultiDocumentMapping = "coverage.unsupportedMultiDocumentMapping";
     public const string ContextMismatch = "coverage.contextMismatch";
     public const string ContextUnbound = "coverage.contextUnbound";
+    public const string AmbiguousCallableOwnership = "coverage.ambiguousCallableOwnership";
+    public const string UnsupportedCallable = "scope.unsupportedCallable";
     public const string Unavailable = "coverage.unavailable";
 }
 
