@@ -223,7 +223,8 @@ public static class ProjectContextLoader
             var extensions = new HashSet<string>([".cs", ".csproj", ".props", ".targets", ".sln", ".slnx", ".json", ".projitems", ".shproj", ".rsp", ".editorconfig", ".globalconfig"], StringComparer.OrdinalIgnoreCase);
             var result = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
                 .Where(path => extensions.Contains(Path.GetExtension(path)) || Path.GetFileName(path).Equals("NuGet.Config", StringComparison.OrdinalIgnoreCase))
-                .Where(path => !path.Split(Path.DirectorySeparatorChar).Any(part => part is "bin" or "obj" or ".git" or "TestResults" or "node_modules"))
+                .Where(path => !Path.GetRelativePath(root, path).Split(Path.DirectorySeparatorChar)
+                    .Any(part => part is "bin" or "obj" or ".git" or "TestResults" or "node_modules"))
                 .ToDictionary(path => Path.GetRelativePath(root, path).Replace('\\', '/'),
                     path => ProjectAnalysisContext.ContentHash(File.ReadAllBytes(path)), StringComparer.Ordinal);
             for (var directory = Directory.GetParent(root); directory is not null; directory = directory.Parent)
