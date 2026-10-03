@@ -76,7 +76,7 @@ public sealed class CoveragePathResolver
         this.pathCase = pathCase;
         this.mappings = ValidateMappings(mappings).ToArray();
         MappingIdentities = this.mappings.Select(rule => new CoveragePathMappingIdentity(
-            CanonicalForIdentity(rule.ReportRoot), rule.LocalRoot, rule.Id)).ToArray();
+            CanonicalForIdentity(rule.ReportRoot), rule.LogicalDestination, rule.Id)).ToArray();
     }
 
     public IReadOnlyList<CoveragePathMappingIdentity> MappingIdentities { get; }
@@ -213,7 +213,7 @@ public sealed class CoveragePathResolver
             var logicalDestination = LogicalDestination(rootIdentity, localRoot);
             var identityText = $"{CanonicalForIdentity(reportRoot)}\n{logicalDestination}\n{pathCase}";
             var id = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identityText))).ToLowerInvariant();
-            output.Add(new MappingRule(reportRoot, localRoot, id));
+            output.Add(new MappingRule(reportRoot, localRoot, logicalDestination, id));
         }
         return output.OrderBy(rule => CanonicalForIdentity(rule.ReportRoot), StringComparer.Ordinal)
             .ThenBy(rule => rule.Id, StringComparer.Ordinal);
@@ -400,5 +400,5 @@ public sealed class CoveragePathResolver
         }
     }
 
-    private sealed record MappingRule(LexicalPath ReportRoot, string LocalRoot, string Id);
+    private sealed record MappingRule(LexicalPath ReportRoot, string LocalRoot, string LogicalDestination, string Id);
 }

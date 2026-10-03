@@ -239,12 +239,16 @@ internal static class App
         var runArtifacts = new List<RunArtifact>();
         var generatedReports = new List<string>();
         var pathPolicy = PathIdentityPolicy.Current;
-        var canonicalWorkingDirectory = CanonicalExistingPath(workingDirectory, workingDirectory, pathPolicy);
+        var canonicalizer = new ExistingPathCanonicalizer(pathPolicy);
+        var canonicalWorkingDirectory = CanonicalExistingPath(workingDirectory, workingDirectory, pathPolicy,
+            canonicalizer: canonicalizer);
         var preparedMappings = options.CoveragePathMappings.Select(mapping => mapping with
         {
-            LocalRoot = CanonicalExistingPath(mapping.LocalRoot, workingDirectory, pathPolicy)
+            LocalRoot = CanonicalExistingPath(mapping.LocalRoot, workingDirectory, pathPolicy,
+                canonicalizer: canonicalizer)
         }).ToArray();
-        var resolvedInputs = options.Inputs.Select(input => CanonicalExistingPath(input, workingDirectory, pathPolicy)).ToArray();
+        var resolvedInputs = options.Inputs.Select(input => CanonicalExistingPath(input, workingDirectory, pathPolicy,
+            canonicalizer: canonicalizer)).ToArray();
         var declaredRoots = DeclaredSourceRoots(resolvedInputs, canonicalWorkingDirectory);
         var explicitFiles = resolvedInputs.Where(File.Exists).ToArray();
         if (options.Changed)
@@ -256,7 +260,7 @@ internal static class App
         }
         var files = options.Changed
             ? await ChangedFilesAsync(workingDirectory, options.Timeout, cancellationToken, processExecutor)
-            : SourceDiscovery.Discover(options.Inputs, workingDirectory);
+            : SourceDiscovery.Discover(options.Inputs, workingDirectory, pathPolicy, canonicalizer);
         var sourceInventory = SourcePathCapture.Capture(files, declaredRoots, explicitFiles,
             preparedMappings.Select(mapping => mapping.LocalRoot), workingDirectory: canonicalWorkingDirectory);
         var sourceLogicalPaths = sourceInventory.Entries.ToDictionary(
@@ -507,7 +511,7 @@ internal static class App
             .Distinct()
             .OrderBy(artifact => artifact.Kind, StringComparer.Ordinal).ThenBy(artifact => artifact.Path, StringComparer.Ordinal).ToArray();
         var pathMappings = options.ValidatedCoveragePathMappings.Select(mapping => new CoveragePathMappingResult(
-            mapping.ReportRoot, NormalizePath(workingDirectory, mapping.LocalRoot), mapping.Id))
+            mapping.ReportRoot, mapping.LocalRoot, mapping.Id))
             .OrderBy(mapping => mapping.ReportRoot, StringComparer.Ordinal).ThenBy(mapping => mapping.LocalRoot, StringComparer.Ordinal).ToArray();
         var evaluation = new EvaluationSection("legacy", new PolicyOptions(options.Threshold, options.AllowMissingCoverage),
                 new EvaluationScope(".", outcome.Files.Select(ResultPath).Order(StringComparer.Ordinal).ToArray()),
@@ -637,12 +641,13 @@ internal static class App
     }
 
     internal static string CanonicalExistingPath(string path, string workingDirectory,
-        PathIdentityPolicy? pathPolicy = null, Func<string, bool>? exists = null)
+        PathIdentityPolicy? pathPolicy = null, Func<string, bool>? exists = null,
+        ExistingPathCanonicalizer? canonicalizer = null)
     {
         pathPolicy ??= PathIdentityPolicy.Current;
         var normalized = pathPolicy.Normalize(path, workingDirectory);
         var accepted = exists?.Invoke(normalized) ?? (File.Exists(normalized) || Directory.Exists(normalized));
-        return accepted ? pathPolicy.NormalizeExisting(normalized) : normalized;
+        return accepted ? (canonicalizer ?? new ExistingPathCanonicalizer(pathPolicy)).NormalizeExisting(normalized) : normalized;
     }
 
     private static void CaptureCoverageEvidence(
