@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <LangVersion>14.0</LangVersion>
+    <DefineConstants>$(DefineConstants);FROM_DIRECTORY_BUILD_PROPS</DefineConstants>
+  </PropertyGroup>
+</Project>
