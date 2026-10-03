@@ -124,6 +124,48 @@ public sealed class ProjectContextTests
     }
 
     [Fact]
+    public async Task SdkResolutionFailurePreservesStructuredReason()
+    {
+        var selected = Path.GetFullPath("Fixtures/ProjectContexts/ContextSolution.slnx", AppContext.BaseDirectory);
+
+        var result = await ProjectContextLoader.LoadAsync(
+            new(selected, "Debug", null, [], false, false, TimeSpan.FromSeconds(30)),
+            CancellationToken.None,
+            (_, _, _) => Task.FromException<ProjectContextSdkResolution>(
+                new ProjectContextException("context.sdkResolutionFailed", "SDK probe failed.")));
+
+        Assert.False(result.Success);
+        Assert.Equal("context.sdkResolutionFailed", result.FailureReason);
+        Assert.Contains("SDK probe failed.", result.Diagnostics);
+    }
+
+    [Fact]
+    public async Task CallerCancellationStillEscapesStructuredFailureBoundary()
+    {
+        var selected = Path.GetFullPath("Fixtures/ProjectContexts/ContextSolution.slnx", AppContext.BaseDirectory);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ProjectContextLoader.LoadAsync(
+            new(selected, "Debug", null, [], false, false, TimeSpan.FromSeconds(30)),
+            cancellation.Token,
+            (_, _, _) => Task.FromCanceled<ProjectContextSdkResolution>(cancellation.Token)));
+    }
+
+    [Fact]
+    public async Task MissingTargetReturnsStructuredReason()
+    {
+        var missing = Path.Combine(Path.GetTempPath(), "crap4csharp-missing", Guid.NewGuid().ToString("N"), "Missing.csproj");
+
+        var result = await ProjectContextLoader.LoadAsync(
+            new(missing, "Debug", null, [], false, false, TimeSpan.FromSeconds(30)),
+            CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Equal("context.targetNotFound", result.FailureReason);
+    }
+
+    [Fact]
     public void TargetSelectionNeverGuessesNestedProjects()
     {
         var root = Path.Combine(Path.GetTempPath(), "crap4csharp-select", Guid.NewGuid().ToString("N"));

@@ -82,9 +82,19 @@ public static class ProjectContextLoader
         CancellationToken cancellationToken,
         Func<string, TimeSpan, CancellationToken, Task<ProjectContextSdkResolution>> resolveSdkAsync)
     {
-        var target = ProjectTargetSelector.Select(Path.GetDirectoryName(Path.GetFullPath(request.Target))!, request.Target);
-        var root = Path.GetDirectoryName(target)!;
-        var before = SnapshotAuthoredInputs(root);
+        string target;
+        string root;
+        IReadOnlyDictionary<string, string> before;
+        try
+        {
+            target = ProjectTargetSelector.Select(Path.GetDirectoryName(Path.GetFullPath(request.Target))!, request.Target);
+            root = Path.GetDirectoryName(target)!;
+            before = SnapshotAuthoredInputs(root);
+        }
+        catch (ProjectContextException exception)
+        {
+            return new ProjectContextLoadResult(false, [], [exception.Message], exception.Reason);
+        }
         using var overallTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         overallTimeout.CancelAfter(request.Timeout);
         var operationToken = overallTimeout.Token;
@@ -97,19 +107,31 @@ public static class ProjectContextLoader
         {
             return SnapshotFailure(root, before, "context.loaderTimeout", $"Project context loading exceeded {request.Timeout.TotalSeconds:0.###} seconds.");
         }
+        catch (ProcessTimeoutException)
+        {
+            return SnapshotFailure(root, before, "context.loaderTimeout", $"Project context loading exceeded {request.Timeout.TotalSeconds:0.###} seconds.");
+        }
+        catch (ProjectContextException exception)
+        {
+            return SnapshotFailure(root, before, exception.Reason, exception.Message);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return SnapshotFailure(root, before, "context.sdkResolutionFailed", exception.Message);
+        }
         var effective = request with
         {
             Target = target, SdkPath = sdk.Path, SdkVersion = sdk.Version, MsBuildVersion = sdk.MsBuildVersion,
             DotNetRoot = sdk.DotNetRoot, DotNetHostPath = sdk.HostPath
         };
         var scratch = Path.Combine(Path.GetTempPath(), "crap4csharp-context", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(scratch);
         var requestPath = Path.Combine(scratch, "request.json");
         var responsePath = Path.Combine(scratch, "response.json");
-        await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(effective, JsonOptions), operationToken);
-        var assembly = typeof(ProjectContextLoader).Assembly.Location;
         try
         {
+            Directory.CreateDirectory(scratch);
+            await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(effective, JsonOptions), operationToken);
+            var assembly = typeof(ProjectContextLoader).Assembly.Location;
             var environment = new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["DOTNET_ROOT"] = sdk.DotNetRoot,
@@ -139,6 +161,18 @@ public static class ProjectContextLoader
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && overallTimeout.IsCancellationRequested)
         {
             return SnapshotFailure(root, before, "context.loaderTimeout", $"Project context loading exceeded {request.Timeout.TotalSeconds:0.###} seconds.");
+        }
+        catch (ProcessTimeoutException)
+        {
+            return SnapshotFailure(root, before, "context.loaderTimeout", $"Project context loading exceeded {request.Timeout.TotalSeconds:0.###} seconds.");
+        }
+        catch (ProjectContextException exception)
+        {
+            return SnapshotFailure(root, before, exception.Reason, exception.Message);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return SnapshotFailure(root, before, "context.loaderFailed", exception.Message);
         }
         finally
         {
