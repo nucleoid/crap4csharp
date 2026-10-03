@@ -555,6 +555,31 @@ public sealed class ResultContractTests : IDisposable
         Assert.Contains(evaluation.GetProperty("checks").EnumerateArray(), check =>
             check.GetProperty("name").GetString() == "crap" && check.GetProperty("status").GetString() == "notApplicable");
         Assert.Equal("notApplicable", evaluation.GetProperty("decision").GetProperty("policyDecision").GetString());
+        Assert.Equal("crap.noKnownScores", evaluation.GetProperty("decision").GetProperty("reason").GetString());
+    }
+
+    [Fact]
+    public void CanonicalMethodIdentitiesDistinguishLegalOverloadShapes()
+    {
+        var source = Write("Identities.cs", """
+            namespace One {
+              class C<T> { int M() => 1; }
+              class C {
+                int M() => 1;
+                int M(int value) => value;
+                int M(ref int value) => value;
+                int G(int value) => value;
+                int G<T>(int value) => value;
+                public void Dispose() { }
+                void System.IDisposable.Dispose() { }
+              }
+            }
+            namespace Two { class C { int M() => 1; } }
+            """);
+
+        var methods = new SourceAnalyzer().AnalyzeFiles([source]);
+
+        Assert.Equal(methods.Count, methods.Select(method => method.EntityIdentity).Distinct(StringComparer.Ordinal).Count());
     }
 
     [Fact]
