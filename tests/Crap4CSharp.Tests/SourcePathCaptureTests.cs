@@ -142,4 +142,32 @@ public sealed class SourcePathCaptureTests : IDisposable
         Assert.NotEqual(entries[0].ExternalRootId, entries[1].ExternalRootId);
         Assert.NotEqual(entries[0].LogicalPath, entries[1].LogicalPath);
     }
+
+    [Fact]
+    public void ExternalRootIdentityIsStableWhenAnotherSameNamedRootIsSelected()
+    {
+        var workspace = Path.Combine(temporary, "workspace");
+        var firstRoot = Path.Combine(temporary, "outside-a", "shared");
+        var secondRoot = Path.Combine(temporary, "outside-b", "shared");
+        Directory.CreateDirectory(workspace);
+        Directory.CreateDirectory(firstRoot);
+        Directory.CreateDirectory(secondRoot);
+        var first = Path.Combine(firstRoot, "Program.cs");
+        var second = Path.Combine(secondRoot, "Program.cs");
+        File.WriteAllText(first, "class Program { static void Main() { } }");
+        File.WriteAllText(second, "class Program { static void Main() { } }");
+
+        var alone = SourcePathCapture.Capture([first], [firstRoot], [first], [], workingDirectory: workspace);
+        var together = SourcePathCapture.Capture([second, first], [secondRoot, firstRoot], [second, first], [],
+            workingDirectory: workspace);
+        var aloneEntry = Assert.Single(alone.Entries);
+        var togetherEntries = together.Entries.OrderBy(entry => entry.LocalPath, StringComparer.Ordinal).ToArray();
+        var retainedEntry = Assert.Single(togetherEntries, entry => entry.LocalPath == first);
+
+        Assert.Equal(aloneEntry.ExternalRootId, retainedEntry.ExternalRootId);
+        Assert.Equal(aloneEntry.LogicalPath, retainedEntry.LogicalPath);
+        Assert.NotEqual(togetherEntries[0].ExternalRootId, togetherEntries[1].ExternalRootId);
+        Assert.NotEqual(togetherEntries[0].LogicalPath, togetherEntries[1].LogicalPath);
+        Assert.DoesNotContain(temporary, retainedEntry.ExternalRootId, StringComparison.Ordinal);
+    }
 }
