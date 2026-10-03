@@ -24,7 +24,7 @@ public sealed class PackagedResultTests : IDisposable
             .GetCustomAttribute<AssemblyConfigurationAttribute>()!.Configuration;
         var isolatedNuget = new Dictionary<string, string?> { ["NUGET_PACKAGES"] = packageCache };
         var pack = await Run("dotnet", ["pack", Path.Combine(repository, "src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj"),
-            "-c", configuration, "--no-build", "-o", packages], repository, isolatedNuget);
+            "-c", configuration, "--no-restore", "-m:1", "-o", packages], repository, isolatedNuget);
         AssertSuccess("pack", pack);
         var nugetConfig = Write("NuGet.Config", $"<configuration><packageSources><clear /><add key=\"local\" value=\"{System.Security.SecurityElement.Escape(packages)}\" /></packageSources></configuration>");
         var install = await Run("dotnet", ["tool", "install", "--tool-path", tools, "--add-source", packages,
