@@ -61,7 +61,6 @@ public sealed class CoveragePathResolver
     private readonly CoverageSourceInventory inventory;
     private readonly CoveragePathCase pathCase;
     private readonly IReadOnlyList<MappingRule> mappings;
-    private readonly PathDialect localDialect;
 
     public CoveragePathResolver(
         PathIdentityPolicy localPolicy,
@@ -72,8 +71,6 @@ public sealed class CoveragePathResolver
         this.localPolicy = localPolicy ?? throw new ArgumentNullException(nameof(localPolicy));
         this.inventory = inventory ?? throw new ArgumentNullException(nameof(inventory));
         this.pathCase = pathCase;
-        localDialect = inventory.Roots.Select(root => ParseAbsoluteLocal(root.LocalPath).Dialect).FirstOrDefault(
-            OperatingSystem.IsWindows() ? PathDialect.WindowsDrive : PathDialect.Posix);
         this.mappings = ValidateMappings(mappings).ToArray();
         MappingIdentities = this.mappings.Select(rule => new CoveragePathMappingIdentity(
             CanonicalForIdentity(rule.ReportRoot), rule.LocalRoot, rule.Id)).ToArray();
@@ -184,9 +181,9 @@ public sealed class CoveragePathResolver
             return (mapped, null);
         }
 
-        if (candidate.Dialect != localDialect) return ([], null);
         var native = candidate.ToLocalPath();
-        var matches = inventory.Entries.Where(entry => localPolicy.Comparer.Equals(entry.LocalPath, native))
+        var matches = inventory.Entries.Where(entry => ParseAbsoluteLocal(entry.RootPath).Dialect == candidate.Dialect &&
+                localPolicy.Comparer.Equals(entry.LocalPath, native))
             .Select(entry => (entry, (string?)null)).ToArray();
         return (matches, null);
     }

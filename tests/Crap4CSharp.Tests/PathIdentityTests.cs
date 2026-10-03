@@ -41,8 +41,10 @@ public sealed class PathIdentityTests : IDisposable
         var differentlyCased = Path.Combine(temporary, "PARENT", "FOO.CS");
 
         var normalized = PathIdentityPolicy.Insensitive.NormalizeExisting(differentlyCased);
+        var sensitiveNormalized = PathIdentityPolicy.Sensitive.NormalizeExisting(differentlyCased);
 
         Assert.Equal(actual, normalized);
+        Assert.Equal(actual, sensitiveNormalized);
     }
 
     [Fact]

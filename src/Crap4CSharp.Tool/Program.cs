@@ -350,9 +350,11 @@ internal static class App
 
             foreach (var report in reports)
                 if (!File.Exists(report)) throw new FileNotFoundException($"Coverage report not found: {report}", report);
+            var logicalSourcePaths = sourceInventory.Entries.ToDictionary(
+                entry => entry.LocalPath, entry => entry.LogicalPath, PathIdentityPolicy.Current.Comparer);
             source = new SourceAnalyzer().AnalyzeFiles(files).Select(method => method with
             {
-                LogicalPath = NormalizePath(workingDirectory, method.File)
+                LogicalPath = logicalSourcePaths[PathIdentityPolicy.Current.Normalize(method.File)]
             }).ToArray();
             if (coverage is null)
             {

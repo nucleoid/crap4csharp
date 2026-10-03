@@ -31,11 +31,15 @@ public sealed class PathIdentityPolicy
         return fullPath;
     }
 
-    public string NormalizeExisting(string path, string? baseDirectory = null)
+    public string NormalizeExisting(string path, string? baseDirectory = null) =>
+        NormalizeExisting(path, baseDirectory, new Dictionary<string, ExistingDirectoryEntries>(Comparer));
+
+    internal string NormalizeExisting(
+        string path,
+        string? baseDirectory,
+        IDictionary<string, ExistingDirectoryEntries> directoryEntries)
     {
         var normalized = Normalize(path, baseDirectory);
-        if (IsCaseSensitive) return normalized;
-
         var root = Path.GetPathRoot(normalized)
             ?? throw new ArgumentException($"Path has no root: {path}", nameof(path));
         var current = root;
@@ -44,16 +48,28 @@ public sealed class PathIdentityPolicy
                      StringSplitOptions.RemoveEmptyEntries))
         {
             if (!Directory.Exists(current)) return normalized;
-            var matches = Directory.EnumerateFileSystemEntries(current)
-                .Where(entry => Comparer.Equals(Path.GetFileName(entry), segment))
-                .Order(StringComparer.Ordinal).ToArray();
-            var exact = matches.FirstOrDefault(entry =>
-                string.Equals(Path.GetFileName(entry), segment, StringComparison.Ordinal));
-            if (exact is not null)
+            if (!directoryEntries.TryGetValue(current, out var entries))
+            {
+                try
+                {
+                    var values = Directory.EnumerateFileSystemEntries(current).Order(StringComparer.Ordinal).ToArray();
+                    entries = new ExistingDirectoryEntries(
+                        values.ToDictionary(entry => Path.GetFileName(entry)!, StringComparer.Ordinal),
+                        values.GroupBy(entry => Path.GetFileName(entry)!, StringComparer.OrdinalIgnoreCase)
+                            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.OrdinalIgnoreCase));
+                    directoryEntries[current] = entries;
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    return normalized;
+                }
+            }
+            if (entries.Exact.TryGetValue(segment, out var exact))
             {
                 current = exact;
                 continue;
             }
+            var matches = entries.Insensitive.TryGetValue(segment, out var insensitive) ? insensitive : [];
             if (matches.Length > 1)
                 throw new InvalidDataException(
                     $"Local path identity collision while resolving '{path}': {string.Join(", ", matches.Select(Path.GetFileName))}.");
@@ -61,6 +77,10 @@ public sealed class PathIdentityPolicy
         }
         return Normalize(current);
     }
+
+    internal sealed record ExistingDirectoryEntries(
+        IReadOnlyDictionary<string, string> Exact,
+        IReadOnlyDictionary<string, string[]> Insensitive);
 
     public bool Equals(string left, string right) =>
         Comparer.Equals(Normalize(left), Normalize(right));

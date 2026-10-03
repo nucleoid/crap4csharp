@@ -24,7 +24,7 @@ public sealed class CoverageDiagnosticTests : IDisposable
         var methods = new[]
         {
             new CoverageMethod(file, "Wrong.C", "M", 1, [new(2, 1)], "Fixture"),
-            new CoverageMethod(file, "C", "Other", 1, [new(2, 1)], "Fixture"),
+            new CoverageMethod(file, "C", "M", 2, [new(2, 1)], "Fixture"),
             new CoverageMethod(file, "C", "M", 1, [new(99, 1)], "Fixture")
         };
 
@@ -36,6 +36,34 @@ public sealed class CoverageDiagnosticTests : IDisposable
         Assert.Contains(CoverageReasonCodes.SignatureMismatch, match.ReasonCodes);
         Assert.Contains(CoverageReasonCodes.SpanMismatch, match.ReasonCodes);
         Assert.All(result.Diagnostics, diagnostic => Assert.False(string.IsNullOrWhiteSpace(diagnostic.Id)));
+    }
+
+    [Fact]
+    public void SpecialAndGeneratedReportMembersDoNotBlameOrdinaryMethods()
+    {
+        var file = Write("Members.cs", "class C { int Value { get; set; } int M() => 1; int Uncovered() => 2; }");
+        var source = new SourceAnalyzer().AnalyzeFiles([file]).Select(method => method with
+        {
+            LogicalPath = "Members.cs"
+        }).ToArray();
+        var report = new[]
+        {
+            new CoverageMethod(file, "C", ".ctor", 0, [new(1, 1)], "Fixture"),
+            new CoverageMethod(file, "C", "get_Value", 0, [new(1, 1)], "Fixture"),
+            new CoverageMethod(file, "C", "<M>g__Local|0_0", 0, [new(1, 1)], "Fixture"),
+            new CoverageMethod(file, "C/<>c", "<M>b__0_0", 0, [new(1, 1)], "Fixture")
+        };
+
+        var result = CoverageMatcher.ApplyDetailedResult(source, [report]);
+
+        Assert.All(result.Matches, match =>
+        {
+            Assert.Equal(CoverageReasonCodes.NoMatchingMethod, match.CoverageReason);
+            Assert.Empty(match.DiagnosticIds);
+            Assert.DoesNotContain(CoverageReasonCodes.SignatureMismatch, match.ReasonCodes);
+            Assert.DoesNotContain(CoverageReasonCodes.TypeMismatch, match.ReasonCodes);
+        });
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Scope == CoverageDiagnosticScope.Method);
     }
 
     [Fact]
@@ -139,7 +167,7 @@ public sealed class CoverageDiagnosticTests : IDisposable
         {
             LogicalPath = Path.GetRelativePath(temporary, method.File).Replace(Path.DirectorySeparatorChar, '/')
         }).ToArray();
-        var report = new[] { new CoverageMethod(first, "C", "Other", 0, [new(1, 1)], "Fixture") };
+        var report = new[] { new CoverageMethod(first, "C", "M", 1, [new(1, 1)], "Fixture") };
 
         var result = CoverageMatcher.ApplyDetailedResult(source, [report]);
 

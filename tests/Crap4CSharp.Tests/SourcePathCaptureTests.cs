@@ -67,4 +67,31 @@ public sealed class SourcePathCaptureTests : IDisposable
 
         Assert.Equal(CoverageReasonCodes.PathOutsideRoot, exception.Code);
     }
+
+    [Fact]
+    public void ExternalLinkIdentityDoesNotDependOnOtherSelections()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var root = Path.Combine(temporary, "root");
+        var external = Path.Combine(temporary, "external");
+        Directory.CreateDirectory(root);
+        Directory.CreateDirectory(external);
+        var firstTarget = Path.Combine(external, "C.cs");
+        var secondTarget = Path.Combine(external, "D.cs");
+        File.WriteAllText(firstTarget, "class C { }");
+        File.WriteAllText(secondTarget, "class D { }");
+        var firstLink = Path.Combine(root, "C.cs");
+        var secondLink = Path.Combine(root, "D.cs");
+        File.CreateSymbolicLink(firstLink, firstTarget);
+        File.CreateSymbolicLink(secondLink, secondTarget);
+
+        var alone = SourcePathCapture.Capture([firstLink], [root], [firstLink], []);
+        var together = SourcePathCapture.Capture([secondLink, firstLink], [root], [secondLink, firstLink], []);
+        var aloneEntry = Assert.Single(alone.Entries);
+        var togetherEntry = Assert.Single(together.Entries, entry => entry.LocalPath == firstLink);
+
+        Assert.Equal(aloneEntry.ExternalRootId, togetherEntry.ExternalRootId);
+        Assert.Equal(aloneEntry.LogicalPath, togetherEntry.LogicalPath);
+        Assert.DoesNotContain(temporary, aloneEntry.ExternalRootId, StringComparison.Ordinal);
+    }
 }

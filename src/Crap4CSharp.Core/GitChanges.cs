@@ -13,7 +13,7 @@ public static class GitChanges
         PathIdentityPolicy pathPolicy)
     {
         ArgumentNullException.ThrowIfNull(pathPolicy);
-        var normalizedRoot = pathPolicy.Normalize(repositoryRoot);
+        var normalizedRoot = pathPolicy.NormalizeExisting(repositoryRoot);
         var records = SplitNull(bytes);
         var paths = new List<string>();
         for (var index = 0; index < records.Count; index++)
@@ -31,8 +31,7 @@ public static class GitChanges
             if (!pathPolicy.Contains(normalizedRoot, fullPath))
                 throw new InvalidDataException($"Git reported a path outside repository root: {path}");
             if (File.Exists(fullPath) && SourceDiscovery.IsSource(fullPath) &&
-                !SourceDiscovery.IsExcludedByDirectory(fullPath, repositoryRoot))
-                paths.Add(pathPolicy.NormalizeExisting(fullPath));
+                !SourceDiscovery.IsExcludedByDirectory(fullPath, normalizedRoot)) paths.Add(fullPath);
         }
 
         return pathPolicy.DistinctOrThrow(paths, "Git changed source inventory");

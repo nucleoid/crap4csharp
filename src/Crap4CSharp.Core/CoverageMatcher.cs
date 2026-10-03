@@ -49,8 +49,16 @@ public static class CoverageMatcher
                 var byType = byPath.Where(source => TypesEqual(source.CoverageTypeName, covered.TypeName)).ToArray();
                 if (byType.Length == 0)
                 {
-                    RecordRejection(byPath, covered, CoverageReasonCodes.TypeMismatch, CoverageDiagnosticStage.Method,
-                        observations, diagnostics);
+                    var attributable = IsAttributableReportedMethod(covered)
+                        ? byPath.Where(source => source.MethodName == covered.MethodName &&
+                            (covered.ParameterCount is null || ParameterCount(source.Signature) == covered.ParameterCount)).ToArray()
+                        : [];
+                    if (attributable.Length > 0)
+                        RecordRejection(attributable, covered, CoverageReasonCodes.TypeMismatch, CoverageDiagnosticStage.Method,
+                            observations, diagnostics);
+                    else
+                        RecordObservationRejection(byPath, covered, CoverageReasonCodes.TypeMismatch,
+                            CoverageDiagnosticStage.Method, diagnostics);
                     continue;
                 }
 
@@ -58,8 +66,15 @@ public static class CoverageMatcher
                     (covered.ParameterCount is null || ParameterCount(source.Signature) == covered.ParameterCount)).ToArray();
                 if (bySignature.Length == 0)
                 {
-                    RecordRejection(byType, covered, CoverageReasonCodes.SignatureMismatch, CoverageDiagnosticStage.Method,
-                        observations, diagnostics);
+                    var byName = IsAttributableReportedMethod(covered)
+                        ? byType.Where(source => source.MethodName == covered.MethodName).ToArray()
+                        : [];
+                    if (byName.Length > 0)
+                        RecordRejection(byName, covered, CoverageReasonCodes.SignatureMismatch, CoverageDiagnosticStage.Method,
+                            observations, diagnostics);
+                    else
+                        RecordObservationRejection(byType, covered, CoverageReasonCodes.SignatureMismatch,
+                            CoverageDiagnosticStage.Method, diagnostics);
                     continue;
                 }
 
@@ -173,6 +188,25 @@ public static class CoverageMatcher
         }
     }
 
+    private static void RecordObservationRejection(
+        IEnumerable<SourceMethod> sources,
+        CoverageMethod covered,
+        string code,
+        CoverageDiagnosticStage stage,
+        ICollection<CoverageDiagnostic> diagnostics)
+    {
+        var candidates = sources.OrderBy(LogicalPath, StringComparer.Ordinal)
+            .ThenBy(source => source.CanonicalSignature, StringComparer.Ordinal).ToArray();
+        diagnostics.Add(CoverageDiagnostic.Create(code, stage, CoverageDiagnosticSeverity.Info,
+            CoverageDiagnosticScope.Observation, covered.ReportId, covered.ObservationId,
+            candidatePaths: candidates.Select(LogicalPath),
+            candidateMethodIds: candidates.Select(source => source.CanonicalSignature),
+            reportedType: covered.TypeName, reportedMethodName: covered.MethodName,
+            reportedParameterCount: covered.ParameterCount,
+            moduleIdentities: covered.ModuleIdentity is null ? [] : [covered.ModuleIdentity],
+            message: "Coverage observation does not identify an attributable ordinary source method."));
+    }
+
     private static string PrimaryReason(IReadOnlyCollection<string> reasons)
     {
         foreach (var code in new[]
@@ -201,6 +235,18 @@ public static class CoverageMatcher
     }
 
     private static bool TypesEqual(string source, string covered) => source == covered.Replace('+', '.');
+    private static bool IsAttributableReportedMethod(CoverageMethod covered)
+    {
+        if (covered.MethodName.Length == 0 || covered.MethodName[0] is '<' or '.' ||
+            covered.MethodName.StartsWith("get_", StringComparison.Ordinal) ||
+            covered.MethodName.StartsWith("set_", StringComparison.Ordinal) ||
+            covered.MethodName.StartsWith("add_", StringComparison.Ordinal) ||
+            covered.MethodName.StartsWith("remove_", StringComparison.Ordinal) ||
+            covered.MethodName.StartsWith("op_", StringComparison.Ordinal)) return false;
+        return !covered.TypeName.Contains("<>", StringComparison.Ordinal) &&
+            !covered.TypeName.Contains("/<", StringComparison.Ordinal) &&
+            !covered.TypeName.Contains("+<", StringComparison.Ordinal);
+    }
     private static string LogicalPath(SourceMethod source) =>
         (source.LogicalPath ?? source.File).Replace(Path.DirectorySeparatorChar, '/');
     private static bool IsGeneratedStateMachine(string typeName) =>

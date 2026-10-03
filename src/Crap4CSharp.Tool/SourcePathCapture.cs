@@ -18,7 +18,7 @@ internal static class SourcePathCapture
             {
                 if (!Directory.Exists(path))
                     throw new DirectoryNotFoundException($"Selected source root does not exist: {path}");
-                return new CoverageSourceRoot(path, ResolvePhysical(path));
+                return new CoverageSourceRoot(path, ResolvePhysical(path, pathPolicy));
             }).ToList();
 
         foreach (var localRootValue in mappingLocalRoots)
@@ -31,14 +31,13 @@ internal static class SourcePathCapture
                 .OrderByDescending(root => root.LocalPath.Length).FirstOrDefault()
                 ?? throw new CoveragePathException(CoverageReasonCodes.PathOutsideRoot,
                     $"Coverage mapping local root is outside the declared selected-source roots: {localRootValue}");
-            var physical = ResolvePhysical(localRoot);
+            var physical = ResolvePhysical(localRoot, pathPolicy);
             if (!pathPolicy.Contains(selectedRoot.PhysicalPath, physical))
                 throw new CoveragePathException(CoverageReasonCodes.PathOutsideRoot,
                     $"Coverage mapping local root resolves outside its declared selected-source root: {localRootValue}");
         }
 
         var entries = new List<CoverageSourceEntry>();
-        var externalIndex = 0;
         foreach (var fileValue in files.Order(StringComparer.Ordinal))
         {
             var file = pathPolicy.Normalize(fileValue);
@@ -47,11 +46,12 @@ internal static class SourcePathCapture
             if (root is null)
             {
                 var parent = Path.GetDirectoryName(file)!;
-                root = new CoverageSourceRoot(parent, ResolvePhysical(parent), ExternalId(++externalIndex, parent));
+                root = new CoverageSourceRoot(parent, ResolvePhysical(parent, pathPolicy),
+                    ExternalId($"root:{Path.GetFileName(parent)}"));
                 roots.Add(root);
             }
 
-            var physicalFile = ResolvePhysical(file);
+            var physicalFile = ResolvePhysical(file, pathPolicy);
             var physicalRoot = root.PhysicalPath;
             var externalRootId = root.ExternalRootId;
             if (!pathPolicy.Contains(physicalRoot, physicalFile))
@@ -60,7 +60,8 @@ internal static class SourcePathCapture
                     throw new CoveragePathException(CoverageReasonCodes.PathOutsideRoot,
                         $"Selected source resolves outside its recursive source root: {file}");
                 physicalRoot = Path.GetDirectoryName(physicalFile)!;
-                externalRootId ??= ExternalId(++externalIndex, Path.GetFileName(file));
+                var linkIdentity = Path.GetRelativePath(root.LocalPath, file).Replace(Path.DirectorySeparatorChar, '/');
+                externalRootId ??= ExternalId($"link:{linkIdentity}");
             }
             var logical = pathPolicy.Contains(root.LocalPath, file)
                 ? Path.GetRelativePath(root.LocalPath, file).Replace(Path.DirectorySeparatorChar, '/')
@@ -72,8 +73,8 @@ internal static class SourcePathCapture
         return new CoverageSourceInventory(pathPolicy, entries, roots);
     }
 
-    private static string ResolvePhysical(string value)
-        => ResolvePhysical(Path.GetFullPath(value), new HashSet<string>(PathIdentityPolicy.Current.Comparer), 0);
+    private static string ResolvePhysical(string value, PathIdentityPolicy pathPolicy)
+        => ResolvePhysical(Path.GetFullPath(value), new HashSet<string>(pathPolicy.Comparer), 0);
 
     private static string ResolvePhysical(string fullPath, ISet<string> visitedLinks, int depth)
     {
@@ -117,9 +118,9 @@ internal static class SourcePathCapture
         return Path.GetFullPath(current);
     }
 
-    private static string ExternalId(int index, string identity)
+    private static string ExternalId(string identity)
     {
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity))).ToLowerInvariant()[..12];
-        return $"external-{index}-{hash}";
+        return $"external-{hash}";
     }
 }
