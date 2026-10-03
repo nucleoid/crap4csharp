@@ -65,6 +65,7 @@ internal static partial class GitScopeResolver
             var captured = await CaptureFile(request, root, baseline, resolvedHead, record, timeout, cancellationToken);
             verificationFiles.Add(captured);
             var file = NormalizeEligibility(captured);
+            if (file is null) continue;
             if (file.Kind == ScopeChangeKind.Modified && file.OldIdentity == file.NewIdentity) continue;
             files.Add(file);
         }
@@ -303,14 +304,16 @@ internal static partial class GitScopeResolver
         return result;
     }
 
-    private static ChangedFile NormalizeEligibility(ChangedFile file)
+    private static ChangedFile? NormalizeEligibility(ChangedFile file)
     {
         var oldEligible = Eligible(file.OldPath);
         var newEligible = Eligible(file.NewPath);
         if (!oldEligible && newEligible && file.NewSource is not null)
             return new ChangedFile(null, file.NewPath, ScopeChangeKind.Added, null, file.NewIdentity,
                 null, file.NewSource, [WholeFile(file.NewSource.Text)], [], null, file.NewObjectIdentity);
-        if (oldEligible && !newEligible && file.OldSource is not null)
+        if (oldEligible && !newEligible && file.Kind == ScopeChangeKind.Copied)
+            return null;
+        if (oldEligible && !newEligible && file.Kind == ScopeChangeKind.Renamed && file.OldSource is not null)
             return new ChangedFile(file.OldPath, null, ScopeChangeKind.Deleted, file.OldIdentity, null,
                 file.OldSource, null, [], [WholeFile(file.OldSource.Text)], file.OldObjectIdentity, null);
         return file;
