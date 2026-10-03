@@ -68,12 +68,27 @@ public static class ChangedMethodSelector
             }
         }
 
+        if (limitations.Any(IsChangedDirective))
+        {
+            var oldSignatures = oldMethods.Select(method => method.CanonicalSignature)
+                .ToHashSet(StringComparer.Ordinal);
+            var newSignatures = newMethods.Select(method => method.CanonicalSignature)
+                .ToHashSet(StringComparer.Ordinal);
+            selected.AddRange(newMethods.Where(method => !oldSignatures.Contains(method.CanonicalSignature)));
+            removals.AddRange(oldMethods.Where(method => !newSignatures.Contains(method.CanonicalSignature)));
+        }
+
         if (widened)
             selected = newMethods.ToList();
         return new ChangedMethodSelection(selected.Distinct().OrderBy(method => method.StartLine).ToArray(),
             removals.Distinct().OrderBy(method => method.StartLine).ToArray(), widened,
             widened ? "scope.ambiguousCallableMapping" : null, limitations);
     }
+
+    private static bool IsChangedDirective(ScopeLimitation limitation) =>
+        limitation.Code == "scope.contextIncomplete" &&
+        limitation.SyntaxKind != "DisabledTextTrivia" &&
+        limitation.SyntaxKind.EndsWith("DirectiveTrivia", StringComparison.Ordinal);
 
     private static IReadOnlyList<SourceMethod> RemovedMethods(IReadOnlyList<SourceMethod> oldMethods,
         IReadOnlyList<SourceMethod> newMethods)
@@ -110,6 +125,14 @@ public static class ChangedMethodSelector
             var range = new LineRange(span.StartLinePosition.Line + 1, span.EndLinePosition.Line + 1);
             if (ranges.Any(changed => changed.Intersects(range.StartLine, range.EndLine)))
                 output.Add(new ScopeLimitation("scope.contextIncomplete", source.LogicalPath, "DisabledTextTrivia", range));
+        }
+        foreach (var trivia in tree.GetRoot().DescendantTrivia(descendIntoTrivia: true).Where(trivia => trivia.IsDirective))
+        {
+            var span = tree.GetLineSpan(trivia.Span);
+            var range = new LineRange(span.StartLinePosition.Line + 1, span.EndLinePosition.Line + 1);
+            if (ranges.Any(changed => changed.Intersects(range.StartLine, range.EndLine)))
+                output.Add(new ScopeLimitation("scope.contextIncomplete", source.LogicalPath,
+                    trivia.GetStructure()?.Kind().ToString() ?? "DirectiveTrivia", range));
         }
     }
 
