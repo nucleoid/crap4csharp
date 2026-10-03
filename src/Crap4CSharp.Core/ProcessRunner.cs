@@ -18,7 +18,25 @@ public static class ProcessRunner
         IEnumerable<string> arguments,
         string workingDirectory,
         TimeSpan timeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) =>
+        await RunCoreAsync(fileName, arguments, workingDirectory, timeout, cancellationToken, null);
+
+    public static async Task<ProcessResult> RunWithEnvironmentAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        string workingDirectory,
+        TimeSpan timeout,
+        CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, string> environment) =>
+        await RunCoreAsync(fileName, arguments, workingDirectory, timeout, cancellationToken, environment);
+
+    private static async Task<ProcessResult> RunCoreAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        string workingDirectory,
+        TimeSpan timeout,
+        CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, string>? environment)
     {
         if (timeout <= TimeSpan.Zero || timeout == Timeout.InfiniteTimeSpan)
             throw new ArgumentOutOfRangeException(nameof(timeout), "Process timeout must be positive and finite.");
@@ -30,6 +48,8 @@ public static class ProcessRunner
             RedirectStandardError = true,
             UseShellExecute = false
         };
+        if (environment is not null)
+            foreach (var pair in environment) startInfo.Environment[pair.Key] = pair.Value;
         foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
         using var process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Could not start {fileName}.");
         var output = process.StandardOutput.ReadToEndAsync();

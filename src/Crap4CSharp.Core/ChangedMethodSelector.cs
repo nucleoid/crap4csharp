@@ -1,0 +1,152 @@
+namespace Crap4CSharp.Core;
+
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+
+public sealed record ScopeLimitation(string Code, string Path, string SyntaxKind, LineRange Range);
+
+public sealed record ChangedMethodSelection(
+    IReadOnlyList<SourceMethod> Methods,
+    IReadOnlyList<SourceMethod> Removals,
+    bool ConservativelyWidened,
+    string? WideningReason,
+    IReadOnlyList<ScopeLimitation>? Limitations = null)
+{
+    public IReadOnlyList<ScopeLimitation> ScopeLimitations => Limitations ?? [];
+}
+
+public static class ChangedMethodSelector
+{
+    public static ChangedMethodSelection Select(ChangedFile change, IReadOnlyList<SourceMethod> oldMethods,
+        IReadOnlyList<SourceMethod> newMethods, ScopeGranularity granularity,
+        CSharpParseOptions? oldParseOptions = null, CSharpParseOptions? newParseOptions = null)
+    {
+        var limitations = FindUnsupportedExecutableChanges(change, oldParseOptions, newParseOptions);
+        if (granularity == ScopeGranularity.File)
+            return new ChangedMethodSelection(newMethods, RemovedMethods(oldMethods, newMethods), false, null, limitations);
+
+        if (change.Kind is ScopeChangeKind.Added or ScopeChangeKind.Copied)
+            return new ChangedMethodSelection(newMethods, [], false, null, limitations);
+        if (change.Kind == ScopeChangeKind.Deleted)
+            return new ChangedMethodSelection([], oldMethods, false, null, limitations);
+        if (change.Kind == ScopeChangeKind.Renamed && change.OldIdentity == change.NewIdentity &&
+            change.AddedRanges.Count == 0 && change.DeletedRanges.Count == 0)
+            return new ChangedMethodSelection([], [], false, null, limitations);
+
+        var selected = newMethods.Where(method => change.AddedRanges.Any(range => range.Intersects(method.StartLine, method.EndLine)))
+            .ToList();
+        var oldTouched = oldMethods.Where(method => change.DeletedRanges.Any(range => range.Intersects(method.StartLine, method.EndLine))).ToArray();
+        var removals = new List<SourceMethod>();
+        var widened = false;
+
+        foreach (var oldMethod in oldTouched)
+        {
+            var matches = newMethods.Where(method => method.CanonicalSignature == oldMethod.CanonicalSignature).ToArray();
+            if (matches.Length == 1)
+            {
+                if (!selected.Contains(matches[0])) selected.Add(matches[0]);
+            }
+            else if (matches.Length == 0)
+            {
+                var fullyDeleted = change.DeletedRanges.Any(range =>
+                    range.StartLine <= oldMethod.StartLine && range.EndLine >= oldMethod.EndLine);
+                var survivingShape = newMethods.Where(method => method.MethodName == oldMethod.MethodName &&
+                    method.CoverageTypeName == oldMethod.CoverageTypeName).ToArray();
+                if (!fullyDeleted && survivingShape.Length == 1)
+                {
+                    if (!selected.Contains(survivingShape[0])) selected.Add(survivingShape[0]);
+                }
+                else if (!fullyDeleted && survivingShape.Length > 1)
+                {
+                    widened = true;
+                }
+                else removals.Add(oldMethod);
+            }
+            else
+            {
+                widened = true;
+            }
+        }
+
+        if (limitations.Any(IsChangedDirective))
+        {
+            var oldSignatures = oldMethods.Select(method => method.CanonicalSignature)
+                .ToHashSet(StringComparer.Ordinal);
+            var newSignatures = newMethods.Select(method => method.CanonicalSignature)
+                .ToHashSet(StringComparer.Ordinal);
+            selected.AddRange(newMethods.Where(method => !oldSignatures.Contains(method.CanonicalSignature)));
+            removals.AddRange(oldMethods.Where(method => !newSignatures.Contains(method.CanonicalSignature)));
+        }
+
+        if (widened)
+            selected = newMethods.ToList();
+        return new ChangedMethodSelection(selected.Distinct().OrderBy(method => method.StartLine).ToArray(),
+            removals.Distinct().OrderBy(method => method.StartLine).ToArray(), widened,
+            widened ? "scope.ambiguousCallableMapping" : null, limitations);
+    }
+
+    private static bool IsChangedDirective(ScopeLimitation limitation) =>
+        limitation.Code == "scope.contextIncomplete" &&
+        limitation.SyntaxKind != "DisabledTextTrivia" &&
+        limitation.SyntaxKind.EndsWith("DirectiveTrivia", StringComparison.Ordinal);
+
+    private static IReadOnlyList<SourceMethod> RemovedMethods(IReadOnlyList<SourceMethod> oldMethods,
+        IReadOnlyList<SourceMethod> newMethods)
+    {
+        var current = newMethods.Select(method => method.CanonicalSignature).ToHashSet(StringComparer.Ordinal);
+        return oldMethods.Where(method => !current.Contains(method.CanonicalSignature)).ToArray();
+    }
+
+    private static IReadOnlyList<ScopeLimitation> FindUnsupportedExecutableChanges(ChangedFile change,
+        CSharpParseOptions? oldParseOptions, CSharpParseOptions? newParseOptions)
+    {
+        var limitations = new List<ScopeLimitation>();
+        AddLimitations(change.NewSource, change.AddedRanges, limitations, newParseOptions);
+        AddLimitations(change.OldSource, change.DeletedRanges, limitations, oldParseOptions);
+        return limitations.Distinct().OrderBy(item => item.Path, StringComparer.Ordinal)
+            .ThenBy(item => item.Range.StartLine).ThenBy(item => item.SyntaxKind, StringComparer.Ordinal).ToArray();
+    }
+
+    private static void AddLimitations(CapturedSource? source, IReadOnlyList<LineRange> ranges,
+        List<ScopeLimitation> output, CSharpParseOptions? parseOptions)
+    {
+        if (source is null || ranges.Count == 0) return;
+        var tree = CSharpSyntaxTree.ParseText(source.Text, parseOptions ?? CSharpParseOptions.Default,
+            source.LogicalPath);
+        foreach (var node in tree.GetRoot().DescendantNodes().Where(IsUnsupportedExecutable))
+        {
+            if (node.Ancestors().OfType<MethodDeclarationSyntax>().Any()) continue;
+            var span = tree.GetLineSpan(node.Span);
+            var range = new LineRange(span.StartLinePosition.Line + 1, span.EndLinePosition.Line + 1);
+            if (ranges.Any(changed => changed.Intersects(range.StartLine, range.EndLine)))
+                output.Add(new ScopeLimitation("scope.unsupportedChangedCallable", source.LogicalPath, node.Kind().ToString(), range));
+        }
+        foreach (var trivia in tree.GetRoot().DescendantTrivia(descendIntoTrivia: true)
+            .Where(trivia => trivia.IsKind(SyntaxKind.DisabledTextTrivia)))
+        {
+            var span = tree.GetLineSpan(trivia.Span);
+            var range = new LineRange(span.StartLinePosition.Line + 1, span.EndLinePosition.Line + 1);
+            if (ranges.Any(changed => changed.Intersects(range.StartLine, range.EndLine)))
+                output.Add(new ScopeLimitation("scope.contextIncomplete", source.LogicalPath, "DisabledTextTrivia", range));
+        }
+        foreach (var trivia in tree.GetRoot().DescendantTrivia(descendIntoTrivia: true).Where(trivia => trivia.IsDirective))
+        {
+            var span = tree.GetLineSpan(trivia.Span);
+            var range = new LineRange(span.StartLinePosition.Line + 1, span.EndLinePosition.Line + 1);
+            if (ranges.Any(changed => changed.Intersects(range.StartLine, range.EndLine)))
+                output.Add(new ScopeLimitation("scope.contextIncomplete", source.LogicalPath,
+                    trivia.GetStructure()?.Kind().ToString() ?? "DirectiveTrivia", range));
+        }
+    }
+
+    private static bool IsUnsupportedExecutable(SyntaxNode node) => node is
+        ConstructorDeclarationSyntax or DestructorDeclarationSyntax or OperatorDeclarationSyntax or
+        ConversionOperatorDeclarationSyntax or AccessorDeclarationSyntax or GlobalStatementSyntax or
+        SimpleLambdaExpressionSyntax or ParenthesizedLambdaExpressionSyntax or AnonymousMethodExpressionSyntax ||
+        node is PropertyDeclarationSyntax { ExpressionBody: not null } ||
+        node is PropertyDeclarationSyntax { Initializer: not null } ||
+        node is IndexerDeclarationSyntax { ExpressionBody: not null } ||
+        node is PrimaryConstructorBaseTypeSyntax ||
+        node is VariableDeclaratorSyntax { Initializer: not null };
+}

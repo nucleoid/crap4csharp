@@ -22,6 +22,8 @@ dotnet tool install --tool-path .tools --add-source artifacts Crap4CSharp.Tool
 
 No global install, source-tree modification, or package injection is performed by the tool.
 
+The existing command shown below is **syntax-only legacy analysis**. Project-aware MSBuild/Roslyn context capture is now available as an internal adapter for the forthcoming verified `check` workflow; it is not yet a public `check` or `analyze` command. See [the project context contract](docs/project-context.md) and [measured loader proof](docs/project-loading-proof.md).
+
 ## Usage
 
 ```bash
@@ -36,7 +38,7 @@ crap4csharp --coverage linux.xml --coverage windows.xml src
 crap4csharp --coverage-path-map 'C:\agent\repo\src' "$PWD/src" --coverage windows.xml src
 crap4csharp --coverage-path-map /agent/repo/src "$PWD/src" --coverage container.xml src
 
-# Analyze changed and untracked C# files
+# Analyze changed and untracked C# files using the legacy whole-file mode
 crap4csharp --changed --coverage coverage.xml
 
 # Gate at a different threshold
@@ -73,6 +75,7 @@ The local map root must be inside one of the selected source inputs; map the pro
 ## Analysis policy
 
 - Roslyn syntax trees are used; source is never analyzed with regular expressions.
+- Legacy invocations use filesystem discovery and default parser settings and remain explicitly labelled `syntaxOnly`. They do not claim the effective project's `Compile` items, links, target framework, symbols, language version, imports, generated inputs, or compiler binding.
 - Included: concrete ordinary methods, including block-bodied and expression-bodied, async, generic, overloaded, and methods on nested types.
 - Excluded: constructors, destructors, properties, accessors, operators, local functions, lambdas, and anonymous methods. Decisions inside excluded nested functions do not increase their containing method's complexity.
 - Cyclomatic complexity starts at 1 and increments for conditionals, loops, catches, switch cases/arms, `?:`, `&&`, `||`, and `??`.
@@ -81,7 +84,9 @@ The local map root must be inside one of the selected source inputs; map the pro
 - Compiler-generated async/iterator state-machine `MoveNext` methods are not reassigned to their source methods, so async or iterator source methods may remain `N/A` when a report exposes only state-machine coverage. This is intentionally conservative.
 - Default recursive discovery excludes `.git`, `bin`, `obj`, `packages`, `TestResults`, `node_modules`, `test`, `tests`, and `*.Test(s)` directories, plus common generated names (`*.g.cs`, `*.generated.cs`, `*.designer.cs`, assembly info, and global usings). Explicit eligible `.cs` files are accepted even if they are under an excluded directory; explicit directories retain exclusions. An existing explicit input that is not an eligible `.cs` source file fails instead of becoming an empty success.
 - C# syntax errors are operational failures; malformed syntax trees are never scored.
-- `--changed` consumes NUL-delimited Git porcelain v1, including spaces, newlines, untracked files, renames/copies, and deletions. Deleted files are ignored; paths escaping the repository root are rejected.
+- `--changed` consumes NUL-delimited Git porcelain v1, including spaces, newlines, untracked files, renames/copies, and deletions. Deleted files are ignored and paths escaping the repository root are rejected. This is the legacy whole-file worktree mode; it does not detect already committed changes and is not an alias for the future captured scope selectors.
+
+The repository also contains tested captured Git scope and changed-method selection adapters for future command orchestration. They distinguish exact worktree, index, and commit bytes and preserve resolved ref/object identities. The future `check`/`analyze` commands and public `--scope`, `--base`, `--head`, `--source-state`, and `--granularity` grammar are not implemented by the current CLI. See [captured change scopes](docs/change-scopes.md) for the contract, limitations, and current-worktree-only execution boundary.
 
 Output is ordered by numeric CRAP score descending, followed by unknown (`N/A`) entries. Ties are deterministic by path and line.
 

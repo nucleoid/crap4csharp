@@ -219,18 +219,35 @@ public sealed class CoreTests : IDisposable
     {
         var source = Write("ExplicitCoverage.cs", "class C { int M() => 1; }");
         var malformed = Write("bad.xml", "<coverage>");
-        var processInvoked = false;
-        Task<ProcessResult> UnexpectedProcess(string fileName, IEnumerable<string> arguments, string workingDirectory,
-            TimeSpan timeout, CancellationToken cancellationToken)
+        var processCalls = 0;
+        var noiseRoot = Path.Combine(Path.GetTempPath(), "crap4csharp", $"parallel-test-noise-{Guid.NewGuid():N}");
+        var noise = Task.Run(() =>
         {
-            processInvoked = true;
-            return Task.FromResult(new ProcessResult(99, string.Empty, "unexpected process"));
+            for (var index = 0; index < 100; index++)
+                Directory.CreateDirectory(Path.Combine(noiseRoot, index.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        }, TestContext.Current.CancellationToken);
+
+        try
+        {
+            Assert.Equal(1, (await RunAppWithExecutor(RejectProcess, "--coverage", malformed, source)).ExitCode);
+            Assert.Equal(1, (await RunAppWithExecutor(RejectProcess, "--coverage", Path.Combine(temporary, "missing.xml"), source)).ExitCode);
+            await noise;
+
+            Assert.Equal(0, processCalls);
+            Assert.True(Directory.Exists(noiseRoot));
+        }
+        finally
+        {
+            await noise;
+            Directory.Delete(noiseRoot, recursive: true);
         }
 
-        Assert.Equal(1, (await RunAppWithExecutor(UnexpectedProcess, "--coverage", malformed, source)).ExitCode);
-        Assert.Equal(1, (await RunAppWithExecutor(UnexpectedProcess, "--coverage",
-            Path.Combine(temporary, "missing.xml"), source)).ExitCode);
-        Assert.False(processInvoked);
+        Task<ProcessResult> RejectProcess(string fileName, IEnumerable<string> arguments, string workingDirectory,
+            TimeSpan timeout, CancellationToken cancellationToken)
+        {
+            processCalls++;
+            throw new Xunit.Sdk.XunitException($"Explicit coverage unexpectedly launched {fileName}.");
+        }
     }
 
     [Fact]
@@ -646,15 +663,10 @@ public sealed class CoreTests : IDisposable
     }
 
     private async Task<(int ExitCode, string Output, string Error)> RunApp(params string[] args)
-    {
-        using var output = new StringWriter();
-        using var error = new StringWriter();
-        var exitCode = await global::App.RunAsync(args, temporary, output, error, CancellationToken.None);
-        return (exitCode, output.ToString(), error.ToString());
-    }
+        => await RunAppWithExecutor(null, args);
 
     private async Task<(int ExitCode, string Output, string Error)> RunAppWithExecutor(
-        global::App.ProcessExecutor processExecutor, params string[] args)
+        global::App.ProcessExecutor? processExecutor, params string[] args)
     {
         using var output = new StringWriter();
         using var error = new StringWriter();

@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="Production/Production.csproj" />
+  <Project Path="Referenced/Library.csproj" />
+  <Project Path="Nested/MultiTarget/MultiTarget.csproj" />
+  <Project Path="Tests/ContextTests.csproj" />
+</Solution>
