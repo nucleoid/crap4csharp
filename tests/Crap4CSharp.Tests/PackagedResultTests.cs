@@ -22,13 +22,17 @@ public sealed class PackagedResultTests : IDisposable
         Directory.CreateDirectory(packages);
         var configuration = typeof(PackagedResultTests).Assembly
             .GetCustomAttribute<AssemblyConfigurationAttribute>()!.Configuration;
-        var isolatedNuget = new Dictionary<string, string?> { ["NUGET_PACKAGES"] = packageCache };
+        var isolatedNuget = new Dictionary<string, string?>
+        {
+            ["NUGET_PACKAGES"] = packageCache,
+            ["NUGET_HTTP_CACHE_PATH"] = Path.Combine(temporary, "nuget-http-cache")
+        };
         var pack = await Run("dotnet", ["pack", Path.Combine(repository, "src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj"),
             "-c", configuration, "--no-restore", "-m:1", "-o", packages], repository, isolatedNuget);
         AssertSuccess("pack", pack);
         var nugetConfig = Write("NuGet.Config", $"<configuration><packageSources><clear /><add key=\"local\" value=\"{System.Security.SecurityElement.Escape(packages)}\" /></packageSources></configuration>");
         var install = await Run("dotnet", ["tool", "install", "--tool-path", tools, "--add-source", packages,
-            "--configfile", nugetConfig, "Crap4CSharp.Tool"], repository, isolatedNuget);
+            "--configfile", nugetConfig, "--no-cache", "Crap4CSharp.Tool"], repository, isolatedNuget);
         AssertSuccess("install", install);
 
         var source = Write("Source.cs", "class C { int M() => 1; }");
