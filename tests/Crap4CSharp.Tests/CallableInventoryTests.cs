@@ -119,6 +119,32 @@ public sealed class CallableInventoryTests
     }
 
     [Fact]
+    public void SameSignatureLocalFunctionsInDifferentParentsHaveDistinctEntityIds()
+    {
+        var inventory = CallableInventory.Analyze(
+            "class C { int A() { int Core(int x) => x; return Core(1); } int B() { int Core(int x) => x; return Core(2); } }",
+            "C.cs", Context());
+
+        var locals = inventory.Callables.Where(item => item.Kind == CallableKind.LocalFunction).ToArray();
+        Assert.Equal(2, locals.Length);
+        Assert.Equal(2, locals.Select(item => item.CallableId).Distinct(StringComparer.Ordinal).Count());
+        Assert.All(locals, item => Assert.False(item.IdentityAmbiguous));
+    }
+
+    [Fact]
+    public void CrossFilePartialDefinitionAndImplementationMergeToOneExecutableEntry()
+    {
+        var definition = CallableInventory.Analyze("partial class C { partial void M(); }", "A.cs", Context());
+        var implementation = CallableInventory.Analyze(
+            "partial class C { partial void M() { if (true) { } } }", "B.cs", Context());
+
+        var merged = CallableInventory.Merge([definition, implementation]);
+        var method = Assert.Single(merged.Callables, item => item.Kind == CallableKind.Method && item.Name == "M");
+        Assert.Equal(CallableApplicability.Applicable, method.Applicability);
+        Assert.Equal("B.cs", method.Path);
+    }
+
+    [Fact]
     public void LocalVariableInitializersAreOwnedStatementsNotFieldInitializerCallables()
     {
         var inventory = CallableInventory.Analyze(
@@ -144,6 +170,21 @@ public sealed class CallableInventoryTests
             item.ParentObservationId == constructor.ObservationId);
         Assert.Contains(inventory.Callables, item => item.Kind == CallableKind.FieldInitializer &&
             item.ParentObservationId == constructor.ObservationId);
+    }
+
+    [Fact]
+    public void OuterPrimaryConstructorNeverOwnsNestedTypeInitializers()
+    {
+        var inventory = CallableInventory.Analyze(
+            "class O(int seed) { int own = seed; class N { int nested = 1 > 0 ? 1 : 0; } }",
+            "C.cs", Context());
+        var outer = Assert.Single(inventory.Callables,
+            item => item.Kind == CallableKind.Constructor && item.SemanticIdentity?.TypeName == "O");
+        var own = Assert.Single(inventory.Callables, item => item.Kind == CallableKind.FieldInitializer && item.Name == "own");
+        var nested = Assert.Single(inventory.Callables, item => item.Kind == CallableKind.FieldInitializer && item.Name == "nested");
+
+        Assert.Equal(outer.CallableId, own.ParentId);
+        Assert.Null(nested.ParentId);
     }
 
     private static CallableAnalysisContext Context() => new(

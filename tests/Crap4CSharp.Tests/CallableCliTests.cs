@@ -66,6 +66,61 @@ public sealed class CallableCliTests : IDisposable
     }
 
     [Fact]
+    public async Task LegacyOptionOnlyAcceptsExplicitOrdinaryRuleset()
+    {
+        var source = Write("LegacyExplicit.cs", "class C { int M() => 1; }");
+        var coverage = WriteCoverage(source, 1);
+        var result = await Run(null, "--ruleset", "ordinary-methods-v1", "--format", "json",
+            "--coverage", coverage, source);
+
+        Assert.Equal(0, result.ExitCode);
+        using var document = JsonDocument.Parse(result.Output);
+        Assert.Equal("ordinary-methods-v1", document.RootElement.GetProperty("complexityRulesetVersion").GetString());
+    }
+
+    [Fact]
+    public async Task ModernRulesetRejectsAllowMissingCoverageWithStructuredFailure()
+    {
+        var source = Write("Modern.cs", "class C { int M() => 1; }");
+        var result = await Run(null, "analyze", "--syntax-only", "--format", "json",
+            "--allow-missing-coverage", source);
+
+        Assert.Equal(1, result.ExitCode);
+        using var document = JsonDocument.Parse(result.Output);
+        Assert.Equal("callables-v1", document.RootElement.GetProperty("complexityRulesetVersion").GetString());
+        Assert.Equal("arguments.invalid", document.RootElement.GetProperty("evaluation")
+            .GetProperty("decision").GetProperty("reason").GetString());
+    }
+
+    [Fact]
+    public async Task ModernFailuresWriteOneJsonDocumentToStdoutAndOutput()
+    {
+        var destination = Path.Combine(temporary, "failure.json");
+        var result = await Run(null, "check", "--ruleset", "callables-v1", "--format", "json",
+            "--output", destination);
+
+        Assert.Equal(1, result.ExitCode);
+        using var stdout = JsonDocument.Parse(result.Output);
+        using var written = JsonDocument.Parse(File.ReadAllText(destination));
+        Assert.Equal("callables-v1", stdout.RootElement.GetProperty("complexityRulesetVersion").GetString());
+        Assert.Equal(stdout.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("reason").GetString(),
+            written.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("reason").GetString());
+    }
+
+    [Fact]
+    public async Task ModernHumanOutputDisclosesRulesetCompletenessFindingsAndDecision()
+    {
+        var source = Write("Human.cs", "class C { int M() { System.Func<int> f = () => 1; return f(); } }");
+        var result = await Run(null, "analyze", "--syntax-only", source);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("Ruleset: callables-v1", result.Output);
+        Assert.Contains("Completeness:", result.Output);
+        Assert.Contains("Findings:", result.Output);
+        Assert.Contains("Decision:", result.Output);
+    }
+
+    [Fact]
     public async Task AnalyzeCanExplicitlyInspectTheLegacyRulesetWithoutLaunchingProcesses()
     {
         var source = Write("LegacyAnalyze.cs", "class C { int M() => 1; }");

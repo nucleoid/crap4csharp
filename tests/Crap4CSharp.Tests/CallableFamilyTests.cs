@@ -73,6 +73,18 @@ public sealed class CallableFamilyTests
         Assert.Equal([family.FamilyId], selected.FamilyIds);
     }
 
+    [Fact]
+    public void MultiLevelNestingCreatesDistinctImmediateFamilies()
+    {
+        var inventory = Inventory(
+            "class C { int M() { int L() { int D() => 1; return D(); } return L(); } }");
+        var families = CallableFamilyEvaluator.Evaluate(inventory, [], 8);
+
+        Assert.Equal(2, families.Count);
+        Assert.Equal(2, families.Select(item => item.FamilyId).Distinct(StringComparer.Ordinal).Count());
+        Assert.All(families, family => Assert.Equal(2, family.MemberObservationIds.Count));
+    }
+
     private static CallableInventoryResult Inventory(string source) => CallableInventory.Analyze(source, "C.cs",
         new CallableAnalysisContext("App.csproj", "net10.0", "Debug", "AnyCPU", "ctx", CSharpParseOptions.Default));
 

@@ -123,6 +123,23 @@ public sealed class CallableCoverageTests
         });
     }
 
+    [Fact]
+    public void LambdaInsidePropertyDoesNotPolluteGetterSemanticIdentity()
+    {
+        var inventory = Inventory(
+            "class C { int[] xs = []; int P => System.Linq.Enumerable.Count(xs, x => x > 0); }");
+        var getter = Assert.Single(inventory.Callables, item => item.Kind == CallableKind.PropertyGet);
+        var lambda = Assert.Single(inventory.Callables, item => item.Kind == CallableKind.Lambda);
+        Assert.NotNull(getter.SemanticIdentity);
+        Assert.Null(lambda.SemanticIdentity);
+
+        var resolved = CallableCoverageResolver.Resolve(inventory,
+            [Report(getter, [new CoveragePoint(getter.Span.StartLine, 1)])]);
+
+        Assert.Equal("known", Assert.Single(resolved.Observations,
+            item => item.ObservationId == getter.ObservationId).Status);
+    }
+
     private static CallableInventoryResult Inventory(string source) => CallableInventory.Analyze(source, "C.cs",
         new CallableAnalysisContext("App.csproj", "net10.0", "Debug", "AnyCPU", "ctx", CSharpParseOptions.Default));
 

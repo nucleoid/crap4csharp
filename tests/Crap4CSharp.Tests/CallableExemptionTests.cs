@@ -79,6 +79,12 @@ public sealed class CallableExemptionTests
         Assert.Contains(CallableExemptions.Validate(Document(child, []), ExemptionTrust.BaseTrusted,
             inventory, [new(child.CallableId, "unknown", [], CoverageReasonCodes.UnsupportedGeneratedMapping)], [family]).Errors,
             error => error == "exemption.familyAcknowledgementMissing");
+
+        var unmatched = Encoding.UTF8.GetString(Document(child, [family.FamilyId]))
+            .Replace(child.CallableId, new string('0', child.CallableId.Length), StringComparison.Ordinal);
+        Assert.Contains(CallableExemptions.Validate(Encoding.UTF8.GetBytes(unmatched), ExemptionTrust.BaseTrusted,
+            inventory, [new(child.CallableId, "unknown", [], CoverageReasonCodes.UnsupportedGeneratedMapping)], [family]).Errors,
+            error => error == "exemption.unmatched");
     }
 
     private static string Value(string field, CallableEntry item) => field switch

@@ -50,6 +50,24 @@ public sealed class ComplexityRulesTests
         Assert.Equal(1, Complexity(member, ComplexityRules.Modern));
     }
 
+    [Theory]
+    [InlineData("int M(int x) { switch (x) { case 1: case 2: return 1; default: return 0; } }", 4)]
+    [InlineData("int M(int x) { while (x-- > 0) { } do { x++; } while (x < 0); return x; }", 3)]
+    [InlineData("async System.Threading.Tasks.Task<int> M(System.Collections.Generic.IAsyncEnumerable<int> xs) { await foreach (var x in xs) { if (x > 0) return x; } return 0; }", 3)]
+    [InlineData("System.Collections.Generic.IEnumerable<int> M() { try { yield return 1; } finally { Cleanup(); } }", 1)]
+    public void CallablesV1PinsRemainingStatementMatrix(string member, int expected)
+    {
+        Assert.Equal(expected, Complexity(member, ComplexityRules.Modern));
+    }
+
+    [Fact]
+    public void AndOrPatternIsLegacyTwoAndModernFour()
+    {
+        const string member = "int M(int x) => x is (> 0 and < 10) or 20 ? 1 : 0;";
+        Assert.Equal(2, Complexity(member, ComplexityRules.Legacy));
+        Assert.Equal(4, Complexity(member, ComplexityRules.Modern));
+    }
+
     private static int Complexity(string member, IComplexityRules rules)
     {
         var tree = CSharpSyntaxTree.ParseText($"class C {{ {member} }}");
