@@ -32,6 +32,8 @@ public static class CoverageReasonCodes
     public const string UnsupportedCallable = "scope.unsupportedCallable";
     public const string PdbUnavailable = "coverage.pdbUnavailable";
     public const string PdbMalformed = "coverage.pdbMalformed";
+    public const string PeUnavailable = "coverage.peUnavailable";
+    public const string PeMalformed = "coverage.peMalformed";
     public const string PdbIdentityMismatch = "coverage.pdbIdentityMismatch";
     public const string SourceChecksumMismatch = "coverage.sourceChecksumMismatch";
     public const string Unavailable = "coverage.unavailable";

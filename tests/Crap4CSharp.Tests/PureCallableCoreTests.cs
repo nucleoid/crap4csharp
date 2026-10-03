@@ -24,7 +24,7 @@ public sealed class PureCallableCoreTests
         var coverage = CallableCoverageResolver.Resolve(inventory, []);
         _ = CallableFamilyEvaluator.Evaluate(inventory, coverage.Observations, 8);
 
-        Assert.Equal("coverage.peUnavailable", mapping.Reason);
+        Assert.Equal(CoverageReasonCodes.PeUnavailable, mapping.Reason);
         Assert.False(File.Exists(logicalSource));
         Assert.Empty(Directory.EnumerateFileSystemEntries(temporary.Path));
     }

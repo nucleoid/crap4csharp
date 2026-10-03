@@ -36,7 +36,7 @@ public static class PortablePdbCallableMapper
             return Unsupported(CoverageReasonCodes.UnsupportedGeneratedMapping);
         if (callable.SemanticIdentity is null || callable.ContextId != binding.ContextId)
             return Unsupported(CoverageReasonCodes.ContextMismatch);
-        if (peBytes.IsDefaultOrEmpty) return Unsupported("coverage.peUnavailable");
+        if (peBytes.IsDefaultOrEmpty) return Unsupported(CoverageReasonCodes.PeUnavailable);
         if (pdbBytes.IsDefaultOrEmpty) return Unsupported(CoverageReasonCodes.PdbUnavailable);
         if (peBytes.Length > MaximumArtifactBytes || pdbBytes.Length > MaximumArtifactBytes)
             return Unsupported("coverage.artifactTooLarge");
@@ -49,33 +49,46 @@ public static class PortablePdbCallableMapper
             var metadata = pe.GetMetadataReader();
             var mvid = metadata.GetGuid(metadata.GetModuleDefinition().Mvid);
             if (mvid != binding.ExpectedMvid) return Unsupported(CoverageReasonCodes.ContextMismatch, mvid: mvid);
-
-            using var pdbStream = new MemoryStream(pdbBytes.ToArray(), writable: false);
-            using var provider = MetadataReaderProvider.FromPortablePdbStream(pdbStream, MetadataStreamOptions.LeaveOpen);
-            var pdb = provider.GetMetadataReader();
-            var pdbIdBytes = pdb.DebugMetadataHeader?.Id.ToArray() ?? [];
-            var pdbId = Convert.ToHexString(pdbIdBytes).ToLowerInvariant();
-            if (!string.Equals(pdbId, binding.ExpectedPortablePdbId, StringComparison.Ordinal))
-                return Unsupported(CoverageReasonCodes.PdbIdentityMismatch, mvid, pdbId);
-            if (!PeReferencesPdb(pe, pdbIdBytes))
-                return Unsupported(CoverageReasonCodes.PdbIdentityMismatch, mvid, pdbId);
-            if (!ValidateSourceDocument(callable.Path, pdb, binding.SourceDocuments))
-                return Unsupported(CoverageReasonCodes.SourceChecksumMismatch, mvid, pdbId);
-
             var kickoff = FindMethod(metadata, callable.SemanticIdentity);
-            if (kickoff.IsNil) return Unsupported("coverage.kickoffMethodNotFound", mvid, pdbId);
-            var generated = FindGeneratedMethod(pdb, kickoff);
-            if (generated.IsNil) return Unsupported(CoverageReasonCodes.UnsupportedGeneratedMapping, mvid, pdbId);
-            return new PortablePdbMappingResult("supported", null, "portablePdbStateMachine",
-                MetadataTokens.GetToken(kickoff), MetadataTokens.GetToken(generated), mvid, pdbId);
+            if (kickoff.IsNil) return Unsupported("coverage.kickoffMethodNotFound", mvid);
+
+            try
+            {
+                using var pdbStream = new MemoryStream(pdbBytes.ToArray(), writable: false);
+                using var provider = MetadataReaderProvider.FromPortablePdbStream(pdbStream, MetadataStreamOptions.LeaveOpen);
+                var pdb = provider.GetMetadataReader();
+                var pdbIdBytes = pdb.DebugMetadataHeader?.Id.ToArray() ?? [];
+                var pdbId = Convert.ToHexString(pdbIdBytes).ToLowerInvariant();
+                if (!string.Equals(pdbId, binding.ExpectedPortablePdbId, StringComparison.Ordinal))
+                    return Unsupported(CoverageReasonCodes.PdbIdentityMismatch, mvid, pdbId);
+                if (!PeReferencesPdb(pe, pdbIdBytes))
+                    return Unsupported(CoverageReasonCodes.PdbIdentityMismatch, mvid, pdbId);
+                if (!ValidateSourceDocument(callable.Path, pdb, binding.SourceDocuments))
+                    return Unsupported(CoverageReasonCodes.SourceChecksumMismatch, mvid, pdbId);
+
+                var generated = FindGeneratedMethod(pdb, kickoff);
+                if (generated.IsNil) return Unsupported(CoverageReasonCodes.UnsupportedGeneratedMapping, mvid, pdbId);
+                if (!ValidateGeneratedDocument(pdb, generated, callable.Path))
+                    return Unsupported(CoverageReasonCodes.UnsupportedMultiDocumentMapping, mvid, pdbId);
+                return new PortablePdbMappingResult("supported", null, "portablePdbStateMachine",
+                    MetadataTokens.GetToken(kickoff), MetadataTokens.GetToken(generated), mvid, pdbId);
+            }
+            catch (BadImageFormatException)
+            {
+                return Unsupported(CoverageReasonCodes.PdbMalformed, mvid);
+            }
+            catch (Exception exception) when (exception is IOException or ArgumentException or InvalidOperationException)
+            {
+                return Unsupported(CoverageReasonCodes.PdbMalformed, mvid);
+            }
         }
         catch (BadImageFormatException)
         {
-            return Unsupported(CoverageReasonCodes.PdbMalformed);
+            return Unsupported(CoverageReasonCodes.PeMalformed);
         }
         catch (Exception exception) when (exception is IOException or ArgumentException or InvalidOperationException)
         {
-            return Unsupported(CoverageReasonCodes.PdbMalformed);
+            return Unsupported(CoverageReasonCodes.PeMalformed);
         }
     }
 
@@ -139,6 +152,16 @@ public static class PortablePdbCallableMapper
         var actual = algorithm == Sha256 ? SHA256.HashData(supplied[0].Value.AsSpan()) :
             algorithm == Sha1 ? SHA1.HashData(supplied[0].Value.AsSpan()) : [];
         return actual.Length > 0 && actual.AsSpan().SequenceEqual(pdb.GetBlobBytes(document.Hash));
+    }
+
+    private static bool ValidateGeneratedDocument(MetadataReader pdb, MethodDefinitionHandle generated,
+        string logicalPath)
+    {
+        var debug = pdb.GetMethodDebugInformation(generated);
+        var documents = debug.GetSequencePoints().Where(point => !point.IsHidden)
+            .Select(point => point.Document.IsNil ? debug.Document : point.Document)
+            .Where(handle => !handle.IsNil).Distinct().ToArray();
+        return documents.Length == 1 && PathEqual(pdb.GetString(pdb.GetDocument(documents[0]).Name), logicalPath);
     }
 
     private static string TypeName(MetadataReader reader, TypeDefinitionHandle handle)

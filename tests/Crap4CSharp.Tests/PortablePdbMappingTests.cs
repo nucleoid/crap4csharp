@@ -73,8 +73,30 @@ public sealed class PortablePdbMappingTests
 
         Assert.Equal("coverage.pdbUnavailable", PortablePdbCallableMapper.Map(asyncCallable, artifacts.Pe, [], binding).Reason);
         Assert.Equal("coverage.pdbMalformed", PortablePdbCallableMapper.Map(asyncCallable, artifacts.Pe, [1, 2, 3], binding).Reason);
+        Assert.Equal("coverage.peMalformed", PortablePdbCallableMapper.Map(asyncCallable, [1, 2, 3], artifacts.Pdb, binding).Reason);
         Assert.Equal(CoverageReasonCodes.UnsupportedGeneratedMapping,
             PortablePdbCallableMapper.Map(lambda, artifacts.Pe, artifacts.Pdb, binding).Reason);
+    }
+
+    [Fact]
+    public void LineRemappingCannotEscapeExactGeneratedDocumentOwnership()
+    {
+        const string remapped = """
+            using System.Threading.Tasks;
+            class C {
+              public async Task<int> Async(int x) {
+            #line 100 "Mapped.cs"
+                await Task.Yield(); return x;
+            #line default
+              }
+            }
+            """;
+        var artifacts = Compile(remapped);
+        var callable = Assert.Single(Inventory(remapped).Callables);
+        var result = PortablePdbCallableMapper.Map(callable, artifacts.Pe, artifacts.Pdb,
+            Binding(artifacts, Encoding.UTF8.GetBytes(remapped)));
+
+        Assert.Equal(CoverageReasonCodes.UnsupportedMultiDocumentMapping, result.Reason);
     }
 
     private static CallableInventoryResult Inventory(string source) => CallableInventory.Analyze(source, "Fixture.cs",
