@@ -29,6 +29,13 @@ public sealed record ProjectContextLoadResult(
 
 public sealed record ProjectContextProjectExclusion(string ProjectPath, string Reason);
 
+internal sealed record ProjectContextSdkResolution(
+    string Version,
+    string Path,
+    string MsBuildVersion,
+    string DotNetRoot,
+    string HostPath);
+
 public sealed class ProjectContextException(string reason, string message) : InvalidOperationException(message)
 {
     public string Reason { get; } = reason;
@@ -67,7 +74,13 @@ public static class ProjectContextLoader
         Converters = { new JsonStringEnumConverter() }
     };
 
-    public static async Task<ProjectContextLoadResult> LoadAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken)
+    public static Task<ProjectContextLoadResult> LoadAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken) =>
+        LoadAsync(request, cancellationToken, ResolveSdkAsync);
+
+    internal static async Task<ProjectContextLoadResult> LoadAsync(
+        ProjectContextLoadRequest request,
+        CancellationToken cancellationToken,
+        Func<string, TimeSpan, CancellationToken, Task<ProjectContextSdkResolution>> resolveSdkAsync)
     {
         var target = ProjectTargetSelector.Select(Path.GetDirectoryName(Path.GetFullPath(request.Target))!, request.Target);
         var root = Path.GetDirectoryName(target)!;
@@ -75,10 +88,10 @@ public static class ProjectContextLoader
         using var overallTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         overallTimeout.CancelAfter(request.Timeout);
         var operationToken = overallTimeout.Token;
-        (string Version, string Path, string MsBuildVersion, string DotNetRoot, string HostPath) sdk;
+        ProjectContextSdkResolution sdk;
         try
         {
-            sdk = await ResolveSdkAsync(root, request.Timeout, operationToken);
+            sdk = await resolveSdkAsync(root, request.Timeout, operationToken);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && overallTimeout.IsCancellationRequested)
         {
@@ -144,7 +157,7 @@ public static class ProjectContextLoader
 
     private static string DotNetHost => Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet";
 
-    private static async Task<(string Version, string Path, string MsBuildVersion, string DotNetRoot, string HostPath)> ResolveSdkAsync(string root, TimeSpan timeout, CancellationToken cancellationToken)
+    private static async Task<ProjectContextSdkResolution> ResolveSdkAsync(string root, TimeSpan timeout, CancellationToken cancellationToken)
     {
         var versionResult = await ProcessRunner.RunAsync(DotNetHost, ["--version"], root, timeout, cancellationToken);
         if (versionResult.ExitCode != 0) throw new ProjectContextException("context.sdkResolutionFailed", versionResult.StandardError);
@@ -163,7 +176,7 @@ public static class ProjectContextLoader
             ?? throw new ProjectContextException("context.sdkResolutionFailed", $"Could not determine dotnet root from {sdkRoot}.");
         var hostPath = Path.Combine(dotnetRoot, OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet");
         if (!File.Exists(hostPath)) throw new ProjectContextException("context.sdkResolutionFailed", $"Resolved dotnet host is unavailable: {hostPath}");
-        return (version, Path.Combine(sdkRoot, version), msbuildVersion, dotnetRoot, hostPath);
+        return new ProjectContextSdkResolution(version, Path.Combine(sdkRoot, version), msbuildVersion, dotnetRoot, hostPath);
     }
 
     private static string[] SplitDiagnostics(ProcessResult result) =>
