@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Text;
 using Crap4CSharp.Core;
+using Microsoft.CodeAnalysis.CSharp;
 using Xunit;
 
 namespace Crap4CSharp.Tests;
@@ -111,6 +112,28 @@ public sealed class ChangedMethodSelectorTests
     }
 
     [Fact]
+    public void SelectorLimitationsUseTheProjectParseOptions()
+    {
+        const string oldText = "#if FEATURE\nclass C { int M() => 1; }\n#endif";
+        const string newText = "#if FEATURE\nclass C { int M() => 2; }\n#endif";
+        var oldSource = CapturedSource.Create("src/C.cs", Encoding.UTF8.GetBytes(oldText));
+        var newSource = CapturedSource.Create("src/C.cs", Encoding.UTF8.GetBytes(newText));
+        var options = new CSharpParseOptions(preprocessorSymbols: ["FEATURE"]);
+        var analyzer = new SourceAnalyzer();
+        var change = new ChangedFile("src/C.cs", "src/C.cs", ScopeChangeKind.Modified,
+            oldSource.ContentIdentity, newSource.ContentIdentity, oldSource, newSource,
+            [new LineRange(2, 2)], [new LineRange(2, 2)]);
+
+        var selection = ChangedMethodSelector.Select(change,
+            analyzer.AnalyzeCaptured(oldSource.LogicalPath, oldSource.Bytes, options),
+            analyzer.AnalyzeCaptured(newSource.LogicalPath, newSource.Bytes, options),
+            ScopeGranularity.Method, options, options);
+
+        Assert.Equal("M", Assert.Single(selection.Methods).MethodName);
+        Assert.DoesNotContain(selection.ScopeLimitations, limitation => limitation.SyntaxKind == "DisabledTextTrivia");
+    }
+
+    [Fact]
     public void IfDirectiveOnlyActivationAndDeactivationCannotProduceEmptyCompleteSelection()
     {
         AssertDirectiveInventoryChange(
@@ -133,8 +156,8 @@ public sealed class ChangedMethodSelectorTests
     {
         const string oldText = "class C {\n int M(\n  int removed,\n  int kept) => kept;\n}";
         const string newText = "class C {\n int M(\n  int kept) => kept;\n}";
-        var oldMethods = new SourceAnalyzer().AnalyzeText("src/C.cs", oldText);
-        var newMethods = new SourceAnalyzer().AnalyzeText("src/C.cs", newText);
+        var oldMethods = new SourceAnalyzer().AnalyzeLogicalText("src/C.cs", oldText);
+        var newMethods = new SourceAnalyzer().AnalyzeLogicalText("src/C.cs", newText);
         var oldSource = CapturedSource.Create("src/C.cs", Encoding.UTF8.GetBytes(oldText));
         var newSource = CapturedSource.Create("src/C.cs", Encoding.UTF8.GetBytes(newText));
         var change = new ChangedFile("src/C.cs", "src/C.cs", ScopeChangeKind.Modified,

@@ -81,10 +81,12 @@ public sealed class SourceAnalyzer
         return methods;
     }
 
-    public IReadOnlyList<SourceMethod> AnalyzeCaptured(string logicalPath, ImmutableArray<byte> bytes) =>
-        AnalyzeText(CapturedSource.Create(logicalPath, bytes.AsSpan()).Text, logicalPath, CSharpParseOptions.Default);
+    public IReadOnlyList<SourceMethod> AnalyzeCaptured(string logicalPath, ImmutableArray<byte> bytes,
+        CSharpParseOptions? parseOptions = null) =>
+        AnalyzeText(CapturedSource.Create(logicalPath, bytes.AsSpan()).Text, logicalPath,
+            parseOptions ?? CSharpParseOptions.Default);
 
-    public IReadOnlyList<SourceMethod> AnalyzeText(string logicalPath, string text) =>
+    public IReadOnlyList<SourceMethod> AnalyzeLogicalText(string logicalPath, string text) =>
         AnalyzeText(text, logicalPath, CSharpParseOptions.Default);
 
     public static int CalculateComplexity(MethodDeclarationSyntax method)

@@ -19,9 +19,10 @@ public sealed record ChangedMethodSelection(
 public static class ChangedMethodSelector
 {
     public static ChangedMethodSelection Select(ChangedFile change, IReadOnlyList<SourceMethod> oldMethods,
-        IReadOnlyList<SourceMethod> newMethods, ScopeGranularity granularity)
+        IReadOnlyList<SourceMethod> newMethods, ScopeGranularity granularity,
+        CSharpParseOptions? oldParseOptions = null, CSharpParseOptions? newParseOptions = null)
     {
-        var limitations = FindUnsupportedExecutableChanges(change);
+        var limitations = FindUnsupportedExecutableChanges(change, oldParseOptions, newParseOptions);
         if (granularity == ScopeGranularity.File)
             return new ChangedMethodSelection(newMethods, RemovedMethods(oldMethods, newMethods), false, null, limitations);
 
@@ -97,19 +98,22 @@ public static class ChangedMethodSelector
         return oldMethods.Where(method => !current.Contains(method.CanonicalSignature)).ToArray();
     }
 
-    private static IReadOnlyList<ScopeLimitation> FindUnsupportedExecutableChanges(ChangedFile change)
+    private static IReadOnlyList<ScopeLimitation> FindUnsupportedExecutableChanges(ChangedFile change,
+        CSharpParseOptions? oldParseOptions, CSharpParseOptions? newParseOptions)
     {
         var limitations = new List<ScopeLimitation>();
-        AddLimitations(change.NewSource, change.AddedRanges, limitations);
-        AddLimitations(change.OldSource, change.DeletedRanges, limitations);
+        AddLimitations(change.NewSource, change.AddedRanges, limitations, newParseOptions);
+        AddLimitations(change.OldSource, change.DeletedRanges, limitations, oldParseOptions);
         return limitations.Distinct().OrderBy(item => item.Path, StringComparer.Ordinal)
             .ThenBy(item => item.Range.StartLine).ThenBy(item => item.SyntaxKind, StringComparer.Ordinal).ToArray();
     }
 
-    private static void AddLimitations(CapturedSource? source, IReadOnlyList<LineRange> ranges, List<ScopeLimitation> output)
+    private static void AddLimitations(CapturedSource? source, IReadOnlyList<LineRange> ranges,
+        List<ScopeLimitation> output, CSharpParseOptions? parseOptions)
     {
         if (source is null || ranges.Count == 0) return;
-        var tree = CSharpSyntaxTree.ParseText(source.Text, path: source.LogicalPath);
+        var tree = CSharpSyntaxTree.ParseText(source.Text, parseOptions ?? CSharpParseOptions.Default,
+            source.LogicalPath);
         foreach (var node in tree.GetRoot().DescendantNodes().Where(IsUnsupportedExecutable))
         {
             if (node.Ancestors().OfType<MethodDeclarationSyntax>().Any()) continue;

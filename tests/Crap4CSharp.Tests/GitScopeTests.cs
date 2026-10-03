@@ -105,7 +105,8 @@ public sealed class GitScopeTests : IDisposable
         var file = Assert.Single(scope.Files);
         Assert.Equal(path, file.NewPath);
         Assert.Equal("class Exact { int M() => 1; }\n", file.NewSource!.Text);
-        Assert.StartsWith("sha256:", file.NewIdentity, StringComparison.Ordinal);
+        Assert.Equal(ProjectAnalysisContext.ContentHash(System.Text.Encoding.UTF8.GetBytes(file.NewSource.Text)),
+            file.NewIdentity);
     }
 
     [Fact]
@@ -291,6 +292,21 @@ public sealed class GitScopeTests : IDisposable
         var captured = CapturedSource.Create("Code.cs", bytes);
 
         Assert.Equal(ProjectAnalysisContext.ContentHash(bytes), captured.ContentIdentity);
+    }
+
+    [Fact]
+    public void StatOnlyCandidateIsStillReverifiedAfterInitialIdentityMatch()
+    {
+        Write("Code.cs", "class C { int M() => 1; }");
+        var source = CapturedSource.Create("Code.cs", File.ReadAllBytes(Path.Combine(temporary, "Code.cs")));
+        var candidate = new ChangedFile("Code.cs", "Code.cs", ScopeChangeKind.Modified,
+            source.ContentIdentity, source.ContentIdentity, source, source, [], []);
+        Write("Code.cs", "class C { int M() => 2; }");
+
+        var error = Assert.Throws<ScopeException>(() =>
+            GitScopeResolver.VerifyWorktreeBytes(temporary, [candidate]));
+
+        Assert.Equal("scope.changedDuringCapture", error.Reason);
     }
 
     [Fact]

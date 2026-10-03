@@ -25,12 +25,15 @@ internal static partial class GitScopeResolver
         var root = Text(rootResult).TrimEnd('\r', '\n');
         if (root.Length == 0) throw new ScopeException("scope.notGitRepository", "git returned an empty repository root.");
 
-        var currentHead = await TryResolveCommit(root, "HEAD", timeout, cancellationToken);
+        var capturesWorktree = request.Mode == ChangeScopeMode.Worktree ||
+            request.Mode == ChangeScopeMode.Base && request.SourceState == ScopeSourceState.Worktree;
+        var currentHead = await ResolveCurrentHeadOrUnborn(root, timeout, cancellationToken);
         if (request.Mode == ChangeScopeMode.Base && currentHead is null)
             throw new ScopeException("scope.unbornHead", "base scope requires an existing HEAD commit.");
         var indexBefore = await IndexIdentity(root, timeout, cancellationToken);
         await EnsureNoConflicts(root, timeout, cancellationToken);
-        await EnsureNoHiddenIndexEntries(root, timeout, cancellationToken);
+        if (capturesWorktree)
+            await EnsureNoHiddenIndexEntries(root, timeout, cancellationToken);
 
         string? resolvedBase = null;
         string? resolvedHead = currentHead;
@@ -56,44 +59,48 @@ internal static partial class GitScopeResolver
         var baseline = request.Mode == ChangeScopeMode.Base ? mergeBase! : currentHead ?? emptyTree!;
         var records = await ReadChanges(request, root, baseline, resolvedHead, timeout, cancellationToken);
         var files = new List<ChangedFile>();
+        var verificationFiles = new List<ChangedFile>();
         foreach (var record in records.Where(record => Eligible(record.OldPath) || Eligible(record.NewPath)))
         {
-            var file = await CaptureFile(request, root, baseline, resolvedHead, record, timeout, cancellationToken);
+            var captured = await CaptureFile(request, root, baseline, resolvedHead, record, timeout, cancellationToken);
+            verificationFiles.Add(captured);
+            var file = NormalizeEligibility(captured);
             if (file.Kind == ScopeChangeKind.Modified && file.OldIdentity == file.NewIdentity) continue;
             files.Add(file);
         }
         files = CoalesceExactWorktreeRenames(files);
 
-        var capturesWorktree = request.Mode == ChangeScopeMode.Worktree ||
-            request.Mode == ChangeScopeMode.Base && request.SourceState == ScopeSourceState.Worktree;
         if (capturesWorktree)
         {
             var recordsAfter = await ReadChanges(request, root, baseline, resolvedHead, timeout, cancellationToken);
             if (!records.SequenceEqual(recordsAfter))
                 throw new ScopeException("scope.changedDuringCapture", "the set of worktree changes changed during capture.");
         }
-        var currentHeadAfter = await TryResolveCommit(root, "HEAD", timeout, cancellationToken);
+        var currentHeadAfter = await ResolveCurrentHeadOrUnborn(root, timeout, cancellationToken);
         var indexAfter = await IndexIdentity(root, timeout, cancellationToken);
         if (currentHead != currentHeadAfter || indexBefore != indexAfter)
             throw new ScopeException("scope.changedDuringCapture", "HEAD or index changed during capture.");
         if (capturesWorktree)
-            VerifyWorktreeBytes(root, files);
+            VerifyWorktreeBytes(root, verificationFiles);
 
         var diagnostics = new List<string>
         {
             "git.diff.noExternal=true", "git.diff.noTextconv=true", "git.diff.text=true", "git.diff.renames=50%",
             "git.diff.copies=50%", "git.diff.algorithm=myers", "git.diff.indentHeuristic=false"
         };
-        if (records.Any(record => ContextInput(record.OldPath) || ContextInput(record.NewPath)))
-            diagnostics.Add("scope.contextIncomplete");
-        foreach (var path in records.SelectMany(record => new[] { record.OldPath, record.NewPath })
-            .Where(path => path is not null && !Eligible(path)).Distinct(PathComparer()).Order(PathComparer()))
+        var filteredPaths = records.SelectMany(record => new[] { record.OldPath, record.NewPath })
+            .Where(path => path is not null && !Eligible(path)).Select(path => path!)
+            .Distinct(PathComparer()).Order(PathComparer()).ToArray();
+        var contextIncomplete = records.Any(record => ContextInput(record.OldPath) || ContextInput(record.NewPath)) ||
+            filteredPaths.Any(BuildRelevantFilteredInput);
+        foreach (var path in filteredPaths)
         {
-            diagnostics.Add(path!.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)
-                ? $"scope.excludedChangedSource:{path}"
+            diagnostics.Add(path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)
+                ? IsExcludedTestSource(path)
+                    ? $"scope.excludedTestSource:{path}"
+                    : $"scope.excludedChangedSource:{path}"
                 : $"scope.unclassifiedChangedInput:{path}");
         }
-        var contextIncomplete = diagnostics.Any(diagnostic => diagnostic.StartsWith("scope.", StringComparison.Ordinal));
         if (contextIncomplete)
             diagnostics.Add("scope.contextIncomplete");
         diagnostics.AddRange(files.Where(file => file.OldSource is not null && file.NewSource is not null &&
@@ -258,7 +265,7 @@ internal static partial class GitScopeResolver
 
     private static string NormalizeForDiff(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);
 
-    private static void VerifyWorktreeBytes(string root, IEnumerable<ChangedFile> files)
+    internal static void VerifyWorktreeBytes(string root, IEnumerable<ChangedFile> files)
     {
         foreach (var file in files)
         {
@@ -296,6 +303,19 @@ internal static partial class GitScopeResolver
         return result;
     }
 
+    private static ChangedFile NormalizeEligibility(ChangedFile file)
+    {
+        var oldEligible = Eligible(file.OldPath);
+        var newEligible = Eligible(file.NewPath);
+        if (!oldEligible && newEligible && file.NewSource is not null)
+            return new ChangedFile(null, file.NewPath, ScopeChangeKind.Added, null, file.NewIdentity,
+                null, file.NewSource, [WholeFile(file.NewSource.Text)], [], null, file.NewObjectIdentity);
+        if (oldEligible && !newEligible && file.OldSource is not null)
+            return new ChangedFile(file.OldPath, null, ScopeChangeKind.Deleted, file.OldIdentity, null,
+                file.OldSource, null, [], [WholeFile(file.OldSource.Text)], file.OldObjectIdentity, null);
+        return file;
+    }
+
     private static async Task EnsureNoConflicts(string root, TimeSpan timeout, CancellationToken cancellationToken)
     {
         var unmerged = await Git(root, timeout, cancellationToken, ["ls-files", "--unmerged", "-z", "--"]);
@@ -327,6 +347,26 @@ internal static partial class GitScopeResolver
         return result.ExitCode == 0 ? Text(result).Trim() : null;
     }
 
+    private static async Task<string?> ResolveCurrentHeadOrUnborn(string root, TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var resolved = await Git(root, timeout, cancellationToken,
+            ["rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"], allowFailure: true);
+        if (resolved.ExitCode == 0) return Text(resolved).Trim();
+
+        var symbolic = await Git(root, timeout, cancellationToken,
+            ["symbolic-ref", "-q", "HEAD"], allowFailure: true);
+        if (symbolic.ExitCode == 0)
+        {
+            var branch = Text(symbolic).Trim();
+            var exists = await Git(root, timeout, cancellationToken,
+                ["show-ref", "--verify", "--quiet", branch], allowFailure: true);
+            if (exists.ExitCode == 1) return null;
+        }
+
+        throw new ScopeException("scope.gitFailed", $"git rev-parse HEAD failed: {resolved.Error.Trim()}");
+    }
+
     private static async Task<string> ResolveCommit(string root, string reference, TimeSpan timeout, CancellationToken cancellationToken) =>
         await TryResolveCommit(root, reference, timeout, cancellationToken)
         ?? throw new ScopeException("scope.invalidRef", $"'{reference}' does not resolve to a commit.");
@@ -343,6 +383,20 @@ internal static partial class GitScopeResolver
          Path.GetFileName(path).Equals("nuget.config", StringComparison.OrdinalIgnoreCase) ||
          Path.GetFileName(path).Equals(".editorconfig", StringComparison.OrdinalIgnoreCase) ||
          Path.GetFileName(path).Equals(".globalconfig", StringComparison.OrdinalIgnoreCase));
+
+    private static bool BuildRelevantFilteredInput(string path) =>
+        ContextInput(path) ||
+        path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) && !IsExcludedTestSource(path) ||
+        Path.GetExtension(path).ToLowerInvariant() is ".rsp" or ".resx";
+
+    private static bool IsExcludedTestSource(string path) =>
+        path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) &&
+        SourceDiscovery.IsExcludedByDirectory(path, ".") &&
+        path.Replace('\\', '/').Split('/').SkipLast(1).Any(segment =>
+            segment.Equals("test", StringComparison.OrdinalIgnoreCase) ||
+            segment.Equals("tests", StringComparison.OrdinalIgnoreCase) ||
+            segment.EndsWith(".Tests", StringComparison.OrdinalIgnoreCase) ||
+            segment.EndsWith(".Test", StringComparison.OrdinalIgnoreCase));
 
     private static List<PathChange> ParseNameStatus(byte[] bytes)
     {

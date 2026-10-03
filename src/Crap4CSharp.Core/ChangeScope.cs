@@ -1,5 +1,4 @@
 using System.Collections.Immutable;
-using System.Security.Cryptography;
 using System.Text;
 
 namespace Crap4CSharp.Core;
@@ -23,7 +22,7 @@ public sealed record CapturedSource(string LogicalPath, ImmutableArray<byte> Byt
     {
         _ = StrictUtf8.GetString(bytes);
         return new CapturedSource(logicalPath, ImmutableArray.Create(bytes.ToArray()),
-            "sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant());
+            ProjectAnalysisContext.ContentHash(bytes.ToArray()));
     }
 
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
