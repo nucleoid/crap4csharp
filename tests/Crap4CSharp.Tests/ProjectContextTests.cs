@@ -166,6 +166,33 @@ public sealed class ProjectContextTests
     }
 
     [Fact]
+    public async Task AuthoredInputMutationIsDetectedWhenAnAncestorIsNamedBin()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "crap4csharp-mutation", "bin", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var project = Path.Combine(root, "Mutation.csproj");
+        var settings = Path.Combine(root, "settings.json");
+        await File.WriteAllTextAsync(project, "<Project Sdk=\"Microsoft.NET.Sdk\" />", TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(settings, "{\"value\":1}", TestContext.Current.CancellationToken);
+        try
+        {
+            var result = await ProjectContextLoader.LoadAsync(
+                new(project, "Debug", null, [], false, false, TimeSpan.FromSeconds(30)),
+                CancellationToken.None,
+                (_, _, _) =>
+                {
+                    File.WriteAllText(settings, "{\"value\":2}");
+                    return Task.FromException<ProjectContextSdkResolution>(
+                        new ProjectContextException("context.sdkResolutionFailed", "SDK probe failed."));
+                });
+
+            Assert.False(result.Success);
+            Assert.Equal("context.inputsMutated", result.FailureReason);
+        }
+        finally { Directory.Delete(Path.Combine(Path.GetTempPath(), "crap4csharp-mutation"), true); }
+    }
+
+    [Fact]
     public void TargetSelectionNeverGuessesNestedProjects()
     {
         var root = Path.Combine(Path.GetTempPath(), "crap4csharp-select", Guid.NewGuid().ToString("N"));
