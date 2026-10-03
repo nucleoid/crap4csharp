@@ -53,8 +53,8 @@ internal static class App
           --timeout-seconds <n>
                              Maximum time for each external command (default: 300; max: 86400).
           --allow-missing-coverage
-                             Allow N/A methods; known scores still gate. By default any N/A is
-                             an operational failure to prevent a false-green quality gate.
+                             Legacy/non-unsupported inspection opt-out for N/A methods. Known
+                             scores still gate; unsupported callables always fail closed.
           --changed          Analyze changed/untracked C# files from git porcelain status.
           --ruleset <id>     Select ordinary-methods-v1 (legacy option-only invocation) or
                              callables-v1 (analyze/check commands; analyze default).
@@ -230,6 +230,22 @@ internal static class App
             {
                 case "--syntax-only": options.SyntaxOnly = true; break;
                 case "--coverage": options.Coverage.Add(Value()); break;
+                case "--coverage-path-map":
+                    if (index + 2 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal) ||
+                        args[index + 2].StartsWith("--", StringComparison.Ordinal))
+                        throw new ArgumentException("--coverage-path-map requires exactly two operands: <report-root> <local-root>.");
+                    options.CoveragePathMappings.Add(new CoveragePathMapping(args[++index], args[++index]));
+                    break;
+                case "--coverage-path-case":
+                    if (!seen.Add(arg)) throw new ArgumentException("--coverage-path-case may be specified only once.");
+                    options.CoveragePathCase = Value() switch
+                    {
+                        "auto" => CoveragePathCase.Auto,
+                        "sensitive" => CoveragePathCase.Sensitive,
+                        "insensitive" => CoveragePathCase.Insensitive,
+                        _ => throw new ArgumentException("Coverage path case must be auto, sensitive, or insensitive.")
+                    };
+                    break;
                 case "--ruleset":
                     if (!seen.Add(arg)) throw new ArgumentException("--ruleset may be specified only once.");
                     options.Ruleset = Value();
@@ -285,6 +301,8 @@ internal static class App
         };
         options.Inputs.AddRange(modern.Inputs);
         options.Coverage.AddRange(modern.Coverage);
+        options.CoveragePathMappings.AddRange(modern.CoveragePathMappings);
+        options.CoveragePathCase = modern.CoveragePathCase;
         var outcome = await ExecuteAsync(options, workingDirectory, cancellationToken,
             (_, _, _, _, _) => throw new InvalidOperationException("syntax-only analyze cannot launch child processes"),
             TextWriter.Null, TextWriter.Null, () => { });
@@ -312,8 +330,15 @@ internal static class App
                 .ThenBy(item => item.Span.Start).ToArray()) { TargetFramework = "net10.0" };
 
         var roots = files.Select(path => Path.GetDirectoryName(path)!).Distinct(PathIdentityPolicy.Current.Comparer).ToArray();
-        var captured = SourcePathCapture.Capture(files, roots, files, [], workingDirectory: workingDirectory);
-        var resolver = new CoveragePathResolver(PathIdentityPolicy.Current, captured, [], CoveragePathCase.Auto);
+        var preparedMappings = options.CoveragePathMappings.Select(mapping => mapping with
+        {
+            LocalRoot = CanonicalExistingPath(mapping.LocalRoot, workingDirectory, PathIdentityPolicy.Current,
+                canonicalizer: canonicalizer)
+        }).ToArray();
+        var captured = SourcePathCapture.Capture(files, roots, files, preparedMappings.Select(item => item.LocalRoot),
+            workingDirectory: workingDirectory);
+        var resolver = new CoveragePathResolver(PathIdentityPolicy.Current, captured, preparedMappings,
+            options.CoveragePathCase);
         var reads = reports.Select(report => CoverageReader.ReadDetailed(report, resolver)).ToArray();
         ThrowHardCoverageDiagnostic(reads.SelectMany(read => read.Diagnostics));
         var logicalPaths = captured.Entries.ToDictionary(item => item.LocalPath, item => item.LogicalPath,
@@ -416,6 +441,9 @@ internal static class App
             Families = families,
             CallableExemptions = exemptionValidation.Matches,
             ExemptionErrors = exemptionValidation.Errors,
+            CoveragePathPolicy = new CoveragePathPolicyResult(options.CoveragePathCase.ToString().ToLowerInvariant(),
+                resolver.MappingIdentities.Select(mapping => new CoveragePathMappingResult(
+                    mapping.ReportRoot, mapping.LocalRoot, mapping.Id)).ToArray()),
             CoverageDiagnostics = reads.SelectMany(item => item.Diagnostics).Concat(resolved.Diagnostics)
                 .GroupBy(item => item.Id, StringComparer.Ordinal).Select(item => item.First())
                 .OrderBy(item => item.Code, StringComparer.Ordinal).ThenBy(item => item.Id, StringComparer.Ordinal).ToArray()
@@ -1024,6 +1052,8 @@ internal static class App
         public string? Output { get; set; }
         public string? Exemptions { get; set; }
         public List<string> Coverage { get; } = [];
+        public List<CoveragePathMapping> CoveragePathMappings { get; } = [];
+        public CoveragePathCase CoveragePathCase { get; set; } = CoveragePathCase.Auto;
         public List<string> Inputs { get; } = [];
     }
 
