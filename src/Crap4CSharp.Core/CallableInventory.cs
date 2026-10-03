@@ -104,9 +104,11 @@ public static class CallableInventory
                 .OrderBy(item => item.Candidate.OwnershipSpan.Length).FirstOrDefault();
             var anonymous = IsAnonymous(candidate.Kind);
             var semanticIdentity = SemanticIdentity(candidate, semanticModel);
-            var semanticKey = anonymous
-                ? $"{parent.Entry?.CallableId ?? "<root>"}:{candidate.Kind}:{candidate.SemanticKey}:{candidate.BodyFingerprint}"
-                : semanticIdentity?.StableKey ?? candidate.SemanticKey;
+            var semanticKey = candidate.Kind == CallableKind.LocalFunction
+                ? $"{parent.Entry?.SemanticKey ?? "<root>"}:local:{semanticIdentity?.StableKey ?? candidate.SemanticKey}"
+                : anonymous
+                    ? $"{parent.Entry?.CallableId ?? "<root>"}:{candidate.Kind}:{candidate.SemanticKey}:{candidate.BodyFingerprint}"
+                    : semanticIdentity?.StableKey ?? candidate.SemanticKey;
             var callableId = Hash(context.Project.Replace('\\', '/'), context.TargetFramework, context.Configuration,
                 context.Platform, ComplexityRules.CallablesV1, candidate.Kind.ToString(), semanticKey);
             var observationId = Hash(callableId, context.ContextId, contentIdentity, logicalPath.Replace('\\', '/'),
@@ -132,9 +134,9 @@ public static class CallableInventory
             .GroupBy(item => item.Entry.CallableId, StringComparer.Ordinal)
             .Where(group => group.Count() > 1)
             .SelectMany(group => group).Select(item => item.Entry.ObservationId).ToHashSet(StringComparer.Ordinal);
-        var entries = built.Select(item => ambiguous.Contains(item.Entry.ObservationId)
+        var entries = CollapsePartialDeclarations(built.Select(item => ambiguous.Contains(item.Entry.ObservationId)
                 ? item.Entry with { IdentityAmbiguous = true, CoverageCapability = "unsupported", CoverageReason = "coverage.ambiguousCallableOwnership" }
-                : item.Entry)
+                : item.Entry))
             .OrderBy(item => item.Path, StringComparer.Ordinal).ThenBy(item => item.Span.Start)
             .ThenBy(item => item.Kind).ThenBy(item => item.CallableId, StringComparer.Ordinal).ToArray();
         return new CallableInventoryResult(ComplexityRules.CallablesV1, context.ContextId, contentIdentity, entries)
@@ -142,6 +144,34 @@ public static class CallableInventory
             TargetFramework = context.TargetFramework
         };
     }
+
+    public static CallableInventoryResult Merge(IReadOnlyList<CallableInventoryResult> inventories)
+    {
+        ArgumentNullException.ThrowIfNull(inventories);
+        if (inventories.Count == 0)
+            throw new ArgumentException("At least one callable inventory is required.", nameof(inventories));
+        var first = inventories[0];
+        if (inventories.Any(item => item.Ruleset != first.Ruleset || item.ContextId != first.ContextId ||
+                item.TargetFramework != first.TargetFramework))
+            throw new ArgumentException("Callable inventories must share one ruleset and analysis context.", nameof(inventories));
+
+        var callables = CollapsePartialDeclarations(inventories.SelectMany(item => item.Callables))
+            .OrderBy(item => item.Path, StringComparer.Ordinal).ThenBy(item => item.Span.Start)
+            .ThenBy(item => item.Kind).ThenBy(item => item.CallableId, StringComparer.Ordinal).ToArray();
+        return new CallableInventoryResult(first.Ruleset, first.ContextId,
+            Hash(inventories.Select(item => item.SourceContentIdentity)), callables)
+        {
+            TargetFramework = first.TargetFramework
+        };
+    }
+
+    private static IEnumerable<CallableEntry> CollapsePartialDeclarations(IEnumerable<CallableEntry> entries) =>
+        entries.GroupBy(item => item.CallableId, StringComparer.Ordinal).SelectMany(group =>
+        {
+            var values = group.ToArray();
+            var applicable = values.Where(item => item.Applicability == CallableApplicability.Applicable).ToArray();
+            return applicable.Length == 1 && values.Length > 1 ? applicable : values;
+        });
 
     private static List<Candidate> Discover(CompilationUnitSyntax root, SyntaxTree tree)
     {
@@ -294,14 +324,21 @@ public static class CallableInventory
             TypeDeclarationSyntax type => model.GetDeclaredSymbol(type)?.InstanceConstructors
                 .SingleOrDefault(constructor => constructor.Parameters.Length == type.ParameterList?.Parameters.Count &&
                     constructor.DeclaringSyntaxReferences.Any(reference => reference.Span == type.Span)),
-            _ => candidate.Node.AncestorsAndSelf().OfType<PropertyDeclarationSyntax>().FirstOrDefault() is { } property
-                ? model.GetDeclaredSymbol(property)?.GetMethod
-                : candidate.Node.AncestorsAndSelf().OfType<IndexerDeclarationSyntax>().FirstOrDefault() is { } indexer
-                    ? model.GetDeclaredSymbol(indexer)?.GetMethod
-                    : null
+            _ => ExpressionOwnerIdentity(candidate, model)
         };
         if (symbol is null || candidate.Kind is CallableKind.LocalFunction) return symbol is null ? null : FromSymbol(symbol);
         return FromSymbol(symbol);
+    }
+
+    private static IMethodSymbol? ExpressionOwnerIdentity(Candidate candidate, SemanticModel model)
+    {
+        if (candidate.Kind == CallableKind.PropertyGet &&
+            candidate.Node.AncestorsAndSelf().OfType<PropertyDeclarationSyntax>().FirstOrDefault() is { } property)
+            return model.GetDeclaredSymbol(property)?.GetMethod;
+        if (candidate.Kind == CallableKind.IndexerGet &&
+            candidate.Node.AncestorsAndSelf().OfType<IndexerDeclarationSyntax>().FirstOrDefault() is { } indexer)
+            return model.GetDeclaredSymbol(indexer)?.GetMethod;
+        return null;
     }
 
     private static CallableSemanticIdentity FromSymbol(IMethodSymbol symbol)
@@ -339,8 +376,10 @@ public static class CallableInventory
     private static bool CanOwn(Candidate parent, Candidate child)
     {
         var primaryConstructor = parent.Kind == CallableKind.Constructor && parent.Node is TypeDeclarationSyntax;
-        return !primaryConstructor || child.Kind is CallableKind.FieldInitializer or CallableKind.EventInitializer or
-            CallableKind.PropertyInitializer or CallableKind.PrimaryConstructorBaseArguments;
+        if (!primaryConstructor) return true;
+        if (child.Kind is not (CallableKind.FieldInitializer or CallableKind.EventInitializer or
+            CallableKind.PropertyInitializer or CallableKind.PrimaryConstructorBaseArguments)) return false;
+        return child.Node.AncestorsAndSelf().OfType<TypeDeclarationSyntax>().FirstOrDefault() == parent.Node;
     }
 
     private static CallableKind AccessorKind(AccessorDeclarationSyntax accessor)

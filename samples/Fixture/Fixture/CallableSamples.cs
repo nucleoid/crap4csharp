@@ -1,8 +1,15 @@
 namespace Fixture;
 
-public sealed class CallableSamples(int seed)
+public interface IProbe
+{
+    int Read();
+}
+
+public sealed class CallableSamples(int seed) : IProbe
 {
     private EventHandler? changed;
+
+    public CallableSamples() : this(0) { }
 
     public int Value { get; init; } = seed > 0 ? seed : 0;
 
@@ -10,6 +17,12 @@ public sealed class CallableSamples(int seed)
     {
         get => Value * 2;
         set => _ = value > 0 ? value : 0;
+    }
+
+    public int this[int index]
+    {
+        get => Value + index;
+        set => _ = value - index;
     }
 
     public event EventHandler Changed
@@ -54,5 +67,17 @@ public sealed class CallableSamples(int seed)
         Func<int, int> lambda = item => item > 0 ? item : 0;
         Func<int, int> staticLambda = static item => item > 0 ? item : 0;
         return Capturing(value) + StaticLocal(value) + lambda(value) + staticLambda(value);
+    }
+
+    int IProbe.Read() => Value;
+
+    public static CallableSamples operator +(CallableSamples left, CallableSamples right) =>
+        new(left.Value + right.Value);
+
+    public static explicit operator int(CallableSamples value) => value.Value;
+
+    public sealed class Box<T>
+    {
+        public T Echo(T value) => value;
     }
 }

@@ -145,6 +145,18 @@ public sealed class CallableInventoryTests
     }
 
     [Fact]
+    public void PartialPropertyDeclarationAndImplementationProduceOneGetter()
+    {
+        var inventory = CallableInventory.Analyze(
+            "partial class C { public partial int P { get; } public partial int P { get => 1; } }",
+            "C.cs", Context());
+
+        var getter = Assert.Single(inventory.Callables,
+            item => item.Kind == CallableKind.PropertyGet && item.SemanticIdentity?.MetadataName == "get_P");
+        Assert.Equal(CallableApplicability.Applicable, getter.Applicability);
+    }
+
+    [Fact]
     public void LocalVariableInitializersAreOwnedStatementsNotFieldInitializerCallables()
     {
         var inventory = CallableInventory.Analyze(
@@ -188,5 +200,6 @@ public sealed class CallableInventoryTests
     }
 
     private static CallableAnalysisContext Context() => new(
-        "repo/App.csproj", "net10.0", "Debug", "AnyCPU", "context-a", CSharpParseOptions.Default);
+        "repo/App.csproj", "net10.0", "Debug", "AnyCPU", "context-a",
+        CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.Preview));
 }

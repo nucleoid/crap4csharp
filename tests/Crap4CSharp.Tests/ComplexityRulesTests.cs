@@ -51,7 +51,7 @@ public sealed class ComplexityRulesTests
     }
 
     [Theory]
-    [InlineData("int M(int x) { switch (x) { case 1: case 2: return 1; default: return 0; } }", 4)]
+    [InlineData("int M(int x) { switch (x) { case 1: case 2: return 1; default: return 0; } }", 3)]
     [InlineData("int M(int x) { while (x-- > 0) { } do { x++; } while (x < 0); return x; }", 3)]
     [InlineData("async System.Threading.Tasks.Task<int> M(System.Collections.Generic.IAsyncEnumerable<int> xs) { await foreach (var x in xs) { if (x > 0) return x; } return 0; }", 3)]
     [InlineData("System.Collections.Generic.IEnumerable<int> M() { try { yield return 1; } finally { Cleanup(); } }", 1)]

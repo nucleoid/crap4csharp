@@ -53,8 +53,8 @@ internal static class App
           --timeout-seconds <n>
                              Maximum time for each external command (default: 300; max: 86400).
           --allow-missing-coverage
-                             Legacy/non-unsupported inspection opt-out for N/A methods. Known
-                             scores still gate; unsupported callables always fail closed.
+                             Legacy ordinary-methods-v1 inspection opt-out for N/A methods.
+                             Not accepted by callables-v1.
           --changed          Analyze changed/untracked C# files from git porcelain status.
           --ruleset <id>     Select ordinary-methods-v1 (legacy option-only invocation) or
                              callables-v1 (analyze/check commands; analyze default).
@@ -181,9 +181,10 @@ internal static class App
     {
         var startedAt = DateTimeOffset.UtcNow;
         var stopwatch = Stopwatch.StartNew();
+        ModernOptions? options = null;
         try
         {
-            var options = ParseModern(args);
+            options = ParseModern(args);
             if (options.Command == "check")
                 throw new ArgumentException(options.Ruleset == ComplexityRules.OrdinaryMethodsV1
                     ? "check requires callables-v1; ordinary-methods-v1 is available through the legacy option-only invocation."
@@ -208,6 +209,33 @@ internal static class App
         }
         catch (Exception exception) when (IsHandled(exception))
         {
+            var reason = exception is ArgumentException ? "arguments.invalid" :
+                exception is OperationCanceledException ? "run.cancelled" : "execution.failed";
+            var ruleset = options?.Ruleset ?? PreDetectValue(args, "--ruleset") switch
+            {
+                ComplexityRules.OrdinaryMethodsV1 => ComplexityRules.OrdinaryMethodsV1,
+                _ => ComplexityRules.CallablesV1
+            };
+            var result = BuildCallableFailure(args[0], ruleset, reason, startedAt, stopwatch.Elapsed);
+            var json = ResultWriter.Serialize(result);
+            var format = options?.Format ?? (HasJsonIntent(args) ? "json" : "human");
+            var destination = options?.Output ?? PreDetectValue(args, "--output");
+            var mayWrite = destination is not null && args.Count(arg => arg == "--output") == 1 &&
+                IsAbsentOutputDestination(destination, workingDirectory);
+            if (mayWrite)
+            {
+                try
+                {
+                    await ResultWriter.WriteAtomicAsync(Path.GetFullPath(destination!, workingDirectory), json,
+                        CancellationToken.None);
+                }
+                catch (Exception writeException) when (IsHandled(writeException))
+                {
+                    await error.WriteLineAsync($"error: unable to write result document: {writeException.Message}");
+                }
+            }
+            if (format == "json") await output.WriteAsync(json);
+            else RenderCallableHuman(result, output);
             await error.WriteLineAsync($"error: {exception.Message}");
             return 1;
         }
@@ -278,6 +306,8 @@ internal static class App
         }
         if (options.Ruleset is not (ComplexityRules.CallablesV1 or ComplexityRules.OrdinaryMethodsV1))
             throw new ArgumentException($"Unknown ruleset '{options.Ruleset}'.");
+        if (options.Ruleset == ComplexityRules.CallablesV1 && options.AllowMissingCoverage)
+            throw new ArgumentException("--allow-missing-coverage is only available with ordinary-methods-v1.");
         if (options.Command == "analyze" && !options.SyntaxOnly)
             throw new ArgumentException("Issue #7 analyze requires --syntax-only; project build orchestration is deferred to issue #10.");
         return options;
@@ -324,10 +354,7 @@ internal static class App
         var references = CaptureSyntaxReferences();
         var inventories = files.Select(path => CallableInventory.Analyze(File.ReadAllText(path),
             NormalizePath(workingDirectory, path), context, references)).ToArray();
-        var inventory = new CallableInventoryResult(ComplexityRules.CallablesV1, contextId,
-            StableId(inventories.Select(item => item.SourceContentIdentity).ToArray()),
-            inventories.SelectMany(item => item.Callables).OrderBy(item => item.Path, StringComparer.Ordinal)
-                .ThenBy(item => item.Span.Start).ToArray()) { TargetFramework = "net10.0" };
+        var inventory = CallableInventory.Merge(inventories);
 
         var roots = files.Select(path => Path.GetDirectoryName(path)!).Distinct(PathIdentityPolicy.Current.Comparer).ToArray();
         var preparedMappings = options.CoveragePathMappings.Select(mapping => mapping with
@@ -409,8 +436,6 @@ internal static class App
             ? new CallableExemptionValidation([], [], false)
             : CallableExemptions.Validate(File.ReadAllBytes(Path.GetFullPath(options.Exemptions, workingDirectory)),
                 ExemptionTrust.LocalUnreviewed, inventory, resolved.Observations, families);
-        var unsupported = unknown.Any(item => item.CoverageReason is CoverageReasonCodes.UnsupportedGeneratedMapping or
-            CoverageReasonCodes.UnsupportedCallable or CoverageReasonCodes.AmbiguousCallableOwnership);
         var checks = new List<CheckResult>
         {
             new("testExecution", "notApplicable", "tests.skippedSyntaxOnly", false),
@@ -418,8 +443,7 @@ internal static class App
                 ? new("callableExemptions", "operationalError", exemptionValidation.Errors[0], true)
                 : new("callableExemptions", "notApplicable", options.Exemptions is null
                     ? "exemption.none" : "exemption.localUnreviewed", false),
-            unknown.Length == 0 ? new("coverage", "pass", "coverage.complete", true) : options.AllowMissingCoverage && !unsupported
-                ? new("coverage", "skipped", "coverage.missingAllowed", false)
+            unknown.Length == 0 ? new("coverage", "pass", "coverage.complete", true)
                 : new("coverage", "operationalError", unknown[0].CoverageReason ?? CoverageReasonCodes.Unavailable, true),
             new("crap", thresholdFindings.Length > 0 ? "fail" : callables.Any(item => item.Crap is not null) ? "pass" : "notApplicable",
                 thresholdFindings.Length > 0 ? "crap.thresholdExceeded" : callables.Any(item => item.Crap is not null)
@@ -454,6 +478,28 @@ internal static class App
         return new ResultDocument(ResultContract.SchemaVersion, ToolVersion, ComplexityRules.CallablesV1, evaluation, run);
     }
 
+    private static ResultDocument BuildCallableFailure(string command, string ruleset, string reason,
+        DateTimeOffset startedAt, TimeSpan duration)
+    {
+        var check = new CheckResult(reason == "arguments.invalid" ? "arguments" : "execution",
+            reason == "run.cancelled" ? "cancelled" : "operationalError", reason, true);
+        var decision = new EvaluationDecision(false, "unknown", reason);
+        var evaluation = new EvaluationSection(command, new PolicyOptions(8, false),
+            new EvaluationScope(".", []), [], [check], [], [],
+            new CoverageSummary(0, 0, 0, new Dictionary<string, int>(StringComparer.Ordinal)), [], decision)
+        {
+            Callables = ruleset == ComplexityRules.CallablesV1 ? [] : null,
+            Families = ruleset == ComplexityRules.CallablesV1 ? [] : null,
+            CallableExemptions = ruleset == ComplexityRules.CallablesV1 ? [] : null,
+            ExemptionErrors = ruleset == ComplexityRules.CallablesV1 ? [] : null
+        };
+        var run = new RunSection(Guid.NewGuid().ToString("D"), startedAt, DateTimeOffset.UtcNow,
+            duration.TotalMilliseconds, [], [], [],
+            new CancellationDetails(reason == "run.cancelled", false, reason == "run.cancelled" ? reason : null),
+            reason == "run.cancelled" ? "cancelled" : "operationalError", 1);
+        return new ResultDocument(ResultContract.SchemaVersion, ToolVersion, ruleset, evaluation, run);
+    }
+
     private static string StableId(params string[] values) => Convert.ToHexString(
         SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", values)))).ToLowerInvariant();
 
@@ -480,8 +526,16 @@ internal static class App
 
     private static void RenderCallableHuman(ResultDocument result, TextWriter output)
     {
+        output.WriteLine($"Ruleset: {result.ComplexityRulesetVersion}");
         foreach (var item in result.Evaluation.Callables ?? [])
             output.WriteLine($"{item.Path}:{item.Span.StartLine} {item.Kind} {item.CallableId} CRAP={item.Crap?.ToString("0.00", CultureInfo.InvariantCulture) ?? "N/A"}");
+        output.WriteLine($"Completeness: known={result.Evaluation.Coverage.Known}; unknown={result.Evaluation.Coverage.Unknown}");
+        output.WriteLine($"Findings: {result.Evaluation.Findings.Count}");
+        foreach (var finding in result.Evaluation.Findings)
+            output.WriteLine($"  {finding.Code} {finding.Path}:{finding.Span.StartLine} {finding.EntityKey}");
+        foreach (var error in result.Evaluation.ExemptionErrors ?? [])
+            output.WriteLine($"  exemption error: {error}");
+        output.WriteLine($"Decision: {result.Evaluation.Decision.PolicyDecision} ({result.Evaluation.Decision.Reason}); exit={result.Run.ExitCode}");
     }
 
     private static Options Parse(string[] args)
@@ -533,6 +587,12 @@ internal static class App
                     break;
                 case "--changed": options.Changed = true; break;
                 case "--allow-missing-coverage": options.AllowMissingCoverage = true; break;
+                case "--ruleset":
+                    var ruleset = Value();
+                    if (ruleset != ComplexityRules.OrdinaryMethodsV1)
+                        throw new ArgumentException("Legacy option-only invocation requires ordinary-methods-v1.");
+                    options.Ruleset = ruleset;
+                    break;
                 case "--format":
                     if (seenFormat) throw new ArgumentException("--format may be specified only once.");
                     seenFormat = true;
