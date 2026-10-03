@@ -339,6 +339,49 @@ public sealed class GitScopeTests : IDisposable
     }
 
     [Fact]
+    public async Task LineEndingOnlyChangeHasNoExecutableRangesAndIsDiagnosed()
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("Code.cs", "class C {\n int M() => 1;\n}\n");
+        await Git("add", "--", "Code.cs");
+        await Git("commit", "--quiet", "-m", "base");
+        File.WriteAllText(Path.Combine(temporary, "Code.cs"), "class C {\r\n int M() => 1;\r\n}\r\n");
+
+        var scope = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Worktree), temporary,
+            TimeSpan.FromSeconds(10), CancellationToken.None);
+
+        var file = Assert.Single(scope.Files);
+        Assert.Empty(file.AddedRanges);
+        Assert.Empty(file.DeletedRanges);
+        Assert.Contains("scope.lineEndingOnly:Code.cs", scope.Diagnostics);
+        Assert.Equal(ScopeCompleteness.Complete, scope.Completeness);
+    }
+
+    [Fact]
+    public async Task WorktreeCaptureDoesNotRewriteConsumerIndex()
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("Code.cs", "class C { int M() => 1; }");
+        await Git("add", "--", "Code.cs");
+        await Git("commit", "--quiet", "-m", "base");
+        var sourcePath = Path.Combine(temporary, "Code.cs");
+        File.SetLastWriteTimeUtc(sourcePath, DateTime.UtcNow.AddSeconds(5));
+        var indexPath = Path.Combine(temporary, ".git", "index");
+        var indexBytes = await File.ReadAllBytesAsync(indexPath, TestContext.Current.CancellationToken);
+        var indexWriteTime = File.GetLastWriteTimeUtc(indexPath);
+
+        await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Worktree), temporary,
+            TimeSpan.FromSeconds(10), CancellationToken.None);
+
+        Assert.Equal(indexBytes, await File.ReadAllBytesAsync(indexPath, TestContext.Current.CancellationToken));
+        Assert.Equal(indexWriteTime, File.GetLastWriteTimeUtc(indexPath));
+    }
+
+    [Fact]
     public async Task IncompatibleLineSeparatorAndHiddenIndexEntryFailClosed()
     {
         await Git("init", "--quiet");
