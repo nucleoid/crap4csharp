@@ -81,16 +81,19 @@ public static class ProjectContextLoader
         try
         {
             var result = await ProcessRunner.RunAsync(DotNetHost, [assembly, LoaderCommand, requestPath, responsePath], root, request.Timeout, cancellationToken);
-            if (result.ExitCode != 0 || !File.Exists(responsePath))
-                return new ProjectContextLoadResult(false, [], SplitDiagnostics(result), "context.loaderFailed");
-            var loaded = JsonSerializer.Deserialize<ProjectContextLoadResult>(await File.ReadAllTextAsync(responsePath, cancellationToken), JsonOptions)
-                ?? new ProjectContextLoadResult(false, [], ["Loader returned an empty response."], "context.protocolInvalid");
+            ProjectContextLoadResult loaded;
+            if (File.Exists(responsePath))
+                loaded = JsonSerializer.Deserialize<ProjectContextLoadResult>(await File.ReadAllTextAsync(responsePath, cancellationToken), JsonOptions)
+                    ?? new ProjectContextLoadResult(false, [], ["Loader returned an empty response."], "context.protocolInvalid");
+            else
+                loaded = new ProjectContextLoadResult(false, [], SplitDiagnostics(result), "context.loaderFailed");
             var after = SnapshotAuthoredInputs(root);
             if (!before.OrderBy(pair => pair.Key, StringComparer.Ordinal).SequenceEqual(after.OrderBy(pair => pair.Key, StringComparer.Ordinal)))
                 return new ProjectContextLoadResult(false, loaded.Contexts,
                     loaded.Diagnostics.Concat(["Authored project/source inputs changed while project context was loading."]).ToArray(),
                     "context.inputsMutated");
-            return loaded;
+            return result.ExitCode == 0 || !loaded.Success ? loaded : new ProjectContextLoadResult(false, loaded.Contexts,
+                loaded.Diagnostics.Concat(SplitDiagnostics(result)).ToArray(), "context.loaderFailed", loaded.ExcludedProjects);
         }
         catch (JsonException exception)
         {
@@ -127,13 +130,29 @@ public static class ProjectContextLoader
 
     private static Dictionary<string, string> SnapshotAuthoredInputs(string root)
     {
-        var extensions = new HashSet<string>([".cs", ".csproj", ".props", ".targets", ".sln", ".slnx", ".json"], StringComparer.OrdinalIgnoreCase);
-        return Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
-            .Where(path => extensions.Contains(Path.GetExtension(path)))
-            .Where(path => !path.Split(Path.DirectorySeparatorChar).Any(part => part is "bin" or "obj" or ".git" or "TestResults"))
-            .ToDictionary(path => Path.GetRelativePath(root, path).Replace('\\', '/'),
-                path => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant(),
-                StringComparer.Ordinal);
+        try
+        {
+            var extensions = new HashSet<string>([".cs", ".csproj", ".props", ".targets", ".sln", ".slnx", ".json", ".projitems", ".shproj", ".rsp", ".editorconfig", ".globalconfig"], StringComparer.OrdinalIgnoreCase);
+            var result = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+                .Where(path => extensions.Contains(Path.GetExtension(path)) || Path.GetFileName(path).Equals("NuGet.Config", StringComparison.OrdinalIgnoreCase))
+                .Where(path => !path.Split(Path.DirectorySeparatorChar).Any(part => part is "bin" or "obj" or ".git" or "TestResults" or "node_modules"))
+                .ToDictionary(path => Path.GetRelativePath(root, path).Replace('\\', '/'),
+                    path => ProjectAnalysisContext.ContentHash(File.ReadAllBytes(path)), StringComparer.Ordinal);
+            for (var directory = Directory.GetParent(root); directory is not null; directory = directory.Parent)
+            {
+                foreach (var name in new[] { "Directory.Build.props", "Directory.Build.targets", "Directory.Packages.props", "global.json", "NuGet.Config", ".editorconfig", ".globalconfig" })
+                {
+                    var path = Path.Combine(directory.FullName, name);
+                    if (File.Exists(path)) result[$"<ancestor>/{directory.Name}/{name}"] = ProjectAnalysisContext.ContentHash(File.ReadAllBytes(path));
+                }
+                if (File.Exists(Path.Combine(directory.FullName, "global.json"))) break;
+            }
+            return result;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new ProjectContextException("context.inputSnapshotFailed", exception.Message);
+        }
     }
 }
 

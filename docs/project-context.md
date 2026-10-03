@@ -17,13 +17,13 @@ The selected consumer SDK is resolved by `dotnet` from the consumer target direc
 
 ## Identity and exclusions
 
-Context identity is a canonical SHA-256 manifest over logical project identity, assembly, TFM, effective configuration/platform, language/source kind, sorted symbols, content-addressed evaluated imports, included source physical/logical identities and hashes, exclusions and policy, plus adapter versions. Absolute temporary roots, timestamps, and Roslyn project IDs are excluded. Linked inputs retain separate physical and logical identities.
+Context identity is a length-prefixed canonical SHA-256 manifest over logical project identity, assembly, TFM, effective configuration/platform, language/source kind, sorted symbols, raw-byte content-addressed evaluated imports, included source physical/logical identities and hashes, exclusions and policy, plus adapter versions. Absolute temporary roots, timestamps, and Roslyn project IDs are excluded. Linked inputs retain separate physical and logical identities.
 
 The full workspace compile inventory is observed before policy filtering. Test projects (from evaluated `IsTestProject`) and generated documents are disclosed as exclusions unless explicitly included. Generated inclusion requests compilation-backed syntax trees; inability to produce them is an operational failure. Directory names alone do not classify projects as tests.
 
 ## Trust and mutation
 
-MSBuild evaluation and design-time loading can execute imported logic. This is appropriate only for repositories the operator trusts; it is not a sandbox for hostile projects. The parent snapshots authored C#, project, solution, props, targets, and JSON inputs before loading and fails `context.inputsMutated` if they change. It does not revert files. Normal prepared `obj`/`bin` outputs are outside that authored-input comparison.
+MSBuild evaluation and design-time loading can execute imported logic. This is appropriate only for repositories the operator trusts; it is not a sandbox for hostile projects. The parent snapshots authored C#, project, solution, props, targets, configuration, response, and JSON inputs before loading; the child additionally snapshots evaluated imports and compile items around workspace loading. Either side fails `context.inputsMutated` if observed inputs change. It does not revert files. Normal prepared `obj`/`bin` outputs are outside that authored-input comparison.
 
 The protocol uses task-owned request/response files so loader logs cannot corrupt structured output. The child process is bounded and process-tree cancellation is inherited from the common runner.
 

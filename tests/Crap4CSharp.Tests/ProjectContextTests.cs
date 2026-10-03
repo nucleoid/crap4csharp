@@ -28,11 +28,39 @@ public sealed class ProjectContextTests
         Assert.DoesNotContain(production.Sources, source => source.PhysicalPath.EndsWith("Excluded.cs", StringComparison.Ordinal));
         Assert.Contains(production.PreprocessorSymbols, symbol => symbol == "FROM_DIRECTORY_BUILD_PROPS");
         Assert.DoesNotContain(result.Contexts, context => context.AssemblyName == "ContextTests");
+        Assert.Contains(result.ExcludedProjects ?? [], project => project.ProjectPath.EndsWith("Tests/ContextTests.csproj", StringComparison.Ordinal));
         foreach (var (path, before) in protectedFiles)
         {
             Assert.Equal(before.Item1, File.ReadAllBytes(path));
             Assert.Equal(before.Item2, File.GetLastWriteTimeUtc(path));
         }
+
+        var filtered = await ProjectContextLoader.LoadAsync(request with { Frameworks = ["missing-tfm"] }, CancellationToken.None);
+        Assert.False(filtered.Success);
+        Assert.Equal("context.frameworkNotFound", filtered.FailureReason);
+
+        var generated = await ProjectContextLoader.LoadAsync(request with { IncludeGenerated = true }, CancellationToken.None);
+        Assert.True(generated.Success, string.Join(Environment.NewLine, generated.Diagnostics));
+        var generatedProduction = Assert.Single(generated.Contexts, context => context.AssemblyName == "Production");
+        Assert.Equal(generatedProduction.Sources.Count, generatedProduction.Sources.Select(source => source.LogicalPath).Distinct(StringComparer.Ordinal).Count());
+        Assert.Single(generatedProduction.Sources, source => source.LogicalPath == "Linked/Linked.cs");
+    }
+
+    [Fact]
+    public async Task UnrestoredProjectFailsWithStableReason()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "crap4csharp-unrestored", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var project = Path.Combine(root, "Unrestored.csproj");
+        await File.WriteAllTextAsync(project, "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>", TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(root, "Code.cs"), "class Code { int M() => 1; }", TestContext.Current.CancellationToken);
+        try
+        {
+            var result = await ProjectContextLoader.LoadAsync(new ProjectContextLoadRequest(project, "Debug", null, [], false, false, TimeSpan.FromMinutes(2)), TestContext.Current.CancellationToken);
+            Assert.False(result.Success);
+            Assert.Equal("context.assetsUnavailable", result.FailureReason);
+        }
+        finally { Directory.Delete(root, true); }
     }
 
     [Fact]
