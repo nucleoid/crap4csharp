@@ -224,7 +224,7 @@ public sealed class CoreTests : IDisposable
         {
             for (var index = 0; index < 100; index++)
                 Directory.CreateDirectory(Path.Combine(noiseRoot, index.ToString(System.Globalization.CultureInfo.InvariantCulture)));
-        });
+        }, TestContext.Current.CancellationToken);
 
         try
         {
