@@ -90,6 +90,24 @@ public sealed class CallableCoverageTests
         Assert.Contains(resolved.Diagnostics, item => item.Code == CoverageReasonCodes.UnsupportedGeneratedMapping);
     }
 
+    [Fact]
+    public void IndistinguishableAnonymousEntitiesRemainSeparateUnknownObservationsWithoutCrashing()
+    {
+        var inventory = Inventory("class C { void M() { System.Func<int,int> a = x => x + 1; System.Func<int,int> b = x => x + 1; } }");
+
+        var resolved = CallableCoverageResolver.Resolve(inventory, []);
+
+        var lambdas = inventory.Callables.Where(item => item.Kind == CallableKind.Lambda).ToArray();
+        Assert.Equal(2, lambdas.Length);
+        Assert.Equal(2, resolved.Observations.Count(item => item.CallableId == lambdas[0].CallableId));
+        Assert.All(resolved.Observations.Where(item => item.CallableId == lambdas[0].CallableId), item =>
+        {
+            Assert.Equal("unknown", item.Status);
+            Assert.Equal(CoverageReasonCodes.AmbiguousCallableOwnership, item.Reason);
+            Assert.NotNull(item.ObservationId);
+        });
+    }
+
     private static CallableInventoryResult Inventory(string source) => CallableInventory.Analyze(source, "C.cs",
         new CallableAnalysisContext("App.csproj", "net10.0", "Debug", "AnyCPU", "ctx", CSharpParseOptions.Default));
 
