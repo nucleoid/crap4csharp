@@ -127,6 +127,43 @@ public sealed class ResultContractTests : IDisposable
     }
 
     [Theory]
+    [InlineData("--project")]
+    [InlineData("--coverage")]
+    public async Task MalformedValueCannotTurnOutputIntoAnUnverifiedDestination(string consumingOption)
+    {
+        var source = Write("Source.cs", "class C { int M() => 1; }");
+        var before = await File.ReadAllBytesAsync(source, TestContext.Current.CancellationToken);
+        var result = await RunApp("--format", "json", consumingOption, "--output", source);
+        Assert.Equal(1, result.ExitCode);
+        Assert.Equal(before, await File.ReadAllBytesAsync(source, TestContext.Current.CancellationToken));
+        using var document = JsonDocument.Parse(result.Output);
+        Assert.Equal("arguments.invalid", document.RootElement.GetProperty("evaluation").GetProperty("checks")[0].GetProperty("reason").GetString());
+    }
+
+    [Fact]
+    public async Task IdenticalContentAtUnrelatedOutputPathIsNotAnAlias()
+    {
+        var source = Write("Source.cs", "class C { int M() => 1; }");
+        var coverage = WriteOpenCover("coverage.xml", source, visits: 1);
+        var destination = Write("result.json", File.ReadAllText(source));
+        var result = await RunApp("--format", "json", "--output", destination, "--coverage", coverage, source);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(result.Output, await File.ReadAllTextAsync(destination, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task OutputCannotReplaceProjectReferencedOnlyBySolution()
+    {
+        var source = Write("Source.cs", "class C { int M() => 1; }");
+        Write("Root.slnx", "<Solution><Project Path=\"nested/Referenced.csproj\" /></Solution>");
+        var project = Write(Path.Combine("nested", "Referenced.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        var before = await File.ReadAllBytesAsync(project, TestContext.Current.CancellationToken);
+        var result = await RunApp("--format", "json", "--output", project, source);
+        Assert.Equal(1, result.ExitCode);
+        Assert.Equal(before, await File.ReadAllBytesAsync(project, TestContext.Current.CancellationToken));
+    }
+
+    [Theory]
     [InlineData(true)]
     [InlineData(false)]
     public async Task EarlyFailureMarksExistingOutputStaleWithoutReplacingIt(bool argumentFailure)
@@ -489,6 +526,44 @@ public sealed class ResultContractTests : IDisposable
         Assert.Equal("B(int)", metrics.Single(metric => metric.GetProperty("methodIdentity").GetString() == "C.B(int)").GetProperty("signature").GetString());
     }
 
+    [Fact]
+    public async Task FindingEntityKeySurvivesLineMovementWhileObservationIdDoesNot()
+    {
+        var source = Write("Stable.cs", "class C { int M() { if (true) return 1; return 0; } }");
+        var first = await RunApp("--format", "json", "--threshold", "0", "--coverage", WriteOpenCover("first.xml", source, 1), source);
+        Write("Stable.cs", "\nclass C { int M() { if (true) return 1; return 0; } }");
+        var secondCoverage = WriteOpenCover("second.xml", source, 1);
+        File.WriteAllText(secondCoverage, File.ReadAllText(secondCoverage).Replace("sl=\"1\"", "sl=\"2\"", StringComparison.Ordinal));
+        var second = await RunApp("--format", "json", "--threshold", "0", "--coverage", secondCoverage, source);
+        using var firstDocument = JsonDocument.Parse(first.Output);
+        using var secondDocument = JsonDocument.Parse(second.Output);
+        var firstFinding = firstDocument.RootElement.GetProperty("evaluation").GetProperty("findings")[0];
+        var secondFinding = secondDocument.RootElement.GetProperty("evaluation").GetProperty("findings")[0];
+        Assert.Equal(firstFinding.GetProperty("entityKey").GetString(), secondFinding.GetProperty("entityKey").GetString());
+        Assert.NotEqual(firstFinding.GetProperty("id").GetString(), secondFinding.GetProperty("id").GetString());
+    }
+
+    [Fact]
+    public async Task AllowedAllUnknownCoverageIsNotApplicableButStillExitZero()
+    {
+        var source = Write("Unknown.cs", "class C { int M() => 1; }");
+        var coverage = Write("unknown.xml", "<CoverageSession><Modules /></CoverageSession>");
+        var result = await RunApp("--format", "json", "--allow-missing-coverage", "--coverage", coverage, source);
+        Assert.Equal(0, result.ExitCode);
+        using var document = JsonDocument.Parse(result.Output);
+        var evaluation = document.RootElement.GetProperty("evaluation");
+        Assert.Contains(evaluation.GetProperty("checks").EnumerateArray(), check =>
+            check.GetProperty("name").GetString() == "crap" && check.GetProperty("status").GetString() == "notApplicable");
+        Assert.Equal("notApplicable", evaluation.GetProperty("decision").GetProperty("policyDecision").GetString());
+    }
+
+    [Fact]
+    public async Task HumanOutputFailureReturnsOperationalExitCode()
+    {
+        var exitCode = await global::App.RunAsync([], temporary, new ThrowingWriter(), TextWriter.Null, CancellationToken.None);
+        Assert.Equal(1, exitCode);
+    }
+
     private async Task<(int ExitCode, string Output, string Error)> RunApp(params string[] args)
     {
         using var output = new StringWriter();
@@ -600,5 +675,10 @@ public sealed class ResultContractTests : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, contents);
         return Path.GetFullPath(path);
+    }
+
+    private sealed class ThrowingWriter : StringWriter
+    {
+        public override Task WriteLineAsync(string? value) => Task.FromException(new IOException("output unavailable"));
     }
 }

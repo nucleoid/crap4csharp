@@ -17,16 +17,18 @@ public sealed class PackagedResultTests : IDisposable
     {
         var repository = Path.GetFullPath("../../../../../", AppContext.BaseDirectory);
         var packages = Path.Combine(temporary, "packages");
+        var packageCache = Path.Combine(temporary, "nuget-packages");
         var tools = Path.Combine(temporary, "tools");
         Directory.CreateDirectory(packages);
         var configuration = typeof(PackagedResultTests).Assembly
             .GetCustomAttribute<AssemblyConfigurationAttribute>()!.Configuration;
+        var isolatedNuget = new Dictionary<string, string?> { ["NUGET_PACKAGES"] = packageCache };
         var pack = await Run("dotnet", ["pack", Path.Combine(repository, "src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj"),
-            "-c", configuration, "--no-build", "-o", packages], repository);
+            "-c", configuration, "--no-build", "-o", packages], repository, isolatedNuget);
         AssertSuccess("pack", pack);
         var nugetConfig = Write("NuGet.Config", $"<configuration><packageSources><clear /><add key=\"local\" value=\"{System.Security.SecurityElement.Escape(packages)}\" /></packageSources></configuration>");
         var install = await Run("dotnet", ["tool", "install", "--tool-path", tools, "--add-source", packages,
-            "--configfile", nugetConfig, "Crap4CSharp.Tool"], repository);
+            "--configfile", nugetConfig, "Crap4CSharp.Tool"], repository, isolatedNuget);
         AssertSuccess("install", install);
 
         var source = Write("Source.cs", "class C { int M() => 1; }");
@@ -37,6 +39,8 @@ public sealed class PackagedResultTests : IDisposable
 
         var pass = await Run(executable, ["--format", "json", "--coverage", coverage, source], temporary);
         AssertDocument(repository, pass, 0);
+        var violation = await Run(executable, ["--format", "json", "--threshold", "0", "--coverage", coverage, source], temporary);
+        AssertDocument(repository, violation, 2, "crap.thresholdExceeded");
         using (var document = JsonDocument.Parse(pass.Output))
         {
             Assert.Equal("1.0", document.RootElement.GetProperty("schemaVersion").GetString());
