@@ -8,7 +8,8 @@ internal static class ResultWriter
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-        WriteIndented = true
+        WriteIndented = true,
+        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
     };
 
     public static string Serialize(ResultDocument result) => JsonSerializer.Serialize(result, Options) + "\n";

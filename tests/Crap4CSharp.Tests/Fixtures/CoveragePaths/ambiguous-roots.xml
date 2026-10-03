@@ -1,0 +1,1 @@
+<coverage><sources><source>{{ROOT_ONE}}</source><source>{{ROOT_TWO}}</source></sources><packages><package><classes><class name="OnlyOneTypeMatches" filename="Same.cs"><methods><method name="M" signature="()"><lines><line number="1" hits="1" /></lines></method></methods></class></classes></package></packages></coverage>

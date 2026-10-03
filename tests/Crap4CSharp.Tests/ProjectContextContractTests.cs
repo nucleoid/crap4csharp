@@ -54,6 +54,32 @@ public sealed class ProjectContextContractTests
     }
 
     [Fact]
+    public void ContextualCoverageDiagnosticsKeepContextIdentityAndDoNotCollide()
+    {
+        var method = new SourceMethod("A.cs", "C", "M", "C.M()", "M()", 1, 1, 1)
+        {
+            LogicalPath = "src/A.cs"
+        };
+        var contexts = new[]
+        {
+            new ContextualSourceMethod("net10", method),
+            new ContextualSourceMethod("netstandard", method)
+        };
+        var wrongArity = new CoverageMethod("A.cs", "C", "M", 1, [new CoveragePoint(1, 1)], "App");
+
+        var matches = CoverageMatcher.ApplyDetailed(contexts,
+        [
+            new ContextualCoverageReport("net10", [wrongArity]),
+            new ContextualCoverageReport("netstandard", [wrongArity])
+        ]);
+
+        Assert.Equal(["net10", "netstandard"], matches.Select(match => match.Source.ContextId));
+        Assert.All(matches, match => Assert.Equal(CoverageReasonCodes.SignatureMismatch, match.CoverageReason));
+        var diagnosticIds = matches.Select(match => Assert.Single(match.Metric.CoverageStatus!.DiagnosticIds)).ToArray();
+        Assert.Equal(2, diagnosticIds.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    [Fact]
     public void CompiledInputBindingFailsClosedOnContextOrSourceDrift()
     {
         var source = new ProjectSourceIdentity("A.cs", "A.cs", "sha-a", false, false);

@@ -7,28 +7,46 @@ public static class SourceDiscovery
         ".git", "bin", "obj", "packages", "TestResults", "node_modules"
     };
 
-    public static IReadOnlyList<string> Discover(IEnumerable<string> inputs, string workingDirectory)
+    public static IReadOnlyList<string> Discover(IEnumerable<string> inputs, string workingDirectory) =>
+        Discover(inputs, workingDirectory, PathIdentityPolicy.Current);
+
+    public static IReadOnlyList<string> Discover(
+        IEnumerable<string> inputs,
+        string workingDirectory,
+        PathIdentityPolicy pathPolicy) =>
+        Discover(inputs, workingDirectory, pathPolicy, new ExistingPathCanonicalizer(pathPolicy));
+
+    internal static IReadOnlyList<string> Discover(
+        IEnumerable<string> inputs,
+        string workingDirectory,
+        PathIdentityPolicy pathPolicy,
+        ExistingPathCanonicalizer canonicalizer)
     {
-        var resolvedInputs = inputs.Any() ? inputs : [workingDirectory];
-        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        ArgumentNullException.ThrowIfNull(pathPolicy);
+        ArgumentNullException.ThrowIfNull(canonicalizer);
+        var inputList = inputs.ToArray();
+        var resolvedInputs = inputList.Length > 0 ? inputList : [workingDirectory];
+        var files = new List<string>();
         foreach (var input in resolvedInputs)
         {
-            var path = Path.GetFullPath(input, workingDirectory);
+            var path = pathPolicy.Normalize(input, workingDirectory);
             if (File.Exists(path))
             {
+                path = canonicalizer.NormalizeExisting(path);
                 if (!IsSource(path)) throw new ArgumentException($"Explicit input is not an eligible C# source file: {input}");
                 files.Add(path);
                 continue;
             }
 
             if (!Directory.Exists(path)) throw new DirectoryNotFoundException($"Input does not exist: {input}");
+            path = canonicalizer.NormalizeExisting(path);
             foreach (var file in Directory.EnumerateFiles(path, "*.cs", SearchOption.AllDirectories))
             {
-                if (IsSource(file) && !IsExcludedByDirectory(file, path)) files.Add(Path.GetFullPath(file));
+                if (IsSource(file) && !IsExcludedByDirectory(file, path)) files.Add(pathPolicy.Normalize(file));
             }
         }
 
-        return files.Order(StringComparer.Ordinal).ToArray();
+        return pathPolicy.DistinctOrThrow(files, "selected source inventory");
     }
 
     public static bool IsSource(string path)

@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using System.Diagnostics;
 using Crap4CSharp.Core;
 using Xunit;
@@ -330,6 +331,309 @@ public sealed class CoreTests : IDisposable
     }
 
     [Fact]
+    public async Task ChangedModeFromSubdirectoryKeepsIdentityWhenAncestorSiblingIsAdded()
+    {
+        var repository = Path.Combine(temporary, "changed-repository");
+        var workspace = Path.Combine(repository, "sub");
+        var ancestor = Path.Combine(repository, "a");
+        var nested = Path.Combine(ancestor, "b");
+        Directory.CreateDirectory(workspace);
+        Directory.CreateDirectory(nested);
+        var retained = Path.Combine(nested, "y.cs");
+        File.WriteAllText(retained, "class Y { int M() => 1; }");
+        var report = Path.Combine(repository, "coverage.xml");
+        File.WriteAllText(report, $"""
+            <CoverageSession><Modules><Module><Files><File uid="1" fullPath="{System.Security.SecurityElement.Escape(retained)}" /></Files>
+            <Classes><Class><FullName>Y</FullName><Methods><Method><Name>Y.M()</Name><SequencePoints>
+            <SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method></Methods></Class></Classes>
+            </Module></Modules></CoverageSession>
+            """);
+        var init = await ProcessRunner.RunAsync("git", ["init", "--quiet"], repository, TimeSpan.FromSeconds(10),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(0, init.ExitCode);
+
+        var alone = await RunAppFrom(workspace, "--format", "json", "--changed", "--coverage", report);
+        File.WriteAllText(Path.Combine(ancestor, "X.cs"), "class X { }");
+        var together = await RunAppFrom(workspace, "--format", "json", "--changed", "--coverage", report);
+
+        using var aloneDocument = JsonDocument.Parse(alone.Output);
+        using var togetherDocument = JsonDocument.Parse(together.Output);
+        var alonePath = Assert.Single(aloneDocument.RootElement.GetProperty("evaluation").GetProperty("metrics")
+            .EnumerateArray()).GetProperty("path").GetString();
+        var togetherPath = Assert.Single(togetherDocument.RootElement.GetProperty("evaluation").GetProperty("metrics")
+            .EnumerateArray()).GetProperty("path").GetString();
+        Assert.Equal(0, alone.ExitCode);
+        Assert.Equal(0, together.ExitCode);
+        Assert.Equal(alonePath, togetherPath);
+        Assert.StartsWith("../external-", alonePath, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CoveragePathMapUsesExactlyTwoOperands()
+    {
+        var one = await RunApp("--coverage-path-map", "/agent/repo");
+        var optionAsSecondOperand = await RunApp("--coverage-path-map", "/agent/repo", "--allow-missing-coverage");
+
+        Assert.Equal(1, one.ExitCode);
+        Assert.Equal(1, optionAsSecondOperand.ExitCode);
+        Assert.Contains("two operands", one.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("two operands", optionAsSecondOperand.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task InvalidCoverageMapFailsBeforeChildExecutionWithEmptyInventory()
+    {
+        var first = Path.Combine(temporary, "first");
+        var second = Path.Combine(temporary, "second");
+        Directory.CreateDirectory(first);
+        Directory.CreateDirectory(second);
+        var childCalled = false;
+        Task<ProcessResult> Child(string _, IEnumerable<string> __, string ___, TimeSpan ____, CancellationToken _____)
+        {
+            childCalled = true;
+            return Task.FromResult(new ProcessResult(0, string.Empty, string.Empty));
+        }
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = await global::App.RunAsync([
+            "--format", "json",
+            "--coverage-path-map", "/agent/repo", first,
+            "--coverage-path-map", "/agent/./repo", second
+        ], temporary, output, error, CancellationToken.None, Child);
+
+        Assert.Equal(1, exitCode);
+        Assert.False(childCalled);
+        Assert.Contains(CoverageReasonCodes.PathMappingConflict, output.ToString());
+    }
+
+    [Fact]
+    public async Task InvalidCoverageMapFailsBeforeChangedModeRunsGit()
+    {
+        var first = Path.Combine(temporary, "first");
+        var second = Path.Combine(temporary, "second");
+        Directory.CreateDirectory(first);
+        Directory.CreateDirectory(second);
+        var childCalled = false;
+        Task<ProcessResult> Child(string _, IEnumerable<string> __, string ___, TimeSpan ____, CancellationToken _____)
+        {
+            childCalled = true;
+            return Task.FromResult(new ProcessResult(0, string.Empty, string.Empty));
+        }
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = await global::App.RunAsync([
+            "--changed",
+            "--coverage-path-map", "/agent/repo", first,
+            "--coverage-path-map", "/agent/./repo", second
+        ], temporary, output, error, CancellationToken.None, Child);
+
+        Assert.Equal(1, exitCode);
+        Assert.False(childCalled);
+        Assert.Contains(CoverageReasonCodes.PathMappingConflict, error.ToString());
+    }
+
+    [Fact]
+    public async Task InstalledGrammarMapsForeignCoverageAndHonorsUnknownOptOut()
+    {
+        var source = Write("mapped/src/C.cs", "class C { int M() => 1; }");
+        var report = Write("foreign.xml", """
+            <CoverageSession><Modules><Module><ModuleName>Fixture</ModuleName><Files><File uid="1" fullPath="C:\agent\repo\src\C.cs" /></Files>
+            <Classes><Class><FullName>C</FullName><Methods><Method><Name>C.M()</Name><SequencePoints><SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method></Methods></Class></Classes>
+            </Module></Modules></CoverageSession>
+            """);
+
+        var mapped = await RunApp("--coverage-path-map", @"C:\agent\repo", Path.Combine(temporary, "mapped"),
+            "--coverage", report, Path.Combine(temporary, "mapped"));
+        var unmappedStrict = await RunApp("--coverage", report, source);
+        var unmappedAllowed = await RunApp("--allow-missing-coverage", "--coverage", report, source);
+
+        Assert.True(mapped.ExitCode == 0, $"stdout: {mapped.Output} stderr: {mapped.Error}");
+        Assert.Equal(1, unmappedStrict.ExitCode);
+        Assert.Equal(0, unmappedAllowed.ExitCode);
+    }
+
+    [Fact]
+    public async Task DocumentedSelectedSourceMappingFormSucceeds()
+    {
+        var source = Write("src/C.cs", "class C { int M() => 1; }");
+        var report = Write("documented-map.xml", """
+            <CoverageSession><Modules><Module><ModuleName>Fixture</ModuleName><Files><File uid="1" fullPath="C:\agent\repo\src\C.cs" /></Files>
+            <Classes><Class><FullName>C</FullName><Methods><Method><Name>C.M()</Name><SequencePoints><SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method></Methods></Class></Classes>
+            </Module></Modules></CoverageSession>
+            """);
+
+        var result = await RunApp("--coverage-path-map", @"C:\agent\repo\src", Path.Combine(temporary, "src"),
+            "--coverage", report, Path.Combine(temporary, "src"));
+
+        Assert.True(result.ExitCode == 0, $"stdout: {result.Output} stderr: {result.Error}");
+        Assert.Contains(source, Directory.EnumerateFiles(Path.Combine(temporary, "src")));
+    }
+
+    [Fact]
+    public async Task AcceptedInputCaseSpellingKeepsCanonicalMappingIdentity()
+    {
+        var actualRoot = Path.Combine(temporary, "case-input", "src");
+        Directory.CreateDirectory(actualRoot);
+        var typedRoot = Path.Combine(temporary, "case-input", "SRC");
+        if (!Directory.Exists(typedRoot)) return;
+        var source = Path.Combine(actualRoot, "C.cs");
+        File.WriteAllText(source, "class C { int M() => 1; }");
+        var report = Write("case-input.xml", """
+            <CoverageSession><Modules><Module><Files><File uid="1" fullPath="C:\agent\repo\src\C.cs" /></Files>
+            <Classes><Class><FullName>C</FullName><Methods><Method><Name>C.M()</Name><SequencePoints>
+            <SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method></Methods></Class></Classes>
+            </Module></Modules></CoverageSession>
+            """);
+
+        var canonical = await RunApp("--format", "json", "--coverage-path-map", @"C:\agent\repo\src", actualRoot,
+            "--coverage", report, actualRoot);
+        var alternate = await RunApp("--format", "json", "--coverage-path-map", @"C:\agent\repo\src", typedRoot,
+            "--coverage", report, typedRoot);
+        using var canonicalDocument = JsonDocument.Parse(canonical.Output);
+        using var alternateDocument = JsonDocument.Parse(alternate.Output);
+
+        Assert.Equal(0, canonical.ExitCode);
+        Assert.Equal(0, alternate.ExitCode);
+        Assert.Equal(canonicalDocument.RootElement.GetProperty("evaluation").GetProperty("coveragePathPolicy")
+                .GetProperty("mappings")[0].GetProperty("id").GetString(),
+            alternateDocument.RootElement.GetProperty("evaluation").GetProperty("coveragePathPolicy")
+                .GetProperty("mappings")[0].GetProperty("id").GetString());
+        Assert.Equal("case-input/src/C.cs", alternateDocument.RootElement.GetProperty("evaluation")
+            .GetProperty("metrics")[0].GetProperty("path").GetString());
+    }
+
+    [Fact]
+    public async Task SameNamedMethodsAcrossSelectedRootsKeepDistinctLogicalDiagnostics()
+    {
+        var first = Write("App1/Program.cs", "class Program { static void Main() { } }");
+        var second = Write("App2/Program.cs", "class Program { static void Main() { } }");
+        var report = Write("multi-root.xml", $"""
+            <CoverageSession><Modules><Module><ModuleName>Fixture</ModuleName><Files>
+            <File uid="1" fullPath="{System.Security.SecurityElement.Escape(first)}" />
+            <File uid="2" fullPath="{System.Security.SecurityElement.Escape(second)}" />
+            </Files><Classes><Class><FullName>Program</FullName><Methods>
+            <Method><Name>Program.Main(System.Int32)</Name><SequencePoints><SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method>
+            <Method><Name>Program.Main(System.Int32)</Name><SequencePoints><SequencePoint vc="1" sl="1" fileid="2" /></SequencePoints><FileRef uid="2" /></Method>
+            </Methods></Class></Classes></Module></Modules></CoverageSession>
+            """);
+
+        var result = await RunApp("--format", "json", "--allow-missing-coverage", "--coverage", report,
+            Path.Combine(temporary, "App1"), Path.Combine(temporary, "App2"));
+        using var document = JsonDocument.Parse(result.Output);
+        var metrics = document.RootElement.GetProperty("evaluation").GetProperty("metrics").EnumerateArray().ToArray();
+        var diagnostics = document.RootElement.GetProperty("evaluation").GetProperty("coverageDiagnostics").EnumerateArray()
+            .Where(item => item.GetProperty("scope").GetString() == "method").ToArray();
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(["App1/Program.cs", "App2/Program.cs"], metrics.Select(item => item.GetProperty("path").GetString()).Order());
+        Assert.Equal(2, diagnostics.Select(item => item.GetProperty("path").GetString()).Distinct().Count());
+        Assert.Equal(2, diagnostics.Select(item => item.GetProperty("id").GetString()).Distinct().Count());
+    }
+
+    [Fact]
+    public async Task ExternalFileWithoutMethodsUsesInventoryPathForScopeAndArtifact()
+    {
+        var workspace = Path.Combine(temporary, "workspace");
+        var externalRoot = Path.Combine(temporary, "outside", "shared");
+        Directory.CreateDirectory(workspace);
+        Directory.CreateDirectory(externalRoot);
+        var source = Path.Combine(externalRoot, "Empty.cs");
+        File.WriteAllText(source, "class Empty { }");
+        var report = Write("empty.xml", "<CoverageSession><Modules /></CoverageSession>");
+
+        var result = await RunAppFrom(workspace, "--format", "json", "--coverage", report, source);
+        using var document = JsonDocument.Parse(result.Output);
+        var scopePath = Assert.Single(document.RootElement.GetProperty("evaluation").GetProperty("scope")
+            .GetProperty("sources").EnumerateArray()).GetString();
+        var artifactPath = Assert.Single(document.RootElement.GetProperty("evaluation").GetProperty("artifacts")
+            .EnumerateArray(), item => item.GetProperty("kind").GetString() == "source").GetProperty("path").GetString();
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(scopePath, artifactPath);
+        Assert.StartsWith("../external-", scopePath, StringComparison.Ordinal);
+        Assert.DoesNotContain("outside", scopePath, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExternalMappingEvaluationUsesLogicalDestination()
+    {
+        var workspace = Path.Combine(temporary, "mapping-workspace");
+        var externalRoot = Path.Combine(temporary, "mapping-outside", "shared");
+        Directory.CreateDirectory(workspace);
+        Directory.CreateDirectory(externalRoot);
+        var source = Path.Combine(externalRoot, "C.cs");
+        File.WriteAllText(source, "class C { int M() => 1; }");
+        var report = Write("external-map.xml", """
+            <CoverageSession><Modules><Module><Files><File uid="1" fullPath="C:\agent\repo\C.cs" /></Files>
+            <Classes><Class><FullName>C</FullName><Methods><Method><Name>C.M()</Name><SequencePoints>
+            <SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method></Methods></Class></Classes>
+            </Module></Modules></CoverageSession>
+            """);
+
+        var result = await RunAppFrom(workspace, "--format", "json", "--coverage-path-map",
+            @"C:\agent\repo", externalRoot, "--coverage", report, source);
+        using var document = JsonDocument.Parse(result.Output);
+        var localRoot = document.RootElement.GetProperty("evaluation").GetProperty("coveragePathPolicy")
+            .GetProperty("mappings")[0].GetProperty("localRoot").GetString();
+        var sourcePath = Assert.Single(document.RootElement.GetProperty("evaluation").GetProperty("scope")
+            .GetProperty("sources").EnumerateArray()).GetString();
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.StartsWith("../external-", localRoot, StringComparison.Ordinal);
+        Assert.StartsWith(localRoot, sourcePath, StringComparison.Ordinal);
+        Assert.DoesNotContain("mapping-outside", localRoot, StringComparison.Ordinal);
+        Assert.DoesNotContain(temporary, localRoot, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task HardCoverageFailureStillUsesInventoryPathForScopeAndArtifact()
+    {
+        var workspace = Path.Combine(temporary, "failure-workspace");
+        var externalRoot = Path.Combine(temporary, "failure-outside", "shared");
+        Directory.CreateDirectory(workspace);
+        Directory.CreateDirectory(externalRoot);
+        var source = Path.Combine(externalRoot, "C.cs");
+        File.WriteAllText(source, "class C { int M() => 1; }");
+        var report = Write("failure.xml", $"""
+            <coverage><sources><source>{System.Security.SecurityElement.Escape(externalRoot)}</source></sources>
+            <packages><package><classes><class name="C" filename="../escape.cs"><methods>
+            <method name="M" signature="()"><lines><line number="1" hits="1" /></lines></method>
+            </methods></class></classes></package></packages></coverage>
+            """);
+
+        var result = await RunAppFrom(workspace, "--format", "json", "--coverage", report, source);
+        using var document = JsonDocument.Parse(result.Output);
+        var scopePath = Assert.Single(document.RootElement.GetProperty("evaluation").GetProperty("scope")
+            .GetProperty("sources").EnumerateArray()).GetString();
+        var artifactPath = Assert.Single(document.RootElement.GetProperty("evaluation").GetProperty("artifacts")
+            .EnumerateArray(), item => item.GetProperty("kind").GetString() == "source").GetProperty("path").GetString();
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains(CoverageReasonCodes.PathOutsideRoot, result.Error);
+        Assert.Equal(scopePath, artifactPath);
+        Assert.StartsWith("../external-", scopePath, StringComparison.Ordinal);
+        Assert.DoesNotContain("failure-outside", scopePath, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InvalidReportPathRemainsOperationalWithMissingCoverageOptOut()
+    {
+        var source = Write("InvalidPath.cs", "class C { int M() => 1; }");
+        var report = Write("invalid-path.xml", """
+            <CoverageSession><Modules><Module><Files><File uid="1" fullPath="file:///source/InvalidPath.cs" /></Files>
+            <Classes><Class><FullName>C</FullName><Methods><Method><Name>C.M()</Name><SequencePoints><SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method></Methods></Class></Classes>
+            </Module></Modules></CoverageSession>
+            """);
+
+        var result = await RunApp("--allow-missing-coverage", "--coverage", report, source);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains(CoverageReasonCodes.InvalidPath, result.Error);
+    }
+
+    [Fact]
     public async Task ProcessRunnerTimesOutWithoutHanging()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -367,6 +671,15 @@ public sealed class CoreTests : IDisposable
         using var output = new StringWriter();
         using var error = new StringWriter();
         var exitCode = await global::App.RunAsync(args, temporary, output, error, CancellationToken.None, processExecutor);
+        return (exitCode, output.ToString(), error.ToString());
+    }
+
+    private static async Task<(int ExitCode, string Output, string Error)> RunAppFrom(string workingDirectory,
+        params string[] args)
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var exitCode = await global::App.RunAsync(args, workingDirectory, output, error, CancellationToken.None);
         return (exitCode, output.ToString(), error.ToString());
     }
 

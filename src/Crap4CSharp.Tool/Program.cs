@@ -38,6 +38,12 @@ internal static class App
         Options:
           --coverage <xml>   Use an OpenCover or Cobertura/Coverlet XML report; repeatable.
                              Supplying coverage skips dotnet test.
+          --coverage-path-map <report-root> <local-root>
+                             Translate an absolute report root to an existing selected-source
+                             directory; repeatable. Longest component prefix wins.
+          --coverage-path-case <auto|sensitive|insensitive>
+                             Compare foreign report roots using dialect defaults (auto), or the
+                             explicit policy. Local source identity is unchanged.
           --project <path>   Solution or project passed to dotnet test.
           --threshold <n>    Fail when a known CRAP score is strictly greater than n (default: 8).
           --timeout-seconds <n>
@@ -95,8 +101,17 @@ internal static class App
         {
             var cancelled = exception is OperationCanceledException;
             var timedOut = exception is ProcessTimeoutException;
-            var reason = exception is ArgumentException ? "arguments.invalid" : cancelled ? "run.cancelled" : timedOut ? "run.timeout" : "execution.failed";
-            outcome = ExecutionOutcome.Failure(reason, exception.Message, cancelled, timedOut) with { AliasChecked = aliasChecked };
+            var reason = exception is ArgumentException ? "arguments.invalid" : exception is CoveragePathException pathException
+                ? pathException.Code : cancelled ? "run.cancelled" : timedOut ? "run.timeout" : "execution.failed";
+            var message = exception is CoveragePathException ? $"{reason}: {exception.Message}" : exception.Message;
+            outcome = ExecutionOutcome.Failure(reason, message, cancelled, timedOut) with
+            {
+                AliasChecked = aliasChecked,
+                CoverageDiagnostics = exception is CoveragePathException
+                    ? [CoverageDiagnostic.Create(reason, CoverageDiagnosticStage.Path, CoverageDiagnosticSeverity.Error,
+                        CoverageDiagnosticScope.Report, message: reason)]
+                    : []
+            };
         }
 
         var format = options?.Format ?? (jsonIntent ? "json" : "human");
@@ -154,6 +169,7 @@ internal static class App
         var options = new Options();
         var seenFormat = false;
         var seenOutput = false;
+        var seenCoveragePathCase = false;
         for (var index = 0; index < args.Length; index++)
         {
             var arg = args[index];
@@ -167,6 +183,23 @@ internal static class App
             switch (arg)
             {
                 case "--coverage": options.Coverage.Add(Value()); break;
+                case "--coverage-path-map":
+                    if (index + 2 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal) ||
+                        args[index + 2].StartsWith("--", StringComparison.Ordinal))
+                        throw new ArgumentException("--coverage-path-map requires exactly two operands: <report-root> <local-root>.");
+                    options.CoveragePathMappings.Add(new CoveragePathMapping(args[++index], args[++index]));
+                    break;
+                case "--coverage-path-case":
+                    if (seenCoveragePathCase) throw new ArgumentException("--coverage-path-case may be specified only once.");
+                    seenCoveragePathCase = true;
+                    options.CoveragePathCase = Value() switch
+                    {
+                        "auto" => CoveragePathCase.Auto,
+                        "sensitive" => CoveragePathCase.Sensitive,
+                        "insensitive" => CoveragePathCase.Insensitive,
+                        _ => throw new ArgumentException("Coverage path case must be auto, sensitive, or insensitive.")
+                    };
+                    break;
                 case "--project": options.Project = Value(); break;
                 case "--threshold":
                     if (!double.TryParse(Value(), NumberStyles.Float, CultureInfo.InvariantCulture, out var threshold) ||
@@ -208,9 +241,36 @@ internal static class App
         var commands = new List<CommandRecord>();
         var runArtifacts = new List<RunArtifact>();
         var generatedReports = new List<string>();
+        var pathPolicy = PathIdentityPolicy.Current;
+        var canonicalizer = new ExistingPathCanonicalizer(pathPolicy);
+        var canonicalWorkingDirectory = CanonicalExistingPath(workingDirectory, workingDirectory, pathPolicy,
+            canonicalizer: canonicalizer);
+        var preparedMappings = options.CoveragePathMappings.Select(mapping => mapping with
+        {
+            LocalRoot = CanonicalExistingPath(mapping.LocalRoot, workingDirectory, pathPolicy,
+                canonicalizer: canonicalizer)
+        }).ToArray();
+        var resolvedInputs = options.Inputs.Select(input => CanonicalExistingPath(input, workingDirectory, pathPolicy,
+            canonicalizer: canonicalizer)).ToArray();
+        var declaredRoots = DeclaredSourceRoots(resolvedInputs, canonicalWorkingDirectory);
+        var explicitFiles = resolvedInputs.Where(File.Exists).ToArray();
+        if (options.Changed)
+        {
+            var preflightInventory = SourcePathCapture.Capture([], declaredRoots, [],
+                preparedMappings.Select(mapping => mapping.LocalRoot), workingDirectory: canonicalWorkingDirectory);
+            _ = new CoveragePathResolver(PathIdentityPolicy.Current, preflightInventory,
+                preparedMappings, options.CoveragePathCase);
+        }
         var files = options.Changed
             ? await ChangedFilesAsync(workingDirectory, options.Timeout, cancellationToken, processExecutor)
-            : SourceDiscovery.Discover(options.Inputs, workingDirectory);
+            : SourceDiscovery.Discover(options.Inputs, workingDirectory, pathPolicy, canonicalizer);
+        var sourceInventory = SourcePathCapture.Capture(files, declaredRoots, explicitFiles,
+            preparedMappings.Select(mapping => mapping.LocalRoot), workingDirectory: canonicalWorkingDirectory);
+        var sourceLogicalPaths = sourceInventory.Entries.ToDictionary(
+            entry => entry.LocalPath, entry => entry.LogicalPath, PathIdentityPolicy.Current.Comparer);
+        var pathResolver = new CoveragePathResolver(PathIdentityPolicy.Current, sourceInventory,
+            preparedMappings, options.CoveragePathCase);
+        options.ValidatedCoveragePathMappings = pathResolver.MappingIdentities;
         var reports = options.Coverage.Select(path => Path.GetFullPath(path, workingDirectory)).ToList();
         var project = options.Project is null ? null : Path.GetFullPath(options.Project, workingDirectory);
         var implicitTargets = project is null && reports.Count == 0 ? PotentialTestTargets(workingDirectory) : [];
@@ -219,6 +279,7 @@ internal static class App
         {
             Files = files,
             Reports = reports,
+            SourceLogicalPaths = sourceLogicalPaths,
             OutputAliasReason = alias,
             AliasChecked = true
         };
@@ -226,6 +287,8 @@ internal static class App
 
         IReadOnlyList<SourceMethod> source = [];
         CoverageMatcher.DetailedMatch[] detailed = [];
+        var coverageDiagnostics = new List<CoverageDiagnostic>();
+        var coverageEvidence = new List<CoverageRunEvidence>();
         var checks = new List<CheckResult>();
         try
         {
@@ -234,12 +297,25 @@ internal static class App
             {
                 foreach (var report in reports)
                     if (!File.Exists(report)) throw new FileNotFoundException($"Coverage report not found: {report}", report);
-                coverage = reports.Select(CoverageReader.Read).ToArray();
+                var reads = reports.Select(report => CoverageReader.ReadDetailed(report, pathResolver)).ToArray();
+                coverage = reads.Select(read => read.Methods).ToArray();
+                CaptureCoverageEvidence(reads, coverageDiagnostics, coverageEvidence);
+                ThrowHardCoverageDiagnostic(coverageDiagnostics);
             }
             if (files.Count == 0)
             {
                 lines.Add("No C# source files found.");
-                return new ExecutionOutcome { Files = files, Reports = reports, HumanLines = lines, Reason = "crap.noEligibleMethods", AliasChecked = true };
+                return new ExecutionOutcome
+                {
+                    Files = files,
+                    Reports = reports,
+                    SourceLogicalPaths = sourceLogicalPaths,
+                    HumanLines = lines,
+                    Reason = "crap.noEligibleMethods",
+                    CoverageDiagnostics = coverageDiagnostics,
+                    CoverageEvidence = coverageEvidence,
+                    AliasChecked = true
+                };
             }
 
             var testFailed = false;
@@ -274,6 +350,7 @@ internal static class App
                     {
                         Files = files,
                         Reports = reports,
+                        SourceLogicalPaths = sourceLogicalPaths,
                         Checks = noCoverageChecks,
                         ErrorMessage = "dotnet test produced no coverage XML. Add coverlet.collector to the test project or pass --coverage.",
                         Reason = "coverage.notProduced",
@@ -287,9 +364,20 @@ internal static class App
 
             foreach (var report in reports)
                 if (!File.Exists(report)) throw new FileNotFoundException($"Coverage report not found: {report}", report);
-            source = new SourceAnalyzer().AnalyzeFiles(files);
-            coverage ??= reports.Select(CoverageReader.Read).ToArray();
-            detailed = CoverageMatcher.ApplyDetailed(source, coverage)
+            source = new SourceAnalyzer().AnalyzeFiles(files).Select(method => method with
+            {
+                LogicalPath = sourceLogicalPaths[PathIdentityPolicy.Current.Normalize(method.File)]
+            }).ToArray();
+            if (coverage is null)
+            {
+                var reads = reports.Select(report => CoverageReader.ReadDetailed(report, pathResolver)).ToArray();
+                coverage = reads.Select(read => read.Methods).ToArray();
+                CaptureCoverageEvidence(reads, coverageDiagnostics, coverageEvidence);
+                ThrowHardCoverageDiagnostic(coverageDiagnostics);
+            }
+            var matchResult = CoverageMatcher.ApplyDetailedResult(source, coverage);
+            coverageDiagnostics.AddRange(matchResult.Diagnostics);
+            detailed = matchResult.Matches
                 .OrderBy(result => result.Metric.File, StringComparer.Ordinal)
                 .ThenBy(result => result.Metric.DisplayName, StringComparer.Ordinal)
                 .ThenBy(result => result.Metric.StartLine)
@@ -311,6 +399,8 @@ internal static class App
                 if (obscuredViolation)
                     lines.Add($"> raw CRAP {metric.Crap!.Value.ToString("R", CultureInfo.InvariantCulture)} > threshold {options.Threshold.ToString("R", CultureInfo.InvariantCulture)}");
             }
+            foreach (var match in detailed.Where(match => match.CoverageReason is not null))
+                lines.Add($"N/A reason: {Path.GetRelativePath(workingDirectory, match.Metric.File)}:{match.Metric.StartLine} {match.CoverageReason}");
             var violations = detailed.Where(result => result.Metric.Crap > options.Threshold).ToArray();
             var missing = detailed.Count(result => result.Metric.Coverage is null);
             lines.Add($"Methods: {detailed.Length}; known coverage: {detailed.Length - missing}; missing coverage: {missing}; violations (> {options.Threshold.ToString(CultureInfo.InvariantCulture)}): {violations.Length}");
@@ -334,6 +424,7 @@ internal static class App
             {
                 Files = files,
                 Reports = reports,
+                SourceLogicalPaths = sourceLogicalPaths,
                 SourceMethods = source,
                 Matches = detailed,
                 Checks = checks,
@@ -342,6 +433,8 @@ internal static class App
                 Commands = commands,
                 RunArtifacts = runArtifacts,
                 GeneratedReports = generatedReports,
+                CoverageDiagnostics = coverageDiagnostics,
+                CoverageEvidence = coverageEvidence,
                 AliasChecked = true
             };
         }
@@ -349,23 +442,27 @@ internal static class App
         {
             var cancelled = exception is OperationCanceledException || cancellationToken.IsCancellationRequested;
             var timedOut = !cancelled && exception is ProcessTimeoutException;
-            var reason = cancelled ? "run.cancelled" : timedOut ? "run.timeout" : "execution.failed";
+            var reason = exception is CoveragePathException pathException ? pathException.Code :
+                cancelled ? "run.cancelled" : timedOut ? "run.timeout" : "execution.failed";
             var failureCheck = new CheckResult(commands.Count > 0 ? "testExecution" : "execution",
                 cancelled ? "cancelled" : "operationalError", reason, true);
             return new ExecutionOutcome
             {
                 Files = files,
                 Reports = reports,
+                SourceLogicalPaths = sourceLogicalPaths,
                 GeneratedReports = generatedReports,
                 SourceMethods = source,
                 Matches = detailed,
                 Checks = checks.Concat([failureCheck]).ToArray(),
                 HumanLines = lines,
-                ErrorMessage = exception.Message,
+                ErrorMessage = exception is CoveragePathException ? $"{reason}: {exception.Message}" : exception.Message,
                 Reason = reason,
                 CancellationReason = cancelled || timedOut ? reason : null,
                 Commands = commands,
                 RunArtifacts = runArtifacts,
+                CoverageDiagnostics = coverageDiagnostics,
+                CoverageEvidence = coverageEvidence,
                 AliasChecked = true,
                 Cancelled = cancelled,
                 TimedOut = timedOut
@@ -377,23 +474,32 @@ internal static class App
         DateTimeOffset startedAt, DateTimeOffset finishedAt, TimeSpan duration)
     {
         var checks = EffectiveChecks(outcome);
+        string ResultPath(string path) => outcome.SourceLogicalPaths.TryGetValue(PathIdentityPolicy.Current.Normalize(path), out var logical)
+            ? logical
+            : NormalizePath(workingDirectory, path);
         var metrics = outcome.Matches.Select(match =>
         {
-            return new MetricResult("legacy-syntax", NormalizePath(workingDirectory, match.Metric.File), match.Metric.DisplayName,
+            return new MetricResult("legacy-syntax", ResultPath(match.Metric.File), match.Metric.DisplayName,
                 match.Source.Signature, new SourceSpan(match.Metric.StartLine, match.Metric.EndLine), match.Metric.Complexity,
-                match.Metric.Coverage, match.Metric.Crap, match.CoverageReason);
+                match.Metric.Coverage, match.Metric.Crap, match.CoverageReason)
+            {
+                CoverageStatus = match.Metric.CoverageStatus
+            };
         }).OrderBy(metric => metric.ContextId, StringComparer.Ordinal).ThenBy(metric => metric.Path, StringComparer.Ordinal)
           .ThenBy(metric => metric.MethodIdentity, StringComparer.Ordinal).ThenBy(metric => metric.Span.StartLine).ToArray();
         var findings = outcome.Matches.Where(match => match.Metric.Crap > options.Threshold).Select(match =>
         {
-            var path = NormalizePath(workingDirectory, match.Metric.File);
+            var path = ResultPath(match.Metric.File);
             var span = new SourceSpan(match.Metric.StartLine, match.Metric.EndLine);
             return new FindingResult(
             FindingIdentity.Create("legacy-syntax", path, match.Metric.DisplayName, span, "crap.thresholdExceeded"),
             EntityIdentity.Create("legacy-syntax", path, match.Source.CanonicalSignature, "crap.thresholdExceeded"),
             "crap.thresholdExceeded", "error", "complexity", "legacy-syntax", path, match.Metric.DisplayName,
             match.Source.Signature, span, match.Metric.Complexity, match.Metric.Coverage, match.Metric.Crap, match.CoverageReason,
-            options.Threshold, "gt", "fail", []);
+            options.Threshold, "gt", "fail", [])
+            {
+                CoverageStatus = match.Metric.CoverageStatus
+            };
         })
             .OrderBy(finding => finding.ContextId, StringComparer.Ordinal).ThenBy(finding => finding.Path, StringComparer.Ordinal)
             .ThenBy(finding => finding.MethodIdentity, StringComparer.Ordinal).ThenBy(finding => finding.Span.StartLine)
@@ -403,33 +509,46 @@ internal static class App
             .OrderBy(group => group.Key, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
         var generatedReports = outcome.GeneratedReports.ToHashSet(OperatingSystem.IsWindows()
             ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
-        var artifacts = outcome.Files.Select(path => Artifact(path, "source", workingDirectory, generated: false))
+        var artifacts = outcome.Files.Select(path => Artifact(path, "source", workingDirectory, generated: false, ResultPath(path)))
             .Concat(outcome.Reports.Select(path => Artifact(path, "coverage", workingDirectory, generatedReports.Contains(path))))
             .Distinct()
             .OrderBy(artifact => artifact.Kind, StringComparer.Ordinal).ThenBy(artifact => artifact.Path, StringComparer.Ordinal).ToArray();
-        return new ResultDocument(ResultContract.SchemaVersion, ToolVersion, ResultContract.ComplexityRulesetVersion,
-            new EvaluationSection("legacy", new PolicyOptions(options.Threshold, options.AllowMissingCoverage),
-                new EvaluationScope(".", outcome.Files.Select(path => NormalizePath(workingDirectory, path)).Order(StringComparer.Ordinal).ToArray()),
+        var pathMappings = options.ValidatedCoveragePathMappings.Select(mapping => new CoveragePathMappingResult(
+            mapping.ReportRoot, mapping.LocalRoot, mapping.Id))
+            .OrderBy(mapping => mapping.ReportRoot, StringComparer.Ordinal).ThenBy(mapping => mapping.LocalRoot, StringComparer.Ordinal).ToArray();
+        var evaluation = new EvaluationSection("legacy", new PolicyOptions(options.Threshold, options.AllowMissingCoverage),
+                new EvaluationScope(".", outcome.Files.Select(ResultPath).Order(StringComparer.Ordinal).ToArray()),
                 [new EvaluationContext("legacy-syntax", "syntaxOnly", null, null, null, null, null)], checks, metrics, findings,
                 new CoverageSummary(metrics.Length, metrics.Count(metric => metric.Coverage is not null), metrics.Count(metric => metric.Coverage is null), reasonCounts),
-                artifacts, reduced.Decision),
-            new RunSection(Guid.NewGuid().ToString("D"), startedAt, finishedAt, duration.TotalMilliseconds,
+                artifacts, reduced.Decision)
+        {
+            CoveragePathPolicy = new CoveragePathPolicyResult(options.CoveragePathCase.ToString().ToLowerInvariant(), pathMappings),
+            CoverageDiagnostics = outcome.CoverageDiagnostics.GroupBy(diagnostic => diagnostic.Id, StringComparer.Ordinal)
+                .Select(group => group.First()).OrderBy(diagnostic => diagnostic.Code, StringComparer.Ordinal)
+                .ThenBy(diagnostic => diagnostic.Id, StringComparer.Ordinal).ToArray()
+        };
+        var run = new RunSection(Guid.NewGuid().ToString("D"), startedAt, finishedAt, duration.TotalMilliseconds,
                 outcome.Commands, [], outcome.RunArtifacts,
                 new CancellationDetails(outcome.Cancelled, outcome.TimedOut, outcome.CancellationReason),
-                reduced.Status, reduced.ExitCode));
+                reduced.Status, reduced.ExitCode)
+        {
+            CoverageEvidence = outcome.CoverageEvidence.OrderBy(item => item.Id, StringComparer.Ordinal).ToArray()
+        };
+        return new ResultDocument(ResultContract.SchemaVersion, ToolVersion, ResultContract.ComplexityRulesetVersion,
+            evaluation, run);
     }
 
-    private static ArtifactIdentity Artifact(string path, string kind, string workingDirectory, bool generated)
+    private static ArtifactIdentity Artifact(string path, string kind, string workingDirectory, bool generated, string? logicalOverride = null)
     {
         try
         {
             var contentIdentity = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
-            var logicalPath = generated ? $"<generated>/coverage/{contentIdentity}.xml" : NormalizePath(workingDirectory, path);
+            var logicalPath = generated ? $"<generated>/coverage/{contentIdentity}.xml" : logicalOverride ?? NormalizePath(workingDirectory, path);
             return new ArtifactIdentity(kind, logicalPath, contentIdentity, "sha256");
         }
         catch
         {
-            var logicalPath = generated ? "<generated>/coverage/unavailable.xml" : NormalizePath(workingDirectory, path);
+            var logicalPath = generated ? "<generated>/coverage/unavailable.xml" : logicalOverride ?? NormalizePath(workingDirectory, path);
             return new ArtifactIdentity(kind, logicalPath, null, "unavailable");
         }
     }
@@ -516,6 +635,62 @@ internal static class App
     private static bool IsHandled(Exception exception) => exception is ArgumentException or IOException or UnauthorizedAccessException or
         InvalidDataException or InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception or OperationCanceledException;
 
+    private static IReadOnlyList<string> DeclaredSourceRoots(IEnumerable<string> resolvedInputs, string workingDirectory)
+    {
+        var values = resolvedInputs.ToArray();
+        if (values.Length == 0) return [workingDirectory];
+        return values.Select(path => File.Exists(path) ? Path.GetDirectoryName(path)! : path)
+            .Distinct(PathIdentityPolicy.Current.Comparer).Order(StringComparer.Ordinal).ToArray();
+    }
+
+    internal static string CanonicalExistingPath(string path, string workingDirectory,
+        PathIdentityPolicy? pathPolicy = null, Func<string, bool>? exists = null,
+        ExistingPathCanonicalizer? canonicalizer = null)
+    {
+        pathPolicy ??= PathIdentityPolicy.Current;
+        var normalized = pathPolicy.Normalize(path, workingDirectory);
+        var accepted = exists?.Invoke(normalized) ?? (File.Exists(normalized) || Directory.Exists(normalized));
+        return accepted ? (canonicalizer ?? new ExistingPathCanonicalizer(pathPolicy)).NormalizeExisting(normalized) : normalized;
+    }
+
+    private static void CaptureCoverageEvidence(
+        IEnumerable<CoverageReadResult> reads,
+        ICollection<CoverageDiagnostic> diagnostics,
+        ICollection<CoverageRunEvidence> evidence)
+    {
+        var evidenceIds = evidence.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
+        foreach (var read in reads)
+        {
+            foreach (var diagnostic in read.Diagnostics) diagnostics.Add(diagnostic);
+            foreach (var method in read.Methods.Where(method => method.PathResolution is not null))
+            {
+                var resolution = method.PathResolution!;
+                var id = resolution.Diagnostic?.EvidenceRefs.FirstOrDefault() ??
+                    Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", read.ReportId,
+                        method.ObservationId, resolution.Status, resolution.MappingId)))).ToLowerInvariant();
+                if (evidenceIds.Add(id))
+                    evidence.Add(new CoverageRunEvidence(id, read.ReportId, method.ObservationId, method.ReportedFile,
+                        resolution.LocalPath, resolution.Status.ToString().ToLowerInvariant(), resolution.MappingId));
+            }
+            foreach (var diagnostic in read.Diagnostics)
+            {
+                foreach (var evidenceRef in diagnostic.EvidenceRefs)
+                {
+                    if (!evidenceIds.Add(evidenceRef)) continue;
+                    evidence.Add(new CoverageRunEvidence(evidenceRef, read.ReportId, diagnostic.ObservationId,
+                        null, null, diagnostic.Code, diagnostic.MappingId));
+                }
+            }
+        }
+    }
+
+    private static void ThrowHardCoverageDiagnostic(IEnumerable<CoverageDiagnostic> diagnostics)
+    {
+        var hard = diagnostics.FirstOrDefault(diagnostic => diagnostic.Code is CoverageReasonCodes.InvalidPath or
+            CoverageReasonCodes.PathOutsideRoot or CoverageReasonCodes.PathMappingConflict);
+        if (hard is not null) throw new CoveragePathException(hard.Code, hard.Message);
+    }
+
     private static async Task<IReadOnlyList<string>> ChangedFilesAsync(string workingDirectory, TimeSpan timeout,
         CancellationToken cancellationToken, ProcessExecutor processExecutor)
     {
@@ -549,12 +724,15 @@ internal static class App
     private sealed class Options
     {
         public List<string> Coverage { get; } = [];
+        public List<CoveragePathMapping> CoveragePathMappings { get; } = [];
         public List<string> Inputs { get; } = [];
         public string? Project { get; set; }
         public double Threshold { get; set; } = 8;
         public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(300);
         public bool Changed { get; set; }
         public bool AllowMissingCoverage { get; set; }
+        public CoveragePathCase CoveragePathCase { get; set; } = CoveragePathCase.Auto;
+        public IReadOnlyList<CoveragePathMappingIdentity> ValidatedCoveragePathMappings { get; set; } = [];
         public string Format { get; set; } = "human";
         public string? Output { get; set; }
     }
@@ -563,6 +741,8 @@ internal static class App
     {
         public IReadOnlyList<string> Files { get; init; } = [];
         public IReadOnlyList<string> Reports { get; init; } = [];
+        public IReadOnlyDictionary<string, string> SourceLogicalPaths { get; init; } =
+            new Dictionary<string, string>(PathIdentityPolicy.Current.Comparer);
         public IReadOnlyList<SourceMethod> SourceMethods { get; init; } = [];
         public IReadOnlyList<CoverageMatcher.DetailedMatch> Matches { get; init; } = [];
         public IReadOnlyList<CheckResult> Checks { get; init; } = [];
@@ -570,6 +750,8 @@ internal static class App
         public IReadOnlyList<CommandRecord> Commands { get; init; } = [];
         public IReadOnlyList<RunArtifact> RunArtifacts { get; init; } = [];
         public IReadOnlyList<string> GeneratedReports { get; init; } = [];
+        public IReadOnlyList<CoverageDiagnostic> CoverageDiagnostics { get; init; } = [];
+        public IReadOnlyList<CoverageRunEvidence> CoverageEvidence { get; init; } = [];
         public string? Reason { get; init; }
         public string? ErrorMessage { get; init; }
         public string? OutputAliasReason { get; init; }
