@@ -21,10 +21,9 @@ internal static class SourcePathCapture
         {
             var normalized = pathPolicy.Normalize(rootValue);
             if (rootIdentities.ContainsKey(normalized)) continue;
-            var ordinal = rootIdentities.Count;
             rootIdentities.Add(normalized, pathPolicy.Contains(invocationRoot, normalized)
                 ? null
-                : ExternalId($"root:{ordinal}"));
+                : ExternalId($"root:{RelativeIdentity(invocationRoot, normalized)}"));
             normalizedRoots.Add(normalized);
         }
         var roots = normalizedRoots.Order(StringComparer.Ordinal).Select(path =>
@@ -141,5 +140,16 @@ internal static class SourcePathCapture
     {
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity))).ToLowerInvariant()[..12];
         return $"external-{hash}";
+    }
+
+    private static string RelativeIdentity(string invocationRoot, string path)
+    {
+        var relative = Path.GetRelativePath(invocationRoot, path);
+        if (Path.IsPathFullyQualified(relative))
+        {
+            var root = Path.GetPathRoot(relative) ?? string.Empty;
+            relative = relative[root.Length..].TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+        return relative.Replace(Path.DirectorySeparatorChar, '/');
     }
 }
