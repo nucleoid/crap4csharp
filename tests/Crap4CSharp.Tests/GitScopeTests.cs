@@ -5,10 +5,10 @@ namespace Crap4CSharp.Tests;
 
 public sealed class GitScopeTests : IDisposable
 {
-    private readonly string temporary = Path.Combine(Path.GetTempPath(), "crap4csharp-scope-tests", Guid.NewGuid().ToString("N"));
+    private readonly TestDirectory fixture = TestDirectory.Create("crap4csharp-scope-tests");
+    private string temporary => fixture.Path;
 
-    public GitScopeTests() => Directory.CreateDirectory(temporary);
-    public void Dispose() => Directory.Delete(temporary, recursive: true);
+    public void Dispose() => fixture.Dispose();
 
     [Fact]
     public async Task BaseHeadCapturesCommittedBytesAndIgnoresDirtyWorktree()
@@ -303,7 +303,7 @@ public sealed class GitScopeTests : IDisposable
         await Git("add", "--", "Code.cs");
         await Git("commit", "--quiet", "-m", "base");
         var head = (await Git("rev-parse", "HEAD")).StandardOutput.Trim();
-        File.Delete(Path.Combine(temporary, ".git", "objects", head[..2], head[2..]));
+        fixture.DeleteFile(Path.Combine(".git", "objects", head[..2], head[2..]));
 
         var error = await Assert.ThrowsAsync<ScopeException>(() => GitScopeResolver.CaptureAsync(
             new GitScopeRequest(ChangeScopeMode.Base, "HEAD", "HEAD", ScopeSourceState.Head), temporary,
@@ -546,6 +546,40 @@ public sealed class GitScopeTests : IDisposable
         var hiddenError = await Assert.ThrowsAsync<ScopeException>(() => GitScopeResolver.CaptureAsync(
             new GitScopeRequest(ChangeScopeMode.Worktree), temporary, TimeSpan.FromSeconds(10), CancellationToken.None));
         Assert.Equal("scope.hiddenIndexEntry", hiddenError.Reason);
+    }
+
+    [Fact]
+    public void OwnedFixtureCleanupDeletesReadOnlyLooseObjectsAndSentinels()
+    {
+        var owned = TestDirectory.Create("crap4csharp-cleanup-contract");
+        var looseObject = owned.Write(Path.Combine(".git", "objects", "aa", "object"), "object");
+        var sentinel = owned.Write("readonly.txt", "sentinel");
+        File.SetAttributes(looseObject, File.GetAttributes(looseObject) | FileAttributes.ReadOnly);
+        File.SetAttributes(sentinel, File.GetAttributes(sentinel) | FileAttributes.ReadOnly);
+        var root = owned.Path;
+
+        owned.Dispose();
+
+        Assert.False(Directory.Exists(root));
+    }
+
+    [Fact]
+    public void OwnedFixtureCleanupDoesNotFollowLinksOutsideRoot()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var outside = TestDirectory.Create("crap4csharp-cleanup-outside");
+        var target = outside.Write("target.txt", "outside");
+        var targetAttributes = File.GetAttributes(target);
+        var owned = TestDirectory.Create("crap4csharp-cleanup-contract");
+        File.CreateSymbolicLink(Path.Combine(owned.Path, "outside-link"), target);
+        var root = owned.Path;
+
+        owned.Dispose();
+
+        Assert.False(Directory.Exists(root));
+        Assert.Equal("outside", File.ReadAllText(target));
+        Assert.Equal(targetAttributes, File.GetAttributes(target));
     }
 
     private async Task<ProcessResult> Git(params string[] arguments)
