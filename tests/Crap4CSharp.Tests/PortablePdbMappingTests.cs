@@ -56,6 +56,10 @@ public sealed class PortablePdbMappingTests
             PortablePdbCallableMapper.Map(callable, artifacts.Pe, artifacts.Pdb,
                 valid with { SourceDocuments = new Dictionary<string, ImmutableArray<byte>>(StringComparer.Ordinal)
                 { ["Fixture.cs"] = ImmutableArray.Create(Encoding.UTF8.GetBytes(Source + " ")) } }).Reason);
+        Assert.Equal("coverage.sourceChecksumMismatch",
+            PortablePdbCallableMapper.Map(callable, artifacts.Pe, artifacts.Pdb,
+                valid with { SourceDocuments = new Dictionary<string, ImmutableArray<byte>>(StringComparer.Ordinal)
+                { ["other/Fixture.cs"] = ImmutableArray.Create(Encoding.UTF8.GetBytes(Source)) } }).Reason);
     }
 
     [Fact]
