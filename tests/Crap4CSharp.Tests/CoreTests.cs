@@ -313,6 +313,81 @@ public sealed class CoreTests : IDisposable
     }
 
     [Fact]
+    public async Task CoveragePathMapUsesExactlyTwoOperands()
+    {
+        var one = await RunApp("--coverage-path-map", "/agent/repo");
+        var optionAsSecondOperand = await RunApp("--coverage-path-map", "/agent/repo", "--allow-missing-coverage");
+
+        Assert.Equal(1, one.ExitCode);
+        Assert.Equal(1, optionAsSecondOperand.ExitCode);
+        Assert.Contains("two operands", one.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("two operands", optionAsSecondOperand.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task InvalidCoverageMapFailsBeforeChildExecutionWithEmptyInventory()
+    {
+        var first = Path.Combine(temporary, "first");
+        var second = Path.Combine(temporary, "second");
+        Directory.CreateDirectory(first);
+        Directory.CreateDirectory(second);
+        var childCalled = false;
+        Task<ProcessResult> Child(string _, IEnumerable<string> __, string ___, TimeSpan ____, CancellationToken _____)
+        {
+            childCalled = true;
+            return Task.FromResult(new ProcessResult(0, string.Empty, string.Empty));
+        }
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = await global::App.RunAsync([
+            "--format", "json",
+            "--coverage-path-map", "/agent/repo", first,
+            "--coverage-path-map", "/agent/./repo", second
+        ], temporary, output, error, CancellationToken.None, Child);
+
+        Assert.Equal(1, exitCode);
+        Assert.False(childCalled);
+        Assert.Contains(CoverageReasonCodes.PathMappingConflict, output.ToString());
+    }
+
+    [Fact]
+    public async Task InstalledGrammarMapsForeignCoverageAndHonorsUnknownOptOut()
+    {
+        var source = Write("mapped/src/C.cs", "class C { int M() => 1; }");
+        var report = Write("foreign.xml", """
+            <CoverageSession><Modules><Module><ModuleName>Fixture</ModuleName><Files><File uid="1" fullPath="C:\agent\repo\src\C.cs" /></Files>
+            <Classes><Class><FullName>C</FullName><Methods><Method><Name>C.M()</Name><SequencePoints><SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method></Methods></Class></Classes>
+            </Module></Modules></CoverageSession>
+            """);
+
+        var mapped = await RunApp("--coverage-path-map", @"C:\agent\repo", Path.Combine(temporary, "mapped"),
+            "--coverage", report, source);
+        var unmappedStrict = await RunApp("--coverage", report, source);
+        var unmappedAllowed = await RunApp("--allow-missing-coverage", "--coverage", report, source);
+
+        Assert.Equal(0, mapped.ExitCode);
+        Assert.Equal(1, unmappedStrict.ExitCode);
+        Assert.Equal(0, unmappedAllowed.ExitCode);
+    }
+
+    [Fact]
+    public async Task InvalidReportPathRemainsOperationalWithMissingCoverageOptOut()
+    {
+        var source = Write("InvalidPath.cs", "class C { int M() => 1; }");
+        var report = Write("invalid-path.xml", """
+            <CoverageSession><Modules><Module><Files><File uid="1" fullPath="file:///source/InvalidPath.cs" /></Files>
+            <Classes><Class><FullName>C</FullName><Methods><Method><Name>C.M()</Name><SequencePoints><SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method></Methods></Class></Classes>
+            </Module></Modules></CoverageSession>
+            """);
+
+        var result = await RunApp("--allow-missing-coverage", "--coverage", report, source);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains(CoverageReasonCodes.InvalidPath, result.Error);
+    }
+
+    [Fact]
     public async Task ProcessRunnerTimesOutWithoutHanging()
     {
         if (OperatingSystem.IsWindows()) return;
