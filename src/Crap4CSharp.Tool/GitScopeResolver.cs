@@ -30,6 +30,7 @@ internal static partial class GitScopeResolver
             throw new ScopeException("scope.unbornHead", "base scope requires an existing HEAD commit.");
         var indexBefore = await IndexIdentity(root, timeout, cancellationToken);
         await EnsureNoConflicts(root, timeout, cancellationToken);
+        await EnsureNoHiddenIndexEntries(root, timeout, cancellationToken);
 
         string? resolvedBase = null;
         string? resolvedHead = currentHead;
@@ -74,6 +75,16 @@ internal static partial class GitScopeResolver
         };
         if (records.Any(record => ContextInput(record.OldPath) || ContextInput(record.NewPath)))
             diagnostics.Add("scope.contextIncomplete");
+        foreach (var path in records.SelectMany(record => new[] { record.OldPath, record.NewPath })
+            .Where(path => path is not null && !Eligible(path)).Distinct(PathComparer()).Order(PathComparer()))
+        {
+            diagnostics.Add(path!.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)
+                ? $"scope.excludedChangedSource:{path}"
+                : $"scope.unclassifiedChangedInput:{path}");
+        }
+        if (diagnostics.Any(diagnostic => diagnostic.StartsWith("scope.", StringComparison.Ordinal)))
+            diagnostics.Add("scope.contextIncomplete");
+        diagnostics = diagnostics.Distinct(StringComparer.Ordinal).ToList();
         return new CapturedChangeScope(request.Mode, request.SourceState, root,
             new ScopeRevision(request.BaseRef, request.HeadRef ?? (request.Mode == ChangeScopeMode.Base ? "HEAD" : null),
                 resolvedBase, resolvedHead, currentHead, mergeBase, indexBefore),
@@ -95,7 +106,7 @@ internal static partial class GitScopeResolver
         {
             var untracked = SplitNull((await Git(root, timeout, cancellationToken,
                 ["ls-files", "--others", "--exclude-standard", "-z", "--"])).Output);
-            changes.AddRange(untracked.Where(Eligible).Select(path => new PathChange(ScopeChangeKind.Added, null, path)));
+            changes.AddRange(untracked.Select(path => new PathChange(ScopeChangeKind.Added, null, path)));
         }
         return changes;
     }
@@ -113,6 +124,7 @@ internal static partial class GitScopeResolver
         {
             var bytes = (await Git(root, timeout, cancellationToken, ["show", $"{baseline}:{record.OldPath}"])).Output;
             oldSource = Capture(record.OldPath, bytes);
+            EnsureCompatibleLineMap(oldSource);
             oldIdentity = oldSource.ContentIdentity;
             oldObjectIdentity = await BlobIdentity(root, $"{baseline}:{record.OldPath}", timeout, cancellationToken);
         }
@@ -134,10 +146,11 @@ internal static partial class GitScopeResolver
                 bytes = await File.ReadAllBytesAsync(Path.Combine(root, record.NewPath), cancellationToken);
             }
             newSource = Capture(record.NewPath, bytes);
+            EnsureCompatibleLineMap(newSource);
             newIdentity = newSource.ContentIdentity;
         }
 
-        var (added, deleted) = record.Kind == ScopeChangeKind.Added
+        var (added, deleted) = record.Kind is ScopeChangeKind.Added or ScopeChangeKind.Copied
             ? (newSource is null ? [] : new[] { WholeFile(newSource.Text) }, Array.Empty<LineRange>())
             : record.Kind == ScopeChangeKind.Deleted
                 ? (Array.Empty<LineRange>(), oldSource is null ? [] : new[] { WholeFile(oldSource.Text) })
@@ -158,8 +171,8 @@ internal static partial class GitScopeResolver
         {
             var oldPath = Path.Combine(temporary.FullName, "old.cs");
             var newPath = Path.Combine(temporary.FullName, "new.cs");
-            await File.WriteAllBytesAsync(oldPath, oldSource.Bytes.ToArray(), cancellationToken);
-            await File.WriteAllBytesAsync(newPath, newSource.Bytes.ToArray(), cancellationToken);
+            await File.WriteAllTextAsync(oldPath, NormalizeForDiff(oldSource.Text), new UTF8Encoding(false), cancellationToken);
+            await File.WriteAllTextAsync(newPath, NormalizeForDiff(newSource.Text), new UTF8Encoding(false), cancellationToken);
             var diff = await Git(root, timeout, cancellationToken,
                 ["diff", "--no-index", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", "--text", "--", oldPath, newPath],
                 allowFailure: true);
@@ -209,6 +222,21 @@ internal static partial class GitScopeResolver
         }
     }
 
+    private static void EnsureCompatibleLineMap(CapturedSource source)
+    {
+        var text = source.Text;
+        for (var index = 0; index < text.Length; index++)
+        {
+            var character = text[index];
+            if (character == '\r' && (index + 1 >= text.Length || text[index + 1] != '\n') ||
+                character is '\u0085' or '\u2028' or '\u2029')
+                throw new ScopeException("scope.lineMapIncompatible",
+                    $"{source.LogicalPath} contains a line separator that Git and Roslyn number differently.");
+        }
+    }
+
+    private static string NormalizeForDiff(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);
+
     private static void VerifyWorktreeBytes(string root, IEnumerable<ChangedFile> files)
     {
         foreach (var file in files)
@@ -251,6 +279,18 @@ internal static partial class GitScopeResolver
     {
         var unmerged = await Git(root, timeout, cancellationToken, ["ls-files", "--unmerged", "-z", "--"]);
         if (unmerged.Output.Length > 0) throw new ScopeException("scope.conflictedIndex", "unmerged index entries are unsupported.");
+    }
+
+    private static async Task EnsureNoHiddenIndexEntries(string root, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var entries = SplitNull((await Git(root, timeout, cancellationToken, ["ls-files", "-v", "-z", "--"])).Output);
+        foreach (var entry in entries)
+        {
+            if (entry.Length < 3 || entry[1] != ' ') continue;
+            var path = entry[2..];
+            if ((entry[0] == 'S' || char.IsLower(entry[0])) && (Eligible(path) || ContextInput(path)))
+                throw new ScopeException("scope.hiddenIndexEntry", $"{path} is marked skip-worktree or assume-unchanged.");
+        }
     }
 
     private static async Task<string> IndexIdentity(string root, TimeSpan timeout, CancellationToken cancellationToken)

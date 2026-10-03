@@ -295,6 +295,70 @@ public sealed class GitScopeTests : IDisposable
         Assert.Equal("scope.conflictedIndex", error.Reason);
     }
 
+    [Fact]
+    public async Task UntrackedContextAndExcludedSourceMakeScopeIncomplete()
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("seed.txt", "seed");
+        await Git("add", "--", "seed.txt");
+        await Git("commit", "--quiet", "-m", "base");
+        Write("Directory.Build.props", "<Project />");
+        Write("Generated.g.cs", "class Generated { int M() => 1; }");
+
+        var scope = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Worktree), temporary,
+            TimeSpan.FromSeconds(10), CancellationToken.None);
+
+        Assert.Empty(scope.Files);
+        Assert.Equal(ScopeCompleteness.ContextIncomplete, scope.Completeness);
+        Assert.Contains(scope.Diagnostics, item => item == "scope.contextIncomplete");
+        Assert.Contains(scope.Diagnostics, item => item == "scope.excludedChangedSource:Generated.g.cs");
+    }
+
+    [Fact]
+    public async Task CrLfIsNormalizedOnlyForHunksAndExactBytesRemainCaptured()
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("Code.cs", "class C {\n int Changed() => 1;\n int Unrelated() => 2;\n}\n");
+        await Git("add", "--", "Code.cs");
+        await Git("commit", "--quiet", "-m", "base");
+        File.WriteAllText(Path.Combine(temporary, "Code.cs"),
+            "class C {\r\n int Changed() => 3;\r\n int Unrelated() => 2;\r\n}\r\n");
+
+        var scope = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Worktree), temporary,
+            TimeSpan.FromSeconds(10), CancellationToken.None);
+
+        var file = Assert.Single(scope.Files);
+        Assert.Contains("\r\n", file.NewSource!.Text);
+        var oldMethods = new SourceAnalyzer().AnalyzeCaptured(file.OldPath!, file.OldSource!.Bytes);
+        var newMethods = new SourceAnalyzer().AnalyzeCaptured(file.NewPath!, file.NewSource.Bytes);
+        Assert.Equal("Changed", Assert.Single(ChangedMethodSelector.Select(file, oldMethods, newMethods, ScopeGranularity.Method).Methods).MethodName);
+    }
+
+    [Fact]
+    public async Task IncompatibleLineSeparatorAndHiddenIndexEntryFailClosed()
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("Code.cs", "class C { int M() => 1; }");
+        await Git("add", "--", "Code.cs");
+        await Git("commit", "--quiet", "-m", "base");
+        Write("Code.cs", "// separator\u2028class C { int M() => 2; }");
+        var lineError = await Assert.ThrowsAsync<ScopeException>(() => GitScopeResolver.CaptureAsync(
+            new GitScopeRequest(ChangeScopeMode.Worktree), temporary, TimeSpan.FromSeconds(10), CancellationToken.None));
+        Assert.Equal("scope.lineMapIncompatible", lineError.Reason);
+
+        Write("Code.cs", "class C { int M() => 1; }");
+        await Git("update-index", "--skip-worktree", "Code.cs");
+        var hiddenError = await Assert.ThrowsAsync<ScopeException>(() => GitScopeResolver.CaptureAsync(
+            new GitScopeRequest(ChangeScopeMode.Worktree), temporary, TimeSpan.FromSeconds(10), CancellationToken.None));
+        Assert.Equal("scope.hiddenIndexEntry", hiddenError.Reason);
+    }
+
     private async Task<ProcessResult> Git(params string[] arguments)
     {
         var result = await ProcessRunner.RunAsync("git", arguments, temporary, TimeSpan.FromSeconds(10), CancellationToken.None);

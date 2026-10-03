@@ -48,7 +48,19 @@ public static class ChangedMethodSelector
             }
             else if (matches.Length == 0)
             {
-                removals.Add(oldMethod);
+                var fullyDeleted = change.DeletedRanges.Any(range =>
+                    range.StartLine <= oldMethod.StartLine && range.EndLine >= oldMethod.EndLine);
+                var survivingShape = newMethods.Where(method => method.MethodName == oldMethod.MethodName &&
+                    method.CoverageTypeName == oldMethod.CoverageTypeName).ToArray();
+                if (!fullyDeleted && survivingShape.Length == 1)
+                {
+                    if (!selected.Contains(survivingShape[0])) selected.Add(survivingShape[0]);
+                }
+                else if (!fullyDeleted && survivingShape.Length > 1)
+                {
+                    widened = true;
+                }
+                else removals.Add(oldMethod);
             }
             else
             {
@@ -91,6 +103,14 @@ public static class ChangedMethodSelector
             if (ranges.Any(changed => changed.Intersects(range.StartLine, range.EndLine)))
                 output.Add(new ScopeLimitation("scope.unsupportedChangedCallable", source.LogicalPath, node.Kind().ToString(), range));
         }
+        foreach (var trivia in tree.GetRoot().DescendantTrivia(descendIntoTrivia: true)
+            .Where(trivia => trivia.IsKind(SyntaxKind.DisabledTextTrivia)))
+        {
+            var span = tree.GetLineSpan(trivia.Span);
+            var range = new LineRange(span.StartLinePosition.Line + 1, span.EndLinePosition.Line + 1);
+            if (ranges.Any(changed => changed.Intersects(range.StartLine, range.EndLine)))
+                output.Add(new ScopeLimitation("scope.contextIncomplete", source.LogicalPath, "DisabledTextTrivia", range));
+        }
     }
 
     private static bool IsUnsupportedExecutable(SyntaxNode node) => node is
@@ -98,6 +118,8 @@ public static class ChangedMethodSelector
         ConversionOperatorDeclarationSyntax or AccessorDeclarationSyntax or GlobalStatementSyntax or
         SimpleLambdaExpressionSyntax or ParenthesizedLambdaExpressionSyntax or AnonymousMethodExpressionSyntax ||
         node is PropertyDeclarationSyntax { ExpressionBody: not null } ||
+        node is PropertyDeclarationSyntax { Initializer: not null } ||
         node is IndexerDeclarationSyntax { ExpressionBody: not null } ||
+        node is PrimaryConstructorBaseTypeSyntax ||
         node is VariableDeclaratorSyntax { Initializer: not null };
 }

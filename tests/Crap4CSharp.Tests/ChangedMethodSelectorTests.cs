@@ -92,4 +92,39 @@ public sealed class ChangedMethodSelectorTests
         Assert.Contains(selection.ScopeLimitations, limitation =>
             limitation.Code == "scope.unsupportedChangedCallable" && limitation.SyntaxKind == "ConstructorDeclaration");
     }
+
+    [Fact]
+    public void DisabledPreprocessorChangeIsVisibleAsIncompleteContext()
+    {
+        const string oldText = "#if DEBUG\nclass C { int Hidden() => 1; }\n#endif";
+        const string newText = "#if DEBUG\nclass C { int Hidden() => 2; }\n#endif";
+        var oldSource = CapturedSource.Create("src/C.cs", Encoding.UTF8.GetBytes(oldText));
+        var newSource = CapturedSource.Create("src/C.cs", Encoding.UTF8.GetBytes(newText));
+        var change = new ChangedFile("src/C.cs", "src/C.cs", ScopeChangeKind.Modified,
+            oldSource.ContentIdentity, newSource.ContentIdentity, oldSource, newSource,
+            [new LineRange(2, 2)], [new LineRange(2, 2)]);
+
+        var selection = ChangedMethodSelector.Select(change, [], [], ScopeGranularity.Method);
+
+        Assert.Contains(selection.ScopeLimitations, limitation =>
+            limitation.Code == "scope.contextIncomplete" && limitation.SyntaxKind == "DisabledTextTrivia");
+    }
+
+    [Fact]
+    public void DeletionOnlySignatureEditSelectsSurvivingMethod()
+    {
+        const string oldText = "class C {\n int M(\n  int removed,\n  int kept) => kept;\n}";
+        const string newText = "class C {\n int M(\n  int kept) => kept;\n}";
+        var oldMethods = new SourceAnalyzer().AnalyzeText("src/C.cs", oldText);
+        var newMethods = new SourceAnalyzer().AnalyzeText("src/C.cs", newText);
+        var oldSource = CapturedSource.Create("src/C.cs", Encoding.UTF8.GetBytes(oldText));
+        var newSource = CapturedSource.Create("src/C.cs", Encoding.UTF8.GetBytes(newText));
+        var change = new ChangedFile("src/C.cs", "src/C.cs", ScopeChangeKind.Modified,
+            oldSource.ContentIdentity, newSource.ContentIdentity, oldSource, newSource, [], [new LineRange(3, 3)]);
+
+        var selection = ChangedMethodSelector.Select(change, oldMethods, newMethods, ScopeGranularity.Method);
+
+        Assert.Equal("M", Assert.Single(selection.Methods).MethodName);
+        Assert.Empty(selection.Removals);
+    }
 }
