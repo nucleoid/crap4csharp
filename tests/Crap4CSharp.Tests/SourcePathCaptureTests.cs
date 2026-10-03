@@ -47,4 +47,24 @@ public sealed class SourcePathCaptureTests : IDisposable
 
         Assert.Equal(CoverageReasonCodes.PathOutsideRoot, exception.Code);
     }
+
+    [Fact]
+    public void FileLinkCannotHideEscapeThroughTargetParentLink()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var root = Path.Combine(temporary, "root");
+        var external = Path.Combine(temporary, "external");
+        Directory.CreateDirectory(root);
+        Directory.CreateDirectory(external);
+        File.WriteAllText(Path.Combine(external, "C.cs"), "class C { }");
+        var parentLink = Path.Combine(root, "escape");
+        Directory.CreateSymbolicLink(parentLink, external);
+        var fileLink = Path.Combine(root, "C.cs");
+        File.CreateSymbolicLink(fileLink, Path.Combine(parentLink, "C.cs"));
+
+        var exception = Assert.Throws<CoveragePathException>(() =>
+            SourcePathCapture.Capture([fileLink], [root], [], []));
+
+        Assert.Equal(CoverageReasonCodes.PathOutsideRoot, exception.Code);
+    }
 }

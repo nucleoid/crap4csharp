@@ -186,8 +186,7 @@ public sealed class CoveragePathResolver
 
         if (candidate.Dialect != localDialect) return ([], null);
         var native = candidate.ToLocalPath();
-        var comparison = ForeignComparison(candidate.Dialect);
-        var matches = inventory.Entries.Where(entry => string.Equals(entry.LocalPath, native, comparison))
+        var matches = inventory.Entries.Where(entry => localPolicy.Comparer.Equals(entry.LocalPath, native))
             .Select(entry => (entry, (string?)null)).ToArray();
         return (matches, null);
     }

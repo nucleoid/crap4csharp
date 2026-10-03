@@ -91,6 +91,67 @@ public sealed class CoverageDiagnosticTests : IDisposable
     }
 
     [Fact]
+    public void DuplicateOpenCoverFileIdWithDifferentPathsIsInvalid()
+    {
+        var first = Write("First.cs", "class First { int M() => 1; }");
+        var second = Write("Second.cs", "class Second { int M() => 1; }");
+        var report = Write("duplicate-id.xml", $"""
+            <CoverageSession><Modules><Module><Files>
+            <File uid="1" fullPath="{Escape(first)}" /><File uid="1" fullPath="{Escape(second)}" />
+            </Files><Classes><Class><FullName>First</FullName><Methods><Method><Name>First.M()</Name>
+            <SequencePoints><SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints>
+            </Method></Methods></Class></Classes></Module></Modules></CoverageSession>
+            """);
+
+        var result = CoverageReader.ReadDetailed(report, Resolver([first, second]));
+
+        var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == CoverageReasonCodes.InvalidPath);
+        Assert.Equal(CoverageDiagnosticScope.Report, diagnostic.Scope);
+        Assert.Equal(CoverageDiagnosticSeverity.Error, diagnostic.Severity);
+    }
+
+    [Fact]
+    public void MultiDocumentMethodWithUnlabelledPointIsUnsupported()
+    {
+        var first = Write("First.cs", "class First { int M() => 1; }");
+        var second = Write("Second.cs", "class Second { int M() => 1; }");
+        var report = Write("unlabelled-point.xml", $"""
+            <CoverageSession><Modules><Module><Files>
+            <File uid="1" fullPath="{Escape(first)}" /><File uid="2" fullPath="{Escape(second)}" />
+            </Files><Classes><Class><FullName>First</FullName><Methods><Method><Name>First.M()</Name>
+            <FileRef uid="1" /><FileRef uid="2" />
+            <SequencePoints><SequencePoint vc="1" sl="1" fileid="1" /><SequencePoint vc="0" sl="1" /></SequencePoints>
+            </Method></Methods></Class></Classes></Module></Modules></CoverageSession>
+            """);
+
+        var result = CoverageReader.ReadDetailed(report, Resolver([first, second]));
+
+        Assert.Empty(result.Methods);
+        Assert.Contains(result.Diagnostics, item => item.Code == CoverageReasonCodes.UnsupportedMultiDocumentMapping);
+    }
+
+    [Fact]
+    public void MethodDiagnosticsRemainScopedToTheirLogicalPath()
+    {
+        var first = Write("one/Code.cs", "class C { int M() => 1; }");
+        var second = Write("two/Code.cs", "class C { int M() => 1; }");
+        var source = new SourceAnalyzer().AnalyzeFiles([first, second]).Select(method => method with
+        {
+            LogicalPath = Path.GetRelativePath(temporary, method.File).Replace(Path.DirectorySeparatorChar, '/')
+        }).ToArray();
+        var report = new[] { new CoverageMethod(first, "C", "Other", 0, [new(1, 1)], "Fixture") };
+
+        var result = CoverageMatcher.ApplyDetailedResult(source, [report]);
+
+        var firstMatch = Assert.Single(result.Matches, match => match.Source.File == first);
+        var secondMatch = Assert.Single(result.Matches, match => match.Source.File == second);
+        Assert.NotEmpty(firstMatch.DiagnosticIds);
+        Assert.Empty(secondMatch.DiagnosticIds);
+        Assert.All(result.Diagnostics.Where(item => item.Scope == CoverageDiagnosticScope.Method),
+            item => Assert.Equal("one/Code.cs", item.Path));
+    }
+
+    [Fact]
     public void CompatibleReportsStillUnionDistinctPoints()
     {
         var file = Write("Union.cs", "class C {\n int M() {\n  var x = 1;\n  return x;\n }\n}");

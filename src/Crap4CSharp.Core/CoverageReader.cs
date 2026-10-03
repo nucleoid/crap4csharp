@@ -75,11 +75,23 @@ public static class CoverageReader
         foreach (var module in document.Descendants().Where(element => element.Name.LocalName == "Module"))
         {
             var moduleIdentity = ChildValue(module, "ModuleName") ?? ChildValue(module, "FullName");
-            var files = module.Descendants().Where(element => element.Name.LocalName == "File")
+            var fileGroups = module.Descendants().Where(element => element.Name.LocalName == "File")
                 .Select(element => (Id: Attr(element, "uid"), Path: Attr(element, "fullPath")))
                 .Where(pair => pair.Id is not null)
-                .GroupBy(pair => pair.Id!, StringComparer.Ordinal)
-                .ToDictionary(group => group.Key, group => group.Select(pair => pair.Path).FirstOrDefault(), StringComparer.Ordinal);
+                .GroupBy(pair => pair.Id!, StringComparer.Ordinal).ToArray();
+            var files = new Dictionary<string, string?>(StringComparer.Ordinal);
+            foreach (var group in fileGroups)
+            {
+                var paths = group.Select(pair => pair.Path).Distinct(StringComparer.Ordinal).ToArray();
+                if (paths.Length > 1)
+                {
+                    diagnostics.Add(CoverageDiagnostic.Create(CoverageReasonCodes.InvalidPath,
+                        CoverageDiagnosticStage.Path, CoverageDiagnosticSeverity.Error, CoverageDiagnosticScope.Report,
+                        reportId, message: $"OpenCover file ID '{group.Key}' identifies multiple paths."));
+                    continue;
+                }
+                files[group.Key] = paths.SingleOrDefault();
+            }
 
             foreach (var method in module.Descendants().Where(element => element.Name.LocalName == "Method"))
             {
@@ -107,13 +119,13 @@ public static class CoverageReader
                 var observationId = ObservationId(reportId, moduleIdentity, typeName, methodName, parameterCount,
                     documentIds, points);
 
-                if (documentIds.Length > 1)
+                if (documentIds.Length > 1 || (fileRefs.Length > 1 && rawPoints.Any(point => point.FileId is null)))
                 {
                     diagnostics.Add(CoverageDiagnostic.Create(CoverageReasonCodes.UnsupportedMultiDocumentMapping,
                         CoverageDiagnosticStage.Generated, CoverageDiagnosticSeverity.Warning, CoverageDiagnosticScope.Observation,
                         reportId, observationId, reportedType: typeName, reportedMethodName: methodName,
                         reportedParameterCount: parameterCount, moduleIdentities: moduleIdentity is null ? [] : [moduleIdentity],
-                        message: "OpenCover method sequence points reference multiple documents."));
+                        message: "OpenCover method sequence points reference multiple or indeterminate documents."));
                     continue;
                 }
 

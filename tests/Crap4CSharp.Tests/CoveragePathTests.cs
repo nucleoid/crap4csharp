@@ -160,7 +160,7 @@ public sealed class CoveragePathTests : IDisposable
     }
 
     [Fact]
-    public void ExplicitInsensitiveForeignCaseCanExposeAmbiguousSelectedPaths()
+    public void ExplicitForeignCaseDoesNotChangeNativeLocalIdentity()
     {
         var upper = Write("src/C.cs", "class Upper { }");
         var lower = Write("src/c.cs", "class Lower { }");
@@ -168,10 +168,24 @@ public sealed class CoveragePathTests : IDisposable
             [Entry(upper, temporary), Entry(lower, temporary)], [new(temporary, temporary)]);
         var resolver = new CoveragePathResolver(PathIdentityPolicy.Sensitive, inventory, [], CoveragePathCase.Insensitive);
 
-        var result = resolver.Resolve(Path.Combine(temporary, "src", "C.cs"), [], Path.Combine(temporary, "coverage.xml"));
+        var upperResult = resolver.Resolve(upper, [], Path.Combine(temporary, "coverage.xml"));
+        var lowerResult = resolver.Resolve(lower, [], Path.Combine(temporary, "coverage.xml"));
 
-        Assert.Equal(CoveragePathResolutionStatus.Ambiguous, result.Status);
-        Assert.Equal(2, result.CandidatePaths.Count);
+        Assert.Equal(upper, upperResult.LocalPath);
+        Assert.Equal(lower, lowerResult.LocalPath);
+    }
+
+    [Fact]
+    public void InsensitiveForeignCaseDoesNotRescueNativeCaseMiss()
+    {
+        var upper = Write("src/C.cs", "class Upper { }");
+        var inventory = new CoverageSourceInventory(PathIdentityPolicy.Sensitive,
+            [Entry(upper, temporary)], [new(temporary, temporary)]);
+        var resolver = new CoveragePathResolver(PathIdentityPolicy.Sensitive, inventory, [], CoveragePathCase.Insensitive);
+
+        var result = resolver.Resolve(Path.Combine(temporary, "src", "c.cs"), [], Path.Combine(temporary, "coverage.xml"));
+
+        Assert.Equal(CoveragePathResolutionStatus.Missing, result.Status);
     }
 
     [Fact]

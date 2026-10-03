@@ -73,21 +73,28 @@ internal static class SourcePathCapture
     }
 
     private static string ResolvePhysical(string value)
+        => ResolvePhysical(Path.GetFullPath(value), new HashSet<string>(PathIdentityPolicy.Current.Comparer), 0);
+
+    private static string ResolvePhysical(string fullPath, ISet<string> visitedLinks, int depth)
     {
-        var fullPath = Path.GetFullPath(value);
-        var root = Path.GetPathRoot(fullPath) ?? throw new IOException($"Path has no root: {value}");
+        if (depth > 64)
+            throw new CoveragePathException(CoverageReasonCodes.PathOutsideRoot,
+                $"Source path link resolution exceeded the safety bound: {fullPath}");
+        fullPath = Path.GetFullPath(fullPath);
+        var root = Path.GetPathRoot(fullPath) ?? throw new IOException($"Path has no root: {fullPath}");
         var current = root;
-        foreach (var segment in fullPath[root.Length..].Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar,
-                     StringSplitOptions.RemoveEmptyEntries))
+        var segments = fullPath[root.Length..].Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar,
+            StringSplitOptions.RemoveEmptyEntries);
+        for (var index = 0; index < segments.Length; index++)
         {
-            var candidate = Path.Combine(current, segment);
+            var candidate = Path.Combine(current, segments[index]);
             FileSystemInfo info = Directory.Exists(candidate) ? new DirectoryInfo(candidate) : new FileInfo(candidate);
             FileSystemInfo? target;
             try
             {
-                target = info.ResolveLinkTarget(returnFinalTarget: true);
+                target = info.ResolveLinkTarget(returnFinalTarget: false);
             }
-            catch (IOException exception)
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
                 throw new CoveragePathException(CoverageReasonCodes.PathOutsideRoot,
                     $"Unable to resolve source path link '{candidate}': {exception.Message}");
@@ -95,7 +102,17 @@ internal static class SourcePathCapture
             if (info.LinkTarget is not null && (target is null || !target.Exists))
                 throw new CoveragePathException(CoverageReasonCodes.PathOutsideRoot,
                     $"Source path contains a broken link: {candidate}");
-            current = target?.FullName ?? candidate;
+            if (target is null)
+            {
+                current = candidate;
+                continue;
+            }
+            var identity = Path.GetFullPath(candidate);
+            if (!visitedLinks.Add(identity))
+                throw new CoveragePathException(CoverageReasonCodes.PathOutsideRoot,
+                    $"Source path contains a link cycle: {candidate}");
+            var remaining = segments.Skip(index + 1).Aggregate(target.FullName, Path.Combine);
+            return ResolvePhysical(remaining, visitedLinks, depth + 1);
         }
         return Path.GetFullPath(current);
     }

@@ -24,15 +24,17 @@ public static class SourceDiscovery
             var path = pathPolicy.Normalize(input, workingDirectory);
             if (File.Exists(path))
             {
+                path = pathPolicy.NormalizeExisting(path);
                 if (!IsSource(path)) throw new ArgumentException($"Explicit input is not an eligible C# source file: {input}");
                 files.Add(path);
                 continue;
             }
 
             if (!Directory.Exists(path)) throw new DirectoryNotFoundException($"Input does not exist: {input}");
+            path = pathPolicy.NormalizeExisting(path);
             foreach (var file in Directory.EnumerateFiles(path, "*.cs", SearchOption.AllDirectories))
             {
-                if (IsSource(file) && !IsExcludedByDirectory(file, path)) files.Add(pathPolicy.Normalize(file));
+                if (IsSource(file) && !IsExcludedByDirectory(file, path)) files.Add(pathPolicy.NormalizeExisting(file));
             }
         }
 

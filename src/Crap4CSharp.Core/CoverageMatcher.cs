@@ -105,11 +105,14 @@ public static class CoverageMatcher
             var source = pair.Key;
             var observation = pair.Value;
             observation.Reasons.Add(CoverageReasonCodes.ConflictingModule);
-            diagnostics.Add(CoverageDiagnostic.Create(CoverageReasonCodes.ConflictingModule,
+            var diagnostic = CoverageDiagnostic.Create(CoverageReasonCodes.ConflictingModule,
                 CoverageDiagnosticStage.Module, CoverageDiagnosticSeverity.Error, CoverageDiagnosticScope.Method,
-                methodId: source.CanonicalSignature, span: new SourceSpan(source.StartLine, source.EndLine),
+                path: LogicalPath(source), methodId: source.CanonicalSignature,
+                span: new SourceSpan(source.StartLine, source.EndLine), contextId: source.ContextId,
                 moduleIdentities: observation.ModuleIdentities,
-                message: "Compatible observations identify conflicting modules."));
+                message: "Compatible observations identify conflicting modules.");
+            diagnostics.Add(diagnostic);
+            observation.DiagnosticIds.Add(diagnostic.Id);
         }
 
         var matches = sourceMethods.Select(source =>
@@ -124,8 +127,7 @@ public static class CoverageMatcher
                 observation.Reasons.Add(reportList.Length > 0 ? CoverageReasonCodes.NoMatchingMethod : CoverageReasonCodes.Unavailable);
             var reasons = observation.Reasons.Order(StringComparer.Ordinal).ToArray();
             var primary = coverage is null ? PrimaryReason(reasons) : null;
-            var supporting = diagnostics.Where(diagnostic => diagnostic.MethodId == source.CanonicalSignature)
-                .Select(diagnostic => diagnostic.Id).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+            var supporting = observation.DiagnosticIds.Order(StringComparer.Ordinal).ToArray();
             var status = coverage is double known
                 ? new MethodCoverageStatus("known", known, observation.Points.Count, observation.Points.Count(point => point.Value), null, [], supporting)
                 : new MethodCoverageStatus("unknown", null, null, null, primary, reasons, supporting);
@@ -145,23 +147,30 @@ public static class CoverageMatcher
         CoverageDiagnosticStage stage, IReadOnlyDictionary<SourceMethod, Observation> observations,
         ICollection<CoverageDiagnostic> diagnostics)
     {
-        var candidates = sources.OrderBy(source => source.CanonicalSignature, StringComparer.Ordinal).ToArray();
+        var candidates = sources.OrderBy(LogicalPath, StringComparer.Ordinal)
+            .ThenBy(source => source.CanonicalSignature, StringComparer.Ordinal).ToArray();
         foreach (var source in candidates) observations[source].Reasons.Add(code);
         diagnostics.Add(CoverageDiagnostic.Create(code, stage, CoverageDiagnosticSeverity.Warning,
             CoverageDiagnosticScope.Observation, covered.ReportId, covered.ObservationId,
+            candidatePaths: candidates.Select(LogicalPath),
             candidateMethodIds: candidates.Select(source => source.CanonicalSignature),
             reportedType: covered.TypeName, reportedMethodName: covered.MethodName,
             reportedParameterCount: covered.ParameterCount,
             moduleIdentities: covered.ModuleIdentity is null ? [] : [covered.ModuleIdentity],
             message: $"Coverage observation rejected at {stage.ToString().ToLowerInvariant()} stage."));
         foreach (var source in candidates)
-            diagnostics.Add(CoverageDiagnostic.Create(code, stage, CoverageDiagnosticSeverity.Warning,
+        {
+            var diagnostic = CoverageDiagnostic.Create(code, stage, CoverageDiagnosticSeverity.Warning,
                 CoverageDiagnosticScope.Method, covered.ReportId, covered.ObservationId,
-                methodId: source.CanonicalSignature, span: new SourceSpan(source.StartLine, source.EndLine),
+                path: LogicalPath(source), methodId: source.CanonicalSignature,
+                span: new SourceSpan(source.StartLine, source.EndLine), contextId: source.ContextId,
                 reportedType: covered.TypeName, reportedMethodName: covered.MethodName,
                 reportedParameterCount: covered.ParameterCount,
                 moduleIdentities: covered.ModuleIdentity is null ? [] : [covered.ModuleIdentity],
-                message: $"Coverage observation rejected for {source.CanonicalSignature}."));
+                message: $"Coverage observation rejected for {source.CanonicalSignature}.");
+            diagnostics.Add(diagnostic);
+            observations[source].DiagnosticIds.Add(diagnostic.Id);
+        }
     }
 
     private static string PrimaryReason(IReadOnlyCollection<string> reasons)
@@ -192,6 +201,8 @@ public static class CoverageMatcher
     }
 
     private static bool TypesEqual(string source, string covered) => source == covered.Replace('+', '.');
+    private static string LogicalPath(SourceMethod source) =>
+        (source.LogicalPath ?? source.File).Replace(Path.DirectorySeparatorChar, '/');
     private static bool IsGeneratedStateMachine(string typeName) =>
         typeName.Contains(">d__", StringComparison.Ordinal) && typeName.Contains('<', StringComparison.Ordinal);
 
@@ -219,6 +230,7 @@ public static class CoverageMatcher
         public Dictionary<PointIdentity, bool> Points { get; } = [];
         public HashSet<string> ModuleIdentities { get; } = new(StringComparer.Ordinal);
         public HashSet<string> Reasons { get; } = new(StringComparer.Ordinal);
+        public HashSet<string> DiagnosticIds { get; } = new(StringComparer.Ordinal);
         public bool HasCompatibleObservation { get; set; }
     }
 

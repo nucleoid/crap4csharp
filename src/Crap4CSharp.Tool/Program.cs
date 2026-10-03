@@ -238,9 +238,6 @@ internal static class App
         var commands = new List<CommandRecord>();
         var runArtifacts = new List<RunArtifact>();
         var generatedReports = new List<string>();
-        var files = options.Changed
-            ? await ChangedFilesAsync(workingDirectory, options.Timeout, cancellationToken, processExecutor)
-            : SourceDiscovery.Discover(options.Inputs, workingDirectory);
         var preparedMappings = options.CoveragePathMappings.Select(mapping => mapping with
         {
             LocalRoot = Path.GetFullPath(mapping.LocalRoot, workingDirectory)
@@ -248,6 +245,16 @@ internal static class App
         var declaredRoots = DeclaredSourceRoots(options.Inputs, workingDirectory);
         var explicitFiles = options.Inputs.Where(input => File.Exists(Path.GetFullPath(input, workingDirectory)))
             .Select(input => Path.GetFullPath(input, workingDirectory)).ToArray();
+        if (options.Changed)
+        {
+            var preflightInventory = SourcePathCapture.Capture([], declaredRoots, [],
+                preparedMappings.Select(mapping => mapping.LocalRoot));
+            _ = new CoveragePathResolver(PathIdentityPolicy.Current, preflightInventory,
+                preparedMappings, options.CoveragePathCase);
+        }
+        var files = options.Changed
+            ? await ChangedFilesAsync(workingDirectory, options.Timeout, cancellationToken, processExecutor)
+            : SourceDiscovery.Discover(options.Inputs, workingDirectory);
         var sourceInventory = SourcePathCapture.Capture(files, declaredRoots, explicitFiles,
             preparedMappings.Select(mapping => mapping.LocalRoot));
         var pathResolver = new CoveragePathResolver(PathIdentityPolicy.Current, sourceInventory,
@@ -343,7 +350,10 @@ internal static class App
 
             foreach (var report in reports)
                 if (!File.Exists(report)) throw new FileNotFoundException($"Coverage report not found: {report}", report);
-            source = new SourceAnalyzer().AnalyzeFiles(files);
+            source = new SourceAnalyzer().AnalyzeFiles(files).Select(method => method with
+            {
+                LogicalPath = NormalizePath(workingDirectory, method.File)
+            }).ToArray();
             if (coverage is null)
             {
                 var reads = reports.Select(report => CoverageReader.ReadDetailed(report, pathResolver)).ToArray();
@@ -612,7 +622,6 @@ internal static class App
         if (values.Length == 0) return [Path.GetFullPath(workingDirectory)];
         return values.Select(value => Path.GetFullPath(value, workingDirectory))
             .Select(path => File.Exists(path) ? Path.GetDirectoryName(path)! : path)
-            .Prepend(Path.GetFullPath(workingDirectory))
             .Distinct(PathIdentityPolicy.Current.Comparer).Order(StringComparer.Ordinal).ToArray();
     }
 
@@ -621,6 +630,7 @@ internal static class App
         ICollection<CoverageDiagnostic> diagnostics,
         ICollection<CoverageRunEvidence> evidence)
     {
+        var evidenceIds = evidence.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
         foreach (var read in reads)
         {
             foreach (var diagnostic in read.Diagnostics) diagnostics.Add(diagnostic);
@@ -630,14 +640,15 @@ internal static class App
                 var id = resolution.Diagnostic?.EvidenceRefs.FirstOrDefault() ??
                     Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", read.ReportId,
                         method.ObservationId, resolution.Status, resolution.MappingId)))).ToLowerInvariant();
-                evidence.Add(new CoverageRunEvidence(id, read.ReportId, method.ObservationId, method.ReportedFile,
-                    resolution.LocalPath, resolution.Status.ToString().ToLowerInvariant(), resolution.MappingId));
+                if (evidenceIds.Add(id))
+                    evidence.Add(new CoverageRunEvidence(id, read.ReportId, method.ObservationId, method.ReportedFile,
+                        resolution.LocalPath, resolution.Status.ToString().ToLowerInvariant(), resolution.MappingId));
             }
             foreach (var diagnostic in read.Diagnostics)
             {
                 foreach (var evidenceRef in diagnostic.EvidenceRefs)
                 {
-                    if (evidence.Any(item => item.Id == evidenceRef)) continue;
+                    if (!evidenceIds.Add(evidenceRef)) continue;
                     evidence.Add(new CoverageRunEvidence(evidenceRef, read.ReportId, diagnostic.ObservationId,
                         null, null, diagnostic.Code, diagnostic.MappingId));
                 }

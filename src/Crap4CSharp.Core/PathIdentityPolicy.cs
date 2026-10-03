@@ -31,6 +31,37 @@ public sealed class PathIdentityPolicy
         return fullPath;
     }
 
+    public string NormalizeExisting(string path, string? baseDirectory = null)
+    {
+        var normalized = Normalize(path, baseDirectory);
+        if (IsCaseSensitive) return normalized;
+
+        var root = Path.GetPathRoot(normalized)
+            ?? throw new ArgumentException($"Path has no root: {path}", nameof(path));
+        var current = root;
+        foreach (var segment in normalized[root.Length..].Split(
+                     Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar,
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (!Directory.Exists(current)) return normalized;
+            var matches = Directory.EnumerateFileSystemEntries(current)
+                .Where(entry => Comparer.Equals(Path.GetFileName(entry), segment))
+                .Order(StringComparer.Ordinal).ToArray();
+            var exact = matches.FirstOrDefault(entry =>
+                string.Equals(Path.GetFileName(entry), segment, StringComparison.Ordinal));
+            if (exact is not null)
+            {
+                current = exact;
+                continue;
+            }
+            if (matches.Length > 1)
+                throw new InvalidDataException(
+                    $"Local path identity collision while resolving '{path}': {string.Join(", ", matches.Select(Path.GetFileName))}.");
+            current = matches.Length == 1 ? matches[0] : Path.Combine(current, segment);
+        }
+        return Normalize(current);
+    }
+
     public bool Equals(string left, string right) =>
         Comparer.Equals(Normalize(left), Normalize(right));
 

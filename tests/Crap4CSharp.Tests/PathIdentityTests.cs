@@ -35,6 +35,17 @@ public sealed class PathIdentityTests : IDisposable
     }
 
     [Fact]
+    public void InsensitivePolicyCanonicalizesUniqueExistingSpelling()
+    {
+        var actual = Write("Parent/Foo.cs", "class C { }");
+        var differentlyCased = Path.Combine(temporary, "PARENT", "FOO.CS");
+
+        var normalized = PathIdentityPolicy.Insensitive.NormalizeExisting(differentlyCased);
+
+        Assert.Equal(actual, normalized);
+    }
+
+    [Fact]
     public void ContainmentUsesCompleteComponents()
     {
         var policy = PathIdentityPolicy.Sensitive;
