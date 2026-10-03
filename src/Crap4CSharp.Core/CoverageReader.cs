@@ -374,6 +374,14 @@ public static class CoverageReader
     private sealed record OpenCoverPoint(int? Line, int? Visits, int? StartColumn, int? EndLine, int? EndColumn,
         int? Offset, string? FileId)
     {
-        public CoveragePoint ToCoveragePoint() => new(Line!.Value, Visits!.Value, StartColumn, EndLine, EndColumn, Offset);
+        public CoveragePoint ToCoveragePoint()
+        {
+            // Coverlet 6 emits 1..2 when the OpenCover projection has only line evidence.
+            // Preserve that as columnless evidence instead of pretending the point starts
+            // before every indented single-line member.
+            var syntheticColumns = StartColumn == 1 && EndColumn == 2;
+            return new CoveragePoint(Line!.Value, Visits!.Value,
+                syntheticColumns ? null : StartColumn, EndLine, syntheticColumns ? null : EndColumn, Offset);
+        }
     }
 }

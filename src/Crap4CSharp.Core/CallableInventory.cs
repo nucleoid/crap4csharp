@@ -60,6 +60,7 @@ public sealed record CallableEntry(
 {
     public CallableSemanticIdentity? SemanticIdentity { get; init; }
     public string? ContextId { get; init; }
+    public string? ParentObservationId { get; init; }
 }
 
 public sealed record CallableInventoryResult(
@@ -97,7 +98,7 @@ public static class CallableInventory
         foreach (var candidate in candidates)
         {
             var parent = built.Where(item => item.Candidate != candidate && item.Candidate.OwnershipSpan.Contains(candidate.Span) &&
-                    IsExecutableParent(item.Candidate.Kind))
+                    CanOwn(item.Candidate, candidate))
                 .OrderBy(item => item.Candidate.OwnershipSpan.Length).FirstOrDefault();
             var anonymous = IsAnonymous(candidate.Kind);
             var semanticIdentity = SemanticIdentity(candidate, semanticModel);
@@ -116,7 +117,12 @@ public static class CallableInventory
                 candidate.Applicable ? CallableApplicability.Applicable : CallableApplicability.NotApplicable,
                 candidate.Applicable ? null : "callable.noAuthoredBody", ComplexityRules.CallablesV1,
                 semanticKey, candidate.BodyFingerprint, false, coverage.Capability, coverage.Reason);
-            entry = entry with { SemanticIdentity = semanticIdentity, ContextId = context.ContextId };
+            entry = entry with
+            {
+                SemanticIdentity = semanticIdentity,
+                ContextId = context.ContextId,
+                ParentObservationId = parent.Entry?.ObservationId
+            };
             built.Add((candidate, entry));
         }
 
@@ -151,6 +157,15 @@ public static class CallableInventory
         {
             switch (node)
             {
+                case ClassDeclarationSyntax type when type.ParameterList is not null:
+                    AddPrimaryConstructor(output, type, type.ParameterList);
+                    break;
+                case StructDeclarationSyntax type when type.ParameterList is not null:
+                    AddPrimaryConstructor(output, type, type.ParameterList);
+                    break;
+                case RecordDeclarationSyntax type when type.ParameterList is not null:
+                    AddPrimaryConstructor(output, type, type.ParameterList);
+                    break;
                 case MethodDeclarationSyntax method:
                     AddDeclaration(output, method, method.Body ?? (SyntaxNode?)method.ExpressionBody?.Expression,
                         CallableKind.Method, method.Identifier.ValueText, MethodKey(method));
@@ -200,7 +215,8 @@ public static class CallableInventory
                 case AnonymousMethodExpressionSyntax anonymous:
                     AddAnonymous(output, anonymous, anonymous.Block, CallableKind.AnonymousMethod, "anonymous");
                     break;
-                case VariableDeclaratorSyntax variable when variable.Initializer is not null:
+                case VariableDeclaratorSyntax variable when variable.Initializer is not null &&
+                    variable.Parent?.Parent is FieldDeclarationSyntax or EventFieldDeclarationSyntax:
                     var declaration = variable.Parent?.Parent;
                     var kind = declaration is EventFieldDeclarationSyntax ? CallableKind.EventInitializer : CallableKind.FieldInitializer;
                     AddExpression(output, variable.Initializer.Value, variable.Initializer.Span, kind, variable.Identifier.ValueText,
@@ -217,6 +233,15 @@ public static class CallableInventory
             }
         }
         return output;
+    }
+
+    private static void AddPrimaryConstructor(List<Candidate> output, TypeDeclarationSyntax declaration,
+        ParameterListSyntax parameters)
+    {
+        var key = MemberPrefix(declaration) + ".ctor(" + Parameters(parameters) + ")";
+        output.Add(Candidate.Create(declaration, parameters.Span, declaration.Span, CallableKind.Constructor,
+            declaration.Identifier.ValueText, key, true, 1,
+            Fingerprint(parameters.DescendantTokens(descendIntoTrivia: false))));
     }
 
     private static void AddDeclaration(List<Candidate> output, SyntaxNode declaration, SyntaxNode? body,
@@ -264,6 +289,9 @@ public static class CallableInventory
             ConversionOperatorDeclarationSyntax conversion => model.GetDeclaredSymbol(conversion),
             LocalFunctionStatementSyntax local => model.GetDeclaredSymbol(local),
             AccessorDeclarationSyntax accessor => model.GetDeclaredSymbol(accessor),
+            TypeDeclarationSyntax type => model.GetDeclaredSymbol(type)?.InstanceConstructors
+                .SingleOrDefault(constructor => constructor.Parameters.Length == type.ParameterList?.Parameters.Count &&
+                    constructor.DeclaringSyntaxReferences.Any(reference => reference.Span == type.Span)),
             _ => candidate.Node.AncestorsAndSelf().OfType<PropertyDeclarationSyntax>().FirstOrDefault() is { } property
                 ? model.GetDeclaredSymbol(property)?.GetMethod
                 : candidate.Node.AncestorsAndSelf().OfType<IndexerDeclarationSyntax>().FirstOrDefault() is { } indexer
@@ -306,7 +334,12 @@ public static class CallableInventory
     private static bool IsAnonymous(CallableKind kind) => kind is CallableKind.Lambda or CallableKind.AnonymousMethod or
         CallableKind.FieldInitializer or CallableKind.EventInitializer or CallableKind.PropertyInitializer or
         CallableKind.PrimaryConstructorBaseArguments;
-    private static bool IsExecutableParent(CallableKind kind) => true;
+    private static bool CanOwn(Candidate parent, Candidate child)
+    {
+        var primaryConstructor = parent.Kind == CallableKind.Constructor && parent.Node is TypeDeclarationSyntax;
+        return !primaryConstructor || child.Kind is CallableKind.FieldInitializer or CallableKind.EventInitializer or
+            CallableKind.PropertyInitializer or CallableKind.PrimaryConstructorBaseArguments;
+    }
 
     private static CallableKind AccessorKind(AccessorDeclarationSyntax accessor)
     {

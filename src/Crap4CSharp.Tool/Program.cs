@@ -291,10 +291,10 @@ internal static class App
         ThrowHardCoverageDiagnostic(reads.SelectMany(read => read.Diagnostics));
         var methods = reads.SelectMany(read => read.Methods).Select(method => method with { ContextId = contextId }).ToArray();
         var resolved = CallableCoverageResolver.Resolve(inventory, methods);
-        var byId = resolved.Observations.ToDictionary(item => item.CallableId, StringComparer.Ordinal);
+        var byId = resolved.Observations.ToDictionary(item => item.ObservationId!, StringComparer.Ordinal);
         var callables = inventory.Callables.Select(item =>
         {
-            var observation = byId[item.CallableId];
+            var observation = byId[item.ObservationId];
             var coverage = observation.Status == "known" && observation.Points.Count > 0
                 ? (double)observation.Points.Count(point => point.Visited) / observation.Points.Count : (double?)null;
             var crap = item.Complexity is int complexity && coverage is double known
@@ -400,7 +400,7 @@ internal static class App
 
     private static void RenderCallableHuman(ResultDocument result, TextWriter output)
     {
-        foreach (var item in result.Evaluation.Callables)
+        foreach (var item in result.Evaluation.Callables ?? [])
             output.WriteLine($"{item.Path}:{item.Span.StartLine} {item.Kind} {item.CallableId} CRAP={item.Crap?.ToString("0.00", CultureInfo.InvariantCulture) ?? "N/A"}");
     }
 

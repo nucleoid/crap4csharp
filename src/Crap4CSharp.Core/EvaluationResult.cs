@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Serialization;
 
 namespace Crap4CSharp.Core;
 
@@ -57,10 +58,14 @@ public sealed record EvaluationSection(
 {
     public CoveragePathPolicyResult CoveragePathPolicy { get; init; } = new("auto", []);
     public IReadOnlyList<CoverageDiagnostic> CoverageDiagnostics { get; init; } = [];
-    public IReadOnlyList<CallableResult> Callables { get; init; } = [];
-    public IReadOnlyList<CallableFamilyMetric> Families { get; init; } = [];
-    public IReadOnlyList<CallableExemptionMatch> CallableExemptions { get; init; } = [];
-    public IReadOnlyList<string> ExemptionErrors { get; init; } = [];
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<CallableResult>? Callables { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<CallableFamilyMetric>? Families { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<CallableExemptionMatch>? CallableExemptions { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? ExemptionErrors { get; init; }
 }
 
 public sealed record CallableResult(

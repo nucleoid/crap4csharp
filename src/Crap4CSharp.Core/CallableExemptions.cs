@@ -36,7 +36,8 @@ public static class CallableExemptions
             item.CallableId, item.BodyChecksum, item.ReasonCode)).FirstOrDefault(group => group.Count() > 1);
         if (duplicate is not null) errors.Add("exemption.duplicate");
 
-        var byCallable = inventory.Callables.ToDictionary(item => item.CallableId, StringComparer.Ordinal);
+        var byCallable = inventory.Callables.GroupBy(item => item.CallableId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
         var byObservation = observations.GroupBy(item => item.CallableId, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
         var familyById = families.ToDictionary(item => item.FamilyId, StringComparer.Ordinal);
@@ -47,7 +48,9 @@ public static class CallableExemptions
             if (entry.Ruleset != inventory.Ruleset) { errors.Add("exemption.rulesetMismatch"); continue; }
             if (entry.ContextId != inventory.ContextId) { errors.Add("exemption.contextMismatch"); continue; }
             if (entry.TargetFramework != inventory.TargetFramework) { errors.Add("exemption.targetFrameworkMismatch"); continue; }
-            if (!byCallable.TryGetValue(entry.CallableId, out var callable)) { errors.Add("exemption.unmatched"); continue; }
+            if (!byCallable.TryGetValue(entry.CallableId, out var callables)) { errors.Add("exemption.unmatched"); continue; }
+            if (callables.Length != 1) { errors.Add("exemption.multiplyMatched"); continue; }
+            var callable = callables[0];
             if (entry.BodyChecksum != callable.BodyChecksum) { errors.Add("exemption.staleBody"); continue; }
             if (!byObservation.TryGetValue(entry.CallableId, out var callableObservations) || callableObservations.Length != 1)
             { errors.Add(callableObservations is { Length: > 1 } ? "exemption.multiplyMatched" : "exemption.unmatchedObservation"); continue; }

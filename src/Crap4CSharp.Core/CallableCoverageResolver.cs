@@ -12,7 +12,7 @@ public static class CallableCoverageResolver
         string? expectedModuleIdentity = null)
     {
         ArgumentNullException.ThrowIfNull(inventory);
-        var observations = inventory.Callables.ToDictionary(item => item.CallableId,
+        var observations = inventory.Callables.ToDictionary(item => item.ObservationId,
             _ => new Accumulator(), StringComparer.Ordinal);
         var diagnostics = new List<CoverageDiagnostic>();
 
@@ -55,34 +55,34 @@ public static class CallableCoverageResolver
                 diagnostics.Add(Diagnostic(code, report, affected, candidates.Length > 1
                     ? "Coverage point ownership is not exclusive."
                     : "Coverage observation does not identify a supported callable."));
-                foreach (var item in affected) observations[item.CallableId].Reasons.Add(code);
+                foreach (var item in affected) observations[item.ObservationId].Reasons.Add(code);
                 continue;
             }
 
             var candidate = candidates[0];
             if (candidate.CoverageCapability != "semantic-ordinary")
             {
-                observations[candidate.CallableId].Reasons.Add(candidate.CoverageReason ?? CoverageReasonCodes.UnsupportedGeneratedMapping);
+                observations[candidate.ObservationId].Reasons.Add(candidate.CoverageReason ?? CoverageReasonCodes.UnsupportedGeneratedMapping);
                 diagnostics.Add(Diagnostic(candidate.CoverageReason ?? CoverageReasonCodes.UnsupportedGeneratedMapping,
                     report, [candidate], "Callable coverage capability is unsupported without authoritative generated mapping."));
                 continue;
             }
             if (report.SequencePoints.Count == 0)
             {
-                observations[candidate.CallableId].Reasons.Add(CoverageReasonCodes.NoEligiblePoints);
+                observations[candidate.ObservationId].Reasons.Add(CoverageReasonCodes.NoEligiblePoints);
                 diagnostics.Add(Diagnostic(CoverageReasonCodes.NoEligiblePoints, report, [candidate],
                     "Coverage observation contains no eligible sequence points."));
                 continue;
             }
             if (!SpanContains(candidate.Span, report.SequencePoints))
             {
-                observations[candidate.CallableId].Reasons.Add(CoverageReasonCodes.SpanMismatch);
+                observations[candidate.ObservationId].Reasons.Add(CoverageReasonCodes.SpanMismatch);
                 diagnostics.Add(Diagnostic(CoverageReasonCodes.SpanMismatch, report, [candidate],
                     "Coverage points fall outside the authored callable span."));
                 continue;
             }
 
-            var accumulator = observations[candidate.CallableId];
+            var accumulator = observations[candidate.ObservationId];
             foreach (var point in report.SequencePoints)
             {
                 var document = report.DocumentIdentities.SingleOrDefault() ?? report.File ?? "<unknown-document>";
@@ -99,14 +99,19 @@ public static class CallableCoverageResolver
 
         var resolved = inventory.Callables.Select(item =>
         {
-            var value = observations[item.CallableId];
+            var value = observations[item.ObservationId];
             if (value.Points.Count > 0)
                 return new CallableCoverageObservation(item.CallableId, "known",
-                    value.Points.OrderBy(pair => pair.Key).Select(pair => pair.Value).ToArray(), null);
-            var reason = value.Reasons.Order(StringComparer.Ordinal).FirstOrDefault() ?? item.CoverageReason ??
+                    value.Points.OrderBy(pair => pair.Key).Select(pair => pair.Value).ToArray(), null)
+                    { ObservationId = item.ObservationId };
+            var reason = item.CoverageCapability is "unsupported" or "portable-pdb-required"
+                ? item.CoverageReason
+                : value.Reasons.Order(StringComparer.Ordinal).FirstOrDefault() ?? item.CoverageReason;
+            reason ??=
                 (item.Applicability == CallableApplicability.NotApplicable ? item.ApplicabilityReason : CoverageReasonCodes.Unavailable);
             return new CallableCoverageObservation(item.CallableId,
-                item.Applicability == CallableApplicability.NotApplicable ? "not-applicable" : "unknown", [], reason);
+                item.Applicability == CallableApplicability.NotApplicable ? "not-applicable" : "unknown", [], reason)
+                { ObservationId = item.ObservationId };
         }).OrderBy(item => item.CallableId, StringComparer.Ordinal).ToArray();
         return new CallableCoverageResolution(resolved,
             diagnostics.GroupBy(item => item.Id, StringComparer.Ordinal).Select(group => group.First())

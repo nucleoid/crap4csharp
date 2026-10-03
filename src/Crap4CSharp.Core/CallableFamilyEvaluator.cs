@@ -17,7 +17,10 @@ public sealed record CallableCoverageObservation(
     string CallableId,
     string Status,
     IReadOnlyList<CallableCoveragePoint> Points,
-    string? Reason);
+    string? Reason)
+{
+    public string? ObservationId { get; init; }
+}
 
 public sealed record CallableFamilyMetric(
     string FamilyId,
@@ -44,15 +47,13 @@ public static class CallableFamilyEvaluator
         double threshold)
     {
         if (!double.IsFinite(threshold) || threshold < 0) throw new ArgumentOutOfRangeException(nameof(threshold));
-        var byId = inventory.Callables.ToDictionary(item => item.CallableId, StringComparer.Ordinal);
-        var children = inventory.Callables.Where(item => item.ParentId is not null)
-            .GroupBy(item => item.ParentId!, StringComparer.Ordinal)
+        var children = inventory.Callables.Where(item => item.ParentObservationId is not null)
+            .GroupBy(item => item.ParentObservationId!, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
-        var coverage = observations.GroupBy(item => item.CallableId, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
+        var coverage = observations.ToArray();
         var output = new List<CallableFamilyMetric>();
 
-        foreach (var root in inventory.Callables.Where(item => item.ParentId is null && children.ContainsKey(item.CallableId)))
+        foreach (var root in inventory.Callables.Where(item => item.ParentObservationId is null && children.ContainsKey(item.ObservationId)))
         {
             var members = Descendants(root, children).Prepend(root)
                 .Where(item => item.Applicability == CallableApplicability.Applicable).ToArray();
@@ -62,8 +63,9 @@ public static class CallableFamilyEvaluator
             var reasons = new List<string>();
             foreach (var member in members)
             {
-                if (!coverage.TryGetValue(member.CallableId, out var memberObservations) ||
-                    memberObservations.Length == 0 || memberObservations.Any(item => item.Status != "known"))
+                var memberObservations = coverage.Where(item => item.ObservationId == member.ObservationId ||
+                    item.ObservationId is null && item.CallableId == member.CallableId).ToArray();
+                if (memberObservations.Length == 0 || memberObservations.Any(item => item.Status != "known"))
                 {
                     incomplete.Add(member.CallableId);
                     reasons.AddRange(memberObservations?.Select(item => item.Reason).Where(item => item is not null).Cast<string>()
@@ -107,7 +109,7 @@ public static class CallableFamilyEvaluator
     private static IEnumerable<CallableEntry> Descendants(CallableEntry root,
         IReadOnlyDictionary<string, CallableEntry[]> children)
     {
-        if (!children.TryGetValue(root.CallableId, out var direct)) yield break;
+        if (!children.TryGetValue(root.ObservationId, out var direct)) yield break;
         foreach (var child in direct)
         {
             yield return child;
@@ -126,14 +128,21 @@ public static class CallableChangeSelector
     public static CallableChangeSelection Select(CallableInventoryResult inventory, IEnumerable<string> changedCallableIds)
     {
         var changed = changedCallableIds.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
-        var byId = inventory.Callables.ToDictionary(item => item.CallableId, StringComparer.Ordinal);
+        var byId = inventory.Callables.GroupBy(item => item.CallableId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
+        var byObservation = inventory.Callables.ToDictionary(item => item.ObservationId, StringComparer.Ordinal);
         var familyIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var id in changed)
         {
-            if (!byId.TryGetValue(id, out var current)) continue;
-            var nested = current.ParentId is not null;
-            while (current.ParentId is not null && byId.TryGetValue(current.ParentId, out var parent)) current = parent;
-            if (nested) familyIds.Add(CallableFamilyEvaluator.FamilyId(current.CallableId, inventory.Ruleset));
+            if (!byId.TryGetValue(id, out var matches)) continue;
+            foreach (var match in matches)
+            {
+                var current = match;
+                var nested = current.ParentObservationId is not null;
+                while (current.ParentObservationId is not null &&
+                    byObservation.TryGetValue(current.ParentObservationId, out var parent)) current = parent;
+                if (nested) familyIds.Add(CallableFamilyEvaluator.FamilyId(current.CallableId, inventory.Ruleset));
+            }
         }
         return new CallableChangeSelection(changed, familyIds.Order(StringComparer.Ordinal).ToArray());
     }

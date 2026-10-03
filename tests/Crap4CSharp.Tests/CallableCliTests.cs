@@ -39,6 +39,7 @@ public sealed class CallableCliTests : IDisposable
         var source = Write("Nested.cs", "class C { int M() { System.Func<int,int> f = x => x > 0 ? 1 : 0; return 1; } }");
         var coverage = WriteCoverage(source, 1);
         var result = await Run(null, "analyze", "--syntax-only", "--format", "json", "--threshold", "0",
+            "--allow-missing-coverage",
             "--coverage", coverage, source);
         Assert.Equal(1, result.ExitCode);
         using var document = JsonDocument.Parse(result.Output);
