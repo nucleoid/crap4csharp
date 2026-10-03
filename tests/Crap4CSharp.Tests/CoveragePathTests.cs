@@ -174,6 +174,19 @@ public sealed class CoveragePathTests : IDisposable
         Assert.Equal(2, result.CandidatePaths.Count);
     }
 
+    [Fact]
+    public void PosixBackslashIsALiteralFilenameCharacter()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var source = Write("src/back\\slash.cs", "class C { }");
+        var resolver = Resolver([source], temporary, []);
+
+        var result = resolver.Resolve(source, [], Path.Combine(temporary, "coverage.xml"));
+
+        Assert.Equal(CoveragePathResolutionStatus.Resolved, result.Status);
+        Assert.Equal("src/back\\slash.cs", Assert.Single(result.CandidatePaths));
+    }
+
     private CoveragePathResolver Resolver(IEnumerable<string> files, string root, IEnumerable<CoveragePathMapping> mappings)
     {
         Directory.CreateDirectory(root);

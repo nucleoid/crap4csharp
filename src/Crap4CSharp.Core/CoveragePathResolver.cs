@@ -32,7 +32,7 @@ public sealed class CoverageSourceInventory
             RootPath = pathPolicy.Normalize(entry.RootPath),
             PhysicalPath = pathPolicy.Normalize(entry.PhysicalPath),
             RootPhysicalPath = pathPolicy.Normalize(entry.RootPhysicalPath),
-            LogicalPath = entry.LogicalPath.Replace('\\', '/')
+            LogicalPath = entry.LogicalPath.Replace(Path.DirectorySeparatorChar, '/')
         }).OrderBy(entry => entry.LogicalPath, StringComparer.Ordinal).ThenBy(entry => entry.LocalPath, StringComparer.Ordinal).ToArray();
         Roots = roots.Select(root => root with
         {
@@ -223,7 +223,10 @@ public sealed class CoveragePathResolver
     private CoveragePathResolution Failure(CoveragePathResolutionStatus status, string code, string message,
         string? reportId, string? observationId)
     {
-        var diagnostic = CoverageDiagnostic.Create(code, CoverageDiagnosticStage.Path, CoverageDiagnosticSeverity.Error,
+        var severity = code == CoverageReasonCodes.MissingPath
+            ? CoverageDiagnosticSeverity.Info
+            : CoverageDiagnosticSeverity.Error;
+        var diagnostic = CoverageDiagnostic.Create(code, CoverageDiagnosticStage.Path, severity,
             CoverageDiagnosticScope.Observation, reportId, observationId, message: message);
         return new CoveragePathResolution(status, null, [], null, diagnostic);
     }

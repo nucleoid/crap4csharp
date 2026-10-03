@@ -327,6 +327,26 @@ public sealed class ResultContractTests : IDisposable
         Assert.Contains("reason", required);
     }
 
+    [Fact]
+    public void AdditiveCoverageFieldsRemainOptionalForOlderV1Documents()
+    {
+        var repository = Path.GetFullPath("../../../../../", AppContext.BaseDirectory);
+        using var schema = JsonDocument.Parse(File.ReadAllText(Path.Combine(repository, "docs", "result-schema-v1.json")));
+        var definitions = schema.RootElement.GetProperty("$defs");
+
+        var evaluationRequired = definitions.GetProperty("evaluation").GetProperty("required").EnumerateArray()
+            .Select(item => item.GetString()).ToArray();
+        var metricRequired = definitions.GetProperty("metric").GetProperty("required").EnumerateArray()
+            .Select(item => item.GetString()).ToArray();
+        var runRequired = definitions.GetProperty("run").GetProperty("required").EnumerateArray()
+            .Select(item => item.GetString()).ToArray();
+
+        Assert.DoesNotContain("coveragePathPolicy", evaluationRequired);
+        Assert.DoesNotContain("coverageDiagnostics", evaluationRequired);
+        Assert.DoesNotContain("coverageStatus", metricRequired);
+        Assert.DoesNotContain("coverageEvidence", runRequired);
+    }
+
     [Theory]
     [InlineData("--format")]
     [InlineData("--output")]

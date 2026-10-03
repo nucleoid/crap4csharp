@@ -15,7 +15,7 @@
   "$defs": {
     "evaluation": {
       "type": "object",
-      "required": ["invocationMode", "policy", "scope", "contexts", "checks", "metrics", "findings", "coverage", "artifacts", "decision", "coveragePathPolicy", "coverageDiagnostics"],
+      "required": ["invocationMode", "policy", "scope", "contexts", "checks", "metrics", "findings", "coverage", "artifacts", "decision"],
       "properties": {
         "invocationMode": { "type": "string", "enum": ["legacy", "check", "analyze", "baseline"] },
         "policy": {
@@ -65,7 +65,7 @@
       "additionalProperties": true
     },
     "metric": {
-      "type": "object", "required": ["contextId", "path", "methodIdentity", "signature", "span", "complexity", "coverage", "crap", "coverageReason", "coverageStatus"],
+      "type": "object", "required": ["contextId", "path", "methodIdentity", "signature", "span", "complexity", "coverage", "crap", "coverageReason"],
       "properties": {
         "contextId": { "type": "string" }, "path": { "type": "string" }, "methodIdentity": { "type": "string" },
         "signature": { "type": ["string", "null"] }, "span": { "$ref": "#/$defs/span" },
@@ -179,7 +179,7 @@
       }, "additionalProperties": true
     },
     "run": {
-      "type": "object", "required": ["invocationId", "startedAt", "finishedAt", "durationMilliseconds", "commands", "diagnosticLocations", "artifacts", "cancellation", "status", "exitCode", "coverageEvidence"],
+      "type": "object", "required": ["invocationId", "startedAt", "finishedAt", "durationMilliseconds", "commands", "diagnosticLocations", "artifacts", "cancellation", "status", "exitCode"],
       "properties": {
         "invocationId": { "type": "string", "format": "uuid" }, "startedAt": { "type": "string", "format": "date-time" },
         "finishedAt": { "type": "string", "format": "date-time" }, "durationMilliseconds": { "type": "number", "minimum": 0 },

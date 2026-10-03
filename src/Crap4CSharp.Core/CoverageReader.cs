@@ -131,9 +131,13 @@ public static class CoverageReader
                 }
 
                 var resolution = resolver.Resolve(reportedFile, [], reportPath, reportId, observationId);
-                resolutions.Add(resolution);
                 if (resolution.Diagnostic is not null)
-                    diagnostics.Add(WithObservation(resolution.Diagnostic, typeName, methodName, parameterCount, moduleIdentity));
+                {
+                    var enriched = WithObservation(resolution.Diagnostic, typeName, methodName, parameterCount, moduleIdentity);
+                    resolution = resolution with { Diagnostic = enriched };
+                    diagnostics.Add(enriched);
+                }
+                resolutions.Add(resolution);
                 output.Add(new CoverageMethod(resolution.LocalPath, typeName, methodName, parameterCount, points, moduleIdentity)
                 {
                     ReportId = reportId, ObservationId = observationId, ReportedFile = reportedFile, PathResolution = resolution
@@ -175,9 +179,13 @@ public static class CoverageReader
                 if (filename is not null)
                 {
                     resolution = resolver.Resolve(filename, sourceRoots, reportPath, reportId, observationId);
-                    resolutions.Add(resolution);
                     if (resolution.Diagnostic is not null)
-                        diagnostics.Add(WithObservation(resolution.Diagnostic, typeName, name, parameterCount, moduleIdentity));
+                    {
+                        var enriched = WithObservation(resolution.Diagnostic, typeName, name, parameterCount, moduleIdentity);
+                        resolution = resolution with { Diagnostic = enriched };
+                        diagnostics.Add(enriched);
+                    }
+                    resolutions.Add(resolution);
                 }
                 else
                 {
