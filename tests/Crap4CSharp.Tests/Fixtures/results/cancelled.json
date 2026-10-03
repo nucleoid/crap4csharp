@@ -1,0 +1,11 @@
+{
+  "invocationMode": "legacy",
+  "policy": { "threshold": 8, "allowMissingCoverage": false, "comparisonOperator": "gt" },
+  "scope": { "logicalWorkspaceRoot": ".", "sources": ["tests/Crap4CSharp.Tests/Fixtures/results/source.cs"] },
+  "contexts": [{ "id": "legacy-syntax", "analysisMode": "syntaxOnly", "project": null, "targetFramework": null, "configuration": null, "sourceSetIdentity": null, "externalRootIdentity": null }],
+  "checks": [{ "name": "testExecution", "status": "cancelled", "reason": "run.cancelled", "required": true }],
+  "metrics": [], "findings": [],
+  "coverage": { "methods": 0, "known": 0, "unknown": 0, "reasons": {} },
+  "artifacts": [{ "kind": "source", "path": "tests/Crap4CSharp.Tests/Fixtures/results/source.cs", "contentIdentity": "b1c506b05ce0758025417a551856116c13d29457fc7ab2fd2ab404a926551b4d", "identityStatus": "sha256" }],
+  "decision": { "completed": false, "policyDecision": "unknown", "reason": "run.cancelled" }
+}

@@ -1,11 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><IsPackable>false</IsPackable></PropertyGroup>
   <ItemGroup>
+    <Compile Remove="Fixtures/results/source.cs" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" />
     <PackageReference Include="xunit.v3" Version="3.2.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
     <ProjectReference Include="../../src/Crap4CSharp.Core/Crap4CSharp.Core.csproj" />
     <ProjectReference Include="../../src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj" />
+    <None Include="Fixtures/results/*.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures/results/source.cs" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures/results/coverage.xml" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

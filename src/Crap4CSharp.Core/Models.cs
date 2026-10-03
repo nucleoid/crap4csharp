@@ -36,4 +36,5 @@ public sealed record SourceMethod(
     int Complexity)
 {
     public string CoverageTypeName { get; init; } = TypeName;
+    public string CanonicalSignature { get; init; } = DisplayName;
 }

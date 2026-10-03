@@ -41,6 +41,15 @@ public sealed class SourceAnalyzer
                 var parameterTypes = method.ParameterList.Parameters
                     .Select(parameter => parameter.Type?.ToString() ?? "?");
                 var signature = $"{method.Identifier.ValueText}({string.Join(",", parameterTypes)})";
+                var canonicalParameters = method.ParameterList.Parameters.Select(parameter =>
+                {
+                    var modifiers = string.Join(" ", parameter.Modifiers.Select(modifier => modifier.ValueText));
+                    return $"{(modifiers.Length == 0 ? string.Empty : modifiers + " ")}{parameter.Type?.ToString() ?? "?"}";
+                });
+                var explicitInterface = method.ExplicitInterfaceSpecifier is null
+                    ? string.Empty : method.ExplicitInterfaceSpecifier.Name + ".";
+                var methodArity = method.TypeParameterList?.Parameters.Count ?? 0;
+                var canonicalSignature = $"{coverageTypeName}.{explicitInterface}{method.Identifier.ValueText}`{methodArity}({string.Join(",", canonicalParameters)})";
                 methods.Add(new SourceMethod(
                     fullPath,
                     typeName,
@@ -49,7 +58,11 @@ public sealed class SourceAnalyzer
                     signature,
                     lineSpan.StartLinePosition.Line + 1,
                     lineSpan.EndLinePosition.Line + 1,
-                    CalculateComplexity(method)) { CoverageTypeName = coverageTypeName });
+                    CalculateComplexity(method))
+                {
+                    CoverageTypeName = coverageTypeName,
+                    CanonicalSignature = canonicalSignature
+                });
             }
         }
 

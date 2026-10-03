@@ -1,0 +1,20 @@
+<CoverageSession>
+  <Modules>
+    <Module>
+      <ModuleName>SnapshotFixture</ModuleName>
+      <Files><File uid="1" fullPath="source.cs" /></Files>
+      <Classes>
+        <Class>
+          <FullName>SnapshotFixture</FullName>
+          <Methods>
+            <Method>
+              <Name>SnapshotFixture.Value()</Name>
+              <SequencePoints><SequencePoint vc="1" sl="3" sc="5" el="3" ec="22" offset="0" fileid="1" /></SequencePoints>
+              <FileRef uid="1" />
+            </Method>
+          </Methods>
+        </Class>
+      </Classes>
+    </Module>
+  </Modules>
+</CoverageSession>
