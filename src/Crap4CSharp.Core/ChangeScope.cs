@@ -8,6 +8,7 @@ public enum ChangeScopeMode { All, Worktree, Staged, Base }
 public enum ScopeSourceState { Worktree, Head }
 public enum ScopeGranularity { Method, File }
 public enum ScopeChangeKind { Added, Modified, Deleted, Renamed, Copied }
+public enum ScopeCompleteness { Complete, ContextIncomplete }
 
 public sealed record LineRange(int StartLine, int EndLine)
 {
@@ -65,7 +66,14 @@ public sealed record CapturedChangeScope(
     string RepositoryRoot,
     ScopeRevision Revision,
     IReadOnlyList<ChangedFile> Files,
-    IReadOnlyList<string> Diagnostics);
+    IReadOnlyList<string> Diagnostics,
+    ScopeCompleteness Completeness = ScopeCompleteness.Complete);
+
+public sealed class ScopeException(string reason, string message, Exception? innerException = null)
+    : InvalidOperationException($"{reason}: {message}", innerException)
+{
+    public string Reason { get; } = reason;
+}
 
 public sealed record GitScopeRequest(
     ChangeScopeMode Mode,

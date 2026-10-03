@@ -7,7 +7,8 @@ using Crap4CSharp.Core;
 internal static partial class GitScopeResolver
 {
     private static readonly string[] SafeGitPrefix =
-        ["-c", "core.quotepath=false", "-c", "diff.external=", "-c", "diff.renameLimit=0"];
+        ["-c", "core.quotepath=false", "-c", "diff.external=", "-c", "diff.renameLimit=0",
+         "-c", "diff.algorithm=myers", "-c", "diff.indentHeuristic=false"];
 
     public static async Task<CapturedChangeScope> CaptureAsync(GitScopeRequest request, string workingDirectory,
         TimeSpan timeout, CancellationToken cancellationToken)
@@ -19,12 +20,14 @@ internal static partial class GitScopeResolver
         if (request.Mode == ChangeScopeMode.Base && string.IsNullOrWhiteSpace(request.BaseRef))
             throw new ArgumentException("Base scope requires an explicit base ref.");
 
-        var root = Text(await Git(workingDirectory, timeout, cancellationToken, ["rev-parse", "--show-toplevel"])).TrimEnd('\r', '\n');
-        if (root.Length == 0) throw new InvalidOperationException("scope.notGitRepository: git returned an empty repository root.");
+        var rootResult = await Git(workingDirectory, timeout, cancellationToken, ["rev-parse", "--show-toplevel"], allowFailure: true);
+        if (rootResult.ExitCode != 0) throw new ScopeException("scope.notGitRepository", "the working directory is not inside a Git repository.");
+        var root = Text(rootResult).TrimEnd('\r', '\n');
+        if (root.Length == 0) throw new ScopeException("scope.notGitRepository", "git returned an empty repository root.");
 
         var currentHead = await TryResolveCommit(root, "HEAD", timeout, cancellationToken);
         if (request.Mode == ChangeScopeMode.Base && currentHead is null)
-            throw new InvalidOperationException("scope.unbornHead: base scope requires an existing HEAD commit.");
+            throw new ScopeException("scope.unbornHead", "base scope requires an existing HEAD commit.");
         var indexBefore = await IndexIdentity(root, timeout, cancellationToken);
         await EnsureNoConflicts(root, timeout, cancellationToken);
 
@@ -35,13 +38,16 @@ internal static partial class GitScopeResolver
         {
             resolvedBase = await ResolveCommit(root, request.BaseRef!, timeout, cancellationToken);
             resolvedHead = await ResolveCommit(root, request.HeadRef ?? "HEAD", timeout, cancellationToken);
-            var mergeBases = NullOrLineValues(await Git(root, timeout, cancellationToken,
-                ["merge-base", "--all", resolvedBase, resolvedHead]));
+            var mergeResult = await Git(root, timeout, cancellationToken,
+                ["merge-base", "--all", resolvedBase, resolvedHead], allowFailure: true);
+            var mergeBases = mergeResult.ExitCode == 0 ? NullOrLineValues(mergeResult) : [];
+            if (mergeBases.Count == 0)
+                throw new ScopeException("scope.noMergeBase", "no merge base is available; history may be shallow or unrelated.");
             if (mergeBases.Count != 1)
-                throw new InvalidOperationException($"scope.mergeBaseAmbiguous: expected one merge base but found {mergeBases.Count}.");
+                throw new ScopeException("scope.mergeBaseAmbiguous", $"expected one merge base but found {mergeBases.Count}.");
             mergeBase = mergeBases[0];
             if (request.SourceState == ScopeSourceState.Worktree && resolvedHead != currentHead)
-                throw new InvalidOperationException("scope.nonCurrentHeadWorktree: worktree source state requires head to resolve to current HEAD.");
+                throw new ScopeException("scope.nonCurrentHeadWorktree", "worktree source state requires head to resolve to current HEAD.");
         }
 
         var emptyTree = currentHead is null ? Text(await Git(root, timeout, cancellationToken,
@@ -56,27 +62,29 @@ internal static partial class GitScopeResolver
         var currentHeadAfter = await TryResolveCommit(root, "HEAD", timeout, cancellationToken);
         var indexAfter = await IndexIdentity(root, timeout, cancellationToken);
         if (currentHead != currentHeadAfter || indexBefore != indexAfter)
-            throw new InvalidOperationException("scope.changedDuringCapture: HEAD or index changed during capture.");
+            throw new ScopeException("scope.changedDuringCapture", "HEAD or index changed during capture.");
         if (request.Mode == ChangeScopeMode.Worktree ||
             request.Mode == ChangeScopeMode.Base && request.SourceState == ScopeSourceState.Worktree)
             VerifyWorktreeBytes(root, files);
 
         var diagnostics = new List<string>
         {
-            "git.diff.noExternal=true", "git.diff.noTextconv=true", "git.diff.renames=50%", "git.diff.copies=50%"
+            "git.diff.noExternal=true", "git.diff.noTextconv=true", "git.diff.text=true", "git.diff.renames=50%",
+            "git.diff.copies=50%", "git.diff.algorithm=myers", "git.diff.indentHeuristic=false"
         };
         if (records.Any(record => ContextInput(record.OldPath) || ContextInput(record.NewPath)))
             diagnostics.Add("scope.contextIncomplete");
         return new CapturedChangeScope(request.Mode, request.SourceState, root,
             new ScopeRevision(request.BaseRef, request.HeadRef ?? (request.Mode == ChangeScopeMode.Base ? "HEAD" : null),
                 resolvedBase, resolvedHead, currentHead, mergeBase, indexBefore),
-            files.OrderBy(file => file.NewPath ?? file.OldPath, PathComparer()).ToArray(), diagnostics);
+            files.OrderBy(file => file.NewPath ?? file.OldPath, PathComparer()).ToArray(), diagnostics,
+            diagnostics.Contains("scope.contextIncomplete") ? ScopeCompleteness.ContextIncomplete : ScopeCompleteness.Complete);
     }
 
     private static async Task<IReadOnlyList<PathChange>> ReadChanges(GitScopeRequest request, string root, string baseline,
         string? resolvedHead, TimeSpan timeout, CancellationToken cancellationToken)
     {
-        var arguments = new List<string> { "diff", "--name-status", "-z", "--no-ext-diff", "--no-textconv", "--find-renames=50%", "--find-copies=50%", "--find-copies-harder" };
+        var arguments = new List<string> { "diff", "--name-status", "-z", "--no-ext-diff", "--no-textconv", "--find-renames=50%", "--find-copies=50%" };
         if (request.Mode == ChangeScopeMode.Staged) arguments.Add("--cached");
         arguments.Add(baseline);
         if (request.Mode == ChangeScopeMode.Base && request.SourceState == ScopeSourceState.Head) arguments.Add(resolvedHead!);
@@ -133,23 +141,38 @@ internal static partial class GitScopeResolver
             ? (newSource is null ? [] : new[] { WholeFile(newSource.Text) }, Array.Empty<LineRange>())
             : record.Kind == ScopeChangeKind.Deleted
                 ? (Array.Empty<LineRange>(), oldSource is null ? [] : new[] { WholeFile(oldSource.Text) })
-                : await ReadHunks(request, root, baseline, resolvedHead, record, timeout, cancellationToken);
+                : oldIdentity == newIdentity
+                    ? (Array.Empty<LineRange>(), Array.Empty<LineRange>())
+                : await ReadHunks(root, record, oldSource!, newSource!, timeout, cancellationToken);
         return new ChangedFile(record.OldPath, record.NewPath, record.Kind, oldIdentity, newIdentity,
             oldSource, newSource, added, deleted, oldObjectIdentity, newObjectIdentity);
     }
 
     private static async Task<(IReadOnlyList<LineRange> Added, IReadOnlyList<LineRange> Deleted)> ReadHunks(
-        GitScopeRequest request, string root, string baseline, string? resolvedHead, PathChange record,
+        string root, PathChange record, CapturedSource oldSource, CapturedSource newSource,
         TimeSpan timeout, CancellationToken cancellationToken)
     {
-        var arguments = new List<string> { "diff", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", "--find-renames=50%", "--find-copies=50%", "--find-copies-harder" };
-        if (request.Mode == ChangeScopeMode.Staged) arguments.Add("--cached");
-        arguments.Add(baseline);
-        if (request.Mode == ChangeScopeMode.Base && request.SourceState == ScopeSourceState.Head) arguments.Add(resolvedHead!);
-        arguments.Add("--");
-        if (record.OldPath is not null) arguments.Add(record.OldPath);
-        if (record.NewPath is not null && record.NewPath != record.OldPath) arguments.Add(record.NewPath);
-        var patch = Text(await Git(root, timeout, cancellationToken, arguments));
+        var temporary = Directory.CreateTempSubdirectory("crap4csharp-scope-");
+        string patch;
+        try
+        {
+            var oldPath = Path.Combine(temporary.FullName, "old.cs");
+            var newPath = Path.Combine(temporary.FullName, "new.cs");
+            await File.WriteAllBytesAsync(oldPath, oldSource.Bytes.ToArray(), cancellationToken);
+            await File.WriteAllBytesAsync(newPath, newSource.Bytes.ToArray(), cancellationToken);
+            var diff = await Git(root, timeout, cancellationToken,
+                ["diff", "--no-index", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", "--text", "--", oldPath, newPath],
+                allowFailure: true);
+            if (diff.ExitCode is not (0 or 1))
+                throw new ScopeException("scope.gitFailed", $"git diff --no-index failed: {diff.Error.Trim()}");
+            patch = Text(diff);
+        }
+        finally
+        {
+            try { temporary.Delete(recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
         var added = new List<LineRange>();
         var deleted = new List<LineRange>();
         foreach (Match match in HunkRegex().Matches(patch))
@@ -157,6 +180,8 @@ internal static partial class GitScopeResolver
             AddRange(deleted, match.Groups[1].Value, match.Groups[2].Value);
             AddRange(added, match.Groups[3].Value, match.Groups[4].Value);
         }
+        if (added.Count == 0 && deleted.Count == 0 && record.Kind is ScopeChangeKind.Modified or ScopeChangeKind.Renamed)
+            throw new ScopeException("scope.missingHunks", $"content changed for {record.NewPath ?? record.OldPath} but Git produced no text hunks.");
         return (added, deleted);
     }
 
@@ -191,7 +216,12 @@ internal static partial class GitScopeResolver
             if (file.NewPath is null || file.NewSource is null) continue;
             var path = Path.Combine(root, file.NewPath);
             if (!File.Exists(path) || Capture(file.NewPath, File.ReadAllBytes(path)).ContentIdentity != file.NewSource.ContentIdentity)
-                throw new InvalidOperationException($"scope.changedDuringCapture: {file.NewPath} changed during capture.");
+                throw new ScopeException("scope.changedDuringCapture", $"{file.NewPath} changed during capture.");
+        }
+        foreach (var file in files.Where(file => file.Kind == ScopeChangeKind.Deleted && file.OldPath is not null))
+        {
+            if (File.Exists(Path.Combine(root, file.OldPath!)))
+                throw new ScopeException("scope.changedDuringCapture", $"deleted path {file.OldPath} reappeared during capture.");
         }
     }
 
@@ -220,7 +250,7 @@ internal static partial class GitScopeResolver
     private static async Task EnsureNoConflicts(string root, TimeSpan timeout, CancellationToken cancellationToken)
     {
         var unmerged = await Git(root, timeout, cancellationToken, ["ls-files", "--unmerged", "-z", "--"]);
-        if (unmerged.Output.Length > 0) throw new InvalidOperationException("scope.conflictedIndex: unmerged index entries are unsupported.");
+        if (unmerged.Output.Length > 0) throw new ScopeException("scope.conflictedIndex", "unmerged index entries are unsupported.");
     }
 
     private static async Task<string> IndexIdentity(string root, TimeSpan timeout, CancellationToken cancellationToken)
@@ -238,20 +268,20 @@ internal static partial class GitScopeResolver
 
     private static async Task<string> ResolveCommit(string root, string reference, TimeSpan timeout, CancellationToken cancellationToken) =>
         await TryResolveCommit(root, reference, timeout, cancellationToken)
-        ?? throw new InvalidOperationException($"scope.invalidRef: '{reference}' does not resolve to a commit.");
+        ?? throw new ScopeException("scope.invalidRef", $"'{reference}' does not resolve to a commit.");
 
     private static async Task<string> BlobIdentity(string root, string spec, TimeSpan timeout, CancellationToken cancellationToken) =>
         Text(await Git(root, timeout, cancellationToken, ["rev-parse", "--verify", "--end-of-options", spec])).Trim();
 
-    private static bool Eligible(string? path) => path is not null && path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) &&
-        !path.Split('/').Any(segment => segment is ".git" or "bin" or "obj" or "packages" or "TestResults" or "node_modules") &&
-        !Path.GetFileName(path).EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase) &&
-        !Path.GetFileName(path).EndsWith(".generated.cs", StringComparison.OrdinalIgnoreCase) &&
-        !Path.GetFileName(path).EndsWith(".designer.cs", StringComparison.OrdinalIgnoreCase);
+    private static bool Eligible(string? path) => path is not null && SourceDiscovery.IsSource(path) &&
+        !SourceDiscovery.IsExcludedByDirectory(path, ".");
 
     private static bool ContextInput(string? path) => path is not null &&
         (Path.GetExtension(path).ToLowerInvariant() is ".csproj" or ".sln" or ".slnx" or ".props" or ".targets" ||
-         Path.GetFileName(path) is "global.json" or "NuGet.Config");
+         Path.GetFileName(path).Equals("global.json", StringComparison.OrdinalIgnoreCase) ||
+         Path.GetFileName(path).Equals("nuget.config", StringComparison.OrdinalIgnoreCase) ||
+         Path.GetFileName(path).Equals(".editorconfig", StringComparison.OrdinalIgnoreCase) ||
+         Path.GetFileName(path).Equals(".globalconfig", StringComparison.OrdinalIgnoreCase));
 
     private static List<PathChange> ParseNameStatus(byte[] bytes)
     {
@@ -323,8 +353,8 @@ internal static partial class GitScopeResolver
             process.StandardInput.Close();
         }
         await using var output = new MemoryStream();
-        var outputTask = process.StandardOutput.BaseStream.CopyToAsync(output, cancellationToken);
-        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+        var outputTask = process.StandardOutput.BaseStream.CopyToAsync(output);
+        var errorTask = process.StandardError.ReadToEndAsync();
         using var timeoutSource = new CancellationTokenSource(timeout);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
         try { await process.WaitForExitAsync(linked.Token); }
@@ -332,6 +362,7 @@ internal static partial class GitScopeResolver
         {
             if (!process.HasExited) process.Kill(entireProcessTree: true);
             await process.WaitForExitAsync(CancellationToken.None);
+            await Task.WhenAll(outputTask, errorTask);
             if (cancellationToken.IsCancellationRequested) throw;
             throw new ProcessTimeoutException("git", timeout);
         }
@@ -339,7 +370,7 @@ internal static partial class GitScopeResolver
         var error = await errorTask;
         var result = new GitResult(process.ExitCode, output.ToArray(), error);
         if (!allowFailure && result.ExitCode != 0)
-            throw new InvalidOperationException($"scope.gitFailed: git {arguments[0]} failed: {error.Trim()}");
+            throw new ScopeException("scope.gitFailed", $"git {arguments[0]} failed: {error.Trim()}");
         return result;
     }
 

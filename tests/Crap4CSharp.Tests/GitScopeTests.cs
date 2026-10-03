@@ -118,7 +118,7 @@ public sealed class GitScopeTests : IDisposable
         await Git("add", "--", "Code.cs");
         await Git("commit", "--quiet", "-m", "base");
 
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => GitScopeResolver.CaptureAsync(
+        var error = await Assert.ThrowsAsync<ScopeException>(() => GitScopeResolver.CaptureAsync(
             new GitScopeRequest(ChangeScopeMode.Base, "missing-ref", "HEAD", ScopeSourceState.Head), temporary,
             TimeSpan.FromSeconds(10), CancellationToken.None));
 
@@ -148,6 +148,153 @@ public sealed class GitScopeTests : IDisposable
         Assert.Empty(ChangedMethodSelector.Select(file, oldMethods, newMethods, ScopeGranularity.Method).Methods);
     }
 
+    [Fact]
+    public async Task GitAttributesCannotHideChangedTextHunks()
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write(".gitattributes", "*.cs -diff\n");
+        Write("Code.cs", "class C {\n int Before() => 1;\n}\n");
+        await Git("add", "--", ".gitattributes", "Code.cs");
+        await Git("commit", "--quiet", "-m", "base");
+        Write("Code.cs", "class C {\n int After() => 2;\n}\n");
+
+        var scope = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Worktree), temporary,
+            TimeSpan.FromSeconds(10), CancellationToken.None);
+
+        var file = Assert.Single(scope.Files);
+        Assert.NotEmpty(file.AddedRanges);
+        Assert.NotEmpty(file.DeletedRanges);
+    }
+
+    [Fact]
+    public async Task TestSourcesAreExcludedAndProjectChangesMakeCompletenessTyped()
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("src/Code.cs", "class C { int M() => 1; }");
+        Write("tests/TestCode.cs", "class T { int Test() => 1; }");
+        Write("App.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        await Git("add", "--", ".");
+        await Git("commit", "--quiet", "-m", "base");
+        Write("src/Code.cs", "class C { int M() => 2; }");
+        Write("tests/TestCode.cs", "class T { int Test() => 2; }");
+        Write("App.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup /></Project>");
+
+        var scope = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Worktree), temporary,
+            TimeSpan.FromSeconds(10), CancellationToken.None);
+
+        Assert.Equal("src/Code.cs", Assert.Single(scope.Files).NewPath);
+        Assert.Equal(ScopeCompleteness.ContextIncomplete, scope.Completeness);
+        Assert.Contains("scope.contextIncomplete", scope.Diagnostics);
+    }
+
+    [Fact]
+    public async Task UnbornWorktreeAndStagedScopesTreatSourcesAsAdditions()
+    {
+        await Git("init", "--quiet");
+        Write("Staged.cs", "class Staged { int M() => 1; }");
+        await Git("add", "--", "Staged.cs");
+        Write("Untracked.cs", "class Untracked { int M() => 1; }");
+
+        var staged = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Staged), temporary,
+            TimeSpan.FromSeconds(10), CancellationToken.None);
+        var worktree = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Worktree), temporary,
+            TimeSpan.FromSeconds(10), CancellationToken.None);
+
+        Assert.Equal("Staged.cs", Assert.Single(staged.Files).NewPath);
+        Assert.Equal(2, worktree.Files.Count);
+        Assert.All(worktree.Files, file => Assert.Equal(ScopeChangeKind.Added, file.Kind));
+    }
+
+    [Fact]
+    public async Task WorktreeUsesFinalNetContentWhileStagedKeepsIndexChange()
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        const string original = "class C { int Base() => 0; }";
+        Write("Code.cs", original);
+        await Git("add", "--", "Code.cs");
+        await Git("commit", "--quiet", "-m", "base");
+        Write("Code.cs", "class C { int Staged() => 1; }");
+        await Git("add", "--", "Code.cs");
+        Write("Code.cs", original);
+
+        var staged = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Staged), temporary,
+            TimeSpan.FromSeconds(10), CancellationToken.None);
+        var worktree = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Worktree), temporary,
+            TimeSpan.FromSeconds(10), CancellationToken.None);
+
+        Assert.Contains("Staged", Assert.Single(staged.Files).NewSource!.Text);
+        Assert.Empty(worktree.Files);
+        Assert.Equal(original, File.ReadAllText(Path.Combine(temporary, "Code.cs")));
+        Assert.Contains("MM Code.cs", (await Git("status", "--short")).StandardOutput);
+    }
+
+    [Fact]
+    public async Task DivergedBaseUsesRecordedMergeBaseAgainstSelectedHead()
+    {
+        await Git("init", "--quiet", "--initial-branch=main");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("Code.cs", "class C { int Initial() => 0; }");
+        await Git("add", "--", "Code.cs");
+        await Git("commit", "--quiet", "-m", "initial");
+        var initial = (await Git("rev-parse", "HEAD")).StandardOutput.Trim();
+        await Git("branch", "side");
+        Write("Code.cs", "class C { int Main() => 1; }");
+        await Git("commit", "--quiet", "-am", "main");
+        var main = (await Git("rev-parse", "HEAD")).StandardOutput.Trim();
+        await Git("switch", "--quiet", "side");
+        Write("Side.cs", "class Side { int M() => 1; }");
+        await Git("add", "--", "Side.cs");
+        await Git("commit", "--quiet", "-m", "side");
+        var side = (await Git("rev-parse", "HEAD")).StandardOutput.Trim();
+
+        var scope = await GitScopeResolver.CaptureAsync(
+            new GitScopeRequest(ChangeScopeMode.Base, side, main, ScopeSourceState.Head), temporary,
+            TimeSpan.FromSeconds(10), CancellationToken.None);
+
+        Assert.Equal(side, scope.Revision.ResolvedBase);
+        Assert.Equal(main, scope.Revision.ResolvedHead);
+        Assert.Equal(initial, scope.Revision.MergeBase);
+        Assert.Contains("Main", Assert.Single(scope.Files).NewSource!.Text);
+    }
+
+    [Fact]
+    public async Task DetachedHeadWorksAndConflictedIndexFailsClosed()
+    {
+        await Git("init", "--quiet", "--initial-branch=main");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("Code.cs", "class C { int M() => 0; }");
+        await Git("add", "--", "Code.cs");
+        await Git("commit", "--quiet", "-m", "base");
+        var head = (await Git("rev-parse", "HEAD")).StandardOutput.Trim();
+        await Git("checkout", "--quiet", "--detach", head);
+        Write("Code.cs", "class C { int M() => 1; }");
+        var detached = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Worktree), temporary,
+            TimeSpan.FromSeconds(10), CancellationToken.None);
+        Assert.Equal(head, detached.Revision.CurrentHead);
+
+        await Git("checkout", "--quiet", "-B", "main", head);
+        await Git("checkout", "--quiet", "-b", "other");
+        Write("Code.cs", "class C { int Other() => 2; }");
+        await Git("commit", "--quiet", "-am", "other");
+        await Git("checkout", "--quiet", "main");
+        Write("Code.cs", "class C { int Main() => 3; }");
+        await Git("commit", "--quiet", "-am", "main");
+        var merge = await ProcessRunner.RunAsync("git", ["merge", "other"], temporary, TimeSpan.FromSeconds(10), CancellationToken.None);
+        Assert.NotEqual(0, merge.ExitCode);
+
+        var error = await Assert.ThrowsAsync<ScopeException>(() => GitScopeResolver.CaptureAsync(
+            new GitScopeRequest(ChangeScopeMode.Worktree), temporary, TimeSpan.FromSeconds(10), CancellationToken.None));
+        Assert.Equal("scope.conflictedIndex", error.Reason);
+    }
+
     private async Task<ProcessResult> Git(params string[] arguments)
     {
         var result = await ProcessRunner.RunAsync("git", arguments, temporary, TimeSpan.FromSeconds(10), CancellationToken.None);
@@ -155,5 +302,10 @@ public sealed class GitScopeTests : IDisposable
         return result;
     }
 
-    private void Write(string relative, string text) => File.WriteAllText(Path.Combine(temporary, relative), text);
+    private void Write(string relative, string text)
+    {
+        var path = Path.Combine(temporary, relative);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, text);
+    }
 }

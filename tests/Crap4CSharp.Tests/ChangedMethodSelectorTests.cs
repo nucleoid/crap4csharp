@@ -60,4 +60,36 @@ public sealed class ChangedMethodSelectorTests
         Assert.Empty(selection.Methods);
         Assert.Empty(selection.Removals);
     }
+
+    [Fact]
+    public void CopySelectsEveryMethodRegardlessOfSimilarityHunks()
+    {
+        const string text = "class C { int One() => 1; int Two() => 2; }";
+        var source = CapturedSource.Create("src/Copy.cs", Encoding.UTF8.GetBytes(text));
+        var methods = new SourceAnalyzer().AnalyzeCaptured(source.LogicalPath, source.Bytes);
+        var change = new ChangedFile("src/Original.cs", "src/Copy.cs", ScopeChangeKind.Copied,
+            "old", "new", source with { LogicalPath = "src/Original.cs" }, source, [], []);
+
+        var selection = ChangedMethodSelector.Select(change, methods, methods, ScopeGranularity.Method);
+
+        Assert.Equal(2, selection.Methods.Count);
+    }
+
+    [Fact]
+    public void ConstructorChangeIsVisibleAsUnsupportedExecutableScope()
+    {
+        const string oldText = "class C { C() { Value = 1; } int Value; }";
+        const string newText = "class C { C() { Value = 2; } int Value; }";
+        var oldSource = CapturedSource.Create("src/C.cs", Encoding.UTF8.GetBytes(oldText));
+        var newSource = CapturedSource.Create("src/C.cs", Encoding.UTF8.GetBytes(newText));
+        var change = new ChangedFile("src/C.cs", "src/C.cs", ScopeChangeKind.Modified,
+            oldSource.ContentIdentity, newSource.ContentIdentity, oldSource, newSource,
+            [new LineRange(1, 1)], [new LineRange(1, 1)]);
+
+        var selection = ChangedMethodSelector.Select(change, [], [], ScopeGranularity.Method);
+
+        Assert.Empty(selection.Methods);
+        Assert.Contains(selection.ScopeLimitations, limitation =>
+            limitation.Code == "scope.unsupportedChangedCallable" && limitation.SyntaxKind == "ConstructorDeclaration");
+    }
 }
