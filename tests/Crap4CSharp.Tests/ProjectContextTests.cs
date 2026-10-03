@@ -15,6 +15,9 @@ public sealed class ProjectContextTests
             .ToDictionary(path => path, path => (File.ReadAllBytes(path), File.GetLastWriteTimeUtc(path)));
         var request = new ProjectContextLoadRequest(selected, "Debug", null, [], false, false, TimeSpan.FromMinutes(2));
 
+        var restore = await ProjectBuildPreparation.RestoreAsync(selected, TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+        Assert.Equal(0, restore.ExitCode);
+
         var result = await ProjectContextLoader.LoadAsync(request, CancellationToken.None);
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));

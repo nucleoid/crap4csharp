@@ -1,4 +1,5 @@
 using Crap4CSharp.Core;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Xunit;
 
@@ -50,5 +51,21 @@ public sealed class ProjectContextContractTests
         var report = new ContextualCoverageReport("net10", []);
         var matches = CoverageMatcher.ApplyDetailed(contexts, [report]);
         Assert.Equal(CoverageReasonCodes.Unavailable, Assert.Single(matches, x => x.ContextId == "netstandard").CoverageReason);
+    }
+
+    [Fact]
+    public void CompiledInputBindingFailsClosedOnContextOrSourceDrift()
+    {
+        var source = new ProjectSourceIdentity("A.cs", "A.cs", "sha-a", false, false);
+        var context = ProjectAnalysisContext.Create("App.csproj", "App", "net10.0", "Debug", "AnyCPU",
+            LanguageVersion.CSharp14, [], SourceCodeKind.Regular, [], [source],
+            new ProjectExclusionPolicy(false, false), new ProjectAdapterIdentity("10.0.103", "18.0.11", "5.0.0"));
+        var evidence = new CompiledInputEvidence(context.ContextId, "missing.dll", null,
+            [new CompiledInputIdentity("A.cs", "different", false)], true, null);
+
+        var capability = CompiledInputCapture.Validate(context, evidence);
+
+        Assert.False(capability.CompiledInputBindingComplete);
+        Assert.Equal("context.compiledInputDrift", capability.Limitation);
     }
 }
