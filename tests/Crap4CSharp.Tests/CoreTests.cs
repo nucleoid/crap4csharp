@@ -219,18 +219,18 @@ public sealed class CoreTests : IDisposable
     {
         var source = Write("ExplicitCoverage.cs", "class C { int M() => 1; }");
         var malformed = Write("bad.xml", "<coverage>");
-        var resultRoot = Path.Combine(Path.GetTempPath(), "crap4csharp");
-        var before = Directory.Exists(resultRoot)
-            ? Directory.EnumerateDirectories(resultRoot).ToHashSet(StringComparer.Ordinal)
-            : new HashSet<string>(StringComparer.Ordinal);
+        var processInvoked = false;
+        Task<ProcessResult> UnexpectedProcess(string fileName, IEnumerable<string> arguments, string workingDirectory,
+            TimeSpan timeout, CancellationToken cancellationToken)
+        {
+            processInvoked = true;
+            return Task.FromResult(new ProcessResult(99, string.Empty, "unexpected process"));
+        }
 
-        Assert.Equal(1, (await RunApp("--coverage", malformed, source)).ExitCode);
-        Assert.Equal(1, (await RunApp("--coverage", Path.Combine(temporary, "missing.xml"), source)).ExitCode);
-
-        var after = Directory.Exists(resultRoot)
-            ? Directory.EnumerateDirectories(resultRoot).ToHashSet(StringComparer.Ordinal)
-            : new HashSet<string>(StringComparer.Ordinal);
-        Assert.Equal(before, after);
+        Assert.Equal(1, (await RunAppWithExecutor(UnexpectedProcess, "--coverage", malformed, source)).ExitCode);
+        Assert.Equal(1, (await RunAppWithExecutor(UnexpectedProcess, "--coverage",
+            Path.Combine(temporary, "missing.xml"), source)).ExitCode);
+        Assert.False(processInvoked);
     }
 
     [Fact]
@@ -586,6 +586,15 @@ public sealed class CoreTests : IDisposable
         using var output = new StringWriter();
         using var error = new StringWriter();
         var exitCode = await global::App.RunAsync(args, temporary, output, error, CancellationToken.None);
+        return (exitCode, output.ToString(), error.ToString());
+    }
+
+    private async Task<(int ExitCode, string Output, string Error)> RunAppWithExecutor(
+        global::App.ProcessExecutor processExecutor, params string[] args)
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var exitCode = await global::App.RunAsync(args, temporary, output, error, CancellationToken.None, processExecutor);
         return (exitCode, output.ToString(), error.ToString());
     }
 
