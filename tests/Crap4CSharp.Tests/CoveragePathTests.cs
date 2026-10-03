@@ -108,6 +108,27 @@ public sealed class CoveragePathTests : IDisposable
             Assert.Single(libraryMapping.MappingIdentities).Id);
     }
 
+    [Fact]
+    public void MappingIdentityIgnoresAcceptedInputCaseSpelling()
+    {
+        var workspace = Path.Combine(temporary, "case-workspace");
+        var actualRoot = Path.Combine(workspace, "src");
+        var typedRoot = Path.Combine(workspace, "SRC");
+        var source = Write("case-workspace/src/C.cs", "class C { }");
+        var policy = PathIdentityPolicy.Insensitive;
+        var inventory = new CoverageSourceInventory(policy,
+            [new CoverageSourceEntry(source, "src/C.cs", actualRoot, source, actualRoot, null)],
+            [new CoverageSourceRoot(actualRoot, actualRoot)], workspace);
+
+        var actual = new CoveragePathResolver(policy, inventory,
+            [new CoveragePathMapping(@"C:\agent\repo", actualRoot)], CoveragePathCase.Auto);
+        var canonicalTypedRoot = global::App.CanonicalExistingPath(typedRoot, workspace, policy, _ => true);
+        var typed = new CoveragePathResolver(policy, inventory,
+            [new CoveragePathMapping(@"C:\agent\repo", canonicalTypedRoot)], CoveragePathCase.Auto);
+
+        Assert.Equal(Assert.Single(actual.MappingIdentities).Id, Assert.Single(typed.MappingIdentities).Id);
+    }
+
     [Theory]
     [InlineData("C:src\\C.cs")]
     [InlineData(@"\\?\C:\src\C.cs")]

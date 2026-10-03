@@ -455,6 +455,39 @@ public sealed class CoreTests : IDisposable
     }
 
     [Fact]
+    public async Task AcceptedInputCaseSpellingKeepsCanonicalMappingIdentity()
+    {
+        var actualRoot = Path.Combine(temporary, "case-input", "src");
+        Directory.CreateDirectory(actualRoot);
+        var typedRoot = Path.Combine(temporary, "case-input", "SRC");
+        if (!Directory.Exists(typedRoot)) return;
+        var source = Path.Combine(actualRoot, "C.cs");
+        File.WriteAllText(source, "class C { int M() => 1; }");
+        var report = Write("case-input.xml", """
+            <CoverageSession><Modules><Module><Files><File uid="1" fullPath="C:\agent\repo\src\C.cs" /></Files>
+            <Classes><Class><FullName>C</FullName><Methods><Method><Name>C.M()</Name><SequencePoints>
+            <SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method></Methods></Class></Classes>
+            </Module></Modules></CoverageSession>
+            """);
+
+        var canonical = await RunApp("--format", "json", "--coverage-path-map", @"C:\agent\repo\src", actualRoot,
+            "--coverage", report, actualRoot);
+        var alternate = await RunApp("--format", "json", "--coverage-path-map", @"C:\agent\repo\src", typedRoot,
+            "--coverage", report, typedRoot);
+        using var canonicalDocument = JsonDocument.Parse(canonical.Output);
+        using var alternateDocument = JsonDocument.Parse(alternate.Output);
+
+        Assert.Equal(0, canonical.ExitCode);
+        Assert.Equal(0, alternate.ExitCode);
+        Assert.Equal(canonicalDocument.RootElement.GetProperty("evaluation").GetProperty("coveragePathPolicy")
+                .GetProperty("mappings")[0].GetProperty("id").GetString(),
+            alternateDocument.RootElement.GetProperty("evaluation").GetProperty("coveragePathPolicy")
+                .GetProperty("mappings")[0].GetProperty("id").GetString());
+        Assert.Equal("case-input/src/C.cs", alternateDocument.RootElement.GetProperty("evaluation")
+            .GetProperty("metrics")[0].GetProperty("path").GetString());
+    }
+
+    [Fact]
     public async Task SameNamedMethodsAcrossSelectedRootsKeepDistinctLogicalDiagnostics()
     {
         var first = Write("App1/Program.cs", "class Program { static void Main() { } }");
