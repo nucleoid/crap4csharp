@@ -1,0 +1,107 @@
+using Crap4CSharp.Core;
+using Microsoft.CodeAnalysis.CSharp;
+using Xunit;
+
+namespace Crap4CSharp.Tests;
+
+public sealed class CallableCoverageTests
+{
+    [Fact]
+    public void SemanticIdentityDistinguishesSameArityOverloadsAndSpecialMembers()
+    {
+        const string source = """
+            class C {
+              C(int x) { }
+              int P { get => 1; init { } }
+              int M(int x) => x;
+              int M(string x) => x.Length;
+              static explicit operator int(C x) => x.P;
+            }
+            """;
+        var inventory = Inventory(source);
+
+        Assert.Contains(inventory.Callables, item => item.SemanticIdentity?.MetadataName == ".ctor");
+        Assert.Contains(inventory.Callables, item => item.SemanticIdentity?.MetadataName == "get_P");
+        Assert.Contains(inventory.Callables, item => item.SemanticIdentity?.MetadataName == "set_P");
+        Assert.Contains(inventory.Callables, item => item.SemanticIdentity?.MetadataName == "op_Explicit" &&
+            item.SemanticIdentity.ReturnType.Contains("Int32", StringComparison.Ordinal));
+        Assert.Equal(2, inventory.Callables.Where(item => item.Name == "M")
+            .Select(item => item.SemanticIdentity!.Parameters[0].Type).Distinct(StringComparer.Ordinal).Count());
+    }
+
+    [Fact]
+    public void ExactSemanticReportIdentityMapsOrdinaryBodies()
+    {
+        var inventory = Inventory("class C { int M(int x) => x; int M(string x) => x.Length; }");
+        var target = inventory.Callables.Single(item => item.Name == "M" && item.SemanticIdentity!.Parameters[0].Type.Contains("Int32"));
+        var report = Report(target, [new CoveragePoint(target.Span.StartLine, 1, target.Span.StartColumn,
+            target.Span.EndLine, target.Span.EndColumn, 0)]);
+
+        var resolved = CallableCoverageResolver.Resolve(inventory, [report]);
+
+        var match = Assert.Single(resolved.Observations, item => item.CallableId == target.CallableId);
+        Assert.Equal("known", match.Status);
+        Assert.Equal(1, Assert.Single(match.Points).Visited ? 1 : 0);
+        Assert.All(resolved.Observations.Where(item => item.CallableId != target.CallableId), item => Assert.Equal("unknown", item.Status));
+    }
+
+    [Fact]
+    public void SameLineBodiesWithoutDiscriminatingIdentityAreAmbiguousAndNeverShareAPoint()
+    {
+        var inventory = Inventory("class C { int A() => 1; int B() => 2; }");
+        var report = new CoverageMethod("C.cs", "C", string.Empty, null, [new CoveragePoint(1, 1)], "module")
+        {
+            ContextId = "ctx",
+            DocumentIdentities = ["doc"]
+        };
+
+        var resolved = CallableCoverageResolver.Resolve(inventory, [report]);
+
+        Assert.All(resolved.Observations, item => Assert.Equal("unknown", item.Status));
+        Assert.Contains(resolved.Diagnostics, item => item.Code == "coverage.ambiguousCallableOwnership");
+    }
+
+    [Fact]
+    public void ContextAndModuleIdentityNeverUnionAcrossLookalikes()
+    {
+        var inventory = Inventory("class C { int M() => 1; }");
+        var target = Assert.Single(inventory.Callables);
+        var valid = Report(target, [new CoveragePoint(1, 1)]) with { ModuleIdentity = "mvid-a" };
+        var wrongContext = Report(target, [new CoveragePoint(1, 1)]) with { ContextId = "other", ModuleIdentity = "mvid-a" };
+        var wrongModule = Report(target, [new CoveragePoint(1, 1)]) with { ModuleIdentity = "mvid-b" };
+
+        var resolved = CallableCoverageResolver.Resolve(inventory, [valid, wrongContext, wrongModule], "mvid-a");
+
+        Assert.Equal("known", Assert.Single(resolved.Observations).Status);
+        Assert.Contains(resolved.Diagnostics, item => item.Code == CoverageReasonCodes.ContextMismatch);
+        Assert.Contains(resolved.Diagnostics, item => item.Code == CoverageReasonCodes.ConflictingModule);
+    }
+
+    [Fact]
+    public void GeneratedNamesRemainExplicitlyUnsupported()
+    {
+        var inventory = Inventory("class C { async System.Threading.Tasks.Task<int> M() => await System.Threading.Tasks.Task.FromResult(1); }");
+        var report = new CoverageMethod("C.cs", "C+<M>d__0", "MoveNext", 0, [new CoveragePoint(1, 1)], "module")
+        {
+            ContextId = "ctx", RawSignature = "System.Void C+<M>d__0::MoveNext()", DocumentIdentities = ["doc"]
+        };
+        var resolved = CallableCoverageResolver.Resolve(inventory, [report]);
+        Assert.Equal("unknown", Assert.Single(resolved.Observations).Status);
+        Assert.Contains(resolved.Diagnostics, item => item.Code == CoverageReasonCodes.UnsupportedGeneratedMapping);
+    }
+
+    private static CallableInventoryResult Inventory(string source) => CallableInventory.Analyze(source, "C.cs",
+        new CallableAnalysisContext("App.csproj", "net10.0", "Debug", "AnyCPU", "ctx", CSharpParseOptions.Default));
+
+    private static CoverageMethod Report(CallableEntry target, IReadOnlyList<CoveragePoint> points)
+    {
+        var semantic = target.SemanticIdentity!;
+        return new CoverageMethod("C.cs", semantic.TypeName, semantic.MetadataName, semantic.Parameters.Count, points, "module")
+        {
+            ContextId = "ctx",
+            RawSignature = semantic.ReportSignature,
+            GenericArity = semantic.GenericArity,
+            DocumentIdentities = ["doc"]
+        };
+    }
+}
