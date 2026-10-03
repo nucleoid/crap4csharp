@@ -118,6 +118,18 @@ public sealed class CallableInventoryTests
         Assert.Equal(CallableApplicability.Applicable, methods[0].Applicability);
     }
 
+    [Fact]
+    public void LocalVariableInitializersAreOwnedStatementsNotFieldInitializerCallables()
+    {
+        var inventory = CallableInventory.Analyze(
+            "class C { int field = 1; void M() { var local = 2; System.Func<int> f = () => 3; } }",
+            "C.cs", Context());
+
+        Assert.Single(inventory.Callables, item => item.Kind == CallableKind.FieldInitializer);
+        Assert.Single(inventory.Callables, item => item.Kind == CallableKind.Lambda);
+        Assert.DoesNotContain(inventory.Callables, item => item.Kind == CallableKind.FieldInitializer && item.ParentId is not null);
+    }
+
     private static CallableAnalysisContext Context() => new(
         "repo/App.csproj", "net10.0", "Debug", "AnyCPU", "context-a", CSharpParseOptions.Default);
 }
