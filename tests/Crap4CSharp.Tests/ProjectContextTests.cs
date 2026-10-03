@@ -107,6 +107,23 @@ public sealed class ProjectContextTests
     }
 
     [Fact]
+    public async Task PerProcessSdkTimeoutHasStableReasonWhenItWinsOverallTimerRace()
+    {
+        var selected = Path.GetFullPath("Fixtures/ProjectContexts/ContextSolution.slnx", AppContext.BaseDirectory);
+        var timeout = TimeSpan.FromSeconds(30);
+
+        var result = await ProjectContextLoader.LoadAsync(
+            new(selected, "Debug", null, [], false, false, timeout),
+            CancellationToken.None,
+            (_, processTimeout, _) => Task.FromException<ProjectContextSdkResolution>(
+                new ProcessTimeoutException("dotnet", processTimeout)));
+
+        Assert.False(result.Success);
+        Assert.Equal("context.loaderTimeout", result.FailureReason);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("30 seconds", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void TargetSelectionNeverGuessesNestedProjects()
     {
         var root = Path.Combine(Path.GetTempPath(), "crap4csharp-select", Guid.NewGuid().ToString("N"));
