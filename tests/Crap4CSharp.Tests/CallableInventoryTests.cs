@@ -130,6 +130,22 @@ public sealed class CallableInventoryTests
         Assert.DoesNotContain(inventory.Callables, item => item.Kind == CallableKind.FieldInitializer && item.ParentId is not null);
     }
 
+    [Fact]
+    public void PrimaryConstructorIsAnAuthoredConstructorAndOwnsItsInitializerRegions()
+    {
+        var inventory = CallableInventory.Analyze(
+            "class C(int seed) : B(seed > 0 ? seed : 0) { int value = seed > 0 ? seed : 0; } class B(int value) { }",
+            "C.cs", Context());
+
+        var constructor = Assert.Single(inventory.Callables,
+            item => item.Kind == CallableKind.Constructor && item.SemanticIdentity?.TypeName == "C");
+        Assert.Equal(1, constructor.Complexity);
+        Assert.Contains(inventory.Callables, item => item.Kind == CallableKind.PrimaryConstructorBaseArguments &&
+            item.ParentObservationId == constructor.ObservationId);
+        Assert.Contains(inventory.Callables, item => item.Kind == CallableKind.FieldInitializer &&
+            item.ParentObservationId == constructor.ObservationId);
+    }
+
     private static CallableAnalysisContext Context() => new(
         "repo/App.csproj", "net10.0", "Debug", "AnyCPU", "context-a", CSharpParseOptions.Default);
 }
