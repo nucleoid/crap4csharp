@@ -126,6 +126,25 @@ public sealed class CallableCliTests : IDisposable
             item => item.GetProperty("code").GetString() == CoverageReasonCodes.UnsupportedGeneratedMapping);
     }
 
+    [Fact]
+    public async Task ModernSyntaxOnlyHonorsExplicitCoveragePathPolicy()
+    {
+        var source = Write("Mapped.cs", "class C { int M() => 1; }");
+        var coverage = Write("mapped-coverage.xml", """
+            <CoverageSession><Modules><Module><ModuleName>Fixture</ModuleName><Files><File uid="1" fullPath="/agent/src/Mapped.cs" /></Files><Classes><Class><FullName>C</FullName><Methods><Method><Name>System.Int32 C::M()</Name><SequencePoints><SequencePoint vc="1" sl="1" sc="11" el="1" ec="24" offset="0" fileid="1" /></SequencePoints><FileRef uid="1" /></Method></Methods></Class></Classes></Module></Modules></CoverageSession>
+            """);
+
+        var result = await Run(null, "analyze", "--syntax-only", "--format", "json",
+            "--coverage-path-map", "/agent/src", temporary, "--coverage-path-case", "sensitive",
+            "--coverage", coverage, source);
+
+        Assert.Equal(0, result.ExitCode);
+        using var document = JsonDocument.Parse(result.Output);
+        var policy = document.RootElement.GetProperty("evaluation").GetProperty("coveragePathPolicy");
+        Assert.Equal("sensitive", policy.GetProperty("case").GetString());
+        Assert.Single(policy.GetProperty("mappings").EnumerateArray());
+    }
+
     private async Task<(int ExitCode, string Output, string Error)> Run(global::App.ProcessExecutor? executor, params string[] args)
     {
         using var output = new StringWriter();
