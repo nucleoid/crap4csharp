@@ -90,6 +90,24 @@ public sealed class CoveragePathTests : IDisposable
         Assert.Equal(CoverageReasonCodes.PathMappingConflict, exception.Code);
     }
 
+    [Fact]
+    public void MappingIdentityChangesWithWorkspaceLogicalDestination()
+    {
+        var workspace = Path.Combine(temporary, "workspace");
+        var source = Write("workspace/src/C.cs", "class C { }");
+        var library = Write("workspace/lib/C.cs", "class C { }");
+        var inventory = SourcePathCapture.Capture([source, library],
+            [Path.GetDirectoryName(source)!, Path.GetDirectoryName(library)!], [], [], workingDirectory: workspace);
+
+        var sourceMapping = new CoveragePathResolver(PathIdentityPolicy.Sensitive, inventory,
+            [new CoveragePathMapping(@"C:\agent\repo", Path.GetDirectoryName(source)!)], CoveragePathCase.Auto);
+        var libraryMapping = new CoveragePathResolver(PathIdentityPolicy.Sensitive, inventory,
+            [new CoveragePathMapping(@"C:\agent\repo", Path.GetDirectoryName(library)!)], CoveragePathCase.Auto);
+
+        Assert.NotEqual(Assert.Single(sourceMapping.MappingIdentities).Id,
+            Assert.Single(libraryMapping.MappingIdentities).Id);
+    }
+
     [Theory]
     [InlineData("C:src\\C.cs")]
     [InlineData(@"\\?\C:\src\C.cs")]

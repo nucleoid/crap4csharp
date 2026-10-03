@@ -445,6 +445,30 @@ public sealed class CoreTests : IDisposable
     }
 
     [Fact]
+    public async Task ExternalFileWithoutMethodsUsesInventoryPathForScopeAndArtifact()
+    {
+        var workspace = Path.Combine(temporary, "workspace");
+        var externalRoot = Path.Combine(temporary, "outside", "shared");
+        Directory.CreateDirectory(workspace);
+        Directory.CreateDirectory(externalRoot);
+        var source = Path.Combine(externalRoot, "Empty.cs");
+        File.WriteAllText(source, "class Empty { }");
+        var report = Write("empty.xml", "<CoverageSession><Modules /></CoverageSession>");
+
+        var result = await RunAppFrom(workspace, "--format", "json", "--coverage", report, source);
+        using var document = JsonDocument.Parse(result.Output);
+        var scopePath = Assert.Single(document.RootElement.GetProperty("evaluation").GetProperty("scope")
+            .GetProperty("sources").EnumerateArray()).GetString();
+        var artifactPath = Assert.Single(document.RootElement.GetProperty("evaluation").GetProperty("artifacts")
+            .EnumerateArray(), item => item.GetProperty("kind").GetString() == "source").GetProperty("path").GetString();
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(scopePath, artifactPath);
+        Assert.StartsWith("../external-", scopePath, StringComparison.Ordinal);
+        Assert.DoesNotContain("outside", scopePath, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task InvalidReportPathRemainsOperationalWithMissingCoverageOptOut()
     {
         var source = Write("InvalidPath.cs", "class C { int M() => 1; }");
@@ -494,6 +518,15 @@ public sealed class CoreTests : IDisposable
         using var output = new StringWriter();
         using var error = new StringWriter();
         var exitCode = await global::App.RunAsync(args, temporary, output, error, CancellationToken.None);
+        return (exitCode, output.ToString(), error.ToString());
+    }
+
+    private static async Task<(int ExitCode, string Output, string Error)> RunAppFrom(string workingDirectory,
+        params string[] args)
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var exitCode = await global::App.RunAsync(args, workingDirectory, output, error, CancellationToken.None);
         return (exitCode, output.ToString(), error.ToString());
     }
 

@@ -170,4 +170,36 @@ public sealed class SourcePathCaptureTests : IDisposable
         Assert.NotEqual(togetherEntries[0].LogicalPath, togetherEntries[1].LogicalPath);
         Assert.DoesNotContain(temporary, retainedEntry.ExternalRootId, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void ImplicitExternalIdentityDoesNotDependOnAnAncestorSiblingSelection()
+    {
+        var repository = Path.Combine(temporary, "repository");
+        var workspace = Path.Combine(repository, "sub");
+        var ancestor = Path.Combine(repository, "a");
+        var nested = Path.Combine(ancestor, "b");
+        Directory.CreateDirectory(workspace);
+        Directory.CreateDirectory(nested);
+        var sibling = Path.Combine(ancestor, "X.cs");
+        var retained = Path.Combine(nested, "y.cs");
+        File.WriteAllText(sibling, "class X { }");
+        File.WriteAllText(retained, "class Y { }");
+
+        var alone = SourcePathCapture.Capture([retained], [workspace], [], [], workingDirectory: workspace);
+        var together = SourcePathCapture.Capture([sibling, retained], [workspace], [], [], workingDirectory: workspace);
+
+        var aloneEntry = Assert.Single(alone.Entries);
+        var retainedEntry = Assert.Single(together.Entries, entry => entry.LocalPath == retained);
+        Assert.Equal(aloneEntry.ExternalRootId, retainedEntry.ExternalRootId);
+        Assert.Equal(aloneEntry.LogicalPath, retainedEntry.LogicalPath);
+    }
+
+    [Theory]
+    [InlineData(@"C:\", "C:")]
+    [InlineData(@"d:\", "D:")]
+    [InlineData(@"\\Server\Share\", "//server/share")]
+    public void WindowsExternalRootTokensRetainDriveOrShare(string root, string expected)
+    {
+        Assert.Equal(expected, SourcePathCapture.StableRootToken(root));
+    }
 }
