@@ -19,7 +19,7 @@ public static class CoverageMatcher
         return sourceMethods.GroupBy(source => source.ContextId, StringComparer.Ordinal).SelectMany(group =>
         {
             var compatible = reportGroups.TryGetValue(group.Key, out var value) ? value : [];
-            return ApplyDetailed(group.Select(source => source.Method).ToArray(), compatible)
+            return ApplyDetailed(group.Select(source => source.Method with { ContextId = group.Key }).ToArray(), compatible)
                 .Select(match => new ContextualDetailedMatch(group.Key, match.Source, match.Metric, match.CoverageReason));
         }).OrderBy(match => match.ContextId, StringComparer.Ordinal)
           .ThenBy(match => match.Metric.File, StringComparer.Ordinal)
