@@ -234,7 +234,7 @@ public static class ProvenanceVerifier
         if (!string.Equals(manifest.Revision.StateHash, current.StateHash, StringComparison.Ordinal))
             reasons.Add(ProvenanceReasonCodes.WorkspaceChanged);
 
-        var expectedInputs = manifest.Contexts.SelectMany(context => context.Inputs).Where(input => !input.Generated)
+        var expectedInputs = manifest.Contexts.SelectMany(context => context.Inputs).Where(IsCurrentWorkspaceInput)
             .OrderBy(InputKey, StringComparer.Ordinal).ToArray();
         var actualInputs = current.Inputs.OrderBy(InputKey, StringComparer.Ordinal).ToArray();
         if (expectedInputs.Length != actualInputs.Length)
@@ -513,6 +513,7 @@ public static class ProvenanceVerifier
     }
     private static string InputKey(ManifestInput input) => input.Role + "\n" + input.LogicalPath;
     private static string InputKey(CurrentInputEvidence input) => input.Role + "\n" + input.LogicalPath;
+    private static bool IsCurrentWorkspaceInput(ManifestInput input) => !input.Generated && input.Role != "reference";
     private static IReadOnlyDictionary<string, string>? ResolveDocuments(
         IReadOnlyDictionary<string, string> documents, IReadOnlyList<string> logicalPaths,
         CapturedPathPolicy pathPolicy)

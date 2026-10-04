@@ -74,6 +74,12 @@ crap4csharp analyze --syntax-only --callable-exemptions exemptions.json --covera
 # Bundle production is intentionally pending the project-aware check orchestrator (#10);
 # current releases consume externally prepared compatible bundles but do not create them.
 crap4csharp analyze --reuse-artifacts artifacts/crap-run/manifest.json --format json
+
+# Generate a deterministic, unapproved candidate from current revalidated evidence.
+# Known debt remains exit 2; the candidate is still written for review.
+crap4csharp baseline create --policy samples/policy/strict.json \
+  --reuse-artifacts artifacts/crap-run/manifest.json \
+  --output quality/crap-baseline.candidate.json
 ```
 
 With no `--coverage`, the tool creates a unique directory beneath the OS temporary directory and runs:
@@ -125,6 +131,11 @@ Captured replay verifies bundle hashes and reports `captured`; it does not claim
 Current-workspace `verified` evidence requires a separately captured matching revision, concrete worktree, source/context
 closure and successful generating execution. See [artifact provenance](docs/provenance.md) and the
 [run manifest schema](docs/run-manifest-v1.schema.json). Hashes are consistency evidence, not signatures or sandboxing.
+
+Repository policy, immutable-base trust, component-wise debt ceilings, and the explicit candidate review workflow
+are documented in [repository policy and reviewed baselines](docs/policy.md). Baseline generation accepts only a
+supported current-revalidation recipe and never upgrades old captured-only bundles or treats candidate generation as
+approval. Full fresh `check` orchestration remains owned by issue #10.
 
 ## Exit codes
 

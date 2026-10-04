@@ -5,6 +5,7 @@ using Crap4CSharp.Core;
 internal sealed record TrustedPolicyResolution(string Trust, string Revision, ParsedRepositoryPolicy Policy,
     BaselineDocument? Baseline, IReadOnlyDictionary<string, byte[]> ExemptionBytes,
     IReadOnlyDictionary<string, string> ContentHashes);
+internal sealed record ProposedPolicyDifference(string Path, string Status, string TrustedHash, string? ProposedHash);
 
 internal static class TrustedPolicyLoader
 {
@@ -68,6 +69,26 @@ internal static class TrustedPolicyLoader
             hashes[path] = CanonicalIdentity.Sha256(exemptionBytes);
         }
         return new TrustedPolicyResolution("local-unreviewed", "none", parsed, baseline, exemptions, hashes);
+    }
+
+    public static IReadOnlyList<ProposedPolicyDifference> CompareProposed(string repositoryRoot,
+        TrustedPolicyResolution trusted)
+    {
+        var root = Path.GetFullPath(repositoryRoot);
+        return trusted.ContentHashes.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair =>
+        {
+            try
+            {
+                var path = ResolveRegularFile(root, pair.Key);
+                var proposed = CanonicalIdentity.Sha256(File.ReadAllBytes(path));
+                return new ProposedPolicyDifference(pair.Key, proposed == pair.Value ? "unchanged" : "changed",
+                    pair.Value, proposed);
+            }
+            catch (PolicyException exception) when (exception.Code == "policy.fileMissing")
+            {
+                return new ProposedPolicyDifference(pair.Key, "deleted", pair.Value, null);
+            }
+        }).ToArray();
     }
 
     private static string Normalize(string path)

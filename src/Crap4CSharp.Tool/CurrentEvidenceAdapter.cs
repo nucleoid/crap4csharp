@@ -12,7 +12,7 @@ internal static class CurrentEvidenceAdapter
         var revision = manifest.Revision.Kind switch
         {
             "git" => ObserveGit(root, manifest.Contexts.SelectMany(context => context.Inputs)
-                .Where(input => !input.Generated).Select(input => input.LogicalPath)
+                .Where(input => !input.Generated && input.Role != "reference").Select(input => input.LogicalPath)
                 .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
                 gitExecutor ?? ((path, arguments) => Git(path, arguments, gitTimeout ?? TimeSpan.FromSeconds(10)))),
             "none" => new ObservedRevision("none",
@@ -20,7 +20,8 @@ internal static class CurrentEvidenceAdapter
             _ => throw new InvalidDataException($"Unsupported revision kind: {manifest.Revision.Kind}")
         };
         var inputs = new List<CurrentInputEvidence>();
-        foreach (var input in manifest.Contexts.SelectMany(context => context.Inputs).Where(input => !input.Generated)
+        foreach (var input in manifest.Contexts.SelectMany(context => context.Inputs)
+            .Where(input => !input.Generated && input.Role != "reference")
             .GroupBy(input => input.Role + "\n" + input.LogicalPath, StringComparer.Ordinal)
             .Select(group => group.First()).OrderBy(input => input.LogicalPath, StringComparer.Ordinal))
         {
@@ -64,6 +65,8 @@ internal static class CurrentEvidenceAdapter
                 string.Equals(context.Platform, expected.Platform, StringComparison.Ordinal)).ToArray();
             if (candidates.Length != 1) throw new InvalidDataException("Current project context did not resolve uniquely.");
             var current = candidates[0];
+            if (current.ContextId != expected.Id)
+                throw new InvalidDataException("Current evaluated project context identity differs from the captured tested context.");
             var expectedSources = expected.Inputs.Where(input => input.Role == "source")
                 .Select(input => (input.LogicalPath, input.Sha256, input.Generated)).OrderBy(item => item.LogicalPath, StringComparer.Ordinal).ToArray();
             var currentSources = current.Sources.Select(source => (source.LogicalPath,

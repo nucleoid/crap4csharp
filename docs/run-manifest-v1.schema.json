@@ -18,6 +18,16 @@
       "properties": {
         "parseOptions": { "type": "object", "required": ["languageVersion", "sourceKind", "preprocessorSymbols", "features"] },
         "pathPolicy": { "type": "object", "required": ["casePolicy", "reportRootMappings"] },
+        "currentRevalidation": {
+          "type": ["object", "null"],
+          "required": ["provider", "project", "assemblyPath", "pdbPath"],
+          "properties": {
+            "provider": { "const": "sdk-project-context-output-v1" },
+            "project": { "type": "string" },
+            "assemblyPath": { "type": "string" },
+            "pdbPath": { "type": "string" }
+          }
+        },
         "inputs": { "type": "array", "maxItems": 10000 }
       }
     } },
