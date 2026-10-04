@@ -75,3 +75,4 @@ if (@($normalized | Select-Object -Unique).Count -ne 1) {
 }
 
 Write-Host "Validated four real Coverlet callable capability tables."
+exit 0
