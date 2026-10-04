@@ -89,7 +89,7 @@ public sealed record BaselineDocument(string SchemaVersion, string Ruleset, stri
     }
 }
 
-public sealed class BaselineException(string code, string message) : InvalidDataException(message)
+public sealed class BaselineException(string code, string message) : Exception(message)
 {
     public string Code { get; } = code;
 }

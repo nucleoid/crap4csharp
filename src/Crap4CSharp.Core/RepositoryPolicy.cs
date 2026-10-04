@@ -41,7 +41,7 @@ public sealed record RepositoryPolicy(
 public sealed record ParsedRepositoryPolicy(RepositoryPolicy Policy, string Hash, byte[] CanonicalBytes,
     string PolicyPath);
 
-public sealed class PolicyException(string code, string message) : InvalidDataException(message)
+public sealed class PolicyException(string code, string message) : Exception(message)
 {
     public string Code { get; } = code;
 }
@@ -109,7 +109,7 @@ public static class RepositoryPolicyParser
             var frameworks = Strings(root, "targetFrameworks", false);
             if (production.Count == 0 || tests.Count == 0 || frameworks.Count == 0)
                 throw Error("policy.targetsMissing", "At least one production project, test project, and target framework is required.");
-            var exclusions = Paths(Strings(root, "exclusions", true), false);
+            var exclusions = Paths(Strings(root, "exclusions", true), true);
             var directory = normalizedPolicyPath.Contains('/')
                 ? normalizedPolicyPath[..normalizedPolicyPath.LastIndexOf('/')]
                 : string.Empty;
