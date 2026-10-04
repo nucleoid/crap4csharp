@@ -90,3 +90,4 @@ finally {
 }
 
 Write-Host 'Validated callable coverage assertion exit semantics.'
+exit 0
