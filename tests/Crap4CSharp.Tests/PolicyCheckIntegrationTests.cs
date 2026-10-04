@@ -40,10 +40,10 @@ public sealed class PolicyCheckIntegrationTests
         }
 
         var coverage = ImmutableArray.Create(Encoding.UTF8.GetBytes(
-            "<coverage><packages><package name=\"fixture\"><classes><class name=\"Crap4CSharp.ProvenanceFixture.CompiledEvidence\" filename=\"CompiledEvidence.cs\"><methods><method name=\"M\" signature=\"()\"><lines><line number=\"9\" hits=\"1\" /><line number=\"10\" hits=\"1\" /></lines></method></methods></class></classes></package></packages></coverage>"));
+            "<coverage><packages><package name=\"Crap4CSharp.ProvenanceFixture\"><classes><class name=\"Crap4CSharp.ProvenanceFixture.CompiledEvidence\" filename=\"CompiledEvidence.cs\"><methods><method name=\".ctor\" signature=\"()\"><lines><line number=\"5\" hits=\"1\" /></lines></method><method name=\"M\" signature=\"()\"><lines><line number=\"9\" hits=\"1\" /><line number=\"10\" hits=\"1\" /></lines></method></methods></class></classes></package></packages></coverage>"));
         var trx = ImmutableArray.Create(Encoding.UTF8.GetBytes($$"""
             <TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
-              <TestDefinitions><UnitTest storage="{{inspected.ModuleIdentity}}" /></TestDefinitions>
+              <TestDefinitions><UnitTest storage="{{inspected.ModuleIdentity}}.dll" /></TestDefinitions>
               <ResultSummary outcome="Completed"><Counters total="1" executed="1" passed="1" failed="0"
                 error="0" timeout="0" aborted="0" inconclusive="0" notExecuted="0" /></ResultSummary>
             </TestRun>
@@ -67,7 +67,7 @@ public sealed class PolicyCheckIntegrationTests
             ParseOptions = new ManifestParseOptions(inspected.LanguageVersion, context.SourceKind.ToString(),
                 inspected.PreprocessorSymbols, new Dictionary<string, string>()),
             PathPolicy = new ManifestPathPolicy("sensitive",
-                [new ManifestReportRootMapping(projectDirectory.Replace('\\', '/'), "")]),
+                [new ManifestReportRootMapping("/_/tests/Crap4CSharp.ProvenanceFixture", "")]),
             CurrentRevalidation = new ManifestCurrentRevalidation(CurrentEvidenceAdapter.SupportedRecipeProvider,
                 projectLogical, Path.GetRelativePath(repository, assemblyPath).Replace('\\', '/'),
                 Path.GetRelativePath(repository, pdbPath).Replace('\\', '/'))
@@ -106,12 +106,13 @@ public sealed class PolicyCheckIntegrationTests
         using var directory = TestDirectory.Create("crap4csharp-policy-check-e2e");
         var locator = ArtifactCaptureAdapter.PublishNew(manifest, bytes, Path.Combine(directory.Path, "bundle"));
         var output = new StringWriter();
+        var error = new StringWriter();
 
         var exit = await global::App.RunAsync(["check", "--reuse-artifacts", locator, "--policy", policyLogical,
-            "--base", "HEAD", "--format", "json"], repository, output, TextWriter.Null,
+            "--base", "HEAD", "--format", "json"], repository, output, error,
             TestContext.Current.CancellationToken);
 
-        Assert.Equal(0, exit);
+        Assert.True(exit == 0, error + Environment.NewLine + output);
         using var result = JsonDocument.Parse(output.ToString());
         Assert.Equal("base-trusted", result.RootElement.GetProperty("evaluation").GetProperty("policyTrust")
             .GetProperty("trust").GetString());
