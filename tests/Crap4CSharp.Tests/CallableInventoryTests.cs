@@ -132,6 +132,36 @@ public sealed class CallableInventoryTests
     }
 
     [Fact]
+    public void NullableValueTypeOverloadsHaveDistinctSemanticEntityIds()
+    {
+        var inventory = CallableInventory.Analyze(
+            "class C { void M(System.Guid value) { } void M(System.Guid? value) { } void N(System.DateTime value) { } void N(System.DateTime? value) { } }",
+            "C.cs", Context());
+
+        var methods = inventory.Callables.Where(item => item.Kind == CallableKind.Method).ToArray();
+        Assert.Equal(4, methods.Length);
+        Assert.Equal(4, methods.Select(item => item.CallableId).Distinct(StringComparer.Ordinal).Count());
+        Assert.Contains(methods, item => item.SemanticKey.Contains("System.Nullable", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void SameSignatureLocalFunctionsInSiblingScopesAreExplicitlyAmbiguous()
+    {
+        var inventory = CallableInventory.Analyze(
+            "class C { void M() { { int F() => 1; } { int F() => 2; } } }",
+            "C.cs", Context());
+
+        var locals = inventory.Callables.Where(item => item.Kind == CallableKind.LocalFunction).ToArray();
+        Assert.Equal(2, locals.Length);
+        Assert.Single(locals.Select(item => item.CallableId).Distinct(StringComparer.Ordinal));
+        Assert.All(locals, item =>
+        {
+            Assert.True(item.IdentityAmbiguous);
+            Assert.Equal(CoverageReasonCodes.AmbiguousCallableOwnership, item.CoverageReason);
+        });
+    }
+
+    [Fact]
     public void CrossFilePartialDefinitionAndImplementationMergeToOneExecutableEntry()
     {
         var definition = CallableInventory.Analyze("partial class C { partial void M(); }", "A.cs", Context());
@@ -197,6 +227,20 @@ public sealed class CallableInventoryTests
 
         Assert.Equal(outer.CallableId, own.ParentId);
         Assert.Null(nested.ParentId);
+    }
+
+    [Fact]
+    public void ConstantsAreNotExecutableAndStaticInitializersAreNotPrimaryConstructorChildren()
+    {
+        var inventory = CallableInventory.Analyze(
+            "class C(int seed) { const int Limit = 10; static int Shared = seed > 0 ? 1 : 0; int Own = seed; }",
+            "C.cs", Context());
+        var constructor = Assert.Single(inventory.Callables,
+            item => item.Kind == CallableKind.Constructor && item.SemanticIdentity?.TypeName == "C");
+
+        Assert.DoesNotContain(inventory.Callables, item => item.Name == "Limit");
+        Assert.Null(Assert.Single(inventory.Callables, item => item.Name == "Shared").ParentId);
+        Assert.Equal(constructor.CallableId, Assert.Single(inventory.Callables, item => item.Name == "Own").ParentId);
     }
 
     private static CallableAnalysisContext Context() => new(

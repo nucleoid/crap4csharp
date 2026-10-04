@@ -107,6 +107,34 @@ public sealed class CallableCliTests : IDisposable
     }
 
     [Fact]
+    public async Task ModernFailureAtomicallyReplacesExistingNonAliasingOutput()
+    {
+        var destination = Write("existing-result.json", """{"stale":"pass"}""");
+        var result = await Run(null, "check", "--ruleset", "callables-v1", "--format", "json",
+            "--output", destination);
+
+        Assert.Equal(1, result.ExitCode);
+        using var written = JsonDocument.Parse(File.ReadAllText(destination));
+        Assert.Equal(1, written.RootElement.GetProperty("run").GetProperty("exitCode").GetInt32());
+        Assert.False(written.RootElement.TryGetProperty("stale", out _));
+    }
+
+    [Fact]
+    public async Task ModernSyntaxOnlyRejectsDistinctReportsInsteadOfUnioningContexts()
+    {
+        var source = Write("Contexts.cs", "class C { int M() => 1; }");
+        var first = Write("debug.xml", CoverageXml(source, 1));
+        var second = Write("release.xml", CoverageXml(source, 0));
+        var result = await Run(null, "analyze", "--syntax-only", "--format", "json",
+            "--coverage", first, "--coverage", second, source);
+
+        Assert.Equal(1, result.ExitCode);
+        using var document = JsonDocument.Parse(result.Output);
+        Assert.Equal("arguments.invalid", document.RootElement.GetProperty("evaluation")
+            .GetProperty("decision").GetProperty("reason").GetString());
+    }
+
+    [Fact]
     public async Task ModernHumanOutputDisclosesRulesetCompletenessFindingsAndDecision()
     {
         var source = Write("Human.cs", "class C { int M() { System.Func<int> f = () => 1; return f(); } }");
@@ -207,9 +235,11 @@ public sealed class CallableCliTests : IDisposable
         return (exit, output.ToString(), error.ToString());
     }
 
-    private string WriteCoverage(string source, int visits) => Write("coverage.xml", $"""
+    private string WriteCoverage(string source, int visits) => Write("coverage.xml", CoverageXml(source, visits));
+
+    private static string CoverageXml(string source, int visits) => $"""
         <CoverageSession><Modules><Module><ModuleName>Fixture</ModuleName><Files><File uid="1" fullPath="{System.Security.SecurityElement.Escape(source)}" /></Files><Classes><Class><FullName>C</FullName><Methods><Method><Name>System.Int32 C::M()</Name><SequencePoints><SequencePoint vc="{visits}" sl="1" sc="11" el="1" ec="24" offset="0" fileid="1" /></SequencePoints><FileRef uid="1" /></Method></Methods></Class></Classes></Module></Modules></CoverageSession>
-        """);
+        """;
 
     private string Write(string relative, string contents)
     {
