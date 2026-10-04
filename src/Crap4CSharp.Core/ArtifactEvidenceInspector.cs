@@ -188,7 +188,8 @@ public static class ArtifactEvidenceInspector
         if (methods.Length == 0) return false;
 
         if (InspectCoverage(bytes).Format != "cobertura")
-            return methods.All(reported => MatchingMethodCount(reported, build, logicalSourcePaths, pathPolicy) == 1);
+            return methods.All(reported => MatchingMethodCount(reported, methods, build,
+                logicalSourcePaths, pathPolicy) == 1);
 
         // Cobertura expands one relative filename against each captured <source> root.
         // Those paths are alternatives for one observation, not independent methods.
@@ -196,12 +197,13 @@ public static class ArtifactEvidenceInspector
         foreach (var alternatives in methods.GroupBy(CoverageObservationKey, StringComparer.Ordinal))
         {
             if (alternatives.Sum(reported =>
-                    MatchingMethodCount(reported, build, logicalSourcePaths, pathPolicy)) != 1) return false;
+                    MatchingMethodCount(reported, methods, build, logicalSourcePaths, pathPolicy)) != 1) return false;
         }
         return true;
     }
 
-    private static int MatchingMethodCount(CoverageMethod reported, InspectedBuildEvidence build,
+    private static int MatchingMethodCount(CoverageMethod reported, IReadOnlyList<CoverageMethod> allReported,
+        InspectedBuildEvidence build,
         IReadOnlyList<string> logicalSourcePaths, CapturedPathPolicy pathPolicy)
     {
         var candidates = build.Methods.Where(method =>
@@ -213,7 +215,7 @@ public static class ArtifactEvidenceInspector
                 System.Globalization.NumberStyles.HexNumber,
                 System.Globalization.CultureInfo.InvariantCulture, out var token))
             candidates = candidates.Where(method => method.MetadataToken == token).ToArray();
-        return candidates.Count(method => PointsMatch(reported, method, logicalSourcePaths, pathPolicy));
+        return candidates.Count(method => PointsMatch(reported, allReported, method, logicalSourcePaths, pathPolicy));
     }
 
     private static string CoverageObservationKey(CoverageMethod method) => CanonicalIdentity.Tuple(
@@ -253,7 +255,8 @@ public static class ArtifactEvidenceInspector
         return string.IsNullOrEmpty(@namespace) ? name : @namespace + "." + name;
     }
 
-    private static bool PointsMatch(CoverageMethod reported, InspectedMethodEvidence method,
+    private static bool PointsMatch(CoverageMethod reported, IReadOnlyList<CoverageMethod> allReported,
+        InspectedMethodEvidence method,
         IReadOnlyList<string> logicalSourcePaths, CapturedPathPolicy pathPolicy)
     {
         if (reported.File is null || reported.SequencePoints.Count == 0) return false;
@@ -282,18 +285,21 @@ public static class ArtifactEvidenceInspector
             var lineSet = lines.ToHashSet();
             if (lines.Any(line => !points.Any(point => line >= point.StartLine && line <= point.EndLine)))
                 return false;
-            // PDB methods for constructors include lowered member initializers, while
-            // state-machine MoveNext bodies include compiler control points that Coverlet
-            // intentionally does not project. Their reported points still must belong to
-            // the exact mapped PDB method, but v1 cannot infer a complete authored-line
-            // denominator from that lowered method shape.
-            if (method.MethodName is ".ctor" or ".cctor" || method.TypeName.Contains("/<", StringComparison.Ordinal))
+            // State-machine MoveNext bodies include compiler control points that Coverlet
+            // intentionally does not project. They remain containment-only because those
+            // generated methods are not directly scored as authored callables.
+            if (method.TypeName.Contains("/<", StringComparison.Ordinal))
                 return true;
             if (lines.Any(line => !statementPoints.Any(point => line >= point.StartLine && line <= point.EndLine)))
                 return false;
+            HashSet<int> linesAssignedElsewhere = method.MethodName is ".ctor" or ".cctor"
+                ? allReported.Where(other => !ReferenceEquals(other, reported) && other.File is not null &&
+                        comparer.Equals(ResolveBoundPath(other.File, logicalSourcePaths, pathPolicy), reportedLogical))
+                    .SelectMany(other => other.SequencePoints.Select(point => point.Line)).ToHashSet()
+                : [];
             foreach (var point in statementPoints)
                 for (var line = point.StartLine; line <= point.EndLine; line++)
-                    if (!lineSet.Contains(line)) return false;
+                    if (!lineSet.Contains(line) && !linesAssignedElsewhere.Contains(line)) return false;
             return true;
         }
         return reported.SequencePoints.Count == points.Length && reported.SequencePoints.All(reportPoint =>

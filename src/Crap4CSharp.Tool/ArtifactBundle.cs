@@ -12,7 +12,8 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
     private const int MaxEntries = 10_000;
     private static readonly JsonSerializerOptions Json = new()
     {
-        PropertyNameCaseInsensitive = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = false,
         UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Skip
     };
 
@@ -35,6 +36,7 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
         {
             using var document = JsonDocument.Parse(manifestBytes, new JsonDocumentOptions
             { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = 32 });
+            RejectDuplicateProperties(document.RootElement);
             ValidateShape(document.RootElement);
             manifest = document.RootElement.Deserialize<RunManifest>(Json)
                 ?? throw new InvalidDataException("Artifact manifest is empty.");
@@ -150,6 +152,22 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
         foreach (var name in names)
             if (!value.TryGetProperty(name, out var property) || property.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
                 throw new InvalidDataException($"Artifact manifest is missing required property '{name}'.");
+    }
+
+    private static void RejectDuplicateProperties(JsonElement value)
+    {
+        if (value.ValueKind == JsonValueKind.Object)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var property in value.EnumerateObject())
+            {
+                if (!names.Add(property.Name))
+                    throw new InvalidDataException($"Artifact manifest contains duplicate property '{property.Name}'.");
+                RejectDuplicateProperties(property.Value);
+            }
+        }
+        else if (value.ValueKind == JsonValueKind.Array)
+            foreach (var item in value.EnumerateArray()) RejectDuplicateProperties(item);
     }
 
     private static string? ResolveOwnedRegularFile(string root, string locator)

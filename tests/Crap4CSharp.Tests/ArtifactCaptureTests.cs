@@ -130,6 +130,25 @@ public sealed class ArtifactCaptureTests
     }
 
     [Fact]
+    public void LoaderRejectsDuplicatePropertiesAndDoesNotCaseFoldUnknownMembers()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-bundle-duplicate-json");
+        var fixture = CreateFixture();
+        var locator = ArtifactCaptureAdapter.PublishNew(fixture.Manifest, fixture.Bytes,
+            Path.Combine(directory.Path, "bundle"));
+        var original = File.ReadAllText(locator);
+        File.WriteAllText(locator, original.Replace("\"logicalPath\":",
+            "\"logicalPath\": null, \"logicalPath\":", StringComparison.Ordinal));
+        Assert.Throws<InvalidDataException>(() => ArtifactBundle.Load(locator, directory.Path));
+
+        File.WriteAllText(locator, original.Replace("\"logicalPath\":",
+            "\"LogicalPath\": null, \"logicalPath\":", StringComparison.Ordinal));
+        var loaded = ArtifactBundle.Load(locator, directory.Path);
+        Assert.All(loaded.Manifest.Contexts.SelectMany(context => context.Inputs),
+            input => Assert.False(string.IsNullOrWhiteSpace(input.LogicalPath)));
+    }
+
+    [Fact]
     public void ThreePhaseValidationAcceptsExpectedGeneratedTransitionButNotAuthoredDrift()
     {
         var authored = new ManifestInput("source", "src/C.cs", "artifacts/source.bin", 3,

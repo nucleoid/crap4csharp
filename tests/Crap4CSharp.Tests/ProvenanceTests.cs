@@ -378,6 +378,34 @@ public sealed class ProvenanceTests
     }
 
     [Fact]
+    public void ConstructorCoverageMayExcludeOnlyLinesAssignedToAnotherMethod()
+    {
+        var build = new InspectedBuildEvidence("App", "mvid", "debug",
+            new Dictionary<string, string> { ["src/C.cs"] = "hash" }, "preview", [],
+            [new InspectedMethodEvidence(1, "App.C", ".ctor",
+                [new("src/C.cs", 0, 10, 5, 10, 20), new("src/C.cs", 1, 11, 5, 11, 20),
+                 new("src/C.cs", 2, 20, 5, 20, 20)]),
+             new InspectedMethodEvidence(2, "App.C", "get_Value", [new("src/C.cs", 0, 20, 5, 20, 20)])]);
+        var complete = "<CoverageSession><Modules><Module><ModuleName>App</ModuleName>" +
+            "<Files><File uid=\"1\" fullPath=\"src/C.cs\" /></Files><Classes><Class><FullName>App.C</FullName><Methods>" +
+            "<Method><Name>System.Void App.C::.ctor()</Name><FileRef uid=\"1\" /><SequencePoints>" +
+            "<SequencePoint vc=\"1\" sl=\"10\" sc=\"1\" el=\"10\" ec=\"2\" fileid=\"1\" />" +
+            "<SequencePoint vc=\"1\" sl=\"11\" sc=\"1\" el=\"11\" ec=\"2\" fileid=\"1\" />" +
+            "</SequencePoints></Method><Method><Name>System.Int32 App.C::get_Value()</Name><FileRef uid=\"1\" />" +
+            "<SequencePoints><SequencePoint vc=\"1\" sl=\"20\" sc=\"1\" el=\"20\" ec=\"2\" fileid=\"1\" />" +
+            "</SequencePoints></Method></Methods></Class></Classes></Module></Modules></CoverageSession>";
+        var policy = new CapturedPathPolicy(true, []);
+        var completeBytes = ImmutableArray.Create(Encoding.UTF8.GetBytes(complete));
+        var incompleteBytes = ImmutableArray.Create(Encoding.UTF8.GetBytes(complete.Replace(
+            "<SequencePoint vc=\"1\" sl=\"11\" sc=\"1\" el=\"11\" ec=\"2\" fileid=\"1\" />", "")));
+
+        Assert.True(ArtifactEvidenceInspector.CoverageMatchesBuild(completeBytes, "coverage.xml", build,
+            ["src/C.cs"], policy));
+        Assert.False(ArtifactEvidenceInspector.CoverageMatchesBuild(incompleteBytes, "coverage.xml", build,
+            ["src/C.cs"], policy));
+    }
+
+    [Fact]
     public void CoberturaSourceRootsAreAlternativesForOneObservation()
     {
         var manifest = Fixture();
