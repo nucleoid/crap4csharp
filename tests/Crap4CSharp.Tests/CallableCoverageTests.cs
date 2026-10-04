@@ -286,7 +286,10 @@ public sealed class CallableCoverageTests
         var inventory = Inventory("""
             class C {
               private int value;
-              int P { get => value; init { value = 1; } }
+              int P {
+                get => value;
+                init { value = 1; }
+              }
               ref readonly int Current => ref value;
               public virtual int M(in int item) => item;
             }

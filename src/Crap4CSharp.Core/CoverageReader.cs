@@ -190,7 +190,7 @@ public static class CoverageReader
             if (methodsContainer is null) continue;
             foreach (var method in methodsContainer.Elements().Where(element => element.Name.LocalName == "method"))
             {
-                var name = Attr(method, "name") ?? string.Empty;
+                var name = CoverageSignature.StripCustomModifiers(Attr(method, "name") ?? string.Empty);
                 var signature = Attr(method, "signature") ?? string.Empty;
                 var parameterCount = ParseParameterCount(signature);
                 var points = method.Descendants().Where(element => element.Name.LocalName == "line")
@@ -284,7 +284,7 @@ public static class CoverageReader
             if (methodsContainer is null) continue;
             foreach (var method in methodsContainer.Elements().Where(element => element.Name.LocalName == "method"))
             {
-                var name = Attr(method, "name") ?? string.Empty;
+                var name = CoverageSignature.StripCustomModifiers(Attr(method, "name") ?? string.Empty);
                 var signature = Attr(method, "signature") ?? string.Empty;
                 var points = method.Descendants().Where(element => element.Name.LocalName == "line")
                     .Select(element => (Line: IntAttr(element, "number"), Visits: IntAttr(element, "hits")))
@@ -324,6 +324,7 @@ public static class CoverageReader
 
     private static string ParseMethodName(string fullName)
     {
+        fullName = CoverageSignature.StripCustomModifiers(fullName);
         var beforeParameters = fullName.Split('(', 2)[0];
         var separator = beforeParameters.LastIndexOf("::", StringComparison.Ordinal);
         var lastDot = beforeParameters.LastIndexOf('.');
@@ -335,6 +336,7 @@ public static class CoverageReader
 
     private static int? ParseParameterCount(string signature)
     {
+        signature = CoverageSignature.StripCustomModifiers(signature);
         var open = signature.IndexOf('(');
         var close = signature.LastIndexOf(')');
         if (open < 0 || close < open) return null;
@@ -353,6 +355,7 @@ public static class CoverageReader
 
     private static int? ParseGenericArity(string signature)
     {
+        signature = CoverageSignature.StripCustomModifiers(signature);
         var beforeParameters = signature.Split('(', 2)[0];
         var separator = beforeParameters.LastIndexOf("::", StringComparison.Ordinal);
         var method = separator >= 0 ? beforeParameters[(separator + 2)..] :

@@ -174,6 +174,7 @@ public static class CallableCoverageResolver
 
     private static IReadOnlyList<string>? ParameterTypes(string signature)
     {
+        signature = CoverageSignature.StripCustomModifiers(signature);
         var open = signature.IndexOf('(');
         var close = signature.LastIndexOf(')');
         if (open < 0 || close < open) return null;
@@ -197,6 +198,7 @@ public static class CallableCoverageResolver
 
     private static string Normalize(string value)
     {
+        value = CoverageSignature.StripCustomModifiers(value);
         var normalized = System.Text.RegularExpressions.Regex.Replace(value,
                 @"\b(class|valuetype)\s+", string.Empty)
             .Replace(" ", string.Empty, StringComparison.Ordinal)
