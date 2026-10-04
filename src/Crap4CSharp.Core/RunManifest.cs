@@ -234,8 +234,11 @@ public static class ProvenanceVerifier
         if (!string.Equals(manifest.Revision.StateHash, current.StateHash, StringComparison.Ordinal))
             reasons.Add(ProvenanceReasonCodes.WorkspaceChanged);
 
-        var expectedInputs = manifest.Contexts.SelectMany(context => context.Inputs).Where(IsCurrentWorkspaceInput)
-            .OrderBy(InputKey, StringComparer.Ordinal).ToArray();
+        var expectedGroups = manifest.Contexts.SelectMany(context => context.Inputs).Where(IsCurrentWorkspaceInput)
+            .GroupBy(InputKey, StringComparer.Ordinal).ToArray();
+        if (expectedGroups.Any(group => group.Select(input => (input.Length, input.Sha256)).Distinct().Count() != 1))
+            reasons.Add(ProvenanceReasonCodes.SourceChanged);
+        var expectedInputs = expectedGroups.Select(group => group.First()).OrderBy(InputKey, StringComparer.Ordinal).ToArray();
         var actualInputs = current.Inputs.OrderBy(InputKey, StringComparer.Ordinal).ToArray();
         if (expectedInputs.Length != actualInputs.Length)
             reasons.Add(ProvenanceReasonCodes.SourceChanged);

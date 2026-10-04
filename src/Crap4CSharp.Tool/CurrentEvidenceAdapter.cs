@@ -49,6 +49,7 @@ internal static class CurrentEvidenceAdapter
         var basic = Capture(manifest, workspaceRoot);
         var root = Path.GetFullPath(workspaceRoot);
         var hashes = new Dictionary<string, string>(StringComparer.Ordinal);
+        var verifiedInputs = new Dictionary<string, CurrentInputEvidence>(StringComparer.Ordinal);
         foreach (var expected in manifest.Contexts.OrderBy(item => item.Id, StringComparer.Ordinal))
         {
             var recipe = expected.CurrentRevalidation;
@@ -73,6 +74,14 @@ internal static class CurrentEvidenceAdapter
                     source.ContentIdentity, source.IsGenerated)).OrderBy(item => item.LogicalPath, StringComparer.Ordinal).ToArray();
             if (!expectedSources.SequenceEqual(currentSources))
                 throw new InvalidDataException("Current project source membership or content differs from captured tested inputs.");
+            foreach (var source in current.Sources.Where(source => !source.IsGenerated))
+            {
+                var declaration = expected.Inputs.Single(input => input.Role == "source" && !input.Generated &&
+                    input.LogicalPath == source.LogicalPath);
+                verifiedInputs[declaration.Role + "\n" + declaration.LogicalPath] =
+                    new CurrentInputEvidence(declaration.Role, declaration.LogicalPath,
+                        declaration.Length, source.ContentIdentity);
+            }
             var parse = expected.ParseOptions ?? throw new InvalidDataException("Captured context has no parse options.");
             if (parse.LanguageVersion != current.LanguageVersion.ToString() ||
                 parse.SourceKind != current.SourceKind.ToString() ||
@@ -93,7 +102,10 @@ internal static class CurrentEvidenceAdapter
                 throw new InvalidDataException("Current compiled output differs from captured tested build evidence.");
             hashes.Add(expected.Id, expected.ContextHash);
         }
-        return basic with { ContextHashes = hashes, MembershipRecipeRevalidated = true };
+        foreach (var input in basic.Inputs.Where(input => input.Role != "source"))
+            verifiedInputs[input.Role + "\n" + input.LogicalPath] = input;
+        return basic with { Inputs = verifiedInputs.Values.OrderBy(input => input.LogicalPath, StringComparer.Ordinal).ToArray(),
+            ContextHashes = hashes, MembershipRecipeRevalidated = true };
     }
 
     private static string NormalizeRecipePath(string value)
