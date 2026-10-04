@@ -292,16 +292,19 @@ public sealed class CallableCoverageTests
               }
               ref readonly int Current => ref value;
               public virtual int M(in int item) => item;
+              public virtual int N(string text, in int item) => text.Length + item;
             }
             """);
         var init = Assert.Single(inventory.Callables, item => item.Kind == CallableKind.PropertyInit);
         var current = Assert.Single(inventory.Callables, item => item.Name == "Current.get");
         var method = Assert.Single(inventory.Callables, item => item.Name == "M");
+        var multiParameter = Assert.Single(inventory.Callables, item => item.Name == "N");
         var reports = new[]
         {
             CecilReport(init, "C", "System.Void modreq(System.Runtime.CompilerServices.IsExternalInit) C::set_P(System.Int32)"),
             CecilReport(current, "C", "System.Int32& modreq(System.Runtime.InteropServices.InAttribute) C::get_Current()"),
-            CecilReport(method, "C", "System.Int32 C::M(System.Int32& modreq(System.Runtime.InteropServices.InAttribute))")
+            CecilReport(method, "C", "System.Int32 C::M(System.Int32& modreq(System.Runtime.InteropServices.InAttribute))"),
+            CecilReport(multiParameter, "C", "System.Int32 C::N(System.String,System.Int32& modreq(System.Runtime.InteropServices.InAttribute))")
         };
 
         var resolved = CallableCoverageResolver.Resolve(inventory, reports);
@@ -309,6 +312,45 @@ public sealed class CallableCoverageTests
         Assert.All(resolved.Observations.Where(item => reports.Any(report =>
             report.MethodName == inventory.Callables.Single(callable => callable.ObservationId == item.ObservationId)
                 .SemanticIdentity?.MetadataName)), item => Assert.Equal("known", item.Status));
+
+        var mangled = new[] { method, multiParameter }.Select(target =>
+            new CoverageMethod("C.cs", "C", target.SemanticIdentity!.MetadataName, null,
+                [new CoveragePoint(target.Span.StartLine, 1)], "module")
+            {
+                ContextId = "ctx",
+                RawSignature = "(System.Runtime.InteropServices.InAttribute))",
+                DocumentIdentities = ["doc"]
+            }).ToArray();
+        var coberturaResolved = CallableCoverageResolver.Resolve(inventory, mangled);
+        Assert.All(coberturaResolved.Observations.Where(item =>
+            item.ObservationId == method.ObservationId || item.ObservationId == multiParameter.ObservationId),
+            item => Assert.Equal("known", item.Status));
+    }
+
+    [Fact]
+    public void IncompleteCoberturaSignatureCannotChooseAmongSameNameOverloads()
+    {
+        var inventory = Inventory("""
+            class C {
+              public virtual int M(in int item) => item;
+              public int M(string item) => item.Length;
+            }
+            """);
+        var target = Assert.Single(inventory.Callables, item =>
+            item.Name == "M" && item.SemanticIdentity!.Parameters[0].RefKind == "in");
+        var report = new CoverageMethod("C.cs", "C", "M", null,
+            [new CoveragePoint(target.Span.StartLine, 1)], "module")
+        {
+            ContextId = "ctx",
+            RawSignature = "(System.Runtime.InteropServices.InAttribute))",
+            DocumentIdentities = ["doc"]
+        };
+
+        var resolved = CallableCoverageResolver.Resolve(inventory, [report]);
+
+        Assert.Equal("unknown", Assert.Single(resolved.Observations,
+            item => item.ObservationId == target.ObservationId).Status);
+        Assert.Contains(resolved.Diagnostics, item => item.Code == CoverageReasonCodes.AmbiguousCallableOwnership);
     }
 
     private static CallableInventoryResult Inventory(string source) => CallableInventory.Analyze(source, "C.cs",

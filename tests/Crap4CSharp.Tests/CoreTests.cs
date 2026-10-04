@@ -210,9 +210,10 @@ public sealed class CoreTests : IDisposable
             """);
         var cobertura = Write("modified-cobertura.xml", $"""
             <coverage><packages><package><classes><class name="C" filename="{System.Security.SecurityElement.Escape(source)}"><methods>
-            <method name="set_P" signature="(System.Int32 modreq(System.Runtime.CompilerServices.IsExternalInit))"><lines><line number="1" hits="1" /></lines></method>
+            <method name="set_P" signature="(System.Int32)"><lines><line number="1" hits="1" /></lines></method>
             <method name="get_Current" signature="()"><lines><line number="1" hits="1" /></lines></method>
-            <method name="M" signature="(System.Int32&amp; modreq(System.Runtime.InteropServices.InAttribute))"><lines><line number="1" hits="1" /></lines></method>
+            <method name="M" signature="(System.Runtime.InteropServices.InAttribute))"><lines><line number="1" hits="1" /></lines></method>
+            <method name="N" signature="(System.Runtime.InteropServices.InAttribute))"><lines><line number="1" hits="1" /></lines></method>
             </methods></class></classes></package></packages></coverage>
             """);
 
@@ -221,7 +222,8 @@ public sealed class CoreTests : IDisposable
 
         Assert.Equal(["get_Current", "M", "set_P"], openMethods.Select(item => item.MethodName).Order().ToArray());
         Assert.Equal([0, 1, 1], openMethods.Select(item => item.ParameterCount).Order().ToArray());
-        Assert.Equal([0, 1, 1], coberturaMethods.Select(item => item.ParameterCount).Order().ToArray());
+        Assert.Null(Assert.Single(coberturaMethods, item => item.MethodName == "M").ParameterCount);
+        Assert.Null(Assert.Single(coberturaMethods, item => item.MethodName == "N").ParameterCount);
     }
 
     [Fact]
