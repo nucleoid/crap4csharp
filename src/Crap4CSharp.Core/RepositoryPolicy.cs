@@ -57,14 +57,6 @@ public static class RepositoryPolicyParser
     private static readonly HashSet<string> OverrideKeys = new(StringComparer.Ordinal)
     { "frameworks", "scope", "includeTests", "includeGenerated", "coveragePathMappings" };
     private static readonly HashSet<string> Checks = new(["tests", "coverage", "crap"], StringComparer.Ordinal);
-    private static readonly JsonSerializerOptions CanonicalJson = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-        WriteIndented = true,
-        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
-    };
-
     public static ParsedRepositoryPolicy Parse(ReadOnlySpan<byte> bytes, string policyPath)
     {
         if (bytes.Length is 0 or > 1024 * 1024) throw Error("policy.sizeInvalid", "Policy must be between 1 byte and 1 MB.");
@@ -123,7 +115,7 @@ public static class RepositoryPolicyParser
             var policy = new RepositoryPolicy(RepositoryPolicy.Version, mode, production, tests, configuration,
                 frameworks, scope, threshold, MissingCoveragePolicy.Fail, checks, exclusions, ruleset, baseline,
                 exemptions, overrides);
-            var canonical = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(policy, CanonicalJson) + "\n");
+            var canonical = Canonicalize(policy, directory);
             return new ParsedRepositoryPolicy(policy, CanonicalIdentity.Sha256(canonical), canonical, normalizedPolicyPath);
         }
         catch (JsonException exception)
@@ -218,4 +210,57 @@ public static class RepositoryPolicyParser
         : throw Error("policy.malformed", $"'{name}' must be a number.");
 
     private static PolicyException Error(string code, string message) => new(code, message);
+
+    private static byte[] Canonicalize(RepositoryPolicy policy, string policyDirectory)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions
+        { Indented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping }))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("schemaVersion", policy.SchemaVersion);
+            writer.WriteString("mode", policy.Mode == RepositoryPolicyMode.Strict ? "strict" : "incremental");
+            Array(writer, "productionProjects", policy.ProductionProjects);
+            Array(writer, "testProjects", policy.TestProjects);
+            writer.WriteString("configuration", policy.Configuration);
+            Array(writer, "targetFrameworks", policy.TargetFrameworks);
+            writer.WriteString("scope", policy.Scope);
+            writer.WriteNumber("threshold", policy.Threshold);
+            writer.WriteString("missingCoverage", "fail");
+            Array(writer, "requiredChecks", policy.RequiredChecks);
+            Array(writer, "exclusions", policy.Exclusions);
+            writer.WriteString("ruleset", policy.Ruleset);
+            if (policy.BaselinePath is not null)
+            {
+                writer.WriteString("baseline", !string.IsNullOrEmpty(policyDirectory) &&
+                    policy.BaselinePath.StartsWith(policyDirectory + "/", StringComparison.Ordinal)
+                    ? policy.BaselinePath[(policyDirectory.Length + 1)..] : policy.BaselinePath);
+            }
+            Array(writer, "exemptionFiles", policy.ExemptionFiles.Select(path =>
+            {
+                return !string.IsNullOrEmpty(policyDirectory) && path.StartsWith(policyDirectory + "/", StringComparison.Ordinal)
+                    ? path[(policyDirectory.Length + 1)..] : path;
+            }));
+            if (policy.AllowedOverrides != new PolicyAllowedOverrides())
+            {
+                writer.WriteStartObject("allowedOverrides");
+                writer.WriteBoolean("frameworks", policy.AllowedOverrides.Frameworks);
+                writer.WriteBoolean("scope", policy.AllowedOverrides.Scope);
+                writer.WriteBoolean("includeTests", policy.AllowedOverrides.IncludeTests);
+                writer.WriteBoolean("includeGenerated", policy.AllowedOverrides.IncludeGenerated);
+                writer.WriteBoolean("coveragePathMappings", policy.AllowedOverrides.CoveragePathMappings);
+                writer.WriteEndObject();
+            }
+            writer.WriteEndObject();
+        }
+        stream.WriteByte((byte)'\n');
+        return stream.ToArray();
+    }
+
+    private static void Array(Utf8JsonWriter writer, string name, IEnumerable<string> values)
+    {
+        writer.WriteStartArray(name);
+        foreach (var value in values) writer.WriteStringValue(value);
+        writer.WriteEndArray();
+    }
 }
