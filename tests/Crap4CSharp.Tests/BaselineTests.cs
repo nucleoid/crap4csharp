@@ -13,11 +13,13 @@ public sealed class BaselineTests
             "samples/Fixture/Fixture/Scorer.cs", "old-body", 4, .5, 6));
 
         Assert.Equal(0, Evaluate(policy, baseline, Observation(4, .5, 6)).ExitCode);
-        Assert.Equal(1, Evaluate(policy, baseline, Observation(5, .9, 5.1)).ExitCode);
-        Assert.Contains("baseline.complexityWorsened", Evaluate(policy, baseline, Observation(5, .9, 5.1)).OperationalReasons);
-        Assert.Equal(1, Evaluate(policy, baseline, Observation(3, .4, 5.2)).ExitCode);
-        Assert.Contains("baseline.coverageWorsened", Evaluate(policy, baseline, Observation(3, .4, 5.2)).OperationalReasons);
-        Assert.Equal(1, Evaluate(policy, baseline, Observation(4, .5, 6.01)).ExitCode);
+        Assert.Equal(2, Evaluate(policy, baseline, Observation(5, .9, 5.1)).ExitCode);
+        Assert.Contains(Evaluate(policy, baseline, Observation(5, .9, 5.1)).Findings,
+            item => item.Code == "baseline.complexityWorsened");
+        Assert.Equal(2, Evaluate(policy, baseline, Observation(3, .4, 5.2)).ExitCode);
+        Assert.Contains(Evaluate(policy, baseline, Observation(3, .4, 5.2)).Findings,
+            item => item.Code == "baseline.coverageWorsened");
+        Assert.Equal(2, Evaluate(policy, baseline, Observation(4, .5, 6.01)).ExitCode);
     }
 
     [Fact]
