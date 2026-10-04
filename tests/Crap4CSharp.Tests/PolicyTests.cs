@@ -39,6 +39,18 @@ public sealed class PolicyTests
         Assert.Throws<PolicyException>(() => RepositoryPolicyParser.Parse(Encoding.UTF8.GetBytes(json), "quality/policy.json"));
     }
 
+    [Fact]
+    public void CheckedInSamplesAreValidAndUseActualFixtureProjects()
+    {
+        var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+        var strict = RepositoryPolicyParser.Parse(File.ReadAllBytes(Path.Combine(root, "samples/policy/strict.json")),
+            "samples/policy/strict.json");
+        var incremental = RepositoryPolicyParser.Parse(File.ReadAllBytes(Path.Combine(root, "samples/policy/incremental.json")),
+            "samples/policy/incremental.json");
+        Assert.Equal("samples/Fixture/Fixture/Fixture.csproj", strict.Policy.ProductionProjects.Single());
+        Assert.Equal("samples/Fixture/Fixture.Tests/Fixture.Tests.csproj", incremental.Policy.TestProjects.Single());
+    }
+
     internal const string ValidPolicy = """
         {
           "schemaVersion": "repository-policy-v1",

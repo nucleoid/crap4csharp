@@ -50,7 +50,7 @@ public static class PolicyEvaluator
             {
                 var exemption = exemptions.SingleOrDefault(value => value.EntityKey == item.EntityKey &&
                     value.Rule == item.Rule && value.ContextId == item.ContextId && value.CoverageReason == item.CoverageReason &&
-                    !string.IsNullOrWhiteSpace(value.Reason));
+                    !string.IsNullOrWhiteSpace(value.Reason) && IsNarrowUnsupportedReason(value.CoverageReason));
                 if (exemption is not null) exempted.Add(item.EntityKey);
                 else operational.Add(item.CoverageReason ?? "coverage.unknown");
                 continue;
@@ -92,4 +92,8 @@ public static class PolicyEvaluator
 
     private static PolicyFinding Finding(string code, PolicyObservation item, string decision) =>
         new(code, item.EntityKey, item.ContextId, item.Path, decision, [code]);
+
+    private static bool IsNarrowUnsupportedReason(string? reason) => reason is
+        CoverageReasonCodes.UnsupportedGeneratedMapping or CoverageReasonCodes.UnsupportedCallable or
+        CoverageReasonCodes.AmbiguousCallableOwnership;
 }
