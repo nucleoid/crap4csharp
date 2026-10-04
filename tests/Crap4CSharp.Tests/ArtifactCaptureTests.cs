@@ -63,6 +63,30 @@ public sealed class ArtifactCaptureTests
     }
 
     [Fact]
+    public void CurrentVerificationIncludesDeclaredReferenceBytes()
+    {
+        var fixture = CreateFixture();
+        var context = fixture.Manifest.Contexts.Single();
+        var referenceBytes = fixture.Bytes["artifacts/app.dll"];
+        var reference = new ManifestInput("reference", "refs/app.dll", "artifacts/app.dll",
+            referenceBytes.Length, CanonicalIdentity.Sha256(referenceBytes.AsSpan()), null, false);
+        var manifest = ManifestIdentity.Seal(fixture.Manifest with
+        {
+            Contexts = [context with { Inputs = context.Inputs.Append(reference).ToArray() }],
+            ManifestHash = null
+        });
+        var source = context.Inputs.Single();
+        var current = new CurrentEvidence(manifest.Revision.RepositoryIdentity, manifest.Revision.WorkspaceIdentity,
+            manifest.Revision.Head, [new CurrentInputEvidence(source.Role, source.LogicalPath, source.Length, source.Sha256)],
+            new Dictionary<string, string> { [manifest.Contexts.Single().Id] = manifest.Contexts.Single().ContextHash },
+            true, manifest.Revision.StateHash);
+
+        var result = ProvenanceVerifier.VerifyCurrent(manifest, fixture.Bytes, current, true);
+
+        Assert.Contains(ProvenanceReasonCodes.SourceChanged, result.Reasons);
+    }
+
+    [Fact]
     public void GitCurrentEvidenceBindsStatusSubmodulesAndStagedDiff()
     {
         using var directory = TestDirectory.Create("crap4csharp-git-state");

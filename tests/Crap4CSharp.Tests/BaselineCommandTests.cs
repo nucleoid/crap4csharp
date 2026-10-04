@@ -33,8 +33,12 @@ public sealed class BaselineCommandTests
             "App.csproj", "bin/Release/net10.0/App.dll", "bin/Release/net10.0/App.pdb");
         var newHash = ManifestIdentity.ManifestHash(manifest with
         { Contexts = [context with { CurrentRevalidation = recipe }] });
+        var referenceHash = ManifestIdentity.ManifestHash(manifest with
+        { Contexts = [context with { CurrentRevalidation = recipe with
+            { References = [new ManifestCurrentReference("refs/A.dll", "inputs/A.dll")] } }] });
 
         Assert.NotEqual(oldHash, newHash);
+        Assert.NotEqual(newHash, referenceHash);
         Assert.Null(context.CurrentRevalidation);
     }
 

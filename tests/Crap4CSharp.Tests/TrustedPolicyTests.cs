@@ -48,4 +48,32 @@ public sealed class TrustedPolicyTests
         Assert.Contains("policy.exclusionOverrideForbidden", result.Reasons);
         Assert.Contains("policy.exemptionOverrideForbidden", result.Reasons);
     }
+
+    [Fact]
+    public void IncrementalTrustedPolicyAcceptsCandidateCreatedUnderEquivalentStrictAdoptionPolicy()
+    {
+        var incremental = RepositoryPolicyParser.Parse(Encoding.UTF8.GetBytes(PolicyTests.ValidPolicy),
+            "quality/policy.json");
+        var strictText = PolicyTests.ValidPolicy.Replace("\"incremental\"", "\"strict\"", StringComparison.Ordinal)
+            .Replace("\"scope\": \"base\"", "\"scope\": \"all\"", StringComparison.Ordinal)
+            .Replace(",\n  \"baseline\": \"baseline.json\"", "", StringComparison.Ordinal);
+        var strict = RepositoryPolicyParser.Parse(Encoding.UTF8.GetBytes(strictText), "quality/policy.json");
+        var boundHash = RepositoryPolicyParser.BindExemptions(strict.CompatibilityHash,
+            Array.Empty<KeyValuePair<string, ReadOnlyMemory<byte>>>());
+        var candidate = BaselineDocument.Serialize(BaselineDocument.Generate(boundHash,
+            ComplexityRules.CallablesV1, "source", "revision", 5, []));
+        byte[] Git(IReadOnlyList<string> arguments) => string.Join(" ", arguments) switch
+        {
+            "merge-base HEAD origin/main" => Encoding.UTF8.GetBytes("0123456789012345678901234567890123456789\n"),
+            "show 0123456789012345678901234567890123456789:quality/policy.json" =>
+                Encoding.UTF8.GetBytes(PolicyTests.ValidPolicy),
+            "show 0123456789012345678901234567890123456789:quality/baseline.json" => candidate,
+            var command => throw new InvalidOperationException(command)
+        };
+
+        var resolved = TrustedPolicyLoader.LoadFromBase("origin/main", "quality/policy.json", Git);
+
+        Assert.NotNull(resolved.Baseline);
+        Assert.Equal(boundHash, resolved.Baseline.PolicyHash);
+    }
 }

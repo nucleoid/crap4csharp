@@ -70,7 +70,14 @@ public sealed record EvaluationSection(
     public IReadOnlyList<CallableExemptionMatch>? CallableExemptions { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? ExemptionErrors { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public PolicyTrustResult? PolicyTrust { get; init; }
+    public IReadOnlyList<PolicyDifferenceResult> PolicyDifferences { get; init; } = [];
 }
+
+public sealed record PolicyTrustResult(string Trust, string Revision, string PolicyPath,
+    string PolicyHash, string CompatibilityHash);
+public sealed record PolicyDifferenceResult(string Path, string Status, string TrustedHash, string? ProposedHash);
 
 public sealed record CallableResult(
     string CallableId,

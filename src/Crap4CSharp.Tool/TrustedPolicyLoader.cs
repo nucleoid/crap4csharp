@@ -10,28 +10,18 @@ internal sealed record ProposedPolicyDifference(string Path, string Status, stri
 internal static class TrustedPolicyLoader
 {
     public static TrustedPolicyResolution LoadFromBase(string baseRef, string policyPath,
-        Func<IReadOnlyList<string>, byte[]>? gitExecutor = null)
+        Func<IReadOnlyList<string>, byte[]>? gitExecutor = null, string? repositoryRoot = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(baseRef);
         var normalizedPolicy = Normalize(policyPath);
-        var git = gitExecutor ?? (arguments => Git(arguments, Directory.GetCurrentDirectory(), TimeSpan.FromSeconds(15)));
+        var git = gitExecutor ?? (arguments => Git(arguments, repositoryRoot ?? Directory.GetCurrentDirectory(), TimeSpan.FromSeconds(15)));
         var mergeBase = Encoding.UTF8.GetString(git(["merge-base", "HEAD", baseRef])).Trim();
         if (mergeBase.Length != 40 || mergeBase.Any(character => !Uri.IsHexDigit(character)))
             throw new PolicyException("policy.baseInvalid", "Git merge-base did not resolve to a full commit SHA.");
         var policyBytes = git(["show", $"{mergeBase}:{normalizedPolicy}"]);
         var parsed = RepositoryPolicyParser.Parse(policyBytes, normalizedPolicy);
-        BaselineDocument? baseline = null;
         var hashes = new Dictionary<string, string>(StringComparer.Ordinal)
         { [normalizedPolicy] = CanonicalIdentity.Sha256(policyBytes) };
-        if (parsed.Policy.BaselinePath is { } baselinePath)
-        {
-            var bytes = git(["show", $"{mergeBase}:{baselinePath}"]);
-            baseline = BaselineDocument.Parse(bytes);
-            BaselineDocument.Validate(baseline, parsed.Hash, parsed.Policy.Ruleset);
-            hashes[baselinePath] = CanonicalIdentity.Sha256(bytes);
-        }
-        else if (parsed.Policy.Mode == RepositoryPolicyMode.Incremental)
-            throw new PolicyException("policy.baselineRequired", "Incremental trusted policy requires a baseline in the same immutable tree.");
         var exemptions = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         foreach (var path in parsed.Policy.ExemptionFiles)
         {
@@ -39,6 +29,17 @@ internal static class TrustedPolicyLoader
             exemptions.Add(path, bytes);
             hashes[path] = CanonicalIdentity.Sha256(bytes);
         }
+        var compatibilityHash = BoundCompatibilityHash(parsed, exemptions);
+        BaselineDocument? baseline = null;
+        if (parsed.Policy.BaselinePath is { } baselinePath)
+        {
+            var bytes = git(["show", $"{mergeBase}:{baselinePath}"]);
+            baseline = BaselineDocument.Parse(bytes);
+            BaselineDocument.Validate(baseline, compatibilityHash, parsed.Policy.Ruleset);
+            hashes[baselinePath] = CanonicalIdentity.Sha256(bytes);
+        }
+        else if (parsed.Policy.Mode == RepositoryPolicyMode.Incremental)
+            throw new PolicyException("policy.baselineRequired", "Incremental trusted policy requires a baseline in the same immutable tree.");
         return new TrustedPolicyResolution("base-trusted", mergeBase, parsed, baseline, exemptions, hashes);
     }
 
@@ -49,18 +50,8 @@ internal static class TrustedPolicyLoader
         var full = ResolveRegularFile(root, normalized);
         var bytes = File.ReadAllBytes(full);
         var parsed = RepositoryPolicyParser.Parse(bytes, normalized);
-        BaselineDocument? baseline = null;
         var hashes = new Dictionary<string, string>(StringComparer.Ordinal)
         { [normalized] = CanonicalIdentity.Sha256(bytes) };
-        if (parsed.Policy.BaselinePath is { } baselinePath)
-        {
-            var baselineBytes = File.ReadAllBytes(ResolveRegularFile(root, baselinePath));
-            baseline = BaselineDocument.Parse(baselineBytes);
-            BaselineDocument.Validate(baseline, parsed.Hash, parsed.Policy.Ruleset);
-            hashes[baselinePath] = CanonicalIdentity.Sha256(baselineBytes);
-        }
-        else if (parsed.Policy.Mode == RepositoryPolicyMode.Incremental)
-            throw new PolicyException("policy.baselineRequired", "Incremental policy requires a baseline.");
         var exemptions = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         foreach (var path in parsed.Policy.ExemptionFiles)
         {
@@ -68,8 +59,24 @@ internal static class TrustedPolicyLoader
             exemptions.Add(path, exemptionBytes);
             hashes[path] = CanonicalIdentity.Sha256(exemptionBytes);
         }
+        var compatibilityHash = BoundCompatibilityHash(parsed, exemptions);
+        BaselineDocument? baseline = null;
+        if (parsed.Policy.BaselinePath is { } baselinePath)
+        {
+            var baselineBytes = File.ReadAllBytes(ResolveRegularFile(root, baselinePath));
+            baseline = BaselineDocument.Parse(baselineBytes);
+            BaselineDocument.Validate(baseline, compatibilityHash, parsed.Policy.Ruleset);
+            hashes[baselinePath] = CanonicalIdentity.Sha256(baselineBytes);
+        }
+        else if (parsed.Policy.Mode == RepositoryPolicyMode.Incremental)
+            throw new PolicyException("policy.baselineRequired", "Incremental policy requires a baseline.");
         return new TrustedPolicyResolution("local-unreviewed", "none", parsed, baseline, exemptions, hashes);
     }
+
+    internal static string BoundCompatibilityHash(ParsedRepositoryPolicy parsed,
+        IReadOnlyDictionary<string, byte[]> exemptions) => RepositoryPolicyParser.BindExemptions(
+            parsed.CompatibilityHash, exemptions.Select(item =>
+                new KeyValuePair<string, ReadOnlyMemory<byte>>(item.Key, item.Value)));
 
     public static IReadOnlyList<ProposedPolicyDifference> CompareProposed(string repositoryRoot,
         TrustedPolicyResolution trusted)

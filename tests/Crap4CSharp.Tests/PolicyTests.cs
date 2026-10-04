@@ -25,8 +25,34 @@ public sealed class PolicyTests
             "quality/policy.json");
 
         Assert.Equal(first.Hash, second.Hash);
+        Assert.Equal(first.CompatibilityHash, second.CompatibilityHash);
         Assert.Equal("quality/baseline.json", first.Policy.BaselinePath);
         Assert.Equal("samples/Fixture/Fixture/Fixture.csproj", first.Policy.ProductionProjects.Single());
+    }
+
+    [Fact]
+    public void StrictAdoptionAndIncrementalEnforcementShareCompatibilityHash()
+    {
+        var incremental = RepositoryPolicyParser.Parse(Encoding.UTF8.GetBytes(ValidPolicy), "quality/policy.json");
+        var strictText = ValidPolicy.Replace("\"incremental\"", "\"strict\"", StringComparison.Ordinal)
+            .Replace("\"scope\": \"base\"", "\"scope\": \"all\"", StringComparison.Ordinal)
+            .Replace(",\n  \"baseline\": \"baseline.json\"", "", StringComparison.Ordinal);
+        var strict = RepositoryPolicyParser.Parse(Encoding.UTF8.GetBytes(strictText), "quality/policy.json");
+
+        Assert.NotEqual(strict.Hash, incremental.Hash);
+        Assert.Equal(strict.CompatibilityHash, incremental.CompatibilityHash);
+    }
+
+    [Fact]
+    public void CompatibilityBindingIncludesExactExemptionBytes()
+    {
+        var parsed = RepositoryPolicyParser.Parse(Encoding.UTF8.GetBytes(ValidPolicy), "quality/policy.json");
+        var first = RepositoryPolicyParser.BindExemptions(parsed.CompatibilityHash,
+            [new("quality/exceptions.json", Encoding.UTF8.GetBytes("one"))]);
+        var second = RepositoryPolicyParser.BindExemptions(parsed.CompatibilityHash,
+            [new("quality/exceptions.json", Encoding.UTF8.GetBytes("two"))]);
+
+        Assert.NotEqual(first, second);
     }
 
     [Theory]

@@ -67,7 +67,11 @@ public sealed record ManifestContext(string Id, string Project, string TargetFra
     public ManifestPathPolicy? PathPolicy { get; init; }
     public ManifestCurrentRevalidation? CurrentRevalidation { get; init; }
 }
-public sealed record ManifestCurrentRevalidation(string Provider, string Project, string AssemblyPath, string PdbPath);
+public sealed record ManifestCurrentRevalidation(string Provider, string Project, string AssemblyPath, string PdbPath)
+{
+    public IReadOnlyList<ManifestCurrentReference> References { get; init; } = [];
+}
+public sealed record ManifestCurrentReference(string LogicalPath, string WorkspacePath);
 public sealed record ManifestParseOptions(string LanguageVersion, string SourceKind,
     IReadOnlyList<string> PreprocessorSymbols, IReadOnlyDictionary<string, string> Features);
 public sealed record ManifestPathPolicy(string CasePolicy, IReadOnlyList<ManifestReportRootMapping> ReportRootMappings);
@@ -79,6 +83,7 @@ public sealed record ManifestBuild(string Id, string ContextId, string ModuleIde
 public sealed record ManifestExecution(string Id, string ContextId, string BuildId, bool Completed, int ExitCode,
     int TotalTests, int PassedTests, int FailedTests, int SkippedTests)
 {
+    public string TestProject { get; init; } = "";
     public string TestModuleIdentity { get; init; } = "";
     public string TestAssemblySha256 { get; init; } = "";
     public string TestMvid { get; init; } = "";
@@ -159,18 +164,30 @@ public static class ManifestIdentity
             CanonicalIdentity.Tuple("current-revalidation", value.Id, value.CurrentRevalidation!.Provider,
                 value.CurrentRevalidation.Project, value.CurrentRevalidation.AssemblyPath,
                 value.CurrentRevalidation.PdbPath)));
+        values.AddRange(manifest.Contexts.Where(value => value.CurrentRevalidation is not null)
+            .SelectMany(value => value.CurrentRevalidation!.References.Select(reference =>
+                CanonicalIdentity.Tuple("current-reference", value.Id, reference.LogicalPath,
+                    reference.WorkspacePath))));
         values.AddRange(manifest.Contexts.SelectMany(context => context.Inputs.Select(input =>
             CanonicalIdentity.Tuple("context-input", context.Id, InputIdentity(input)))));
         values.AddRange(manifest.Builds.Select(value =>
             CanonicalIdentity.Tuple("build", value.Id, value.ContextId, value.ModuleIdentity, value.AssemblySha256,
                 value.Mvid, value.PdbSha256, value.DebugIdentity)));
-        values.AddRange(manifest.Executions.Select(value =>
-            CanonicalIdentity.Tuple("execution", value.Id, value.ContextId, value.BuildId, value.Completed.ToString(),
+        values.AddRange(manifest.Executions.Select(value => string.IsNullOrEmpty(value.TestProject)
+            ? CanonicalIdentity.Tuple("execution", value.Id, value.ContextId, value.BuildId, value.Completed.ToString(),
                 value.ExitCode.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 value.TotalTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 value.PassedTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 value.FailedTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 value.SkippedTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                value.TestModuleIdentity, value.TestAssemblySha256, value.TestMvid, value.TestPdbSha256,
+                value.TestDebugIdentity)
+            : CanonicalIdentity.Tuple("execution-with-test-project-v1", value.Id, value.ContextId, value.BuildId,
+                value.Completed.ToString(), value.ExitCode.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                value.TotalTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                value.PassedTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                value.FailedTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                value.SkippedTests.ToString(System.Globalization.CultureInfo.InvariantCulture), value.TestProject,
                 value.TestModuleIdentity, value.TestAssemblySha256, value.TestMvid, value.TestPdbSha256,
                 value.TestDebugIdentity)));
         values.AddRange(manifest.Artifacts.Select(value =>
@@ -516,7 +533,7 @@ public static class ProvenanceVerifier
     }
     private static string InputKey(ManifestInput input) => input.Role + "\n" + input.LogicalPath;
     private static string InputKey(CurrentInputEvidence input) => input.Role + "\n" + input.LogicalPath;
-    private static bool IsCurrentWorkspaceInput(ManifestInput input) => !input.Generated && input.Role != "reference";
+    private static bool IsCurrentWorkspaceInput(ManifestInput input) => !input.Generated;
     private static IReadOnlyDictionary<string, string>? ResolveDocuments(
         IReadOnlyDictionary<string, string> documents, IReadOnlyList<string> logicalPaths,
         CapturedPathPolicy pathPolicy)

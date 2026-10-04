@@ -16,7 +16,8 @@ public sealed record PolicyEvaluationResult(int ExitCode, string Decision, IRead
 public static class PolicyEvaluator
 {
     public static PolicyEvaluationResult Evaluate(RepositoryPolicy policy, BaselineDocument? baseline,
-        IReadOnlyList<PolicyObservation> observations, IReadOnlyList<PolicyExemption> exemptions)
+        IReadOnlyList<PolicyObservation> observations, IReadOnlyList<PolicyExemption> exemptions,
+        string? expectedPolicyHash = null)
     {
         ArgumentNullException.ThrowIfNull(policy);
         ArgumentNullException.ThrowIfNull(observations);
@@ -26,17 +27,21 @@ public static class PolicyEvaluator
             operational.Add("baseline.required");
         if (baseline is not null)
         {
-            try { BaselineDocument.Validate(baseline, baseline.PolicyHash, policy.Ruleset); }
+            try { BaselineDocument.Validate(baseline, expectedPolicyHash ?? baseline.PolicyHash, policy.Ruleset); }
             catch (BaselineException exception) { operational.Add(exception.Code); }
         }
         var duplicate = observations.GroupBy(item => (item.EntityKey, item.Rule, item.ContextId))
             .FirstOrDefault(group => group.Count() > 1);
         if (duplicate is not null) operational.Add("policy.duplicateObservation");
+        if (exemptions.GroupBy(item => (item.EntityKey, item.Rule, item.ContextId, item.CoverageReason))
+            .Any(group => group.Count() > 1))
+            operational.Add("exemption.duplicate");
 
         var findings = new List<PolicyFinding>();
         var exempted = new List<string>();
         var applicable = policy.Mode == RepositoryPolicyMode.Strict ? observations : observations.Where(item => item.Selected);
-        var baselineByKey = (baseline?.Entries ?? []).ToDictionary(item => (item.EntityKey, item.Rule));
+        var baselineByKey = (baseline?.Entries ?? []).GroupBy(item => (item.EntityKey, item.Rule))
+            .ToDictionary(group => group.Key, group => group.First());
         foreach (var item in applicable.OrderBy(item => item.ContextId, StringComparer.Ordinal)
             .ThenBy(item => item.EntityKey, StringComparer.Ordinal).ThenBy(item => item.Rule, StringComparer.Ordinal))
         {
@@ -48,7 +53,7 @@ public static class PolicyEvaluator
             if (item.Coverage is null || item.Crap is null || !double.IsFinite(item.Crap.Value) ||
                 !double.IsFinite(item.Coverage.Value))
             {
-                var exemption = exemptions.SingleOrDefault(value => value.EntityKey == item.EntityKey &&
+                var exemption = exemptions.FirstOrDefault(value => value.EntityKey == item.EntityKey &&
                     value.Rule == item.Rule && value.ContextId == item.ContextId && value.CoverageReason == item.CoverageReason &&
                     !string.IsNullOrWhiteSpace(value.Reason) && IsNarrowUnsupportedReason(value.CoverageReason));
                 if (exemption is not null) exempted.Add(item.EntityKey);

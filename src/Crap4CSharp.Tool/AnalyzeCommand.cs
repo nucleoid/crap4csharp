@@ -6,7 +6,7 @@ using Microsoft.CodeAnalysis.CSharp;
 internal static class AnalyzeCommand
 {
     public static ResultDocument Replay(string manifestPath, string workingDirectory, string? outputPath,
-        DateTimeOffset startedAt, TimeSpan duration, CancellationToken cancellationToken)
+        DateTimeOffset startedAt, TimeSpan duration, CancellationToken cancellationToken, bool allSources = false)
     {
         var bundle = ArtifactBundle.Load(manifestPath, workingDirectory);
         if (outputPath is not null) bundle.RejectOutputAlias(outputPath, workingDirectory);
@@ -25,7 +25,7 @@ internal static class AnalyzeCommand
             foreach (var context in manifest.Contexts.OrderBy(item => item.Id, StringComparer.Ordinal))
             {
                 var sourceInputs = context.Inputs.Where(input => input.Role == "source" && !input.Generated &&
-                        scopedSources.Contains(input.LogicalPath))
+                        (allSources || scopedSources.Contains(input.LogicalPath)))
                     .OrderBy(input => input.LogicalPath, StringComparer.Ordinal).ToArray();
                 var sources = sourceInputs.Select(input =>
                 {

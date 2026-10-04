@@ -65,6 +65,19 @@ public sealed class BaselineTests
         Assert.Throws<BaselineException>(() => BaselineDocument.Validate(Baseline(entry), "other", "callables-v1"));
     }
 
+    [Fact]
+    public void EvaluatorReturnsOperationalFailureInsteadOfThrowingForDuplicateBaselineEntries()
+    {
+        var entry = new BaselineEntry("method", "key", "crap.thresholdExceeded", "callables-v1",
+            "a.cs", "body", 4, .5, 6);
+
+        var result = Evaluate(Policy(RepositoryPolicyMode.Incremental), Baseline(entry, entry),
+            Observation(4, .5, 6));
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("baseline.duplicateIdentity", result.OperationalReasons);
+    }
+
     private static PolicyEvaluationResult Evaluate(RepositoryPolicy policy, BaselineDocument? baseline,
         PolicyObservation observation) => PolicyEvaluator.Evaluate(policy, baseline, [observation], []);
 

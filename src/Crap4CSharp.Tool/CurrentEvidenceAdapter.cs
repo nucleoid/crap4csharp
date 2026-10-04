@@ -82,6 +82,24 @@ internal static class CurrentEvidenceAdapter
                     new CurrentInputEvidence(declaration.Role, declaration.LogicalPath,
                         declaration.Length, source.ContentIdentity);
             }
+            var expectedReferences = expected.Inputs.Where(input => input.Role == "reference" && !input.Generated)
+                .OrderBy(input => input.LogicalPath, StringComparer.Ordinal).ToArray();
+            var referenceMappings = recipe.References.OrderBy(item => item.LogicalPath, StringComparer.Ordinal).ToArray();
+            if (referenceMappings.Select(item => item.LogicalPath).Distinct(StringComparer.Ordinal).Count() != referenceMappings.Length ||
+                !expectedReferences.Select(item => item.LogicalPath)
+                    .SequenceEqual(referenceMappings.Select(item => item.LogicalPath), StringComparer.Ordinal))
+                throw new InvalidDataException("Current reference revalidation mappings are incomplete or ambiguous.");
+            foreach (var reference in expectedReferences)
+            {
+                var mapping = referenceMappings.Single(item => item.LogicalPath == reference.LogicalPath);
+                var referencePath = ResolveRegularFile(root, NormalizeRecipePath(mapping.WorkspacePath))
+                    ?? throw new InvalidDataException($"Current reference is missing: {mapping.WorkspacePath}");
+                var bytes = ArtifactBundle.ReadBounded(referencePath, ArtifactBundle.MaxArtifactBytes, null,
+                    mapping.WorkspacePath);
+                verifiedInputs[reference.Role + "\n" + reference.LogicalPath] =
+                    new CurrentInputEvidence(reference.Role, reference.LogicalPath, bytes.Length,
+                        CanonicalIdentity.Sha256(bytes));
+            }
             var parse = expected.ParseOptions ?? throw new InvalidDataException("Captured context has no parse options.");
             if (!Microsoft.CodeAnalysis.CSharp.LanguageVersionFacts.TryParse(parse.LanguageVersion,
                     out var capturedLanguageVersion) || capturedLanguageVersion != current.LanguageVersion ||
@@ -103,7 +121,7 @@ internal static class CurrentEvidenceAdapter
                 throw new InvalidDataException("Current compiled output differs from captured tested build evidence.");
             hashes.Add(expected.Id, expected.ContextHash);
         }
-        foreach (var input in basic.Inputs.Where(input => input.Role != "source"))
+        foreach (var input in basic.Inputs.Where(input => input.Role is not ("source" or "reference")))
             verifiedInputs[input.Role + "\n" + input.LogicalPath] = input;
         return basic with { Inputs = verifiedInputs.Values.OrderBy(input => input.LogicalPath, StringComparer.Ordinal).ToArray(),
             ContextHashes = hashes, MembershipRecipeRevalidated = true };

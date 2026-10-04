@@ -23,6 +23,12 @@ internal static class BaselineCommand
             var parsedPolicy = RepositoryPolicyParser.Parse(policyBytes, policyPath);
             if (parsedPolicy.Policy.Mode != RepositoryPolicyMode.Strict)
                 throw new PolicyException("baseline.strictPolicyRequired", "Baseline generation requires a strict baseline-optional onboarding policy.");
+            if (parsedPolicy.Policy.Scope != "all")
+                throw new PolicyException("baseline.fullScopeRequired", "Baseline generation requires policy scope 'all'.");
+            var exemptionBytes = parsedPolicy.Policy.ExemptionFiles.ToDictionary(path => path,
+                path => File.ReadAllBytes(Path.Combine(root, path.Replace('/', Path.DirectorySeparatorChar))),
+                StringComparer.Ordinal);
+            var compatibilityHash = TrustedPolicyLoader.BoundCompatibilityHash(parsedPolicy, exemptionBytes);
             var bundle = ArtifactBundle.Load(options.Manifest, root);
             bundle.RejectOutputAlias(options.Output, root);
             var outputPath = Path.GetFullPath(options.Output, root);
@@ -34,6 +40,7 @@ internal static class BaselineCommand
                 throw new BaselineException("baseline.rulesetMismatch", "Captured ruleset does not match policy.");
             if (bundle.Manifest.EvaluationInputs.PolicyHash != parsedPolicy.Hash)
                 throw new BaselineException("baseline.policyMismatch", "Captured evidence was not evaluated under the supplied policy bytes.");
+            ValidatePolicyCoverage(bundle.Manifest, parsedPolicy.Policy);
             var structural = ProvenanceVerifier.VerifyCaptureCancellable(bundle.Manifest, bundle.Bytes,
                 parsedPolicy.Policy.Ruleset, cancellationToken);
             if (structural.Status == ProvenanceStatus.Invalid)
@@ -51,14 +58,16 @@ internal static class BaselineCommand
                 throw new InvalidDataException(string.Join(", ", provenance.Reasons));
             var replay = AnalyzeCommand.Replay(options.Manifest, root, null, DateTimeOffset.UtcNow,
                 TimeSpan.Zero, cancellationToken);
-            var observations = Observations(replay).ToArray();
+            var observations = Observations(replay).Where(item => !Excluded(parsedPolicy.Policy, item.Path)).ToArray();
+            var ambiguous = observations.Where(item => item.IdentityAmbiguous).ToArray();
+            observations = observations.Where(item => !item.IdentityAmbiguous).ToArray();
             if (observations.Any(item => item.Coverage is null || item.Crap is null))
                 throw new InvalidDataException("Baseline generation requires known coverage for every applicable callable and family.");
             var policyResult = PolicyEvaluator.Evaluate(parsedPolicy.Policy, null, observations, []);
             if (policyResult.ExitCode == 1)
                 throw new InvalidDataException(string.Join(", ", policyResult.OperationalReasons));
-            if (options.Verb == "update") ValidateExistingBaseline(root, parsedPolicy);
-            var candidate = BaselineDocument.Generate(parsedPolicy.Hash, parsedPolicy.Policy.Ruleset,
+            if (options.Verb == "update") ValidateExistingBaseline(root, parsedPolicy, compatibilityHash);
+            var candidate = BaselineDocument.Generate(compatibilityHash, parsedPolicy.Policy.Ruleset,
                 bundle.Manifest.Revision.WorkspaceIdentity, bundle.Manifest.Revision.Head ?? "none",
                 parsedPolicy.Policy.Threshold, observations);
             var candidateBytes = BaselineDocument.Serialize(candidate);
@@ -72,7 +81,9 @@ internal static class BaselineCommand
                 candidatePath = Path.GetRelativePath(root, outputPath).Replace('\\', '/'),
                 candidateHash = CanonicalIdentity.Sha256(candidateBytes),
                 entries = candidate.Entries.Count,
+                skippedAmbiguousIdentities = ambiguous.Length,
                 policyHash = parsedPolicy.Hash,
+                policyCompatibilityHash = compatibilityHash,
                 evidenceManifestHash = bundle.Manifest.ManifestHash,
                 decision = policyResult.Decision,
                 exitCode = policyResult.ExitCode
@@ -144,20 +155,48 @@ internal static class BaselineCommand
                     callable.CoverageReason, true, callable.CoverageReason == CoverageReasonCodes.AmbiguousCallableOwnership);
         foreach (var family in result.Evaluation.Families ?? [])
         {
-            var root = (result.Evaluation.Callables ?? []).First(item => item.CallableId == family.RootCallableId);
+            var roots = (result.Evaluation.Callables ?? []).Where(item => item.CallableId == family.RootCallableId).ToArray();
+            if (roots.Length != 1)
+                throw new InvalidDataException("A callable family did not resolve to exactly one captured root.");
+            var root = roots[0];
             yield return new PolicyObservation("family", family.FamilyId, CallableFamilyEvaluator.Rule,
                 result.ComplexityRulesetVersion, root.ContextId, root.Path, root.BodyChecksum, family.Complexity,
-                family.Coverage, family.Crap, family.IncompleteReasons.FirstOrDefault(), true, false);
+                family.Coverage, family.Crap, family.IncompleteReasons.FirstOrDefault(), true,
+                family.IncompleteReasons.Contains(CoverageReasonCodes.AmbiguousCallableOwnership, StringComparer.Ordinal));
         }
     }
 
-    private static void ValidateExistingBaseline(string root, ParsedRepositoryPolicy parsed)
+    private static bool Excluded(RepositoryPolicy policy, string path) => policy.Exclusions.Any(exclusion =>
+        path == exclusion || path.StartsWith(exclusion.TrimEnd('/') + "/", StringComparison.Ordinal));
+
+    private static void ValidateExistingBaseline(string root, ParsedRepositoryPolicy parsed, string compatibilityHash)
     {
         if (parsed.Policy.BaselinePath is null)
             throw new BaselineException("baseline.updateSourceMissing", "Baseline update requires policy.baseline.");
         var path = Path.Combine(root, parsed.Policy.BaselinePath.Replace('/', Path.DirectorySeparatorChar));
         if (!File.Exists(path)) throw new BaselineException("baseline.updateSourceMissing", "Existing baseline is missing.");
-        BaselineDocument.Validate(BaselineDocument.Parse(File.ReadAllBytes(path)), parsed.Hash, parsed.Policy.Ruleset);
+        BaselineDocument.Validate(BaselineDocument.Parse(File.ReadAllBytes(path)), compatibilityHash,
+            parsed.Policy.Ruleset);
+    }
+
+    private static void ValidatePolicyCoverage(RunManifest manifest, RepositoryPolicy policy)
+    {
+        var contexts = manifest.Contexts.Select(context =>
+            (Project: CanonicalIdentity.NormalizeLogicalPath(context.Project), context.TargetFramework,
+                context.Configuration)).OrderBy(item => item.Project, StringComparer.Ordinal)
+            .ThenBy(item => item.TargetFramework, StringComparer.Ordinal).ToArray();
+        var expectedContexts = policy.ProductionProjects.SelectMany(project => policy.TargetFrameworks.Select(framework =>
+            (Project: project, TargetFramework: framework, Configuration: policy.Configuration)))
+            .OrderBy(item => item.Project, StringComparer.Ordinal).ThenBy(item => item.TargetFramework, StringComparer.Ordinal).ToArray();
+        if (!contexts.SequenceEqual(expectedContexts))
+            throw new PolicyException("baseline.productionContextMismatch",
+                "Captured production project, target framework, or configuration coverage differs from policy.");
+        var testProjects = manifest.Executions.Select(item => item.TestProject)
+            .Where(item => !string.IsNullOrWhiteSpace(item)).Select(CanonicalIdentity.NormalizeLogicalPath)
+            .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        if (!testProjects.SequenceEqual(policy.TestProjects.Order(StringComparer.Ordinal), StringComparer.Ordinal))
+            throw new PolicyException("baseline.testTargetMismatch",
+                "Captured test execution targets differ from policy testProjects.");
     }
 
     private static string RepositoryRelative(string root, string value)

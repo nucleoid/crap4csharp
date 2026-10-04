@@ -38,8 +38,8 @@ public sealed record RepositoryPolicy(
     public const string Version = "repository-policy-v1";
 }
 
-public sealed record ParsedRepositoryPolicy(RepositoryPolicy Policy, string Hash, byte[] CanonicalBytes,
-    string PolicyPath);
+public sealed record ParsedRepositoryPolicy(RepositoryPolicy Policy, string Hash, string CompatibilityHash,
+    byte[] CanonicalBytes, string PolicyPath);
 
 public sealed class PolicyException(string code, string message) : Exception(message)
 {
@@ -116,7 +116,8 @@ public static class RepositoryPolicyParser
                 frameworks, scope, threshold, MissingCoveragePolicy.Fail, checks, exclusions, ruleset, baseline,
                 exemptions, overrides);
             var canonical = Canonicalize(policy, directory);
-            return new ParsedRepositoryPolicy(policy, CanonicalIdentity.Sha256(canonical), canonical, normalizedPolicyPath);
+            return new ParsedRepositoryPolicy(policy, CanonicalIdentity.Sha256(canonical), CompatibilityHash(policy),
+                canonical, normalizedPolicyPath);
         }
         catch (JsonException exception)
         {
@@ -255,6 +256,32 @@ public static class RepositoryPolicyParser
         }
         stream.WriteByte((byte)'\n');
         return stream.ToArray();
+    }
+
+    public static string CompatibilityHash(RepositoryPolicy policy)
+    {
+        var values = new List<string>
+        {
+            CanonicalIdentity.Tuple("policy-compatibility-header-v1", policy.SchemaVersion, policy.Ruleset,
+                policy.Configuration, policy.Threshold.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+                "missingCoverage:fail")
+        };
+        values.AddRange(policy.ProductionProjects.Select(value => CanonicalIdentity.Tuple("production", value)));
+        values.AddRange(policy.TestProjects.Select(value => CanonicalIdentity.Tuple("test", value)));
+        values.AddRange(policy.TargetFrameworks.Select(value => CanonicalIdentity.Tuple("framework", value)));
+        values.AddRange(policy.RequiredChecks.Select(value => CanonicalIdentity.Tuple("check", value)));
+        values.AddRange(policy.Exclusions.Select(value => CanonicalIdentity.Tuple("exclusion", value)));
+        values.AddRange(policy.ExemptionFiles.Select(value => CanonicalIdentity.Tuple("exemption", value)));
+        return CanonicalIdentity.Set("repository-policy-compatibility-v1", values);
+    }
+
+    public static string BindExemptions(string compatibilityHash,
+        IEnumerable<KeyValuePair<string, ReadOnlyMemory<byte>>> exemptions)
+    {
+        var values = new List<string> { CanonicalIdentity.Tuple("policy", compatibilityHash) };
+        values.AddRange(exemptions.OrderBy(item => item.Key, StringComparer.Ordinal).Select(item =>
+            CanonicalIdentity.Tuple("exemption", item.Key, CanonicalIdentity.Sha256(item.Value.Span))));
+        return CanonicalIdentity.Set("repository-policy-binding-v1", values);
     }
 
     private static void Array(Utf8JsonWriter writer, string name, IEnumerable<string> values)

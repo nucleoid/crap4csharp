@@ -9,9 +9,6 @@ internal static class CapturedEvaluationInputs
 {
     public static (CapturedScope Scope, CapturedPolicy Policy) Read(ArtifactBundle bundle)
     {
-        if (bundle.Manifest.EvaluationInputs.BaselineHash is not null ||
-            bundle.Manifest.EvaluationInputs.ExemptionsHash is not null)
-            throw new InvalidDataException("Captured baseline and exemption evaluation is not supported by this reader version.");
         var scope = ParseScope(Bytes(bundle, "scope"));
         var policy = ParsePolicy(Bytes(bundle, "policy"));
         if (bundle.Manifest.Producer.ComplexityRuleset == ComplexityRules.CallablesV1 && policy.AllowMissingCoverage)
@@ -66,8 +63,6 @@ internal static class CapturedEvaluationInputs
                 schema.ValueKind == JsonValueKind.String && schema.GetString() == RepositoryPolicy.Version)
             {
                 var parsed = RepositoryPolicyParser.Parse(bytes.AsSpan(), "policy.json");
-                if (parsed.Policy.Mode != RepositoryPolicyMode.Strict)
-                    throw new InvalidDataException("Captured baseline onboarding policy must be strict.");
                 return new CapturedPolicy(parsed.Policy.Threshold, false);
             }
             if (root.ValueKind != JsonValueKind.Object || root.GetProperty("version").GetInt32() != 1)

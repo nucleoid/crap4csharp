@@ -65,6 +65,8 @@ internal static class App
           --syntax-only      Analyze captured source and coverage without launching child processes.
           --reuse-artifacts <manifest>
                              Replay a hash-bound captured bundle without loading projects or running processes.
+          --policy <path>    Repository policy path resolved from the immutable merge-base for check.
+          --base <ref>       CI-authorized base ref used to resolve trusted policy and changed scope.
           --format <value>   Render human (default) or json output.
           --output <path>    Atomically write the versioned JSON result document to path.
           -h, --help         Show help and perform no discovery, tests, or writes.
@@ -190,12 +192,13 @@ internal static class App
         try
         {
             options = ParseModern(args);
-            if (options.Command == "check")
-                throw new ArgumentException(options.Ruleset == ComplexityRules.OrdinaryMethodsV1
-                    ? "check requires callables-v1; ordinary-methods-v1 is available through the legacy option-only invocation."
-                    : "check orchestration is reserved for issue #10; use analyze --syntax-only for the issue #7 adapter.");
+            if (options.Command == "check" && options.Ruleset == ComplexityRules.OrdinaryMethodsV1)
+                throw new ArgumentException("check requires callables-v1; ordinary-methods-v1 is available through the legacy option-only invocation.");
             cancellationToken.ThrowIfCancellationRequested();
-            var result = options.ReuseArtifacts is not null
+            var result = options.Command == "check"
+                ? await PolicyCheckCommand.RunAsync(options.ReuseArtifacts!, options.Policy!, options.Base!,
+                    workingDirectory, options.Timeout, startedAt, stopwatch.Elapsed, cancellationToken)
+                : options.ReuseArtifacts is not null
                 ? AnalyzeCommand.Replay(options.ReuseArtifacts, workingDirectory, options.Output,
                     startedAt, stopwatch.Elapsed, cancellationToken)
                 : options.Ruleset == ComplexityRules.OrdinaryMethodsV1
@@ -206,7 +209,8 @@ internal static class App
             {
                 var inputs = options.Inputs.Concat(options.Coverage)
                     .Concat(options.ReuseArtifacts is null ? [] : [options.ReuseArtifacts])
-                    .Concat(options.Exemptions is null ? [] : [options.Exemptions]);
+                    .Concat(options.Exemptions is null ? [] : [options.Exemptions])
+                    .Concat(options.Policy is null ? [] : [options.Policy]);
                 if (FindOutputAlias(options.Output, workingDirectory, inputs, [], null) is not null)
                     throw new ArgumentException("Output path aliases a source, coverage, or exemption input.");
                 await ResultWriter.WriteAtomicAsync(Path.GetFullPath(options.Output, workingDirectory), json,
@@ -239,7 +243,8 @@ internal static class App
                     {
                         var inputs = options.Inputs.Concat(options.Coverage)
                             .Concat(options.ReuseArtifacts is null ? [] : [options.ReuseArtifacts])
-                            .Concat(options.Exemptions is null ? [] : [options.Exemptions]);
+                            .Concat(options.Exemptions is null ? [] : [options.Exemptions])
+                            .Concat(options.Policy is null ? [] : [options.Policy]);
                         mayWrite = FindOutputAlias(destination, workingDirectory, inputs, [], null) is null;
                         if (mayWrite && options.ReuseArtifacts is not null)
                         {
@@ -306,6 +311,20 @@ internal static class App
                     if (!seen.Add(arg)) throw new ArgumentException("--project may be specified only once.");
                     options.Project = Value();
                     break;
+                case "--policy":
+                    if (!seen.Add(arg)) throw new ArgumentException("--policy may be specified only once.");
+                    options.Policy = Value();
+                    break;
+                case "--base":
+                    if (!seen.Add(arg)) throw new ArgumentException("--base may be specified only once.");
+                    options.Base = Value();
+                    break;
+                case "--timeout-seconds":
+                    if (!seen.Add(arg) || !int.TryParse(Value(), NumberStyles.None, CultureInfo.InvariantCulture,
+                            out var timeoutSeconds) || timeoutSeconds is < 1 or > 86400)
+                        throw new ArgumentException("Timeout must be a whole number of seconds from 1 through 86400.");
+                    options.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
+                    break;
                 case "--coverage": options.Coverage.Add(Value()); break;
                 case "--coverage-path-map":
                     if (index + 2 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal) ||
@@ -360,14 +379,20 @@ internal static class App
             throw new ArgumentException("--allow-missing-coverage is only available with ordinary-methods-v1.");
         if (options.ReuseArtifacts is not null)
         {
-            if (options.Command != "analyze" || options.SyntaxOnly || options.Inputs.Count > 0 || options.Coverage.Count > 0 ||
+            if (options.SyntaxOnly || options.Inputs.Count > 0 || options.Coverage.Count > 0 ||
                 options.CoveragePathMappings.Count > 0 || options.CoveragePathCase != CoveragePathCase.Auto ||
                 options.Exemptions is not null || options.Project is not null || options.AllowMissingCoverage ||
                 seen.Contains("--ruleset") || seen.Contains("--threshold"))
                 throw new ArgumentException("--reuse-artifacts cannot be combined with live source, project, coverage, mapping, case, syntax-only, or exemption inputs.");
+            if (options.Command == "check" && (options.Policy is null || options.Base is null))
+                throw new ArgumentException("check --reuse-artifacts requires --policy and --base.");
+            if (options.Command == "analyze" && (options.Policy is not null || options.Base is not null))
+                throw new ArgumentException("--policy and --base are available only with check.");
         }
         else if (options.Command == "analyze" && !options.SyntaxOnly)
             throw new ArgumentException("analyze requires either --reuse-artifacts or --syntax-only.");
+        else if (options.Command == "check")
+            throw new ArgumentException("check currently requires --reuse-artifacts, --policy, and --base.");
         if (options.Command == "analyze" && options.SyntaxOnly && options.Project is not null)
             throw new ArgumentException("--project is not available with analyze --syntax-only.");
         return options;
@@ -1094,7 +1119,8 @@ internal static class App
             outcome.Reason ?? "execution.failed", true)];
     private static bool IsHandled(Exception exception) => exception is ArgumentException or IOException or UnauthorizedAccessException or
         DecoderFallbackException or
-        InvalidDataException or InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception or OperationCanceledException;
+        InvalidDataException or InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception or OperationCanceledException or
+        PolicyException or BaselineException;
 
     private static EvaluationProvenance UnverifiedProvenance() =>
         new("unverified", "none", false, false, []);
@@ -1192,6 +1218,9 @@ internal static class App
         public bool SyntaxOnly { get; set; }
         public string? ReuseArtifacts { get; set; }
         public string? Project { get; set; }
+        public string? Policy { get; set; }
+        public string? Base { get; set; }
+        public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(300);
         public double Threshold { get; set; } = 8;
         public bool AllowMissingCoverage { get; set; }
         public string Format { get; set; } = "human";
