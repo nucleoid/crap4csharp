@@ -25,6 +25,17 @@ public sealed record CoverageMethod(string? File, string TypeName, string Method
 
 public static class CoverageReader
 {
+    public static IReadOnlyList<CoverageMethod> Read(ReadOnlySpan<byte> bytes, string logicalReportPath)
+    {
+        var parsed = ReadCapturedDocument(bytes, logicalReportPath);
+        return parsed.Document.Root?.Name.LocalName switch
+        {
+            "CoverageSession" => ReadOpenCoverCompatibility(parsed.Document, parsed.Directory, parsed.ReportId),
+            "coverage" => ReadCoberturaCompatibility(parsed.Document, parsed.Directory, parsed.ReportId),
+            var root => throw new InvalidDataException($"Unsupported coverage XML root '{root ?? "(missing)"}' in {logicalReportPath}")
+        };
+    }
+
     public static IReadOnlyList<CoverageMethod> Read(string reportPath)
     {
         var parsed = ReadDocument(reportPath);
@@ -68,6 +79,32 @@ public static class CoverageReader
         catch (XmlException exception)
         {
             throw new InvalidDataException($"Malformed coverage XML in {reportPath}: {exception.Message}", exception);
+        }
+    }
+
+    private static ParsedDocument ReadCapturedDocument(ReadOnlySpan<byte> bytes, string logicalReportPath)
+    {
+        if (bytes.Length > 100_000_000) throw new InvalidDataException($"Coverage XML exceeds the 100 MB limit: {logicalReportPath}");
+        try
+        {
+            using var stream = new MemoryStream(bytes.ToArray(), writable: false);
+            using var reader = XmlReader.Create(stream, new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Prohibit,
+                XmlResolver = null,
+                MaxCharactersInDocument = 100_000_000
+            });
+            var document = XDocument.Load(reader, LoadOptions.SetLineInfo);
+            var reportId = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+            var logical = logicalReportPath.Replace('\\', '/');
+            var slash = logical.LastIndexOf('/');
+            var root = OperatingSystem.IsWindows() ? @"C:\" : "/";
+            var directory = slash < 0 ? root : Path.Combine(root, logical[..slash].Replace('/', Path.DirectorySeparatorChar));
+            return new ParsedDocument(document, directory, reportId);
+        }
+        catch (XmlException exception)
+        {
+            throw new InvalidDataException($"Malformed coverage XML in {logicalReportPath}: {exception.Message}", exception);
         }
     }
 
