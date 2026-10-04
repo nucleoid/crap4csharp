@@ -163,6 +163,20 @@ public sealed class ArtifactCaptureTests
     }
 
     [Fact]
+    public void LoaderRejectsNullRootItemsBeforeDeserialization()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-bundle-null-root");
+        var fixture = CreateFixture();
+        var locator = ArtifactCaptureAdapter.PublishNew(fixture.Manifest, fixture.Bytes,
+            Path.Combine(directory.Path, "bundle"));
+        var json = File.ReadAllText(locator).Replace("\"roots\": [\n    {",
+            "\"roots\": [\n    null,\n    {", StringComparison.Ordinal);
+        File.WriteAllText(locator, json);
+
+        Assert.Throws<InvalidDataException>(() => ArtifactBundle.Load(locator, directory.Path));
+    }
+
+    [Fact]
     public void ThreePhaseValidationAcceptsExpectedGeneratedTransitionButNotAuthoredDrift()
     {
         var authored = new ManifestInput("source", "src/C.cs", "artifacts/source.bin", 3,

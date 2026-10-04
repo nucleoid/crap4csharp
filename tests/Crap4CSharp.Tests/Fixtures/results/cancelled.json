@@ -8,6 +8,7 @@
   "coverage": { "methods": 0, "known": 0, "unknown": 0, "reasons": {} },
   "artifacts": [{ "kind": "source", "path": "tests/Crap4CSharp.Tests/Fixtures/results/source.cs", "contentIdentity": "b1c506b05ce0758025417a551856116c13d29457fc7ab2fd2ab404a926551b4d", "identityStatus": "sha256" }],
   "decision": { "completed": false, "policyDecision": "unknown", "reason": "run.cancelled" },
+  "provenance": { "status": "unverified", "basis": "none", "postflightVerified": false, "reusable": false, "reasons": [] },
   "coveragePathPolicy": { "case": "auto", "mappings": [] },
   "coverageDiagnostics": []
 }

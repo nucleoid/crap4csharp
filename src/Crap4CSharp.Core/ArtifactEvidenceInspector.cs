@@ -128,9 +128,13 @@ public static class ArtifactEvidenceInspector
                 Attribute(counters, "notRunnable") + Attribute(counters, "inconclusive");
             var notExecuted = Attribute(counters, "notExecuted");
             var executed = Attribute(counters, "executed");
-            var skipped = notExecuted;
-            if (total <= 0 || passed < 0 || failed < 0 || skipped < 0 || executed + notExecuted != total ||
-                passed + failed > executed || passed == 0)
+            // VSTest includes skipped results in total but excludes them from both
+            // executed and notExecuted. Microsoft.Testing.Platform may instead place
+            // them in notExecuted, so accept either representation while binding the
+            // same derived skipped count.
+            var skipped = total - executed;
+            if (total <= 0 || passed < 0 || failed < 0 || executed < 0 || executed > total || skipped < 0 ||
+                passed + failed != executed || (notExecuted != 0 && notExecuted != skipped) || passed == 0)
                 throw new InvalidDataException("Captured TRX counters are inconsistent.");
             var storageModules = document.Descendants().Where(element => element.Name.LocalName == "UnitTest")
                 .Select(element => element.Attribute("storage")?.Value)
@@ -324,12 +328,14 @@ public static class ArtifactEvidenceInspector
                             counts.GetValueOrDefault(line) > (lineSet.Contains(line) ? 1 : 0))) return false;
             return true;
         }
-        return reported.SequencePoints.Count == points.Length && reported.SequencePoints.All(reportPoint =>
-            points.Any(point => point.StartLine == reportPoint.Line &&
-                point.StartColumn == reportPoint.StartColumn &&
-                point.EndLine == reportPoint.EndLine &&
-                point.EndColumn == reportPoint.EndColumn &&
-                point.Offset == reportPoint.Offset));
+        var reportedPoints = reported.SequencePoints.Select(point =>
+            (point.Line, point.StartColumn, point.EndLine, point.EndColumn, point.Offset)).ToArray();
+        var compiledPoints = points.Select(point =>
+            (Line: point.StartLine, StartColumn: (int?)point.StartColumn, EndLine: (int?)point.EndLine,
+                EndColumn: (int?)point.EndColumn, Offset: (int?)point.Offset)).ToArray();
+        return reportedPoints.Length == reportedPoints.Distinct().Count() &&
+            compiledPoints.Length == compiledPoints.Distinct().Count() &&
+            reportedPoints.ToHashSet().SetEquals(compiledPoints);
     }
 
 }

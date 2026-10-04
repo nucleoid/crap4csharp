@@ -481,6 +481,46 @@ public sealed class ProvenanceTests
     }
 
     [Fact]
+    public void RealVstestTrxDerivesSkippedTestsFromTotalMinusExecuted()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Provenance", "vstest-skipped.trx");
+        var evidence = ArtifactEvidenceInspector.InspectTrx(ImmutableArray.Create(File.ReadAllBytes(path)));
+
+        Assert.Equal(2, evidence.Total);
+        Assert.Equal(1, evidence.Passed);
+        Assert.Equal(0, evidence.Failed);
+        Assert.Equal(1, evidence.Skipped);
+        Assert.Contains("trx-probe", evidence.StorageModules, StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ExactCoordinateEvidenceRejectsADuplicatedPointThatDropsAnotherPoint()
+    {
+        var parts = FixtureParts();
+        var method = parts.Build.Methods.Single(item =>
+            item.TypeName == "Crap4CSharp.ProvenanceFixture.CompiledEvidence" && item.MethodName == "M");
+        Assert.True(method.SequencePoints.Count > 1);
+        var repeated = method.SequencePoints.Select((point, index) =>
+            index == method.SequencePoints.Count - 1 ? method.SequencePoints[0] : point).ToArray();
+        var points = string.Concat(repeated.Select(point =>
+            $"<SequencePoint vc=\"1\" sl=\"{point.StartLine}\" sc=\"{point.StartColumn}\" " +
+            $"el=\"{point.EndLine}\" ec=\"{point.EndColumn}\" offset=\"{point.Offset}\" fileid=\"1\" />"));
+        var xml = $$"""
+            <CoverageSession><Modules><Module><ModuleName>{{parts.Build.ModuleIdentity}}</ModuleName>
+              <Files><File uid="1" fullPath="{{method.SequencePoints[0].Document}}" /></Files>
+              <Classes><Class><FullName>{{method.TypeName}}</FullName><Methods><Method>
+                <Name>System.Int32 {{method.TypeName}}::M()</Name><FileRef uid="1" />
+                <SequencePoints>{{points}}</SequencePoints>
+              </Method></Methods></Class></Classes>
+            </Module></Modules></CoverageSession>
+            """;
+
+        Assert.False(ArtifactEvidenceInspector.CoverageMatchesBuild(
+            ImmutableArray.Create(Encoding.UTF8.GetBytes(xml)), "artifacts/coverage.xml", parts.Build,
+            [CompiledSource], new CapturedPathPolicy(true, [new ManifestReportRootMapping("/_/", "")])));
+    }
+
+    [Fact]
     public void CanonicalManifestIdentityMatchesPublishedGoldenVector()
     {
         var sourceHash = CanonicalIdentity.Sha256([1, 2, 3]);

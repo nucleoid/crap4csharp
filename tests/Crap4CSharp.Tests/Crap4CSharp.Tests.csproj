@@ -18,5 +18,6 @@
     <None Include="Fixtures/legacy-1.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures/ProjectContexts/**/*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures/Provenance/*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures/Provenance/*.trx" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

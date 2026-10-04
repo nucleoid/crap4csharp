@@ -22,6 +22,7 @@
     { "kind": "source", "path": "tests/Crap4CSharp.Tests/Fixtures/results/source.cs", "contentIdentity": "b1c506b05ce0758025417a551856116c13d29457fc7ab2fd2ab404a926551b4d", "identityStatus": "sha256" }
   ],
   "decision": { "completed": true, "policyDecision": "fail", "reason": "crap.thresholdExceeded" },
+  "provenance": { "status": "unverified", "basis": "none", "postflightVerified": false, "reusable": false, "reasons": [] },
   "coveragePathPolicy": { "case": "auto", "mappings": [] },
   "coverageDiagnostics": []
 }

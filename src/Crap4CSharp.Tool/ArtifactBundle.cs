@@ -121,6 +121,14 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
         }
         if (root.GetProperty("contexts").GetArrayLength() == 0)
             throw new InvalidDataException("Artifact manifest contains no analysis context.");
+        foreach (var manifestRoot in root.GetProperty("roots").EnumerateArray())
+        {
+            Require(manifestRoot, "id", "logicalName", "casePolicy");
+            if (manifestRoot.GetProperty("id").ValueKind != JsonValueKind.String ||
+                manifestRoot.GetProperty("logicalName").ValueKind != JsonValueKind.String ||
+                manifestRoot.GetProperty("casePolicy").ValueKind != JsonValueKind.String)
+                throw new InvalidDataException("Artifact manifest root has invalid required member types.");
+        }
         foreach (var context in root.GetProperty("contexts").EnumerateArray())
         {
             Require(context, "id", "project", "targetFramework", "configuration", "platform", "sourceSetHash",

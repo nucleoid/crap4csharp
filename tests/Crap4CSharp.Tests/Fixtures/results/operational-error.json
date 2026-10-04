@@ -8,6 +8,7 @@
   "coverage": { "methods": 0, "known": 0, "unknown": 0, "reasons": {} },
   "artifacts": [],
   "decision": { "completed": false, "policyDecision": "unknown", "reason": "arguments.invalid" },
+  "provenance": { "status": "unverified", "basis": "none", "postflightVerified": false, "reusable": false, "reasons": [] },
   "coveragePathPolicy": { "case": "auto", "mappings": [] },
   "coverageDiagnostics": []
 }

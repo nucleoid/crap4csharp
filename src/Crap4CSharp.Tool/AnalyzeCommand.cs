@@ -12,7 +12,11 @@ internal static class AnalyzeCommand
         if (outputPath is not null) bundle.RejectOutputAlias(outputPath, workingDirectory);
         var manifest = bundle.Manifest;
         var provenance = ProvenanceVerifier.VerifyCaptureCancellable(manifest, bundle.Bytes, null, cancellationToken);
-        var capturedEvaluation = CapturedEvaluationInputs.Read(bundle);
+        // Once byte verification has failed, do not parse secondary policy/scope
+        // artifacts: their failure must not replace the verifier's precise reasons.
+        (CapturedScope Scope, CapturedPolicy Policy) capturedEvaluation = provenance.Status == ProvenanceStatus.Invalid
+            ? (new CapturedScope([]), new CapturedPolicy(8, false))
+            : CapturedEvaluationInputs.Read(bundle);
         var threshold = capturedEvaluation.Policy.Threshold;
         var scopedSources = capturedEvaluation.Scope.Sources.ToHashSet(StringComparer.Ordinal);
         var partitions = new List<ReplayPartition>();

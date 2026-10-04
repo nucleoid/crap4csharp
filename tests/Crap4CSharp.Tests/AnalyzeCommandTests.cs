@@ -182,6 +182,29 @@ public sealed class AnalyzeCommandTests
     }
 
     [Fact]
+    public async Task InvalidEvaluationArtifactPreservesVerifierReasonsWithoutParsingIt()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-invalid-policy-reasons");
+        var manifestPath = CreateBundle(directory.Path);
+        var policyPath = Path.Combine(directory.Path, "artifacts", "policy.json");
+        var malformed = new byte[new FileInfo(policyPath).Length];
+        Array.Fill(malformed, (byte)0xff);
+        File.WriteAllBytes(policyPath, malformed);
+        var output = new StringWriter();
+
+        var exit = await global::App.RunAsync(
+            ["analyze", "--reuse-artifacts", manifestPath, "--format", "json"],
+            directory.Path, output, TextWriter.Null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, exit);
+        using var document = JsonDocument.Parse(output.ToString());
+        var provenance = document.RootElement.GetProperty("evaluation").GetProperty("provenance");
+        Assert.Equal("invalid", provenance.GetProperty("status").GetString());
+        Assert.Contains(provenance.GetProperty("reasons").EnumerateArray(),
+            reason => reason.GetString() == ProvenanceReasonCodes.ArtifactChanged);
+    }
+
+    [Fact]
     public async Task ReplayOutputCannotAliasAnyBundleEntry()
     {
         using var directory = TestDirectory.Create("crap4csharp-output-alias");

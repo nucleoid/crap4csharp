@@ -215,7 +215,8 @@ internal static class App
         }
         catch (Exception exception) when (IsHandled(exception))
         {
-            var reason = exception is ArgumentException ? "arguments.invalid" :
+            var reason = exception is DecoderFallbackException && options?.ReuseArtifacts is not null ? "artifact.invalid" :
+                exception is ArgumentException ? "arguments.invalid" :
                 exception is InvalidDataException ? "artifact.invalid" :
                 exception is OperationCanceledException ? "run.cancelled" : "execution.failed";
             var ruleset = options?.Ruleset ?? PreDetectValue(args, "--ruleset") switch
@@ -519,6 +520,7 @@ internal static class App
             findings, new CoverageSummary(callables.Length, callables.Count(item => item.CoverageStatus == "known"), unknown.Length,
                 reasonCounts), artifacts, reduced.Decision)
         {
+            Provenance = UnverifiedProvenance(),
             Callables = callables,
             Families = families,
             CallableExemptions = exemptionValidation.Matches,
@@ -976,6 +978,7 @@ internal static class App
                 new CoverageSummary(metrics.Length, metrics.Count(metric => metric.Coverage is not null), metrics.Count(metric => metric.Coverage is null), reasonCounts),
                 artifacts, reduced.Decision)
         {
+            Provenance = UnverifiedProvenance(),
             CoveragePathPolicy = new CoveragePathPolicyResult(options.CoveragePathCase.ToString().ToLowerInvariant(), pathMappings),
             CoverageDiagnostics = outcome.CoverageDiagnostics.GroupBy(diagnostic => diagnostic.Id, StringComparer.Ordinal)
                 .Select(group => group.First()).OrderBy(diagnostic => diagnostic.Code, StringComparer.Ordinal)
@@ -1087,7 +1090,11 @@ internal static class App
             outcome.Reason == "run.cancelled" ? "cancelled" : outcome.Reason == "crap.noEligibleMethods" ? "notApplicable" : "operationalError",
             outcome.Reason ?? "execution.failed", true)];
     private static bool IsHandled(Exception exception) => exception is ArgumentException or IOException or UnauthorizedAccessException or
+        DecoderFallbackException or
         InvalidDataException or InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception or OperationCanceledException;
+
+    private static EvaluationProvenance UnverifiedProvenance() =>
+        new("unverified", "none", false, false, []);
 
     private static IReadOnlyList<string> DeclaredSourceRoots(IEnumerable<string> resolvedInputs, string workingDirectory)
     {
