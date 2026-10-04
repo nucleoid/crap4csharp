@@ -42,6 +42,8 @@ public sealed record BaselineDocument(string SchemaVersion, string Ruleset, stri
         if (value.PolicyHash != policyHash) throw new BaselineException("baseline.policyMismatch", "Baseline policy hash does not match policy.");
         if (string.IsNullOrWhiteSpace(value.SourceIdentity) || string.IsNullOrWhiteSpace(value.Revision))
             throw new BaselineException("baseline.sourceMissing", "Baseline source identity and revision are required.");
+        if (value.Entries is null || value.Entries.Cast<BaselineEntry?>().Any(entry => entry is null))
+            throw new BaselineException("baseline.entryInvalid", "Baseline contains a null entry.");
         var duplicate = value.Entries.GroupBy(item => (item.EntityKey, item.Rule, item.Ruleset), EqualityComparer<(string, string, string)>.Default)
             .FirstOrDefault(group => group.Count() > 1);
         if (duplicate is not null) throw new BaselineException("baseline.duplicateIdentity", "Baseline contains duplicate entity identities.");

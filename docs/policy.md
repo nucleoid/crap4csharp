@@ -18,8 +18,9 @@ enforcement. CLI selectors cannot remove required projects, tests, TFMs, coverag
 unless the trusted policy explicitly allows that exact class of override. A local policy is labelled
 `local-unreviewed`; a checksum, review string, or exact callable ID supplied by the branch is not approval.
 
-Captured `analyze` uses only the policy/baseline/exemption bytes stored in the bundle. It performs no Git, project,
-filesystem, or process acquisition. Supplying a separate inspection policy changes trust to `local-unreviewed`.
+Captured `analyze` uses the scope and threshold from the hash-bound policy artifact stored in the bundle and reports
+capture-consistent metrics; it does not apply reviewed baseline allowances or exemptions. It performs no Git,
+project, filesystem, or process acquisition. Reviewed baseline/exemption enforcement belongs to trusted `check`.
 
 Trusted enforcement is explicit:
 
@@ -29,7 +30,7 @@ crap4csharp check --reuse-artifacts artifacts/crap-run/manifest.json \
 ```
 
 The command resolves the merge base once, reads every enforcement overlay from that tree, independently observes
-the trusted scope, revalidates current project/source/reference/PE/PDB evidence, and reports branch versions only as
+the trusted scope, revalidates current project/source/PE/PDB evidence, and reports branch versions only as
 proposed differences. It consumes an existing bundle; fresh restore/build/test/coverage orchestration is separate.
 
 ## Candidate workflow
@@ -66,6 +67,10 @@ complete evaluated source membership and context identity, and independently ins
 against the captured tested build. New imports/sources/generated inputs, authored drift, stale outputs, missing test
 success, or a bare self-asserted `reuseRecipeComplete` flag fail closed. A successful current check may still be
 non-reusable for future replay; reusable and currently verified are separate capabilities.
+
+The current provider supports source-only compiler closures. A captured metadata-reference closure fails closed
+until a provider can independently bind those bytes to the references resolved by the current project loader;
+producer-supplied reference paths are not accepted as proof.
 
 Stable named allowance identity is project + TFM + configuration/platform + canonical Roslyn callable + rule +
 ruleset. Paths, line numbers, source hashes, and body fingerprints are observations, not named identity. Same-symbol

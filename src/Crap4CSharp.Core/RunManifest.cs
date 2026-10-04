@@ -98,7 +98,10 @@ public sealed record ManifestEvaluationInputs(string ScopeHash, string PolicyHas
 public sealed record CurrentInputEvidence(string Role, string LogicalPath, long Length, string Sha256);
 internal sealed record CurrentEvidence(string RepositoryIdentity, string WorkspaceIdentity, string? Head,
     IReadOnlyList<CurrentInputEvidence> Inputs, IReadOnlyDictionary<string, string> ContextHashes,
-    bool MembershipRecipeRevalidated = false, string? StateHash = null);
+    bool MembershipRecipeRevalidated = false, string? StateHash = null)
+{
+    public IReadOnlyList<string> ProtectedPaths { get; init; } = [];
+}
 
 public sealed record ProvenanceResult(ProvenanceStatus Status, string Basis, bool PostflightVerified,
     bool Reusable, IReadOnlyList<string> Reasons);

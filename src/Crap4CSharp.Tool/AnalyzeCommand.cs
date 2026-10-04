@@ -10,6 +10,12 @@ internal static class AnalyzeCommand
     {
         var bundle = ArtifactBundle.Load(manifestPath, workingDirectory);
         if (outputPath is not null) bundle.RejectOutputAlias(outputPath, workingDirectory);
+        return Replay(bundle, workingDirectory, startedAt, duration, cancellationToken, allSources);
+    }
+
+    internal static ResultDocument Replay(ArtifactBundle bundle, string workingDirectory,
+        DateTimeOffset startedAt, TimeSpan duration, CancellationToken cancellationToken, bool allSources = false)
+    {
         var manifest = bundle.Manifest;
         var provenance = ProvenanceVerifier.VerifyCaptureCancellable(manifest, bundle.Bytes, null, cancellationToken);
         // Once byte verification has failed, do not parse secondary policy/scope

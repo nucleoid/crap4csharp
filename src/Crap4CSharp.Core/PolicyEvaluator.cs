@@ -2,7 +2,10 @@ namespace Crap4CSharp.Core;
 
 public sealed record PolicyObservation(string Kind, string EntityKey, string Rule, string Ruleset, string ContextId,
     string Path, string BodyChecksum, int Complexity, double? Coverage, double? Crap, string? CoverageReason,
-    bool Selected, bool IdentityAmbiguous);
+    bool Selected, bool IdentityAmbiguous)
+{
+    public IReadOnlyList<string> RelatedEntityKeys { get; init; } = [];
+}
 
 public sealed record PolicyExemption(string EntityKey, string Rule, string ContextId, string CoverageReason,
     string Reason);
@@ -30,24 +33,23 @@ public static class PolicyEvaluator
             try { BaselineDocument.Validate(baseline, expectedPolicyHash ?? baseline.PolicyHash, policy.Ruleset); }
             catch (BaselineException exception) { operational.Add(exception.Code); }
         }
-        var duplicate = observations.GroupBy(item => (item.EntityKey, item.Rule, item.ContextId))
-            .FirstOrDefault(group => group.Count() > 1);
-        if (duplicate is not null) operational.Add("policy.duplicateObservation");
         if (exemptions.GroupBy(item => (item.EntityKey, item.Rule, item.ContextId, item.CoverageReason))
             .Any(group => group.Count() > 1))
             operational.Add("exemption.duplicate");
 
         var findings = new List<PolicyFinding>();
         var exempted = new List<string>();
-        var applicable = policy.Mode == RepositoryPolicyMode.Strict ? observations : observations.Where(item => item.Selected);
+        var applicable = (policy.Mode == RepositoryPolicyMode.Strict ? observations : observations.Where(item => item.Selected)).ToArray();
+        if (applicable.GroupBy(item => (item.EntityKey, item.Rule, item.ContextId)).Any(group => group.Count() > 1))
+            operational.Add("policy.duplicateObservation");
         var baselineByKey = (baseline?.Entries ?? []).GroupBy(item => (item.EntityKey, item.Rule))
             .ToDictionary(group => group.Key, group => group.First());
         foreach (var item in applicable.OrderBy(item => item.ContextId, StringComparer.Ordinal)
             .ThenBy(item => item.EntityKey, StringComparer.Ordinal).ThenBy(item => item.Rule, StringComparer.Ordinal))
         {
-            if (item.Ruleset != policy.Ruleset || item.IdentityAmbiguous)
+            if (item.Ruleset != policy.Ruleset)
             {
-                operational.Add(item.IdentityAmbiguous ? "baseline.identityAmbiguous" : "policy.rulesetMismatch");
+                operational.Add("policy.rulesetMismatch");
                 continue;
             }
             if (item.Coverage is null || item.Crap is null || !double.IsFinite(item.Crap.Value) ||
@@ -56,7 +58,11 @@ public static class PolicyEvaluator
                 var exemption = exemptions.FirstOrDefault(value => value.EntityKey == item.EntityKey &&
                     value.Rule == item.Rule && value.ContextId == item.ContextId && value.CoverageReason == item.CoverageReason &&
                     !string.IsNullOrWhiteSpace(value.Reason) && IsNarrowUnsupportedReason(value.CoverageReason));
-                if (exemption is not null) exempted.Add(item.EntityKey);
+                var familyExempted = item.Kind == "family" && item.RelatedEntityKeys.Count > 0 &&
+                    item.RelatedEntityKeys.All(key => exemptions.Any(value => value.EntityKey == key &&
+                        value.Rule == "crap.thresholdExceeded" && value.ContextId == item.ContextId &&
+                        !string.IsNullOrWhiteSpace(value.Reason) && IsNarrowUnsupportedReason(value.CoverageReason)));
+                if (exemption is not null || familyExempted) exempted.Add(item.EntityKey);
                 else operational.Add(item.CoverageReason ?? "coverage.unknown");
                 continue;
             }

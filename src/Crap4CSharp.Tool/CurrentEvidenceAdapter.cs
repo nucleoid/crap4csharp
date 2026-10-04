@@ -50,6 +50,7 @@ internal static class CurrentEvidenceAdapter
         var root = Path.GetFullPath(workspaceRoot);
         var hashes = new Dictionary<string, string>(StringComparer.Ordinal);
         var verifiedInputs = new Dictionary<string, CurrentInputEvidence>(StringComparer.Ordinal);
+        var protectedPaths = new HashSet<string>(PathIdentityPolicy.Current.Comparer);
         foreach (var expected in manifest.Contexts.OrderBy(item => item.Id, StringComparer.Ordinal))
         {
             var recipe = expected.CurrentRevalidation;
@@ -74,6 +75,8 @@ internal static class CurrentEvidenceAdapter
                     source.ContentIdentity, source.IsGenerated)).OrderBy(item => item.LogicalPath, StringComparer.Ordinal).ToArray();
             if (!expectedSources.SequenceEqual(currentSources))
                 throw new InvalidDataException("Current project source membership or content differs from captured tested inputs.");
+            foreach (var source in current.Sources)
+                protectedPaths.Add(Path.GetFullPath(source.PhysicalPath, Path.GetDirectoryName(project)!));
             foreach (var source in current.Sources.Where(source => !source.IsGenerated))
             {
                 var declaration = expected.Inputs.Single(input => input.Role == "source" && !input.Generated &&
@@ -84,22 +87,8 @@ internal static class CurrentEvidenceAdapter
             }
             var expectedReferences = expected.Inputs.Where(input => input.Role == "reference" && !input.Generated)
                 .OrderBy(input => input.LogicalPath, StringComparer.Ordinal).ToArray();
-            var referenceMappings = recipe.References.OrderBy(item => item.LogicalPath, StringComparer.Ordinal).ToArray();
-            if (referenceMappings.Select(item => item.LogicalPath).Distinct(StringComparer.Ordinal).Count() != referenceMappings.Length ||
-                !expectedReferences.Select(item => item.LogicalPath)
-                    .SequenceEqual(referenceMappings.Select(item => item.LogicalPath), StringComparer.Ordinal))
-                throw new InvalidDataException("Current reference revalidation mappings are incomplete or ambiguous.");
-            foreach (var reference in expectedReferences)
-            {
-                var mapping = referenceMappings.Single(item => item.LogicalPath == reference.LogicalPath);
-                var referencePath = ResolveRegularFile(root, NormalizeRecipePath(mapping.WorkspacePath))
-                    ?? throw new InvalidDataException($"Current reference is missing: {mapping.WorkspacePath}");
-                var bytes = ArtifactBundle.ReadBounded(referencePath, ArtifactBundle.MaxArtifactBytes, null,
-                    mapping.WorkspacePath);
-                verifiedInputs[reference.Role + "\n" + reference.LogicalPath] =
-                    new CurrentInputEvidence(reference.Role, reference.LogicalPath, bytes.Length,
-                        CanonicalIdentity.Sha256(bytes));
-            }
+            if (expectedReferences.Length > 0)
+                throw new InvalidDataException("This current-revalidation provider cannot independently bind captured metadata references to the loader's current resolved reference closure.");
             var parse = expected.ParseOptions ?? throw new InvalidDataException("Captured context has no parse options.");
             if (!Microsoft.CodeAnalysis.CSharp.LanguageVersionFacts.TryParse(parse.LanguageVersion,
                     out var capturedLanguageVersion) || capturedLanguageVersion != current.LanguageVersion ||
@@ -124,7 +113,8 @@ internal static class CurrentEvidenceAdapter
         foreach (var input in basic.Inputs.Where(input => input.Role is not ("source" or "reference")))
             verifiedInputs[input.Role + "\n" + input.LogicalPath] = input;
         return basic with { Inputs = verifiedInputs.Values.OrderBy(input => input.LogicalPath, StringComparer.Ordinal).ToArray(),
-            ContextHashes = hashes, MembershipRecipeRevalidated = true };
+            ContextHashes = hashes, MembershipRecipeRevalidated = true,
+            ProtectedPaths = protectedPaths.Order(StringComparer.Ordinal).ToArray() };
     }
 
     private static string NormalizeRecipePath(string value)

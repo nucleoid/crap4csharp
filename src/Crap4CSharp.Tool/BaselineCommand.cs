@@ -30,6 +30,7 @@ internal static class BaselineCommand
                 StringComparer.Ordinal);
             var compatibilityHash = TrustedPolicyLoader.BoundCompatibilityHash(parsedPolicy, exemptionBytes);
             var bundle = ArtifactBundle.Load(options.Manifest, root);
+            PolicyCheckCommand.ValidateGeneratedInventory(bundle.Manifest);
             bundle.RejectOutputAlias(options.Output, root);
             var outputPath = Path.GetFullPath(options.Output, root);
             RejectPolicyOrSourceAlias(outputPath, root, policyPath, bundle.Manifest);
@@ -52,6 +53,7 @@ internal static class BaselineCommand
 
             var current = await CurrentEvidenceAdapter.CaptureSupportedAsync(bundle.Manifest, root,
                 options.Timeout, cancellationToken);
+            RejectCurrentOrOverlayAlias(outputPath, root, parsedPolicy, current);
             var provenance = ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, current, false,
                 parsedPolicy.Policy.Ruleset);
             if (provenance.Status != ProvenanceStatus.Verified)
@@ -59,11 +61,11 @@ internal static class BaselineCommand
             var replay = AnalyzeCommand.Replay(options.Manifest, root, null, DateTimeOffset.UtcNow,
                 TimeSpan.Zero, cancellationToken);
             var observations = Observations(replay).Where(item => !Excluded(parsedPolicy.Policy, item.Path)).ToArray();
+            var exemptionResolution = PolicyCheckCommand.ParseExemptions(exemptionBytes, replay);
             var ambiguous = observations.Where(item => item.IdentityAmbiguous).ToArray();
             observations = observations.Where(item => !item.IdentityAmbiguous).ToArray();
-            if (observations.Any(item => item.Coverage is null || item.Crap is null))
-                throw new InvalidDataException("Baseline generation requires known coverage for every applicable callable and family.");
-            var policyResult = PolicyEvaluator.Evaluate(parsedPolicy.Policy, null, observations, []);
+            var policyResult = PolicyEvaluator.Evaluate(parsedPolicy.Policy, null, observations,
+                exemptionResolution.Active);
             if (policyResult.ExitCode == 1)
                 throw new InvalidDataException(string.Join(", ", policyResult.OperationalReasons));
             if (options.Verb == "update") ValidateExistingBaseline(root, parsedPolicy, compatibilityHash);
@@ -82,6 +84,7 @@ internal static class BaselineCommand
                 candidateHash = CanonicalIdentity.Sha256(candidateBytes),
                 entries = candidate.Entries.Count,
                 skippedAmbiguousIdentities = ambiguous.Length,
+                approvedUnsupportedExemptions = exemptionResolution.Active.Count,
                 policyHash = parsedPolicy.Hash,
                 policyCompatibilityHash = compatibilityHash,
                 evidenceManifestHash = bundle.Manifest.ManifestHash,
@@ -162,7 +165,8 @@ internal static class BaselineCommand
             yield return new PolicyObservation("family", family.FamilyId, CallableFamilyEvaluator.Rule,
                 result.ComplexityRulesetVersion, root.ContextId, root.Path, root.BodyChecksum, family.Complexity,
                 family.Coverage, family.Crap, family.IncompleteReasons.FirstOrDefault(), true,
-                family.IncompleteReasons.Contains(CoverageReasonCodes.AmbiguousCallableOwnership, StringComparer.Ordinal));
+                family.IncompleteReasons.Contains(CoverageReasonCodes.AmbiguousCallableOwnership, StringComparer.Ordinal))
+                { RelatedEntityKeys = family.IncompleteCallableIds };
         }
     }
 
@@ -216,6 +220,19 @@ internal static class BaselineCommand
             .Append(Path.GetFullPath(policyPath, root));
         if (protectedPaths.Any(path => string.Equals(path, output, comparison)))
             throw new IOException("Baseline output aliases a policy or source input.");
+    }
+
+    private static void RejectCurrentOrOverlayAlias(string output, string root, ParsedRepositoryPolicy policy,
+        CurrentEvidence current)
+    {
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        var overlays = policy.Policy.ExemptionFiles
+            .Concat(policy.Policy.BaselinePath is null ? [] : [policy.Policy.BaselinePath])
+            .Append(policy.PolicyPath)
+            .Select(path => Path.GetFullPath(path, root));
+        if (current.ProtectedPaths.Concat(overlays)
+            .Any(path => string.Equals(Path.GetFullPath(path), output, comparison)))
+            throw new IOException("Baseline output aliases a current source or policy overlay.");
     }
 
     private static async Task WriteCandidateAsync(string destination, byte[] bytes, bool overwrite,

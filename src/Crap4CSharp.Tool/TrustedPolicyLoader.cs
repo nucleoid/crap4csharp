@@ -15,9 +15,12 @@ internal static class TrustedPolicyLoader
         ArgumentException.ThrowIfNullOrWhiteSpace(baseRef);
         var normalizedPolicy = Normalize(policyPath);
         var git = gitExecutor ?? (arguments => Git(arguments, repositoryRoot ?? Directory.GetCurrentDirectory(), TimeSpan.FromSeconds(15)));
-        var mergeBase = Encoding.UTF8.GetString(git(["merge-base", "HEAD", baseRef])).Trim();
-        if (mergeBase.Length != 40 || mergeBase.Any(character => !Uri.IsHexDigit(character)))
-            throw new PolicyException("policy.baseInvalid", "Git merge-base did not resolve to a full commit SHA.");
+        var mergeBases = Encoding.UTF8.GetString(git(["merge-base", "--all", "HEAD", baseRef]))
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (mergeBases.Length != 1 || mergeBases[0].Length != 40 ||
+            mergeBases[0].Any(character => !Uri.IsHexDigit(character)))
+            throw new PolicyException("policy.baseInvalid", "Git merge-base did not resolve uniquely to one full commit SHA.");
+        var mergeBase = mergeBases[0];
         var policyBytes = git(["show", $"{mergeBase}:{normalizedPolicy}"]);
         var parsed = RepositoryPolicyParser.Parse(policyBytes, normalizedPolicy);
         var hashes = new Dictionary<string, string>(StringComparer.Ordinal)

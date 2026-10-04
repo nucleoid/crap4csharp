@@ -199,7 +199,7 @@ internal static class App
             cancellationToken.ThrowIfCancellationRequested();
             var result = options.Command == "check"
                 ? await PolicyCheckCommand.RunAsync(options.ReuseArtifacts!, options.Policy!, options.Base!,
-                    workingDirectory, options.Timeout, startedAt, stopwatch.Elapsed, cancellationToken)
+                    workingDirectory, options.Output, options.Timeout, startedAt, stopwatch.Elapsed, cancellationToken)
                 : options.ReuseArtifacts is not null
                 ? AnalyzeCommand.Replay(options.ReuseArtifacts, workingDirectory, options.Output,
                     startedAt, stopwatch.Elapsed, cancellationToken)
@@ -237,7 +237,9 @@ internal static class App
             var format = options?.Format ?? (HasJsonIntent(args) ? "json" : "human");
             var destination = options?.Output ?? PreDetectValue(args, "--output");
             var mayWrite = false;
-            if (destination is not null && args.Count(arg => arg == "--output") == 1)
+            var protectedAliasFailure = exception is PolicyException
+                { Code: "output.aliasesPolicyInput" };
+            if (!protectedAliasFailure && destination is not null && args.Count(arg => arg == "--output") == 1)
             {
                 if (options is not null)
                 {
@@ -1117,10 +1119,10 @@ internal static class App
         : [new CheckResult(outcome.Reason == "arguments.invalid" ? "arguments" : "execution",
             outcome.Reason == "run.cancelled" ? "cancelled" : outcome.Reason == "crap.noEligibleMethods" ? "notApplicable" : "operationalError",
             outcome.Reason ?? "execution.failed", true)];
-    private static bool IsHandled(Exception exception) => exception is ArgumentException or IOException or UnauthorizedAccessException or
+    internal static bool IsHandled(Exception exception) => exception is ArgumentException or IOException or UnauthorizedAccessException or
         DecoderFallbackException or
         InvalidDataException or InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception or OperationCanceledException or
-        PolicyException or BaselineException;
+        PolicyException or BaselineException or System.Text.Json.JsonException;
 
     private static EvaluationProvenance UnverifiedProvenance() =>
         new("unverified", "none", false, false, []);

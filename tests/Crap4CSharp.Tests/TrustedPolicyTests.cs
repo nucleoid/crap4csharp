@@ -18,7 +18,7 @@ public sealed class TrustedPolicyTests
             commands.Add(string.Join(" ", arguments));
             return string.Join(" ", arguments) switch
             {
-                "merge-base HEAD origin/main" => Encoding.UTF8.GetBytes("0123456789012345678901234567890123456789\n"),
+                "merge-base --all HEAD origin/main" => Encoding.UTF8.GetBytes("0123456789012345678901234567890123456789\n"),
                 "show 0123456789012345678901234567890123456789:quality/policy.json" => Encoding.UTF8.GetBytes(strict),
                 "show 0123456789012345678901234567890123456789:quality/exceptions.json" => Encoding.UTF8.GetBytes("{\"version\":\"callable-exemptions-v1\",\"entries\":[]}"),
                 _ => throw new InvalidOperationException(string.Join(" ", arguments))
@@ -64,7 +64,7 @@ public sealed class TrustedPolicyTests
             ComplexityRules.CallablesV1, "source", "revision", 5, []));
         byte[] Git(IReadOnlyList<string> arguments) => string.Join(" ", arguments) switch
         {
-            "merge-base HEAD origin/main" => Encoding.UTF8.GetBytes("0123456789012345678901234567890123456789\n"),
+            "merge-base --all HEAD origin/main" => Encoding.UTF8.GetBytes("0123456789012345678901234567890123456789\n"),
             "show 0123456789012345678901234567890123456789:quality/policy.json" =>
                 Encoding.UTF8.GetBytes(PolicyTests.ValidPolicy),
             "show 0123456789012345678901234567890123456789:quality/baseline.json" => candidate,
