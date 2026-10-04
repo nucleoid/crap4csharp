@@ -54,7 +54,10 @@ public sealed record ManifestProducer(string Tool, string ToolVersion, string Co
 public sealed record ManifestCapture(string State, bool CaptureConsistent, bool ActualBindingComplete,
     IReadOnlyList<string> FailureReasons);
 public sealed record ManifestRevision(string Kind, string RepositoryIdentity, string WorkspaceIdentity,
-    string? Head, string? Base, string? ScopeHead);
+    string? Head, string? Base, string? ScopeHead)
+{
+    public string? StateHash { get; init; }
+}
 public sealed record ManifestRoot(string Id, string LogicalName, string CasePolicy);
 public sealed record ManifestContext(string Id, string Project, string TargetFramework, string Configuration,
     string Platform, string SourceSetHash, string ContextHash, string InputClosureHash,
@@ -79,9 +82,9 @@ public sealed record ManifestEvaluationInputs(string ScopeHash, string PolicyHas
     string? ExemptionsHash);
 
 public sealed record CurrentInputEvidence(string Role, string LogicalPath, long Length, string Sha256);
-public sealed record CurrentEvidence(string RepositoryIdentity, string WorkspaceIdentity, string? Head,
+internal sealed record CurrentEvidence(string RepositoryIdentity, string WorkspaceIdentity, string? Head,
     IReadOnlyList<CurrentInputEvidence> Inputs, IReadOnlyDictionary<string, string> ContextHashes,
-    bool MembershipRecipeRevalidated = false);
+    bool MembershipRecipeRevalidated = false, string? StateHash = null);
 
 public sealed record ProvenanceResult(ProvenanceStatus Status, string Basis, bool PostflightVerified,
     bool Reusable, IReadOnlyList<string> Reasons);
@@ -105,39 +108,60 @@ public static class ManifestIdentity
         var parse = context.ParseOptions ?? new ManifestParseOptions("", "", [],
             new Dictionary<string, string>(StringComparer.Ordinal));
         var paths = context.PathPolicy ?? new ManifestPathPolicy("", []);
-        return CanonicalIdentity.Set("manifest-context-v1",
-        [
-            context.Id, context.Project, context.TargetFramework, context.Configuration, context.Platform,
-            sourceSetHash, inputClosureHash, parse.LanguageVersion, parse.SourceKind,
-            .. parse.PreprocessorSymbols.Select(value => "symbol\n" + value),
-            .. parse.Features.Select(pair => $"feature\n{pair.Key}\n{pair.Value}"),
-            paths.CasePolicy,
-            .. paths.ReportRootMappings.Select(mapping => $"map\n{mapping.ReportRoot}\n{mapping.LogicalRoot}")
-        ]);
+        var values = new List<string>
+        {
+            CanonicalIdentity.Tuple("context-header", context.Id, context.Project, context.TargetFramework,
+                context.Configuration, context.Platform, sourceSetHash, inputClosureHash),
+            CanonicalIdentity.Tuple("parse-options", parse.LanguageVersion, parse.SourceKind),
+            CanonicalIdentity.Tuple("path-policy", paths.CasePolicy)
+        };
+        values.AddRange(parse.PreprocessorSymbols.Select(value => CanonicalIdentity.Tuple("preprocessor-symbol", value)));
+        values.AddRange(parse.Features.Select(pair => CanonicalIdentity.Tuple("parse-feature", pair.Key, pair.Value)));
+        values.AddRange(paths.ReportRootMappings.Select(mapping =>
+            CanonicalIdentity.Tuple("report-root-mapping", mapping.ReportRoot, mapping.LogicalRoot)));
+        return CanonicalIdentity.Set("manifest-context-v1", values);
     }
 
     public static string ManifestHash(RunManifest manifest)
     {
         var values = new List<string>
         {
-            manifest.ManifestSchemaVersion, manifest.IdentityAlgorithm,
-            $"producer\n{manifest.Producer.Tool}\n{manifest.Producer.ToolVersion}\n{manifest.Producer.ComplexityRuleset}\n{manifest.Producer.ContextProtocol}\n{manifest.Producer.CoverageProtocol}\n{manifest.Producer.PathProtocol}",
-            $"capture\n{manifest.Capture.State}\n{manifest.Capture.CaptureConsistent}\n{manifest.Capture.ActualBindingComplete}",
-            $"revision\n{manifest.Revision.Kind}\n{manifest.Revision.RepositoryIdentity}\n{manifest.Revision.WorkspaceIdentity}\n{manifest.Revision.Head}\n{manifest.Revision.Base}\n{manifest.Revision.ScopeHead}",
-            $"evaluation\n{manifest.EvaluationInputs.ScopeHash}\n{manifest.EvaluationInputs.PolicyHash}\n{manifest.EvaluationInputs.BaselineHash}\n{manifest.EvaluationInputs.ExemptionsHash}"
+            CanonicalIdentity.Tuple("manifest-header", manifest.ManifestSchemaVersion, manifest.IdentityAlgorithm),
+            CanonicalIdentity.Tuple("producer", manifest.Producer.Tool, manifest.Producer.ToolVersion,
+                manifest.Producer.ComplexityRuleset, manifest.Producer.ContextProtocol,
+                manifest.Producer.CoverageProtocol, manifest.Producer.PathProtocol),
+            CanonicalIdentity.Tuple("capture", manifest.Capture.State,
+                manifest.Capture.CaptureConsistent.ToString(), manifest.Capture.ActualBindingComplete.ToString()),
+            CanonicalIdentity.Tuple("revision", manifest.Revision.Kind, manifest.Revision.RepositoryIdentity,
+                manifest.Revision.WorkspaceIdentity, manifest.Revision.Head, manifest.Revision.Base,
+                manifest.Revision.ScopeHead, manifest.Revision.StateHash),
+            CanonicalIdentity.Tuple("evaluation", manifest.EvaluationInputs.ScopeHash,
+                manifest.EvaluationInputs.PolicyHash, manifest.EvaluationInputs.BaselineHash,
+                manifest.EvaluationInputs.ExemptionsHash)
         };
-        values.AddRange(manifest.Capture.FailureReasons.Select(value => "failure\n" + value));
-        values.AddRange(manifest.Roots.Select(value => $"root\n{value.Id}\n{value.LogicalName}\n{value.CasePolicy}"));
+        values.AddRange(manifest.Capture.FailureReasons.Select(value => CanonicalIdentity.Tuple("failure", value)));
+        values.AddRange(manifest.Roots.Select(value =>
+            CanonicalIdentity.Tuple("root", value.Id, value.LogicalName, value.CasePolicy)));
         values.AddRange(manifest.Contexts.Select(value =>
-            $"context\n{value.Id}\n{value.Project}\n{value.TargetFramework}\n{value.Configuration}\n{value.Platform}\n{value.SourceSetHash}\n{value.ContextHash}\n{value.InputClosureHash}\n{value.ActualCompilerBindingComplete}\n{value.ReuseRecipeComplete}"));
+            CanonicalIdentity.Tuple("context", value.Id, value.Project, value.TargetFramework, value.Configuration,
+                value.Platform, value.SourceSetHash, value.ContextHash, value.InputClosureHash,
+                value.ActualCompilerBindingComplete.ToString(), value.ReuseRecipeComplete.ToString())));
         values.AddRange(manifest.Contexts.SelectMany(context => context.Inputs.Select(input =>
-            $"input\n{context.Id}\n{InputIdentity(input)}")));
+            CanonicalIdentity.Tuple("context-input", context.Id, InputIdentity(input)))));
         values.AddRange(manifest.Builds.Select(value =>
-            $"build\n{value.Id}\n{value.ContextId}\n{value.ModuleIdentity}\n{value.AssemblySha256}\n{value.Mvid}\n{value.PdbSha256}\n{value.DebugIdentity}"));
+            CanonicalIdentity.Tuple("build", value.Id, value.ContextId, value.ModuleIdentity, value.AssemblySha256,
+                value.Mvid, value.PdbSha256, value.DebugIdentity)));
         values.AddRange(manifest.Executions.Select(value =>
-            $"execution\n{value.Id}\n{value.ContextId}\n{value.BuildId}\n{value.Completed}\n{value.ExitCode}\n{value.TotalTests}\n{value.PassedTests}\n{value.FailedTests}\n{value.SkippedTests}"));
+            CanonicalIdentity.Tuple("execution", value.Id, value.ContextId, value.BuildId, value.Completed.ToString(),
+                value.ExitCode.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                value.TotalTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                value.PassedTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                value.FailedTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                value.SkippedTests.ToString(System.Globalization.CultureInfo.InvariantCulture))));
         values.AddRange(manifest.Artifacts.Select(value =>
-            $"artifact\n{value.Id}\n{value.Kind}\n{value.Locator}\n{value.Length}\n{value.Sha256}\n{value.ContextId}\n{value.BuildId}\n{value.ExecutionId}\n{value.Format}\n{value.CoordinateKind}"));
+            CanonicalIdentity.Tuple("artifact", value.Id, value.Kind, value.Locator,
+                value.Length.ToString(System.Globalization.CultureInfo.InvariantCulture), value.Sha256,
+                value.ContextId, value.BuildId, value.ExecutionId, value.Format, value.CoordinateKind)));
         return CanonicalIdentity.Set("manifest-integrity-v1", values);
     }
 
@@ -154,8 +178,9 @@ public static class ManifestIdentity
         return unhashed with { ManifestHash = ManifestHash(unhashed) };
     }
 
-    private static string InputIdentity(ManifestInput input) =>
-        $"{input.Role}\n{input.LogicalPath}\n{input.Locator}\n{input.Length}\n{input.Sha256}\n{input.Encoding}\n{input.Generated}";
+    private static string InputIdentity(ManifestInput input) => CanonicalIdentity.Tuple("input", input.Role,
+        input.LogicalPath, input.Locator, input.Length.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        input.Sha256, input.Encoding, input.Generated.ToString());
 }
 
 public static class ProvenanceVerifier
@@ -173,7 +198,7 @@ public static class ProvenanceVerifier
             reasons.Order(StringComparer.Ordinal).Distinct(StringComparer.Ordinal).ToArray());
     }
 
-    public static ProvenanceResult VerifyCurrent(RunManifest manifest,
+    internal static ProvenanceResult VerifyCurrent(RunManifest manifest,
         IReadOnlyDictionary<string, ImmutableArray<byte>> artifactBytes, CurrentEvidence current,
         bool requireReusableRecipe, string? requiredRuleset = null)
     {
@@ -184,6 +209,8 @@ public static class ProvenanceVerifier
             reasons.Add(ProvenanceReasonCodes.WorkspaceChanged);
         if (!string.Equals(manifest.Revision.Head, current.Head, StringComparison.Ordinal))
             reasons.Add(ProvenanceReasonCodes.RevisionChanged);
+        if (!string.Equals(manifest.Revision.StateHash, current.StateHash, StringComparison.Ordinal))
+            reasons.Add(ProvenanceReasonCodes.WorkspaceChanged);
 
         var expectedInputs = manifest.Contexts.SelectMany(context => context.Inputs).Where(input => !input.Generated)
             .OrderBy(InputKey, StringComparer.Ordinal).ToArray();
@@ -281,19 +308,58 @@ public static class ProvenanceVerifier
                     reasons.Add(ProvenanceReasonCodes.DuplicateIdentity);
             }
         }
-        if (manifest.Builds.Any(build => string.IsNullOrWhiteSpace(build.ModuleIdentity) ||
-                string.IsNullOrWhiteSpace(build.AssemblySha256) || string.IsNullOrWhiteSpace(build.PdbSha256) ||
-                manifest.Artifacts.Count(artifact => artifact.Kind == "assembly" && artifact.ContextId == build.ContextId &&
-                    artifact.BuildId == build.Id && artifact.Sha256 == build.AssemblySha256) != 1 ||
-                manifest.Artifacts.Count(artifact => artifact.Kind == "pdb" && artifact.ContextId == build.ContextId &&
-                    artifact.BuildId == build.Id && artifact.Sha256 == build.PdbSha256) != 1))
-            reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
+        foreach (var build in manifest.Builds)
+        {
+            var assemblies = manifest.Artifacts.Where(artifact => artifact.Kind == "assembly" &&
+                artifact.ContextId == build.ContextId && artifact.BuildId == build.Id).ToArray();
+            var pdbs = manifest.Artifacts.Where(artifact => artifact.Kind == "pdb" &&
+                artifact.ContextId == build.ContextId && artifact.BuildId == build.Id).ToArray();
+            if (assemblies.Length != 1 || pdbs.Length != 1)
+            {
+                reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
+                continue;
+            }
+            var assembly = assemblies[0];
+            var pdb = pdbs[0];
+            if (assembly.Sha256 != build.AssemblySha256 ||
+                pdb.Sha256 != build.PdbSha256 || !artifactBytes.TryGetValue(assembly.Locator, out var assemblyBytes) ||
+                !artifactBytes.TryGetValue(pdb.Locator, out var pdbBytes))
+            {
+                reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
+                continue;
+            }
+            try
+            {
+                var inspected = ArtifactEvidenceInspector.InspectBuild(assemblyBytes, pdbBytes);
+                if (inspected.ModuleIdentity != build.ModuleIdentity || inspected.Mvid != build.Mvid ||
+                    inspected.DebugIdentity != build.DebugIdentity)
+                    reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
+            }
+            catch (InvalidDataException) { reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete); }
+        }
         if (manifest.Executions.Any(item => !item.Completed || item.ExitCode != 0 || item.FailedTests != 0 || item.TotalTests <= 0 ||
                 item.PassedTests + item.FailedTests + item.SkippedTests != item.TotalTests ||
                 manifest.Artifacts.Count(artifact => artifact.Kind == "test-result" && artifact.ContextId == item.ContextId &&
                     artifact.BuildId == item.BuildId && artifact.ExecutionId == item.Id) != 1 ||
                 !manifest.Builds.Any(build => build.Id == item.BuildId && build.ContextId == item.ContextId)))
             reasons.Add(ProvenanceReasonCodes.TestExecutionIncomplete);
+        foreach (var execution in manifest.Executions)
+        {
+            var trxArtifacts = manifest.Artifacts.Where(artifact => artifact.Kind == "test-result" &&
+                artifact.ContextId == execution.ContextId && artifact.BuildId == execution.BuildId &&
+                artifact.ExecutionId == execution.Id).ToArray();
+            if (trxArtifacts.Length != 1) continue;
+            var trx = trxArtifacts[0];
+            if (!artifactBytes.TryGetValue(trx.Locator, out var trxBytes)) continue;
+            try
+            {
+                var inspected = ArtifactEvidenceInspector.InspectTrx(trxBytes);
+                if (inspected.Total != execution.TotalTests || inspected.Passed != execution.PassedTests ||
+                    inspected.Failed != execution.FailedTests || inspected.Skipped != execution.SkippedTests)
+                    reasons.Add(ProvenanceReasonCodes.TestExecutionIncomplete);
+            }
+            catch (InvalidDataException) { reasons.Add(ProvenanceReasonCodes.TestExecutionIncomplete); }
+        }
 
         foreach (var coverage in manifest.Artifacts.Where(item => item.Kind == "coverage"))
         {

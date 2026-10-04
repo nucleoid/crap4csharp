@@ -3,14 +3,15 @@ using Crap4CSharp.Core;
 
 internal static class CurrentEvidenceAdapter
 {
-    public static CurrentEvidence Capture(RunManifest manifest, string workspaceRoot)
+    public static CurrentEvidence Capture(RunManifest manifest, string workspaceRoot,
+        Func<string, IReadOnlyList<string>, string>? gitExecutor = null)
     {
         var root = Path.GetFullPath(workspaceRoot);
         var revision = manifest.Revision.Kind switch
         {
-            "git" => ObserveGit(root),
+            "git" => ObserveGit(root, gitExecutor ?? Git),
             "none" => new ObservedRevision("none",
-                CanonicalIdentity.Set("local-workspace-v1", [root]), null),
+                CanonicalIdentity.Set("local-workspace-v1", [root]), null, null),
             _ => throw new InvalidDataException($"Unsupported revision kind: {manifest.Revision.Kind}")
         };
         var inputs = new List<CurrentInputEvidence>();
@@ -33,21 +34,30 @@ internal static class CurrentEvidenceAdapter
         // proves byte equality only; it cannot prove that no new glob/import/input appeared. Keep context hashes
         // absent so VerifyCurrent returns contextNotRevalidated instead of manufacturing a fresh verification.
         return new CurrentEvidence(revision.RepositoryIdentity, revision.WorkspaceIdentity, revision.Head,
-            inputs, new Dictionary<string, string>(StringComparer.Ordinal), false);
+            inputs, new Dictionary<string, string>(StringComparer.Ordinal), false, revision.StateHash);
     }
 
-    private static ObservedRevision ObserveGit(string root)
+    private static ObservedRevision ObserveGit(string root,
+        Func<string, IReadOnlyList<string>, string> git)
     {
-        var repositoryRoot = Git(root, "rev-parse", "--show-toplevel");
-        var commonDirectory = Path.GetFullPath(Git(root, "rev-parse", "--git-common-dir"), root);
-        var worktreeDirectory = Path.GetFullPath(Git(root, "rev-parse", "--git-dir"), root);
-        var head = Git(root, "rev-parse", "HEAD");
+        string Run(params string[] arguments) => git(root, arguments);
+        var repositoryRoot = Run("rev-parse", "--show-toplevel");
+        var commonDirectory = Path.GetFullPath(Run("rev-parse", "--git-common-dir"), root);
+        var worktreeDirectory = Path.GetFullPath(Run("rev-parse", "--git-dir"), root);
+        var head = Run("rev-parse", "HEAD");
+        var status = Run("status", "--porcelain=v1", "-z", "--untracked-files=all");
+        var submodules = Run("submodule", "status", "--recursive");
+        var staged = Run("diff", "--cached", "--binary", "--full-index");
+        var stateHash = CanonicalIdentity.Set("git-workspace-state-v1",
+            [CanonicalIdentity.Tuple("status", status),
+             CanonicalIdentity.Tuple("submodules", submodules),
+             CanonicalIdentity.Tuple("staged", staged)]);
         return new ObservedRevision(
             CanonicalIdentity.Set("git-repository-v1", [repositoryRoot, commonDirectory]),
-            CanonicalIdentity.Set("git-worktree-v1", [repositoryRoot, worktreeDirectory]), head);
+            CanonicalIdentity.Set("git-worktree-v1", [repositoryRoot, worktreeDirectory]), head, stateHash);
     }
 
-    private static string Git(string root, params string[] arguments)
+    private static string Git(string root, IReadOnlyList<string> arguments)
     {
         var start = new ProcessStartInfo("git")
         {
@@ -59,13 +69,21 @@ internal static class CurrentEvidenceAdapter
         };
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Unable to start git.");
-        var output = process.StandardOutput.ReadToEnd();
-        var error = process.StandardError.ReadToEnd();
-        if (!process.WaitForExit(10_000))
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var outputTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
+        var errorTask = process.StandardError.ReadToEndAsync(timeout.Token);
+        try
         {
-            process.Kill(true);
-            throw new TimeoutException("Git identity observation timed out.");
+            process.WaitForExitAsync(timeout.Token).GetAwaiter().GetResult();
+            Task.WhenAll(outputTask, errorTask).GetAwaiter().GetResult();
         }
+        catch (OperationCanceledException exception)
+        {
+            try { process.Kill(true); } catch (InvalidOperationException) { }
+            throw new TimeoutException("Git identity observation timed out.", exception);
+        }
+        var output = outputTask.Result;
+        var error = errorTask.Result;
         if (process.ExitCode != 0)
             throw new InvalidDataException($"Git identity observation failed: {error.Trim()}");
         return output.Trim();
@@ -88,5 +106,6 @@ internal static class CurrentEvidenceAdapter
         return current;
     }
 
-    private sealed record ObservedRevision(string RepositoryIdentity, string WorkspaceIdentity, string? Head);
+    private sealed record ObservedRevision(string RepositoryIdentity, string WorkspaceIdentity, string? Head,
+        string? StateHash);
 }

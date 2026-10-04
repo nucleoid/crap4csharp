@@ -60,6 +60,40 @@ public sealed class ArtifactCaptureTests
     }
 
     [Fact]
+    public void GitCurrentEvidenceBindsStatusSubmodulesAndStagedDiff()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-git-state");
+        Directory.CreateDirectory(Path.Combine(directory.Path, "src"));
+        File.WriteAllBytes(Path.Combine(directory.Path, "src", "C.cs"), [1, 2, 3]);
+        Directory.CreateDirectory(Path.Combine(directory.Path, ".git", "worktrees", "fixture"));
+        var fixture = CreateFixture();
+        string Run(string state, string _, IReadOnlyList<string> arguments) => string.Join(" ", arguments) switch
+        {
+            "rev-parse --show-toplevel" => directory.Path,
+            "rev-parse --git-common-dir" => Path.Combine(directory.Path, ".git"),
+            "rev-parse --git-dir" => Path.Combine(directory.Path, ".git", "worktrees", "fixture"),
+            "rev-parse HEAD" => "abc",
+            "status --porcelain=v1 -z --untracked-files=all" => state,
+            "submodule status --recursive" => "",
+            "diff --cached --binary --full-index" => "",
+            var command => throw new InvalidOperationException(command)
+        };
+        var manifest = ManifestIdentity.Seal(fixture.Manifest with
+        {
+            Revision = new ManifestRevision("git", "repo", "worktree", "abc", null, null),
+            ManifestHash = null
+        });
+
+        var clean = CurrentEvidenceAdapter.Capture(manifest, directory.Path,
+            (root, arguments) => Run("", root, arguments));
+        var dirty = CurrentEvidenceAdapter.Capture(manifest, directory.Path,
+            (root, arguments) => Run(" M src/C.cs", root, arguments));
+
+        Assert.NotNull(clean.StateHash);
+        Assert.NotEqual(clean.StateHash, dirty.StateHash);
+    }
+
+    [Fact]
     public void LoaderRejectsASymbolicLinkInAnyLocatorComponent()
     {
         if (OperatingSystem.IsWindows()) return; // Creation requires a Windows symlink privilege; Linux exercises the policy.
@@ -73,6 +107,27 @@ public sealed class ArtifactCaptureTests
         Directory.CreateSymbolicLink(artifactDirectory, outside);
 
         Assert.Throws<InvalidDataException>(() => ArtifactBundle.Load(locator, directory.Path));
+    }
+
+    [Fact]
+    public void LoaderAllowsTheCallerToReachAnOwnedBundleThroughAParentSymlink()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        using var directory = TestDirectory.Create("crap4csharp-bundle-parent-link");
+        var fixture = CreateFixture();
+        var realParent = Path.Combine(directory.Path, "real");
+        Directory.CreateDirectory(realParent);
+        var locator = ArtifactCaptureAdapter.PublishNew(fixture.Manifest, fixture.Bytes,
+            Path.Combine(realParent, "bundle"));
+        var linkedParent = Path.Combine(directory.Path, "linked");
+        Directory.CreateSymbolicLink(linkedParent, realParent);
+        var linkedLocator = Path.Combine(linkedParent, "bundle", "manifest.json");
+
+        var loaded = ArtifactBundle.Load(linkedLocator, directory.Path);
+
+        Assert.Equal(ProvenanceStatus.Captured,
+            ProvenanceVerifier.VerifyCapture(loaded.Manifest, loaded.Bytes).Status);
+        Assert.Equal(Path.GetFileName(locator), Path.GetFileName(loaded.ManifestPath));
     }
 
     [Fact]
@@ -132,11 +187,19 @@ public sealed class ArtifactCaptureTests
         var source = ImmutableArray.Create<byte>(1, 2, 3);
         var coverage = ImmutableArray.Create(Encoding.UTF8.GetBytes(
             "<coverage><packages><package name=\"App\"><classes /></package></packages></coverage>"));
-        var assembly = ImmutableArray.Create<byte>(7);
-        var pdb = ImmutableArray.Create<byte>(8);
-        var trx = ImmutableArray.Create<byte>(9);
-        var scope = ImmutableArray.Create<byte>(10);
-        var policy = ImmutableArray.Create<byte>(11);
+        var assemblyPath = typeof(CanonicalIdentity).Assembly.Location;
+        var assembly = ImmutableArray.Create(File.ReadAllBytes(assemblyPath));
+        var pdb = ImmutableArray.Create(File.ReadAllBytes(Path.ChangeExtension(assemblyPath, ".pdb")));
+        var inspected = ArtifactEvidenceInspector.InspectBuild(assembly, pdb);
+        var trx = ImmutableArray.Create(Encoding.UTF8.GetBytes("""
+            <TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
+              <ResultSummary outcome="Completed"><Counters total="1" executed="1" passed="1" failed="0"
+                error="0" timeout="0" aborted="0" inconclusive="0" notExecuted="0" /></ResultSummary>
+            </TestRun>
+            """));
+        var scope = ImmutableArray.Create(Encoding.UTF8.GetBytes("""{"version":1,"sources":["src/C.cs"]}"""));
+        var policy = ImmutableArray.Create(Encoding.UTF8.GetBytes(
+            """{"version":1,"threshold":8,"allowMissingCoverage":false}"""));
         var context = new ManifestContext("ctx", "App.csproj", "net10.0", "Debug", "AnyCPU",
             "", "", "", true, true,
             [new ManifestInput("source", "src/C.cs", "artifacts/source.bin", source.Length,
@@ -152,8 +215,9 @@ public sealed class ArtifactCaptureTests
             new ManifestCapture("completed", true, true, []),
             new ManifestRevision("none", "none", "workspace", null, null, null),
             [new ManifestRoot("workspace", "workspace", "sensitive")], [context],
-            [new ManifestBuild("build", "ctx", "App", CanonicalIdentity.Sha256(assembly.AsSpan()), "mvid",
-                CanonicalIdentity.Sha256(pdb.AsSpan()), "portable-pdb")],
+            [new ManifestBuild("build", "ctx", inspected.ModuleIdentity,
+                CanonicalIdentity.Sha256(assembly.AsSpan()), inspected.Mvid,
+                CanonicalIdentity.Sha256(pdb.AsSpan()), inspected.DebugIdentity)],
             [new ManifestExecution("test", "ctx", "build", true, 0, 1, 1, 0, 0)],
             [new ManifestArtifact("source", "source", "artifacts/source.bin", source.Length,
                     CanonicalIdentity.Sha256(source.AsSpan()), "ctx", null, null, null, null),

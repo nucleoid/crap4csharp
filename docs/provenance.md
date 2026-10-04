@@ -9,15 +9,16 @@ All bundle locators are relative, bounded, containment-checked, and hash/length 
 reports `captured`: it proves internal consistency of the retained evidence, not that the current checkout matches.
 An invalid or incompatible explicit manifest is an operational failure and never falls back to bare XML.
 
-The v1 integrity payload uses domain-separated, length-prefixed UTF-8 values and ordinal set ordering. It excludes
-only `manifestHash` itself; source-set, input-closure and context hashes are recomputed before the manifest hash is
-accepted. The published test vector is:
+The v1 integrity payload uses domain-separated tuples whose UTF-8 fields carry an explicit null/non-null tag and
+byte length, plus ordinal set ordering. This makes null distinct from empty text and prevents delimiter collisions.
+It excludes only `manifestHash` itself; source-set, input-closure and context hashes are recomputed before the
+manifest hash is accepted. The published test vector is:
 
 ```text
-sourceSetHash   352c257a192f9041fefd856032835e63731386e369e327be772c2580a375f928
-inputClosureHash cde09b11c2e1f8023c5fac5f8468a48a42e2fae1fbcc253972ae49a24bb6f80b
-contextHash     7ac8c7682d111361ff8bed3ed526c5b24c71b564f633d81e7ea603bcd7eee3ab
-manifestHash    37381bd2241d6593aac0040bf4d84cdd80a6bcde7689d90633b7f6c917cd43f0
+sourceSetHash   864f42d22774118aa30c2be59188cf321335366c5322a78565ba3e39b7d71a70
+inputClosureHash e281b69e9bae9ddabafdfad7e60ded5039e610cbf82aa373bf6c4c64bc730e21
+contextHash     27e8ee19bc0a8943eb757235bf53b9c1aee69b42eb5b5310c3cef54c946e20b9
+manifestHash    e646f745fce6767735343cfc10718ad333676fec06f980e211a7e54d920c5501
 ```
 
 Each context records effective language version, source kind, preprocessor symbols, feature flags, logical path case,
@@ -48,7 +49,14 @@ configuration/platform/RID, source/context identities, DLL/PDB identities, or li
 optimistically union. A manifest never upgrades unsupported generated-method mapping into known coverage.
 Every accepted coverage artifact references a successful completed execution and its same-context build. The bundle
 also retains hash-bound assembly, portable PDB, and test-result artifacts for that graph; booleans in the manifest do
-not substitute for those bytes.
+not substitute for those bytes. Verification reads managed module metadata and MVID, matches the PE CodeView record
+to the portable PDB identity, and derives execution counters from the captured TRX.
+
+The captured scope artifact is JSON `{"version":1,"sources":[...]}`; the captured policy artifact is JSON
+`{"version":1,"threshold":8,"allowMissingCoverage":false}`. Replay applies those values and rejects live overrides.
+Baseline and exemption hashes fail closed until their captured evaluators are supported. A Git revision may also bind
+`stateHash`, derived from porcelain status (including untracked files), recursive submodule status, and the staged
+binary diff; current-workspace verification must reproduce it.
 
 ## Assurance limits
 

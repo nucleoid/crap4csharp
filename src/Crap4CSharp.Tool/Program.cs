@@ -193,7 +193,7 @@ internal static class App
                     : "check orchestration is reserved for issue #10; use analyze --syntax-only for the issue #7 adapter.");
             cancellationToken.ThrowIfCancellationRequested();
             var result = options.ReuseArtifacts is not null
-                ? AnalyzeCommand.Replay(options.ReuseArtifacts, workingDirectory, options.Output, options.Threshold,
+                ? AnalyzeCommand.Replay(options.ReuseArtifacts, workingDirectory, options.Output,
                     startedAt, stopwatch.Elapsed, cancellationToken)
                 : options.Ruleset == ComplexityRules.OrdinaryMethodsV1
                 ? await AnalyzeLegacyCapturedInputsAsync(options, workingDirectory, startedAt, stopwatch, cancellationToken)
@@ -240,8 +240,8 @@ internal static class App
                         if (mayWrite && options.ReuseArtifacts is not null)
                         {
                             mayWrite = false;
-                            ArtifactBundle.Load(options.ReuseArtifacts, workingDirectory)
-                                .RejectOutputAlias(destination, workingDirectory);
+                            ArtifactBundle.RejectOutputAliasForLocator(options.ReuseArtifacts, destination,
+                                workingDirectory);
                             mayWrite = true;
                         }
                     }
@@ -328,6 +328,7 @@ internal static class App
                     options.Exemptions = Value();
                     break;
                 case "--threshold":
+                    if (!seen.Add(arg)) throw new ArgumentException("--threshold may be specified only once.");
                     if (!double.TryParse(Value(), NumberStyles.Float, CultureInfo.InvariantCulture, out var threshold) ||
                         !double.IsFinite(threshold) || threshold < 0)
                         throw new ArgumentException("Threshold must be a finite non-negative number.");
@@ -358,7 +359,7 @@ internal static class App
             if (options.Command != "analyze" || options.SyntaxOnly || options.Inputs.Count > 0 || options.Coverage.Count > 0 ||
                 options.CoveragePathMappings.Count > 0 || options.CoveragePathCase != CoveragePathCase.Auto ||
                 options.Exemptions is not null || options.Project is not null || options.AllowMissingCoverage ||
-                seen.Contains("--ruleset"))
+                seen.Contains("--ruleset") || seen.Contains("--threshold"))
                 throw new ArgumentException("--reuse-artifacts cannot be combined with live source, project, coverage, mapping, case, syntax-only, or exemption inputs.");
         }
         else if (options.Command == "analyze" && !options.SyntaxOnly)

@@ -29,6 +29,29 @@ public sealed class AnalyzeCommandTests
     }
 
     [Fact]
+    public async Task TruncatedManifestStillWritesRequestedResultOutsideBundle()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-truncated-manifest-output");
+        var bundle = Path.Combine(directory.Path, "bundle");
+        Directory.CreateDirectory(bundle);
+        var manifest = Path.Combine(bundle, "manifest.json");
+        var destination = Path.Combine(directory.Path, "result.json");
+        File.WriteAllText(manifest, "{\"manifestSchemaVersion\":");
+        var output = new StringWriter();
+
+        var exit = await global::App.RunAsync(
+            ["analyze", "--reuse-artifacts", manifest, "--output", destination, "--format", "json"],
+            directory.Path, output, TextWriter.Null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, exit);
+        Assert.True(File.Exists(destination));
+        Assert.Equal(output.ToString(), File.ReadAllText(destination));
+        using var document = JsonDocument.Parse(File.ReadAllText(destination));
+        Assert.Equal("artifact.invalid", document.RootElement.GetProperty("evaluation")
+            .GetProperty("decision").GetProperty("reason").GetString());
+    }
+
+    [Fact]
     public async Task SyntaxOnlyRejectsProjectInsteadOfIgnoringIt()
     {
         using var directory = TestDirectory.Create("crap4csharp-syntax-project");
@@ -79,6 +102,61 @@ public sealed class AnalyzeCommandTests
             "--format", "json"], directory.Path, output, error, TestContext.Current.CancellationToken);
         Assert.Equal(1, exit);
         Assert.Contains("cannot be combined", error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CapturedReplayRejectsALiveThresholdOverride()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-captured-threshold-override");
+        var manifest = CreateBundle(directory.Path);
+        var error = new StringWriter();
+
+        var exit = await global::App.RunAsync(
+            ["analyze", "--reuse-artifacts", manifest, "--threshold", "99", "--format", "json"],
+            directory.Path, TextWriter.Null, error, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, exit);
+        Assert.Contains("cannot be combined", error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CapturedPolicyThresholdControlsTheReplayDecision()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-captured-policy");
+        var manifestPath = CreateBundle(directory.Path);
+        ReplaceEvaluationArtifact(manifestPath, "policy",
+            Encoding.UTF8.GetBytes("""{"version":1,"threshold":0,"allowMissingCoverage":false}"""));
+        var output = new StringWriter();
+
+        var exit = await global::App.RunAsync(
+            ["analyze", "--reuse-artifacts", manifestPath, "--format", "json"],
+            directory.Path, output, TextWriter.Null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, exit);
+        using var document = JsonDocument.Parse(output.ToString());
+        Assert.Equal(0, document.RootElement.GetProperty("evaluation").GetProperty("policy")
+            .GetProperty("threshold").GetDouble());
+        Assert.NotEmpty(document.RootElement.GetProperty("evaluation").GetProperty("findings").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task CapturedScopeFiltersSourcesRatherThanUsingTheLiveDefault()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-captured-scope");
+        var manifestPath = CreateBundle(directory.Path);
+        ReplaceEvaluationArtifact(manifestPath, "scope",
+            Encoding.UTF8.GetBytes("""{"version":1,"sources":[]}"""));
+        var output = new StringWriter();
+
+        var exit = await global::App.RunAsync(
+            ["analyze", "--reuse-artifacts", manifestPath, "--format", "json"],
+            directory.Path, output, TextWriter.Null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, exit);
+        using var document = JsonDocument.Parse(output.ToString());
+        Assert.Empty(document.RootElement.GetProperty("evaluation").GetProperty("metrics").EnumerateArray());
+        Assert.Equal("notApplicable", document.RootElement.GetProperty("evaluation")
+            .GetProperty("decision").GetProperty("policyDecision").GetString());
     }
 
     [Fact]
@@ -148,7 +226,7 @@ public sealed class AnalyzeCommandTests
         var path = CreateBundle(directory.Path);
         var source = Encoding.UTF8.GetBytes("class C { C() { } }");
         var coverage = Encoding.UTF8.GetBytes("""
-            <coverage><packages><package name="App"><classes><class name="C" filename="src/C.cs">
+            <coverage><packages><package name="Crap4CSharp.Core"><classes><class name="C" filename="src/C.cs">
             <methods><method name=".ctor" signature="()"><lines><line number="1" hits="1" /></lines></method></methods>
             </class></classes></package></packages></coverage>
             """);
@@ -188,15 +266,24 @@ public sealed class AnalyzeCommandTests
         Directory.CreateDirectory(artifacts);
         var source = Encoding.UTF8.GetBytes("class C { int M() => 1; }");
         var coverage = Encoding.UTF8.GetBytes("""
-            <coverage><packages><package name="App"><classes><class name="C" filename="src/C.cs">
+            <coverage><packages><package name="Crap4CSharp.Core"><classes><class name="C" filename="src/C.cs">
             <methods><method name="M" signature="()"><lines><line number="1" hits="1" /></lines></method></methods>
             </class></classes></package></packages></coverage>
             """);
-        var assembly = new byte[] { 7 };
-        var pdb = new byte[] { 8 };
-        var trx = new byte[] { 9 };
-        var scope = new byte[] { 10 };
-        var policy = new byte[] { 11 };
+        var assemblyPath = typeof(CanonicalIdentity).Assembly.Location;
+        var assembly = File.ReadAllBytes(assemblyPath);
+        var pdb = File.ReadAllBytes(Path.ChangeExtension(assemblyPath, ".pdb"));
+        var inspected = ArtifactEvidenceInspector.InspectBuild(
+            System.Collections.Immutable.ImmutableArray.Create(assembly),
+            System.Collections.Immutable.ImmutableArray.Create(pdb));
+        var trx = Encoding.UTF8.GetBytes("""
+            <TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
+              <ResultSummary outcome="Completed"><Counters total="1" executed="1" passed="1" failed="0"
+                error="0" timeout="0" aborted="0" inconclusive="0" notExecuted="0" /></ResultSummary>
+            </TestRun>
+            """);
+        var scope = Encoding.UTF8.GetBytes("""{"version":1,"sources":["src/C.cs"]}""");
+        var policy = Encoding.UTF8.GetBytes("""{"version":1,"threshold":8,"allowMissingCoverage":false}""");
         File.WriteAllBytes(Path.Combine(artifacts, "source.bin"), source);
         File.WriteAllBytes(Path.Combine(artifacts, "coverage.xml"), coverage);
         File.WriteAllBytes(Path.Combine(artifacts, "app.dll"), assembly);
@@ -219,8 +306,8 @@ public sealed class AnalyzeCommandTests
             new ManifestCapture("completed", true, true, []),
             new ManifestRevision("none", "local", "deleted-original", null, null, null),
             [new ManifestRoot("workspace", "workspace", "sensitive")], [context],
-            [new ManifestBuild("build", "ctx", "App", CanonicalIdentity.Sha256(assembly), "mvid",
-                CanonicalIdentity.Sha256(pdb), "portable-pdb")],
+            [new ManifestBuild("build", "ctx", inspected.ModuleIdentity, CanonicalIdentity.Sha256(assembly),
+                inspected.Mvid, CanonicalIdentity.Sha256(pdb), inspected.DebugIdentity)],
             [new ManifestExecution("test", "ctx", "build", true, 0, 1, 1, 0, 0)],
             [new ManifestArtifact("source", "source", "artifacts/source.bin", source.Length,
                  CanonicalIdentity.Sha256(source), "ctx", null, null, null, null),
@@ -250,4 +337,23 @@ public sealed class AnalyzeCommandTests
     private static void WriteManifest(string path, RunManifest manifest) => File.WriteAllText(path,
         JsonSerializer.Serialize(manifest, new JsonSerializerOptions
         { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true }));
+
+    private static void ReplaceEvaluationArtifact(string manifestPath, string kind, byte[] bytes)
+    {
+        var manifest = ReadManifest(manifestPath);
+        var artifact = manifest.Artifacts.Single(item => item.Kind == kind);
+        File.WriteAllBytes(Path.Combine(Path.GetDirectoryName(manifestPath)!,
+            artifact.Locator.Replace('/', Path.DirectorySeparatorChar)), bytes);
+        var hash = CanonicalIdentity.Sha256(bytes);
+        var artifacts = manifest.Artifacts.Select(item => item.Id == artifact.Id
+            ? item with { Length = bytes.Length, Sha256 = hash } : item).ToArray();
+        var evaluation = kind switch
+        {
+            "scope" => manifest.EvaluationInputs with { ScopeHash = hash },
+            "policy" => manifest.EvaluationInputs with { PolicyHash = hash },
+            _ => throw new ArgumentOutOfRangeException(nameof(kind))
+        };
+        WriteManifest(manifestPath, ManifestIdentity.Seal(manifest with
+        { Artifacts = artifacts, EvaluationInputs = evaluation, ManifestHash = null }));
+    }
 }

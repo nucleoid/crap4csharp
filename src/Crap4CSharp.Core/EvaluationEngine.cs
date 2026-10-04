@@ -16,9 +16,13 @@ public static class EvaluationEngine
         var sourcePaths = input.Sources.Select(source => source.LogicalPath.Replace('\\', '/')).ToArray();
         var reports = input.Coverage.OrderBy(report => report.LogicalPath, StringComparer.Ordinal).Select(report =>
             CoverageReader.Read(report.Bytes.AsSpan(), report.LogicalPath).Select(method => method with
-            { ContextId = input.ContextId, File = CapturedLogicalPathResolver.Resolve(method.File, sourcePaths, input.PathPolicy) }).ToArray()).ToArray();
+            { ContextId = input.ContextId, File = CapturedLogicalPathResolver.Resolve(method.File, sourcePaths, input.PathPolicy) })
+            .Where(method => input.ExpectedModuleIdentity is null ||
+                string.Equals(method.ModuleIdentity, input.ExpectedModuleIdentity, StringComparison.Ordinal)).ToArray()).ToArray();
         cancellationToken.ThrowIfCancellationRequested();
-        var matches = CoverageMatcher.ApplyDetailed(methods, reports);
+        var matches = CoverageMatcher.ApplyDetailedResult(methods, reports,
+            input.PathPolicy.CaseSensitive ? PathIdentityPolicy.Sensitive : PathIdentityPolicy.Insensitive,
+            logicalPaths: true).Matches;
         var metrics = matches.Select(match => new EvaluationMetric(input.ContextId,
             (match.Source.LogicalPath ?? match.Source.File).Replace('\\', '/'), match.Source.CanonicalSignature,
             match.Metric.StartLine, match.Metric.EndLine, match.Metric.Complexity, match.Metric.Coverage,

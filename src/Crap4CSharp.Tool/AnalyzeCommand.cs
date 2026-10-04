@@ -6,18 +6,22 @@ using Microsoft.CodeAnalysis.CSharp;
 internal static class AnalyzeCommand
 {
     public static ResultDocument Replay(string manifestPath, string workingDirectory, string? outputPath,
-        double threshold, DateTimeOffset startedAt, TimeSpan duration, CancellationToken cancellationToken)
+        DateTimeOffset startedAt, TimeSpan duration, CancellationToken cancellationToken)
     {
         var bundle = ArtifactBundle.Load(manifestPath, workingDirectory);
         if (outputPath is not null) bundle.RejectOutputAlias(outputPath, workingDirectory);
         var manifest = bundle.Manifest;
         var provenance = ProvenanceVerifier.VerifyCapture(manifest, bundle.Bytes);
+        var capturedEvaluation = CapturedEvaluationInputs.Read(bundle);
+        var threshold = capturedEvaluation.Policy.Threshold;
+        var scopedSources = capturedEvaluation.Scope.Sources.ToHashSet(StringComparer.Ordinal);
         var partitions = new List<ReplayPartition>();
         if (provenance.Status != ProvenanceStatus.Invalid)
         {
             foreach (var context in manifest.Contexts.OrderBy(item => item.Id, StringComparer.Ordinal))
             {
-                var sourceInputs = context.Inputs.Where(input => input.Role == "source" && !input.Generated)
+                var sourceInputs = context.Inputs.Where(input => input.Role == "source" && !input.Generated &&
+                        scopedSources.Contains(input.LogicalPath))
                     .OrderBy(input => input.LogicalPath, StringComparer.Ordinal).ToArray();
                 var sources = sourceInputs.Select(input =>
                 {
@@ -50,10 +54,12 @@ internal static class AnalyzeCommand
                             throw new InvalidDataException($"Captured coverage is missing: {item.Id}");
                         return new CapturedCoverage(item.Locator, bytes, item.Format!, item.CoordinateKind!);
                     }).ToArray();
-                    partitions.Add(manifest.Producer.ComplexityRuleset == ComplexityRules.CallablesV1
-                        ? EvaluateCallables(partitionId, context, build, sources, coverage, references, parseOptions, pathPolicy, threshold)
-                        : EvaluateOrdinary(partitionId, sources, coverage, parseOptions, pathPolicy, threshold, provenance,
-                            cancellationToken));
+                    partitions.Add(sources.Length == 0
+                        ? EmptyPartition(partitionId, context)
+                        : manifest.Producer.ComplexityRuleset == ComplexityRules.CallablesV1
+                            ? EvaluateCallables(partitionId, context, build, sources, coverage, references, parseOptions, pathPolicy, threshold)
+                            : EvaluateOrdinary(partitionId, context, build, sources, coverage, parseOptions, pathPolicy,
+                                threshold, provenance, capturedEvaluation.Policy.AllowMissingCoverage, cancellationToken));
                 }
             }
         }
@@ -75,7 +81,7 @@ internal static class AnalyzeCommand
                 provenance.Reasons.FirstOrDefault() ?? "provenance.captureConsistent", true),
             new CheckResult("testExecution", provenance.Status == ProvenanceStatus.Invalid ? "operationalError" : "pass",
                 provenance.Status == ProvenanceStatus.Invalid ? ProvenanceReasonCodes.TestExecutionIncomplete : "tests.capturedSuccessful", true),
-            new CheckResult("coverage", unknown.Length == 0 ? "pass" : "operationalError",
+            new CheckResult("coverage", unknown.Length == 0 || capturedEvaluation.Policy.AllowMissingCoverage ? "pass" : "operationalError",
                 unknown.FirstOrDefault()?.CoverageReason ?? "coverage.complete", true),
             new CheckResult("crap", findings.Length > 0 ? "fail" : metrics.Length > 0 ? "pass" : "notApplicable",
                 findings.Length > 0 ? "crap.thresholdExceeded" : metrics.Length > 0 ? "crap.withinThreshold" : "crap.noEligibleMethods", true)
@@ -88,10 +94,9 @@ internal static class AnalyzeCommand
             : findings.Length > 0 ? "crap.thresholdExceeded" : metrics.Length > 0 ? "crap.withinThreshold" : "crap.noEligibleMethods");
         var reasonCounts = unknown.GroupBy(item => item.CoverageReason ?? CoverageReasonCodes.Unavailable, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
-        var evaluation = new EvaluationSection("analyze", new PolicyOptions(threshold, false),
-            new EvaluationScope(".", manifest.Contexts.SelectMany(context => context.Inputs)
-                .Where(input => input.Role == "source" && !input.Generated).Select(input => input.LogicalPath)
-                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray()),
+        var evaluation = new EvaluationSection("analyze",
+            new PolicyOptions(threshold, capturedEvaluation.Policy.AllowMissingCoverage),
+            new EvaluationScope(".", capturedEvaluation.Scope.Sources),
             partitions.Select(partition => new EvaluationContext(partition.ContextId, "captured", partition.Project,
                 partition.TargetFramework, partition.Configuration, partition.SourceSetHash, null)).ToArray(),
             checks, metrics, findings, new CoverageSummary(metrics.Length, metrics.Count(item => item.Coverage is not null),
@@ -115,18 +120,25 @@ internal static class AnalyzeCommand
         return new ResultDocument(ResultContract.SchemaVersion, ToolVersion, manifest.Producer.ComplexityRuleset, evaluation, run);
     }
 
-    private static ReplayPartition EvaluateOrdinary(string contextId, IReadOnlyList<CapturedSource> sources,
+    private static ReplayPartition EvaluateOrdinary(string contextId, ManifestContext manifestContext,
+        ManifestBuild build, IReadOnlyList<CapturedSource> sources,
         IReadOnlyList<CapturedCoverage> coverage, CSharpParseOptions parseOptions, CapturedPathPolicy pathPolicy,
-        double threshold, ProvenanceResult provenance, CancellationToken cancellationToken)
+        double threshold, ProvenanceResult provenance, bool allowMissingCoverage, CancellationToken cancellationToken)
     {
         var snapshot = EvaluationEngine.Evaluate(new EvaluationInput(contextId, sources, coverage, parseOptions,
-            new PolicyOptions(threshold, false), provenance) { PathPolicy = pathPolicy }, cancellationToken);
+            new PolicyOptions(threshold, allowMissingCoverage), provenance)
+            { PathPolicy = pathPolicy, ExpectedModuleIdentity = build.ModuleIdentity }, cancellationToken);
         var metrics = snapshot.Metrics.Select(metric => new MetricResult(metric.ContextId, metric.Path,
             metric.MethodIdentity, null, new SourceSpan(metric.StartLine, metric.EndLine), metric.Complexity,
             metric.Coverage, metric.Crap, metric.CoverageReason)).ToArray();
-        return new ReplayPartition(contextId, "captured", null, null, null, null, metrics,
+        return new ReplayPartition(contextId, manifestContext.Project, manifestContext.TargetFramework,
+            manifestContext.Configuration, manifestContext.Platform, manifestContext.SourceSetHash, metrics,
             ThresholdFindings(metrics, threshold), [], [], []);
     }
+
+    private static ReplayPartition EmptyPartition(string contextId, ManifestContext context) => new(contextId,
+        context.Project, context.TargetFramework, context.Configuration, context.Platform, context.SourceSetHash,
+        [], [], [], [], []);
 
     private static ReplayPartition EvaluateCallables(string contextId, ManifestContext manifestContext,
         ManifestBuild build, IReadOnlyList<CapturedSource> sources, IReadOnlyList<CapturedCoverage> coverage,

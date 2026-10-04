@@ -33,15 +33,30 @@ public static class CanonicalIdentity
         return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
     }
 
+    public static string Tuple(string domain, params string?[] fields)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        Append(hash, Algorithm);
+        Append(hash, domain);
+        foreach (var field in fields)
+        {
+            Append(hash, field is null ? (byte)0 : (byte)1);
+            if (field is not null) Append(hash, field);
+        }
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
+
     public static string NormalizeLogicalPath(string value)
     {
         var normalized = value.Replace('\\', '/');
-        if (normalized.StartsWith('/') || normalized.Split('/').Any(segment => segment is "" or "." or ".."))
+        if (normalized.Any(character => char.IsControl(character)) || normalized.StartsWith('/') ||
+            normalized.Split('/').Any(segment => segment is "" or "." or ".."))
             throw new ArgumentException($"Logical path is not canonical and relative: {value}");
         return normalized;
     }
 
     private static void Append(IncrementalHash hash, string value) => Append(hash, Encoding.UTF8.GetBytes(value));
+    private static void Append(IncrementalHash hash, byte value) => hash.AppendData([value]);
     private static void Append(IncrementalHash hash, ReadOnlySpan<byte> value)
     {
         Span<byte> length = stackalloc byte[8];

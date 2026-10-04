@@ -307,16 +307,31 @@ public static class CoverageReader
     private static IReadOnlyList<CoverageMethod> ReadCoberturaCompatibility(XDocument document, string baseDirectory,
         string reportId, bool captured)
     {
-        var sourceRoot = document.Root?.Elements().FirstOrDefault(element => element.Name.LocalName == "sources")?
-            .Elements().FirstOrDefault(element => element.Name.LocalName == "source")?.Value.Trim();
+        var sourceRoots = document.Root?.Elements().FirstOrDefault(element => element.Name.LocalName == "sources")?
+            .Elements().Where(element => element.Name.LocalName == "source").Select(element => element.Value.Trim())
+            .Where(value => value.Length > 0).Distinct(StringComparer.Ordinal).ToArray() ?? [];
         var output = new List<CoverageMethod>();
         foreach (var @class in document.Descendants().Where(element => element.Name.LocalName == "class"))
         {
             var moduleIdentity = @class.Ancestors().FirstOrDefault(element => element.Name.LocalName == "package")?.Attribute("name")?.Value;
             var typeName = Attr(@class, "name") ?? string.Empty;
             var filename = Attr(@class, "filename");
-            var file = filename is null ? null : captured ? filename : ResolveNativePath(filename,
-                !string.IsNullOrWhiteSpace(sourceRoot) && Path.IsPathRooted(sourceRoot) ? sourceRoot : baseDirectory);
+            string? file;
+            if (filename is null) file = null;
+            else if (captured)
+            {
+                if (IsLexicallyAbsolute(filename)) file = filename;
+                else if (sourceRoots.Length == 0) file = filename;
+                else if (sourceRoots.Length == 1) file = sourceRoots[0].Replace('\\', '/').TrimEnd('/') + "/" +
+                    filename.Replace('\\', '/').TrimStart('/');
+                else throw new InvalidDataException("Captured Cobertura report has ambiguous source roots.");
+            }
+            else
+            {
+                var sourceRoot = sourceRoots.FirstOrDefault();
+                file = ResolveNativePath(filename,
+                    !string.IsNullOrWhiteSpace(sourceRoot) && Path.IsPathRooted(sourceRoot) ? sourceRoot : baseDirectory);
+            }
             var methodsContainer = @class.Elements().FirstOrDefault(element => element.Name.LocalName == "methods");
             if (methodsContainer is null) continue;
             foreach (var method in methodsContainer.Elements().Where(element => element.Name.LocalName == "method"))
@@ -332,6 +347,13 @@ public static class CoverageReader
             }
         }
         return output;
+    }
+
+    private static bool IsLexicallyAbsolute(string value)
+    {
+        var path = value.Replace('\\', '/');
+        return path.StartsWith('/') || path.StartsWith("//", StringComparison.Ordinal) ||
+            path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] == '/';
     }
 
     private static string? ResolveNativePath(string path, string baseDirectory)

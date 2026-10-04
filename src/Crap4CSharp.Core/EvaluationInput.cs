@@ -9,6 +9,7 @@ public sealed record EvaluationInput(string ContextId, IReadOnlyList<CapturedSou
     ProvenanceResult Provenance)
 {
     public CapturedPathPolicy PathPolicy { get; init; } = new(true, []);
+    public string? ExpectedModuleIdentity { get; init; }
 }
 public sealed record CapturedPathPolicy(bool CaseSensitive, IReadOnlyList<ManifestReportRootMapping> ReportRootMappings);
 public sealed record EvaluationMetric(string ContextId, string Path, string MethodIdentity, int StartLine,

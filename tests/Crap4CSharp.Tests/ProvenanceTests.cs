@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Text;
 using Crap4CSharp.Core;
 using Xunit;
 
@@ -14,6 +15,16 @@ public sealed class ProvenanceTests
         Assert.NotEqual(value, CanonicalIdentity.Content("source", "src/D.cs", [1, 2, 3]));
         Assert.NotEqual(value, CanonicalIdentity.Content("source", "src/C.cs", [1, 2, 4]));
         Assert.Equal(64, value.Length);
+    }
+
+    [Fact]
+    public void CanonicalTuplesDistinguishNullEmptyAndFormerDelimiterCollisions()
+    {
+        Assert.NotEqual(CanonicalIdentity.Tuple("tuple", (string?)null),
+            CanonicalIdentity.Tuple("tuple", ""));
+        Assert.NotEqual(CanonicalIdentity.Tuple("tuple", "a\nb", "c"),
+            CanonicalIdentity.Tuple("tuple", "a", "b\nc"));
+        Assert.Throws<ArgumentException>(() => CanonicalIdentity.NormalizeLogicalPath("src/a\nb.cs"));
     }
 
     [Fact]
@@ -164,17 +175,47 @@ public sealed class ProvenanceTests
     }
 
     [Fact]
+    public void CaptureDerivesBuildIdentityFromActualPeAndPortablePdb()
+    {
+        var manifest = Fixture();
+        manifest = ManifestIdentity.Seal(manifest with
+        {
+            Builds = [manifest.Builds[0] with { Mvid = Guid.Empty.ToString("D") }],
+            ManifestHash = null
+        });
+
+        Assert.Contains(ProvenanceReasonCodes.ActualBindingIncomplete,
+            ProvenanceVerifier.VerifyCapture(manifest, FixtureBytes()).Reasons);
+    }
+
+    [Fact]
+    public void CaptureDerivesExecutionCountsFromActualTrx()
+    {
+        var manifest = Fixture();
+        var bytes = FixtureBytes();
+        var malformed = ImmutableArray.Create(Encoding.UTF8.GetBytes("<TestRun><broken>"));
+        bytes["artifacts/results.trx"] = malformed;
+        var artifacts = manifest.Artifacts.Select(item => item.Kind == "test-result"
+            ? item with { Length = malformed.Length, Sha256 = CanonicalIdentity.Sha256(malformed.AsSpan()) }
+            : item).ToArray();
+        manifest = ManifestIdentity.Seal(manifest with { Artifacts = artifacts, ManifestHash = null });
+
+        Assert.Contains(ProvenanceReasonCodes.TestExecutionIncomplete,
+            ProvenanceVerifier.VerifyCapture(manifest, bytes).Reasons);
+    }
+
+    [Fact]
     public void CanonicalManifestIdentityMatchesPublishedGoldenVector()
     {
         var manifest = Fixture();
 
-        Assert.Equal("352c257a192f9041fefd856032835e63731386e369e327be772c2580a375f928",
+        Assert.Equal("864f42d22774118aa30c2be59188cf321335366c5322a78565ba3e39b7d71a70",
             manifest.Contexts[0].SourceSetHash);
-        Assert.Equal("cde09b11c2e1f8023c5fac5f8468a48a42e2fae1fbcc253972ae49a24bb6f80b",
+        Assert.Equal("e281b69e9bae9ddabafdfad7e60ded5039e610cbf82aa373bf6c4c64bc730e21",
             manifest.Contexts[0].InputClosureHash);
-        Assert.Equal("7ac8c7682d111361ff8bed3ed526c5b24c71b564f633d81e7ea603bcd7eee3ab",
+        Assert.Equal("27e8ee19bc0a8943eb757235bf53b9c1aee69b42eb5b5310c3cef54c946e20b9",
             manifest.Contexts[0].ContextHash);
-        Assert.Equal("37381bd2241d6593aac0040bf4d84cdd80a6bcde7689d90633b7f6c917cd43f0",
+        Assert.Equal("e646f745fce6767735343cfc10718ad333676fec06f980e211a7e54d920c5501",
             manifest.ManifestHash);
     }
 
@@ -216,19 +257,11 @@ public sealed class ProvenanceTests
         Assert.Equal("src/C.cs", result);
     }
 
-    private static Dictionary<string, ImmutableArray<byte>> FixtureBytes() => new(StringComparer.Ordinal)
-    {
-        ["artifacts/source.bin"] = ImmutableArray.Create<byte>(1, 2, 3),
-        ["artifacts/coverage.xml"] = ImmutableArray.Create<byte>(4, 5, 6),
-        ["artifacts/app.dll"] = ImmutableArray.Create<byte>(7),
-        ["artifacts/app.pdb"] = ImmutableArray.Create<byte>(8),
-        ["artifacts/results.trx"] = ImmutableArray.Create<byte>(9),
-        ["artifacts/scope.json"] = ImmutableArray.Create<byte>(10),
-        ["artifacts/policy.json"] = ImmutableArray.Create<byte>(11)
-    };
+    private static Dictionary<string, ImmutableArray<byte>> FixtureBytes() => FixtureParts().Bytes;
 
     private static RunManifest Fixture()
     {
+        var parts = FixtureParts();
         var sourceHash = CanonicalIdentity.Sha256([1, 2, 3]);
         var manifest = new RunManifest("1.0", "sha256-canonical-v1",
             new ManifestProducer("crap4csharp", "0.1.0", ComplexityRules.CallablesV1,
@@ -244,25 +277,62 @@ public sealed class ProvenanceTests
                     new Dictionary<string, string>(StringComparer.Ordinal)),
                 PathPolicy = new ManifestPathPolicy("sensitive", [])
             }],
-            [new ManifestBuild("build", "ctx", "module", CanonicalIdentity.Sha256([7]), "mvid",
-                CanonicalIdentity.Sha256([8]), "portable-pdb")],
+            [new ManifestBuild("build", "ctx", parts.Build.ModuleIdentity,
+                CanonicalIdentity.Sha256(parts.Bytes["artifacts/app.dll"].AsSpan()), parts.Build.Mvid,
+                CanonicalIdentity.Sha256(parts.Bytes["artifacts/app.pdb"].AsSpan()), parts.Build.DebugIdentity)],
             [new ManifestExecution("test", "ctx", "build", true, 0, 1, 1, 0, 0)],
             [new ManifestArtifact("source", "source", "artifacts/source.bin", 3, sourceHash,
                     "ctx", null, null, null, null),
              new ManifestArtifact("coverage", "coverage", "artifacts/coverage.xml", 3,
                     CanonicalIdentity.Sha256([4, 5, 6]), "ctx", "build", "test", "opencover", "sequence-point"),
-             new ManifestArtifact("assembly", "assembly", "artifacts/app.dll", 1, CanonicalIdentity.Sha256([7]),
+             new ManifestArtifact("assembly", "assembly", "artifacts/app.dll", parts.Bytes["artifacts/app.dll"].Length,
+                    CanonicalIdentity.Sha256(parts.Bytes["artifacts/app.dll"].AsSpan()),
                     "ctx", "build", null, null, null),
-             new ManifestArtifact("pdb", "pdb", "artifacts/app.pdb", 1, CanonicalIdentity.Sha256([8]),
+             new ManifestArtifact("pdb", "pdb", "artifacts/app.pdb", parts.Bytes["artifacts/app.pdb"].Length,
+                    CanonicalIdentity.Sha256(parts.Bytes["artifacts/app.pdb"].AsSpan()),
                     "ctx", "build", null, null, null),
-             new ManifestArtifact("test-result", "test-result", "artifacts/results.trx", 1, CanonicalIdentity.Sha256([9]),
+             new ManifestArtifact("test-result", "test-result", "artifacts/results.trx",
+                    parts.Bytes["artifacts/results.trx"].Length,
+                    CanonicalIdentity.Sha256(parts.Bytes["artifacts/results.trx"].AsSpan()),
                     "ctx", "build", "test", "trx", null),
-             new ManifestArtifact("scope", "scope", "artifacts/scope.json", 1, CanonicalIdentity.Sha256([10]),
+             new ManifestArtifact("scope", "scope", "artifacts/scope.json",
+                    parts.Bytes["artifacts/scope.json"].Length,
+                    CanonicalIdentity.Sha256(parts.Bytes["artifacts/scope.json"].AsSpan()),
                     null, null, null, "json", null),
-             new ManifestArtifact("policy", "policy", "artifacts/policy.json", 1, CanonicalIdentity.Sha256([11]),
+             new ManifestArtifact("policy", "policy", "artifacts/policy.json",
+                    parts.Bytes["artifacts/policy.json"].Length,
+                    CanonicalIdentity.Sha256(parts.Bytes["artifacts/policy.json"].AsSpan()),
                     null, null, null, "json", null)],
-            new ManifestEvaluationInputs(CanonicalIdentity.Sha256([10]), CanonicalIdentity.Sha256([11]), null, null), null);
+            new ManifestEvaluationInputs(
+                CanonicalIdentity.Sha256(parts.Bytes["artifacts/scope.json"].AsSpan()),
+                CanonicalIdentity.Sha256(parts.Bytes["artifacts/policy.json"].AsSpan()), null, null), null);
         return ManifestIdentity.Seal(manifest);
+    }
+
+    private static (Dictionary<string, ImmutableArray<byte>> Bytes, InspectedBuildEvidence Build) FixtureParts()
+    {
+        var assemblyPath = typeof(CanonicalIdentity).Assembly.Location;
+        var assembly = ImmutableArray.Create(File.ReadAllBytes(assemblyPath));
+        var pdb = ImmutableArray.Create(File.ReadAllBytes(Path.ChangeExtension(assemblyPath, ".pdb")));
+        var trx = ImmutableArray.Create(Encoding.UTF8.GetBytes("""
+            <TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
+              <ResultSummary outcome="Completed"><Counters total="1" executed="1" passed="1" failed="0"
+                error="0" timeout="0" aborted="0" inconclusive="0" notExecuted="0" /></ResultSummary>
+            </TestRun>
+            """));
+        var bytes = new Dictionary<string, ImmutableArray<byte>>(StringComparer.Ordinal)
+        {
+            ["artifacts/source.bin"] = ImmutableArray.Create<byte>(1, 2, 3),
+            ["artifacts/coverage.xml"] = ImmutableArray.Create<byte>(4, 5, 6),
+            ["artifacts/app.dll"] = assembly,
+            ["artifacts/app.pdb"] = pdb,
+            ["artifacts/results.trx"] = trx,
+            ["artifacts/scope.json"] = ImmutableArray.Create(
+                Encoding.UTF8.GetBytes("""{"version":1,"sources":["src/C.cs"]}""")),
+            ["artifacts/policy.json"] = ImmutableArray.Create(
+                Encoding.UTF8.GetBytes("""{"version":1,"threshold":8,"allowMissingCoverage":false}"""))
+        };
+        return (bytes, ArtifactEvidenceInspector.InspectBuild(assembly, pdb));
     }
 
     private static CurrentEvidence EvidenceFrom(RunManifest manifest) => new(

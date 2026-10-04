@@ -39,7 +39,8 @@ public static class CoverageMatcher
     public static CoverageMatchResult ApplyDetailedResult(
         IReadOnlyList<SourceMethod> sourceMethods,
         IEnumerable<IReadOnlyList<CoverageMethod>> reports,
-        PathIdentityPolicy? pathPolicy = null)
+        PathIdentityPolicy? pathPolicy = null,
+        bool logicalPaths = false)
     {
         pathPolicy ??= PathIdentityPolicy.Current;
         var reportList = reports.ToArray();
@@ -51,7 +52,7 @@ public static class CoverageMatcher
             {
                 if (covered.PathResolution?.Diagnostic is { } pathDiagnostic) diagnostics.Add(pathDiagnostic);
                 if (covered.File is null) continue;
-                var byPath = sourceMethods.Where(source => PathsEqual(pathPolicy, source.File, covered.File)).ToArray();
+                var byPath = sourceMethods.Where(source => PathsEqual(pathPolicy, source.File, covered.File, logicalPaths)).ToArray();
                 if (covered.MethodName == "MoveNext" && IsGeneratedStateMachine(covered.TypeName))
                 {
                     diagnostics.Add(CoverageDiagnostic.Create(CoverageReasonCodes.UnsupportedGeneratedMapping,
@@ -246,8 +247,10 @@ public static class CoverageMatcher
         return CoverageReasonCodes.Unavailable;
     }
 
-    private static bool PathsEqual(PathIdentityPolicy policy, string left, string right)
+    private static bool PathsEqual(PathIdentityPolicy policy, string left, string right, bool logicalPaths)
     {
+        if (logicalPaths)
+            return policy.Comparer.Equals(left.Replace('\\', '/'), right.Replace('\\', '/'));
         try { return policy.Comparer.Equals(policy.Normalize(left), policy.Normalize(right)); }
         catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException) { return false; }
     }

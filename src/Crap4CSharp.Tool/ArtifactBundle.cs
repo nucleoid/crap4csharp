@@ -27,7 +27,8 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
             throw new InvalidDataException($"Artifact manifest not found: {fullManifest}");
         var root = Path.GetDirectoryName(fullManifest)
             ?? throw new InvalidDataException("Artifact manifest has no bundle root.");
-        RejectLinks(root, fullManifest);
+        if (new FileInfo(fullManifest).LinkTarget is not null)
+            throw new InvalidDataException("Artifact manifest cannot be a symbolic link.");
         var manifestBytes = ReadBounded(fullManifest, MaxManifestBytes, null, "manifest.json");
         RunManifest manifest;
         try
@@ -85,7 +86,16 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
         var candidate = Path.GetFullPath(output, workingDirectory);
         if (RelatedPath(BundleRoot, candidate) || ResolvedInputs.Any(path => RelatedPath(path, candidate)))
             throw new InvalidDataException("Output path aliases the artifact bundle or one of its inputs.");
-        RejectExistingLinkComponents(candidate);
+    }
+
+    public static void RejectOutputAliasForLocator(string manifestPath, string output, string workingDirectory)
+    {
+        var manifest = Path.GetFullPath(manifestPath, workingDirectory);
+        var root = Path.GetDirectoryName(manifest)
+            ?? throw new InvalidDataException("Artifact manifest has no bundle root.");
+        var candidate = Path.GetFullPath(output, workingDirectory);
+        if (RelatedPath(root, candidate) || RelatedPath(manifest, candidate))
+            throw new InvalidDataException("Output path aliases the artifact bundle.");
     }
 
     private static void ValidateShape(JsonElement root)
@@ -185,33 +195,33 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
         return output.ToArray();
     }
 
-    private static void RejectLinks(string root, string path)
-    {
-        EnsureContained(root, path);
-        RejectExistingLinkComponents(path);
-    }
-
-    private static void RejectExistingLinkComponents(string path)
-    {
-        var root = Path.GetPathRoot(path) ?? throw new InvalidDataException("Path has no root.");
-        var current = root;
-        foreach (var part in path[root.Length..].Split(Path.DirectorySeparatorChar,
-                     Path.AltDirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
-        {
-            current = Path.Combine(current, part);
-            if (!File.Exists(current) && !Directory.Exists(current)) break;
-            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
-                throw new InvalidDataException("Path contains a symbolic link.");
-        }
-    }
-
     private static bool RelatedPath(string left, string right)
     {
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         static string Terminate(string path) => Path.TrimEndingDirectorySeparator(path) + Path.DirectorySeparatorChar;
-        return string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), comparison) ||
-            Terminate(Path.GetFullPath(left)).StartsWith(Terminate(Path.GetFullPath(right)), comparison) ||
-            Terminate(Path.GetFullPath(right)).StartsWith(Terminate(Path.GetFullPath(left)), comparison);
+        var physicalLeft = ResolvePhysicalPrefix(left);
+        var physicalRight = ResolvePhysicalPrefix(right);
+        return string.Equals(physicalLeft, physicalRight, comparison) ||
+            Terminate(physicalLeft).StartsWith(Terminate(physicalRight), comparison) ||
+            Terminate(physicalRight).StartsWith(Terminate(physicalLeft), comparison);
+    }
+
+    private static string ResolvePhysicalPrefix(string path)
+    {
+        path = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(path) ?? throw new InvalidDataException("Path has no root.");
+        var current = root;
+        var parts = path[root.Length..].Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar,
+            StringSplitOptions.RemoveEmptyEntries);
+        for (var index = 0; index < parts.Length; index++)
+        {
+            var candidate = Path.Combine(current, parts[index]);
+            if (!File.Exists(candidate) && !Directory.Exists(candidate))
+                return Path.GetFullPath(parts.Skip(index).Aggregate(current, Path.Combine));
+            FileSystemInfo info = Directory.Exists(candidate) ? new DirectoryInfo(candidate) : new FileInfo(candidate);
+            current = info.ResolveLinkTarget(true)?.FullName ?? candidate;
+        }
+        return Path.GetFullPath(current);
     }
 
     private static void EnsureContained(string root, string path)
