@@ -15,7 +15,8 @@ internal static class CapturedEvaluationInputs
             throw new InvalidDataException("callables-v1 captured policy cannot allow missing coverage.");
         var available = bundle.Manifest.Contexts.SelectMany(context => context.Inputs
                 .Where(input => input.Role == "source" && !input.Generated)
-                .Select(input => DeclaredRepositorySourcePath(context, input)))
+                .Select(input => input.RepositoryPath is null ? input.LogicalPath :
+                    DeclaredRepositorySourcePath(context, input)))
             .ToHashSet(StringComparer.Ordinal);
         if (scope.Sources.Any(source => !available.Contains(source)))
             throw new InvalidDataException("Captured scope names a source outside the captured context inventory.");

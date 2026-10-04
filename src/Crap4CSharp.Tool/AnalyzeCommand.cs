@@ -31,7 +31,7 @@ internal static class AnalyzeCommand
             foreach (var context in manifest.Contexts.OrderBy(item => item.Id, StringComparer.Ordinal))
             {
                 var sourceInputs = context.Inputs.Where(input => input.Role == "source" && !input.Generated &&
-                        (allSources || scopedSources.Contains(
+                        (allSources || scopedSources.Contains(input.RepositoryPath is null ? input.LogicalPath :
                             CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input))))
                     .OrderBy(input => input.LogicalPath, StringComparer.Ordinal).ToArray();
                 var sources = sourceInputs.Select(input =>
