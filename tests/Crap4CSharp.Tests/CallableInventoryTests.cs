@@ -243,6 +243,27 @@ public sealed class CallableInventoryTests
         Assert.Equal(constructor.CallableId, Assert.Single(inventory.Callables, item => item.Name == "Own").ParentId);
     }
 
+    [Fact]
+    public void LambdaOnlyMemberInitializersOwnTheirAnonymousBodiesAndKeepTypeIdentity()
+    {
+        var inventory = CallableInventory.Analyze(
+            "class A { System.Func<int> F = () => 0; } class B { System.Func<int> F = () => 0; }",
+            "C.cs", Context());
+
+        var initializers = inventory.Callables.Where(item => item.Kind == CallableKind.FieldInitializer)
+            .OrderBy(item => item.Span.Start).ToArray();
+        var lambdas = inventory.Callables.Where(item => item.Kind == CallableKind.Lambda)
+            .OrderBy(item => item.Span.Start).ToArray();
+
+        Assert.Equal(2, initializers.Length);
+        Assert.Equal(2, lambdas.Length);
+        Assert.Equal(2, lambdas.Select(item => item.CallableId).Distinct(StringComparer.Ordinal).Count());
+        Assert.All(lambdas, item => Assert.False(item.IdentityAmbiguous));
+        Assert.Equal(initializers[0].ObservationId, lambdas[0].ParentObservationId);
+        Assert.Equal(initializers[1].ObservationId, lambdas[1].ParentObservationId);
+        Assert.All(initializers, item => Assert.Null(item.ParentObservationId));
+    }
+
     private static CallableAnalysisContext Context() => new(
         "repo/App.csproj", "net10.0", "Debug", "AnyCPU", "context-a",
         CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.Preview));
