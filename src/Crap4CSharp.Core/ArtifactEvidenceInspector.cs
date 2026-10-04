@@ -303,13 +303,14 @@ public static class ArtifactEvidenceInspector
                 point.EndColumn is null && point.Offset is null))
         {
             var lines = reported.SequencePoints.Select(point => point.Line).Distinct().ToArray();
-            // Coverlet omits compiler boundary/brace points (a one-column span) and
-            // projects every retained sequence point to line evidence. Require the
-            // complete statement-line set so a trimmed or stale report cannot improve
-            // the coverage denominator.
+            // Coverlet projects statement points and may project compiler boundary
+            // points. Require every non-boundary statement line. If a method consists
+            // entirely of one-column points (for example Empty() or => 0), those points
+            // are its only executable evidence and all of their lines are required.
             var statementPoints = points.Where(point => point.StartLine != point.EndLine ||
                 point.EndColumn != point.StartColumn + 1).ToArray();
-            if (lines.Length == 0 || statementPoints.Length == 0 || statementPoints.Any(point =>
+            var requiredPoints = statementPoints.Length == 0 ? points : statementPoints;
+            if (lines.Length == 0 || requiredPoints.Any(point =>
                     point.EndLine < point.StartLine || point.EndLine - point.StartLine > 100_000)) return false;
             var lineSet = lines.ToHashSet();
             if (lines.Any(line => !points.Any(point => line >= point.StartLine && line <= point.EndLine)))
@@ -319,7 +320,7 @@ public static class ArtifactEvidenceInspector
             // generated methods are not directly scored as authored callables.
             if (method.TypeName.Contains("/<", StringComparison.Ordinal))
                 return true;
-            foreach (var point in statementPoints)
+            foreach (var point in requiredPoints)
                 for (var line = point.StartLine; line <= point.EndLine; line++)
                     if (!lineSet.Contains(line) && !(method.MethodName is ".ctor" or ".cctor" &&
                             reportedLineCounts.TryGetValue(reportedLogical, out var counts) &&

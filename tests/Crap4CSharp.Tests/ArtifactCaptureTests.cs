@@ -131,7 +131,21 @@ public sealed class ArtifactCaptureTests
     }
 
     [Fact]
-    public void LoaderRejectsAFifoBeforeOpeningIt()
+    public void LoaderRejectsAManifestFifoBeforeOpeningIt()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var directory = TestDirectory.Create("crap4csharp-manifest-fifo");
+        var fixture = CreateFixture();
+        var locator = ArtifactCaptureAdapter.PublishNew(fixture.Manifest, fixture.Bytes,
+            Path.Combine(directory.Path, "bundle"));
+        File.Delete(locator);
+        Assert.Equal(0, MkFifo(locator, Convert.ToUInt32("600", 8)));
+
+        Assert.Throws<InvalidDataException>(() => ArtifactBundle.Load(locator, directory.Path));
+    }
+
+    [Fact]
+    public void LoaderRejectsAnArtifactFifoBeforeOpeningIt()
     {
         if (!OperatingSystem.IsLinux()) return;
         using var directory = TestDirectory.Create("crap4csharp-bundle-fifo");

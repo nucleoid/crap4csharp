@@ -82,7 +82,9 @@ internal static class AnalyzeCommand
         var checks = new[]
         {
             new CheckResult("provenance", provenance.Status == ProvenanceStatus.Invalid ? "operationalError" : "pass",
-                provenance.Reasons.FirstOrDefault() ?? "provenance.captureConsistent", true),
+                provenance.Status == ProvenanceStatus.Invalid
+                    ? provenance.Reasons.FirstOrDefault() ?? "provenance.invalid"
+                    : "provenance.captureConsistent", true),
             new CheckResult("testExecution", provenance.Status == ProvenanceStatus.Invalid ? "operationalError" : "pass",
                 provenance.Status == ProvenanceStatus.Invalid ? ProvenanceReasonCodes.TestExecutionIncomplete : "tests.capturedSuccessful", true),
             new CheckResult("coverage", unknown.Length == 0 || capturedEvaluation.Policy.AllowMissingCoverage ? "pass" : "operationalError",

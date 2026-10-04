@@ -90,4 +90,8 @@ public sealed class CallableSamples(int seed) : IProbe
     {
         changed = null;
     }
+
+    public void Empty() { }
+    public int Zero() => 0;
+    static CallableSamples() { }
 }

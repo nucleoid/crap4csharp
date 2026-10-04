@@ -56,7 +56,8 @@ options to match the captured context, and checks reported coverage points again
 points. Sequence-point formats retain exact coordinates when the report supplies them. Line-only formats such as
 Cobertura, and Coverlet OpenCover's synthetic `1..2` columns, establish only that every reported line is contained
 in a sequence-point span owned by the matching PDB method and that the complete non-boundary statement-line set is
-present for directly represented methods. Constructor PDB methods may also contain lowered member initializers;
+present for directly represented methods. When a method consists entirely of one-column points, all of those point
+lines are required instead. Constructor PDB methods may also contain lowered member initializers;
 their lines may be omitted from the constructor only when the same report assigns those lines to another method.
 State-machine `MoveNext` methods contain compiler control points that Coverlet does not project; v1 validates those
 generated line observations by containment but does not claim a complete authored-line denominator from the lowered

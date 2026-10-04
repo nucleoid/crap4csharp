@@ -394,6 +394,12 @@ public sealed class ProvenanceTests
         var report = ImmutableArray.Create(File.ReadAllBytes(reportPath));
         Assert.Contains("Fixture.CallableSamples::BlockBody()", Encoding.UTF8.GetString(report.AsSpan()),
             StringComparison.Ordinal);
+        Assert.Contains("Fixture.CallableSamples::Empty()", Encoding.UTF8.GetString(report.AsSpan()),
+            StringComparison.Ordinal);
+        Assert.Contains("Fixture.CallableSamples::Zero()", Encoding.UTF8.GetString(report.AsSpan()),
+            StringComparison.Ordinal);
+        Assert.Contains("Fixture.CallableSamples::.cctor()", Encoding.UTF8.GetString(report.AsSpan()),
+            StringComparison.Ordinal);
 
         var build = ArtifactEvidenceInspector.InspectBuild(assembly, pdb);
         string[] sources = ["samples/Fixture/Fixture/CallableSamples.cs", "samples/Fixture/Fixture/Scorer.cs"];

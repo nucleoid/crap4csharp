@@ -85,6 +85,10 @@ public sealed class AnalyzeCommandTests
         var provenance = json.RootElement.GetProperty("evaluation").GetProperty("provenance");
         Assert.Equal("captured", provenance.GetProperty("status").GetString());
         Assert.False(provenance.GetProperty("postflightVerified").GetBoolean());
+        var provenanceCheck = json.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray()
+            .Single(check => check.GetProperty("name").GetString() == "provenance");
+        Assert.Equal("pass", provenanceCheck.GetProperty("status").GetString());
+        Assert.Equal("provenance.captureConsistent", provenanceCheck.GetProperty("reason").GetString());
         Assert.Equal(original, Directory.GetCurrentDirectory());
     }
 

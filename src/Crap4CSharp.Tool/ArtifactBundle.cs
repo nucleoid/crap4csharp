@@ -27,6 +27,8 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
 
         if (!File.Exists(fullManifest))
             throw new InvalidDataException($"Artifact manifest not found: {fullManifest}");
+        if (OperatingSystem.IsLinux() && LinuxFileKind(fullManifest) != UnixFileKind.Regular)
+            throw new InvalidDataException("Artifact manifest locator is not a regular file.");
         var root = Path.GetDirectoryName(fullManifest)
             ?? throw new InvalidDataException("Artifact manifest has no bundle root.");
         if (new FileInfo(fullManifest).LinkTarget is not null)

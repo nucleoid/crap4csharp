@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <CoverageSession>
-  <Summary numSequencePoints="55" visitedSequencePoints="53" numBranchPoints="34" visitedBranchPoints="24" sequenceCoverage="96.36" branchCoverage="70.58" maxCyclomaticComplexity="52" minCyclomaticComplexity="52" visitedClasses="7" numClasses="7" visitedMethods="27" numMethods="29" />
+  <Summary numSequencePoints="58" visitedSequencePoints="56" numBranchPoints="34" visitedBranchPoints="24" sequenceCoverage="96.55" branchCoverage="70.58" maxCyclomaticComplexity="55" minCyclomaticComplexity="55" visitedClasses="7" numClasses="7" visitedMethods="30" numMethods="32" />
   <Modules>
-    <Module hash="8BA7ADA9-C93F-4608-AF23-4AB0C3D66170">
+    <Module hash="A9E06BD8-CB12-4D07-94EE-6EC7495ACCD0">
       <ModulePath>Fixture.dll</ModulePath>
-      <ModuleTime>2026-10-04T09:06:54</ModuleTime>
+      <ModuleTime>2026-10-04T09:26:09</ModuleTime>
       <ModuleName>Fixture</ModuleName>
       <Files>
         <File uid="1" fullPath="samples/Fixture/Fixture/CallableSamples.cs" />
@@ -12,7 +12,7 @@
       </Files>
       <Classes>
         <Class>
-          <Summary numSequencePoints="28" visitedSequencePoints="27" numBranchPoints="14" visitedBranchPoints="8" sequenceCoverage="96.42" branchCoverage="57.14" maxCyclomaticComplexity="4" minCyclomaticComplexity="1" visitedClasses="1" numClasses="1" visitedMethods="21" numMethods="22" />
+          <Summary numSequencePoints="31" visitedSequencePoints="30" numBranchPoints="14" visitedBranchPoints="8" sequenceCoverage="96.77" branchCoverage="57.14" maxCyclomaticComplexity="4" minCyclomaticComplexity="1" visitedClasses="1" numClasses="1" visitedMethods="24" numMethods="25" />
           <FullName>Fixture.CallableSamples</FullName>
           <Methods>
             <Method cyclomaticComplexity="1" nPathComplexity="1" sequenceCoverage="100" branchCoverage="100" isConstructor="False" isGetter="True" isSetter="False" isStatic="True">
@@ -230,6 +230,28 @@
               <BranchPoints />
               <MethodPoint vc="3" uspid="0" p8:type="SequencePoint" ordinal="17" offset="17" sc="0" sl="90" ec="1" el="92" bec="0" bev="0" fileid="1" xmlns:p8="xsi" />
             </Method>
+            <Method cyclomaticComplexity="1" nPathComplexity="1" sequenceCoverage="100" branchCoverage="100" isConstructor="False" isGetter="False" isSetter="False" isStatic="True">
+              <Summary numSequencePoints="1" visitedSequencePoints="1" numBranchPoints="0" visitedBranchPoints="0" sequenceCoverage="100" branchCoverage="100" maxCyclomaticComplexity="1" minCyclomaticComplexity="1" visitedClasses="0" numClasses="0" visitedMethods="1" numMethods="1" />
+              <MetadataToken />
+              <Name>System.Void Fixture.CallableSamples::Empty()</Name>
+              <FileRef uid="1" />
+              <SequencePoints>
+                <SequencePoint vc="2" uspid="94" ordinal="0" sl="94" sc="1" el="94" ec="2" bec="0" bev="0" fileid="1" />
+              </SequencePoints>
+              <BranchPoints />
+              <MethodPoint vc="1" uspid="0" p8:type="SequencePoint" ordinal="18" offset="18" sc="0" sl="94" ec="1" el="94" bec="0" bev="0" fileid="1" xmlns:p8="xsi" />
+            </Method>
+            <Method cyclomaticComplexity="1" nPathComplexity="1" sequenceCoverage="100" branchCoverage="100" isConstructor="False" isGetter="False" isSetter="False" isStatic="True">
+              <Summary numSequencePoints="1" visitedSequencePoints="1" numBranchPoints="0" visitedBranchPoints="0" sequenceCoverage="100" branchCoverage="100" maxCyclomaticComplexity="1" minCyclomaticComplexity="1" visitedClasses="0" numClasses="0" visitedMethods="1" numMethods="1" />
+              <MetadataToken />
+              <Name>System.Int32 Fixture.CallableSamples::Zero()</Name>
+              <FileRef uid="1" />
+              <SequencePoints>
+                <SequencePoint vc="1" uspid="95" ordinal="0" sl="95" sc="1" el="95" ec="2" bec="0" bev="0" fileid="1" />
+              </SequencePoints>
+              <BranchPoints />
+              <MethodPoint vc="1" uspid="0" p8:type="SequencePoint" ordinal="19" offset="19" sc="0" sl="95" ec="1" el="95" bec="0" bev="0" fileid="1" xmlns:p8="xsi" />
+            </Method>
             <Method cyclomaticComplexity="2" nPathComplexity="2" sequenceCoverage="100" branchCoverage="50" isConstructor="False" isGetter="False" isSetter="False" isStatic="True">
               <Summary numSequencePoints="1" visitedSequencePoints="1" numBranchPoints="2" visitedBranchPoints="1" sequenceCoverage="100" branchCoverage="50" maxCyclomaticComplexity="2" minCyclomaticComplexity="2" visitedClasses="0" numClasses="0" visitedMethods="1" numMethods="1" />
               <MetadataToken />
@@ -242,7 +264,7 @@
                 <BranchPoint vc="0" uspid="65" ordinal="0" path="0" offset="7" offsetend="9" sl="65" fileid="1" />
                 <BranchPoint vc="1" uspid="65" ordinal="1" path="1" offset="7" offsetend="17" sl="65" fileid="1" />
               </BranchPoints>
-              <MethodPoint vc="1" uspid="0" p8:type="SequencePoint" ordinal="18" offset="18" sc="0" sl="65" ec="1" el="65" bec="0" bev="0" fileid="1" xmlns:p8="xsi" />
+              <MethodPoint vc="1" uspid="0" p8:type="SequencePoint" ordinal="20" offset="20" sc="0" sl="65" ec="1" el="65" bec="0" bev="0" fileid="1" xmlns:p8="xsi" />
             </Method>
             <Method cyclomaticComplexity="2" nPathComplexity="2" sequenceCoverage="100" branchCoverage="50" isConstructor="False" isGetter="False" isSetter="False" isStatic="True">
               <Summary numSequencePoints="1" visitedSequencePoints="1" numBranchPoints="2" visitedBranchPoints="1" sequenceCoverage="100" branchCoverage="50" maxCyclomaticComplexity="2" minCyclomaticComplexity="2" visitedClasses="0" numClasses="0" visitedMethods="1" numMethods="1" />
@@ -256,7 +278,7 @@
                 <BranchPoint vc="0" uspid="66" ordinal="0" path="0" offset="2" offsetend="4" sl="66" fileid="1" />
                 <BranchPoint vc="1" uspid="66" ordinal="1" path="1" offset="2" offsetend="7" sl="66" fileid="1" />
               </BranchPoints>
-              <MethodPoint vc="1" uspid="0" p8:type="SequencePoint" ordinal="19" offset="19" sc="0" sl="66" ec="1" el="66" bec="0" bev="0" fileid="1" xmlns:p8="xsi" />
+              <MethodPoint vc="1" uspid="0" p8:type="SequencePoint" ordinal="21" offset="21" sc="0" sl="66" ec="1" el="66" bec="0" bev="0" fileid="1" xmlns:p8="xsi" />
             </Method>
             <Method cyclomaticComplexity="2" nPathComplexity="2" sequenceCoverage="100" branchCoverage="50" isConstructor="True" isGetter="False" isSetter="False" isStatic="True">
               <Summary numSequencePoints="1" visitedSequencePoints="1" numBranchPoints="2" visitedBranchPoints="1" sequenceCoverage="100" branchCoverage="50" maxCyclomaticComplexity="2" minCyclomaticComplexity="2" visitedClasses="0" numClasses="0" visitedMethods="1" numMethods="1" />
@@ -270,7 +292,7 @@
                 <BranchPoint vc="0" uspid="14" ordinal="0" path="0" offset="15" offsetend="17" sl="14" fileid="1" />
                 <BranchPoint vc="3" uspid="14" ordinal="1" path="1" offset="15" offsetend="20" sl="14" fileid="1" />
               </BranchPoints>
-              <MethodPoint vc="1" uspid="0" p8:type="SequencePoint" ordinal="20" offset="20" sc="0" sl="8" ec="1" el="8" bec="0" bev="0" fileid="1" xmlns:p8="xsi" />
+              <MethodPoint vc="1" uspid="0" p8:type="SequencePoint" ordinal="22" offset="22" sc="0" sl="8" ec="1" el="8" bec="0" bev="0" fileid="1" xmlns:p8="xsi" />
             </Method>
             <Method cyclomaticComplexity="1" nPathComplexity="1" sequenceCoverage="0" branchCoverage="100" isConstructor="True" isGetter="False" isSetter="False" isStatic="True">
               <Summary numSequencePoints="1" visitedSequencePoints="0" numBranchPoints="0" visitedBranchPoints="0" sequenceCoverage="0" branchCoverage="100" maxCyclomaticComplexity="1" minCyclomaticComplexity="1" visitedClasses="0" numClasses="0" visitedMethods="0" numMethods="1" />
@@ -281,7 +303,18 @@
                 <SequencePoint vc="0" uspid="12" ordinal="0" sl="12" sc="1" el="12" ec="2" bec="0" bev="0" fileid="1" />
               </SequencePoints>
               <BranchPoints />
-              <MethodPoint vc="0" uspid="0" p8:type="SequencePoint" ordinal="21" offset="21" sc="0" sl="12" ec="1" el="12" bec="0" bev="0" fileid="1" xmlns:p8="xsi" />
+              <MethodPoint vc="0" uspid="0" p8:type="SequencePoint" ordinal="23" offset="23" sc="0" sl="12" ec="1" el="12" bec="0" bev="0" fileid="1" xmlns:p8="xsi" />
+            </Method>
+            <Method cyclomaticComplexity="1" nPathComplexity="1" sequenceCoverage="100" branchCoverage="100" isConstructor="True" isGetter="False" isSetter="False" isStatic="True">
+              <Summary numSequencePoints="1" visitedSequencePoints="1" numBranchPoints="0" visitedBranchPoints="0" sequenceCoverage="100" branchCoverage="100" maxCyclomaticComplexity="1" minCyclomaticComplexity="1" visitedClasses="0" numClasses="0" visitedMethods="1" numMethods="1" />
+              <MetadataToken />
+              <Name>System.Void Fixture.CallableSamples::.cctor()</Name>
+              <FileRef uid="1" />
+              <SequencePoints>
+                <SequencePoint vc="2" uspid="96" ordinal="0" sl="96" sc="1" el="96" ec="2" bec="0" bev="0" fileid="1" />
+              </SequencePoints>
+              <BranchPoints />
+              <MethodPoint vc="1" uspid="0" p8:type="SequencePoint" ordinal="24" offset="24" sc="0" sl="96" ec="1" el="96" bec="0" bev="0" fileid="1" xmlns:p8="xsi" />
             </Method>
           </Methods>
         </Class>
