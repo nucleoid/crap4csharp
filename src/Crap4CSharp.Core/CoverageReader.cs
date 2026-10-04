@@ -354,11 +354,14 @@ public static class CoverageReader
     private static int? ParseGenericArity(string signature)
     {
         var beforeParameters = signature.Split('(', 2)[0];
-        var tick = beforeParameters.LastIndexOf('`');
+        var separator = beforeParameters.LastIndexOf("::", StringComparison.Ordinal);
+        var method = separator >= 0 ? beforeParameters[(separator + 2)..] :
+            beforeParameters[(beforeParameters.LastIndexOf('.') + 1)..];
+        var tick = method.LastIndexOf('`');
         // OpenCover/Cobertura often omit generic arity entirely. Absence is unknown,
         // not evidence that the method is non-generic.
         if (tick < 0) return null;
-        var digits = new string(beforeParameters[(tick + 1)..].TakeWhile(char.IsAsciiDigit).ToArray());
+        var digits = new string(method[(tick + 1)..].TakeWhile(char.IsAsciiDigit).ToArray());
         return int.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out var value) ? value : null;
     }
 
