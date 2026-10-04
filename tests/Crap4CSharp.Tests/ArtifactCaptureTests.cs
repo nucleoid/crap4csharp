@@ -1,6 +1,8 @@
 using System.Collections.Immutable;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Crap4CSharp.Core;
 using Xunit;
 
@@ -192,15 +194,28 @@ public sealed class ArtifactCaptureTests
         Assert.Throws<InvalidDataException>(() => ArtifactBundle.Load(locator, directory.Path));
     }
 
-    [Fact]
-    public void LoaderRejectsNullRootItemsBeforeDeserialization()
+    [Theory]
+    [InlineData("\n", "lf")]
+    [InlineData("\r\n", "crlf")]
+    public void LoaderRejectsNullRootItemsBeforeDeserialization(string lineEnding, string fixtureName)
     {
-        using var directory = TestDirectory.Create("crap4csharp-bundle-null-root");
+        using var directory = TestDirectory.Create($"crap4csharp-bundle-null-root-{fixtureName}");
         var fixture = CreateFixture();
         var locator = ArtifactCaptureAdapter.PublishNew(fixture.Manifest, fixture.Bytes,
             Path.Combine(directory.Path, "bundle"));
-        var json = File.ReadAllText(locator).Replace("\"roots\": [\n    {",
-            "\"roots\": [\n    null,\n    {", StringComparison.Ordinal);
+        var original = File.ReadAllText(locator).Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace("\n", lineEnding, StringComparison.Ordinal);
+        var document = JsonNode.Parse(original)!.AsObject();
+        var roots = document["roots"]!.AsArray();
+        var originalRootCount = roots.Count;
+        roots.Insert(0, null);
+        var json = document.ToJsonString(new JsonSerializerOptions { WriteIndented = true })
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace("\n", lineEnding, StringComparison.Ordinal) + lineEnding;
+        using var invalidFixture = JsonDocument.Parse(json);
+        var mutatedRoots = invalidFixture.RootElement.GetProperty("roots");
+        Assert.Equal(originalRootCount + 1, mutatedRoots.GetArrayLength());
+        Assert.Equal(JsonValueKind.Null, mutatedRoots[0].ValueKind);
         File.WriteAllText(locator, json);
 
         Assert.Throws<InvalidDataException>(() => ArtifactBundle.Load(locator, directory.Path));
