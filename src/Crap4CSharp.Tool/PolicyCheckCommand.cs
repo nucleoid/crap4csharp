@@ -10,10 +10,12 @@ internal static class PolicyCheckCommand
         var root = Path.GetFullPath(workingDirectory);
         var bundle = ArtifactBundle.Load(manifestPath, root);
         if (outputPath is not null) bundle.RejectOutputAlias(outputPath, root);
+        ValidateTrustedRevision(bundle.Manifest);
         var trusted = TrustedPolicyLoader.LoadFromBase(baseRef, policyPath, repositoryRoot: root);
         var policy = trusted.Policy.Policy;
         var compatibilityHash = TrustedPolicyLoader.BoundCompatibilityHash(trusted.Policy, trusted.ExemptionBytes);
         ValidatePolicyCoverage(bundle.Manifest, policy);
+        ValidateRepositoryPaths(bundle.Manifest);
         ValidateGeneratedInventory(bundle.Manifest);
         var structural = ProvenanceVerifier.VerifyCaptureCancellable(bundle.Manifest, bundle.Bytes,
             policy.Ruleset, cancellationToken);
@@ -30,8 +32,13 @@ internal static class PolicyCheckCommand
         var captured = CapturedEvaluationInputs.Read(bundle);
         var replay = AnalyzeCommand.Replay(bundle, root, startedAt, duration, cancellationToken, allSources: true);
         var scope = await ResolveScopeAsync(policy, baseRef, root, timeout, cancellationToken);
-        var allSources = bundle.Manifest.Contexts.SelectMany(context => context.Inputs)
-            .Where(input => input.Role == "source" && !input.Generated).Select(input => input.LogicalPath)
+        if (scope is { } resolved && (bundle.Manifest.Revision.ScopeHead != resolved.Revision.CurrentHead ||
+                policy.Scope == "base" && bundle.Manifest.Revision.Base != resolved.Revision.MergeBase))
+            throw new PolicyException("provenance.scopeRevisionMismatch",
+                "Captured scope revision differs from the independently resolved Git scope.");
+        var allSources = bundle.Manifest.Contexts.SelectMany(context => context.Inputs
+                .Where(input => input.Role == "source" && !input.Generated)
+                .Select(input => CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input)))
             .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         var expectedScopedSources = policy.Scope == "all" || scope!.Value.Widened ? allSources : scope.Value.Files
             .Select(file => file.NewPath).Where(path => path is not null).Select(path => path!)
@@ -40,13 +47,16 @@ internal static class PolicyCheckCommand
         if (!captured.Scope.Sources.Order(StringComparer.Ordinal).SequenceEqual(expectedScopedSources, StringComparer.Ordinal))
             throw new PolicyException("policy.scopeMismatch", "Captured scope differs from the independently observed trusted-policy scope.");
 
+        string RepositoryPath(CallableResult callable) => RepositorySourcePath(bundle.Manifest,
+            callable.ContextId, callable.Path);
         bool Selected(CallableResult callable)
             => IsSelected(policy.Scope, scope?.Widened ?? false, scope?.Files ?? [], callable,
+                RepositoryPath(callable),
                 scope?.ProductionExcludedPaths ?? []);
 
         var callableSelections = (replay.Evaluation.Callables ?? []).ToDictionary(item => item.ObservationId,
             Selected, StringComparer.Ordinal);
-        var observations = PolicyObservations(replay, policy, callableSelections).ToArray();
+        var observations = PolicyObservations(replay, bundle.Manifest, policy, callableSelections).ToArray();
         var exemptionResolution = ParseExemptions(trusted.ExemptionBytes, replay);
         var exemptions = exemptionResolution.Active;
         var evaluated = PolicyEvaluator.Evaluate(policy, trusted.Baseline, observations, exemptions,
@@ -103,33 +113,49 @@ internal static class PolicyCheckCommand
         var excluded = result.Diagnostics.Where(item => item.StartsWith("scope.excludedTestSource:", StringComparison.Ordinal) ||
                 item.StartsWith("scope.excludedChangedSource:", StringComparison.Ordinal))
             .Select(item => item[(item.IndexOf(':') + 1)..]).Distinct(StringComparer.Ordinal).ToArray();
-        return new ResolvedPolicyScope(result.Files, result.Completeness != ScopeCompleteness.Complete, excluded);
+        return new ResolvedPolicyScope(result.Files, result.Completeness != ScopeCompleteness.Complete, excluded,
+            result.Revision);
     }
 
-    private static IEnumerable<PolicyObservation> PolicyObservations(ResultDocument result, RepositoryPolicy policy,
-        IReadOnlyDictionary<string, bool> selected)
+    private static IEnumerable<PolicyObservation> PolicyObservations(ResultDocument result, RunManifest manifest,
+        RepositoryPolicy policy, IReadOnlyDictionary<string, bool> selected)
     {
         var callables = result.Evaluation.Callables ?? [];
         foreach (var callable in callables.Where(item => item.Applicability == "applicable" &&
-                     !Excluded(policy, item.Path)))
+                     item.CoverageReason != CoverageReasonCodes.AmbiguousCallableOwnership &&
+                     !Excluded(policy, RepositorySourcePath(manifest, item.ContextId, item.Path))))
         {
-            var ambiguous = callable.CoverageReason == CoverageReasonCodes.AmbiguousCallableOwnership;
+            var path = RepositorySourcePath(manifest, callable.ContextId, callable.Path);
             yield return new PolicyObservation(callable.Kind is "Lambda" or "AnonymousMethod" or "lambda" or "anonymous-method"
-                    ? "anonymous" : "method", ambiguous ? callable.ObservationId : callable.CallableId,
-                "crap.thresholdExceeded", callable.Ruleset, callable.ContextId, callable.Path, callable.BodyChecksum,
+                    ? "anonymous" : "method", callable.CallableId,
+                "crap.thresholdExceeded", callable.Ruleset, callable.ContextId, path, callable.BodyChecksum,
                 callable.Complexity ?? 0, callable.Coverage, callable.Crap, callable.CoverageReason,
-                selected.GetValueOrDefault(callable.ObservationId), ambiguous);
+                selected.GetValueOrDefault(callable.ObservationId), false);
+        }
+        foreach (var group in callables.Where(item => item.Applicability == "applicable" &&
+                     item.CoverageReason == CoverageReasonCodes.AmbiguousCallableOwnership)
+                 .GroupBy(item => (item.ContextId, item.CallableId)))
+        {
+            var values = group.ToArray();
+            var first = values[0];
+            var path = RepositorySourcePath(manifest, first.ContextId, first.Path);
+            if (Excluded(policy, path)) continue;
+            yield return new PolicyObservation("anonymous", first.CallableId, "crap.thresholdExceeded",
+                first.Ruleset, first.ContextId, path, first.BodyChecksum, first.Complexity ?? 0, null, null,
+                CoverageReasonCodes.AmbiguousCallableOwnership,
+                values.Any(item => selected.GetValueOrDefault(item.ObservationId)), true);
         }
         foreach (var family in result.Evaluation.Families ?? [])
         {
             var roots = callables.Where(item => item.CallableId == family.RootCallableId).ToArray();
             if (roots.Length != 1) throw new InvalidDataException("A callable family did not resolve uniquely.");
             var root = roots[0];
-            if (Excluded(policy, root.Path)) continue;
+            var path = RepositorySourcePath(manifest, root.ContextId, root.Path);
+            if (Excluded(policy, path)) continue;
             var familySelected = callables.Where(item => item.FamilyIds.Contains(family.FamilyId, StringComparer.Ordinal))
                 .Any(item => selected.GetValueOrDefault(item.ObservationId));
             yield return new PolicyObservation("family", family.FamilyId, CallableFamilyEvaluator.Rule,
-                result.ComplexityRulesetVersion, root.ContextId, root.Path, root.BodyChecksum, family.Complexity,
+                result.ComplexityRulesetVersion, root.ContextId, path, root.BodyChecksum, family.Complexity,
                 family.Coverage, family.Crap, family.IncompleteReasons.FirstOrDefault(), familySelected, false)
                 { RelatedEntityKeys = family.IncompleteCallableIds };
         }
@@ -182,10 +208,11 @@ internal static class PolicyCheckCommand
                 if (reason is not (CoverageReasonCodes.UnsupportedGeneratedMapping or
                         CoverageReasonCodes.UnsupportedCallable or CoverageReasonCodes.AmbiguousCallableOwnership))
                     throw new PolicyException("exemption.reasonNotUnsupported", "Trusted exemption reason is not narrowly unsupported.");
-                if (matches.Length > 1)
+                if (matches.Length > 1 && matches.Any(item =>
+                        item.CoverageReason != CoverageReasonCodes.AmbiguousCallableOwnership))
                     throw new PolicyException("exemption.multiplyMatched", "Trusted exemption matches multiple current callables.");
-                if (matches.Length == 1 && !matches[0].FamilyIds.Order(StringComparer.Ordinal)
-                        .SequenceEqual(familyIds, StringComparer.Ordinal))
+                if (matches.Length > 0 && matches.Any(match => !match.FamilyIds.Order(StringComparer.Ordinal)
+                        .SequenceEqual(familyIds, StringComparer.Ordinal)))
                     throw new PolicyException("exemption.familyAcknowledgementMismatch",
                         "Trusted exemption must acknowledge exactly the affected callable families.");
                 var justification = Text("justification");
@@ -199,8 +226,7 @@ internal static class PolicyCheckCommand
                         reviewReference, familyIds, true));
                     continue;
                 }
-                var entityKey = reason == CoverageReasonCodes.AmbiguousCallableOwnership
-                    ? matches[0].ObservationId : callableId;
+                var entityKey = callableId;
                 active.Add(new PolicyExemption(entityKey, "crap.thresholdExceeded", contextId, reason, justification));
                 reported.Add(new CallableExemptionMatch(entityKey, "exempted-unsupported", reason, justification,
                     reviewReference, familyIds, true));
@@ -247,23 +273,52 @@ internal static class PolicyCheckCommand
     }
 
     internal static bool IsSelected(string scope, bool widened, IReadOnlyList<ChangedFile> files,
-        CallableResult callable, IReadOnlyList<string>? productionExcludedPaths = null) => scope == "all" || widened ||
-        (productionExcludedPaths ?? []).Contains(callable.Path, StringComparer.Ordinal) ||
-        files.Where(file => file.NewPath == callable.Path)
+        CallableResult callable, string repositoryPath,
+        IReadOnlyList<string>? productionExcludedPaths = null) => scope == "all" || widened ||
+        (productionExcludedPaths ?? []).Contains(repositoryPath, StringComparer.Ordinal) ||
+        files.Where(file => file.NewPath == repositoryPath)
         .Any(file => file.Kind is ScopeChangeKind.Added or ScopeChangeKind.Copied ||
             file.DeletedRanges.Count > 0 ||
             file.AddedRanges.Any(range => range.Intersects(callable.Span.StartLine, callable.Span.EndLine)));
+
+    internal static void ValidateTrustedRevision(RunManifest manifest)
+    {
+        if (manifest.Revision.Kind != "git" || string.IsNullOrWhiteSpace(manifest.Revision.Head))
+            throw new PolicyException("provenance.gitRevisionRequired",
+                "Base-trusted check requires captured Git HEAD and workspace-state evidence.");
+    }
+
+    internal static void ValidateRepositoryPaths(RunManifest manifest)
+    {
+        foreach (var input in manifest.Contexts.SelectMany(context => context.Inputs)
+                     .Where(input => input.Role == "source" && !input.Generated))
+        {
+            if (input.RepositoryPath is null ||
+                CanonicalIdentity.NormalizeLogicalPath(input.RepositoryPath) != input.RepositoryPath.Replace('\\', '/'))
+                throw new PolicyException("provenance.repositoryPathRequired",
+                    "Base-trusted check requires hash-bound repository paths for authored sources.");
+        }
+    }
 
     internal static void ValidateGeneratedInventory(RunManifest manifest)
     {
         var branchClassifiedGenerated = manifest.Contexts.SelectMany(context => context.Inputs)
             .Where(input => input.Role == "source" && input.Generated)
-            .Where(input => !input.LogicalPath.Split('/').Any(part => part.Equals("obj", StringComparison.OrdinalIgnoreCase)))
+            .Where(input => !input.LogicalPath.StartsWith("obj/", StringComparison.OrdinalIgnoreCase) &&
+                !input.LogicalPath.StartsWith("<generated>/", StringComparison.Ordinal))
             .Select(input => input.LogicalPath).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         if (branchClassifiedGenerated.Length > 0)
             throw new PolicyException("policy.branchGeneratedSource",
                 "A production source was classified as generated outside an evaluated obj output: " +
                 string.Join(", ", branchClassifiedGenerated));
+    }
+
+    private static string RepositorySourcePath(RunManifest manifest, string contextId, string logicalPath)
+    {
+        var context = manifest.Contexts.Single(item => item.Id == contextId);
+        var input = context.Inputs.Single(item => item.Role == "source" && !item.Generated &&
+            item.LogicalPath == logicalPath);
+        return CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input);
     }
 
     internal static void RejectOutputAlias(string outputPath, string root, TrustedPolicyResolution trusted,
@@ -278,7 +333,7 @@ internal static class PolicyCheckCommand
     }
 
     private readonly record struct ResolvedPolicyScope(IReadOnlyList<ChangedFile> Files, bool Widened,
-        IReadOnlyList<string> ProductionExcludedPaths);
+        IReadOnlyList<string> ProductionExcludedPaths, ScopeRevision Revision);
 }
 
 internal sealed record ParsedPolicyExemptions(IReadOnlyList<PolicyExemption> Active,

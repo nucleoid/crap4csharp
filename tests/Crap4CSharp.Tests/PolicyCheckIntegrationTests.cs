@@ -43,7 +43,10 @@ public sealed class PolicyCheckIntegrationTests
             var sourceLocator = $"inputs/source-{index++}.bin";
             bytes.Add(sourceLocator, value);
             inputs.Add(new ManifestInput("source", source.LogicalPath, sourceLocator, value.Length,
-                CanonicalIdentity.Sha256(value.AsSpan()), "utf-8", source.IsGenerated));
+                CanonicalIdentity.Sha256(value.AsSpan()), "utf-8", source.IsGenerated)
+            {
+                RepositoryPath = Path.GetRelativePath(repository, physical).Replace('\\', '/')
+            });
         }
 
         var coverage = ImmutableArray.Create(Encoding.UTF8.GetBytes(
@@ -56,7 +59,11 @@ public sealed class PolicyCheckIntegrationTests
             </TestRun>
             """));
         var scope = ImmutableArray.Create(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
-        { version = 1, sources = inputs.Where(item => !item.Generated).Select(item => item.LogicalPath).ToArray() })));
+        {
+            version = 1,
+            sources = inputs.Where(item => !item.Generated)
+                .Select(item => item.RepositoryPath).ToArray()
+        })));
         var policyBytes = await File.ReadAllBytesAsync(Path.Combine(repository,
             PolicyLogical.Replace('/', Path.DirectorySeparatorChar)), TestContext.Current.CancellationToken);
         var policy = RepositoryPolicyParser.Parse(policyBytes, PolicyLogical);
@@ -107,9 +114,15 @@ public sealed class PolicyCheckIntegrationTests
             new ManifestProducer("crap4csharp", "0.1.0", ComplexityRules.CallablesV1,
                 ProjectAnalysisContext.ProtocolVersion, ManifestIdentity.CoverageProtocol, ManifestIdentity.PathProtocol),
             new ManifestCapture("completed", true, true, []),
-            new ManifestRevision("none", "none", CanonicalIdentity.Set("local-workspace-v1", [repository]), null, null, null),
+            new ManifestRevision("git", "pending", "pending", "pending", null, "pending"),
             [new ManifestRoot("workspace", "workspace", "sensitive")], [manifestContext], [build], [execution], artifacts,
             new ManifestEvaluationInputs(CanonicalIdentity.Sha256(scope.AsSpan()), policy.Hash, null, null), null);
+        var observed = CurrentEvidenceAdapter.Capture(manifest, repository);
+        manifest = manifest with
+        {
+            Revision = new ManifestRevision("git", observed.RepositoryIdentity, observed.WorkspaceIdentity,
+                observed.Head, null, observed.Head) { StateHash = observed.StateHash }
+        };
         using var directory = TestDirectory.Create("crap4csharp-policy-check-e2e");
         var locator = ArtifactCaptureAdapter.PublishNew(manifest, bytes, Path.Combine(directory.Path, "bundle"));
         var output = new StringWriter();

@@ -11,8 +11,9 @@ internal static class CurrentEvidenceAdapter
         var root = Path.GetFullPath(workspaceRoot);
         var revision = manifest.Revision.Kind switch
         {
-            "git" => ObserveGit(root, manifest.Contexts.SelectMany(context => context.Inputs)
-                .Where(input => !input.Generated && input.Role != "reference").Select(input => input.LogicalPath)
+            "git" => ObserveGit(root, manifest.Contexts.SelectMany(context => context.Inputs
+                .Where(input => !input.Generated && input.Role != "reference")
+                .Select(input => CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input)))
                 .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
                 gitExecutor ?? ((path, arguments) => Git(path, arguments, gitTimeout ?? TimeSpan.FromSeconds(10)))),
             "none" => new ObservedRevision("none",
@@ -20,13 +21,16 @@ internal static class CurrentEvidenceAdapter
             _ => throw new InvalidDataException($"Unsupported revision kind: {manifest.Revision.Kind}")
         };
         var inputs = new List<CurrentInputEvidence>();
-        foreach (var input in manifest.Contexts.SelectMany(context => context.Inputs)
-            .Where(input => !input.Generated && input.Role != "reference")
-            .GroupBy(input => input.Role + "\n" + input.LogicalPath, StringComparer.Ordinal)
-            .Select(group => group.First()).OrderBy(input => input.LogicalPath, StringComparer.Ordinal))
+        foreach (var value in manifest.Contexts.SelectMany(context => context.Inputs
+                     .Where(input => !input.Generated && input.Role != "reference")
+                     .Select(input => (Input: input, RepositoryPath:
+                         CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input))))
+                 .GroupBy(value => value.Input.Role + "\n" + value.Input.LogicalPath, StringComparer.Ordinal)
+                 .Select(group => group.First()).OrderBy(value => value.Input.LogicalPath, StringComparer.Ordinal))
         {
+            var input = value.Input;
             var logical = CanonicalIdentity.NormalizeLogicalPath(input.LogicalPath);
-            var path = ResolveRegularFile(root, logical);
+            var path = ResolveRegularFile(root, value.RepositoryPath);
             if (path is null)
             {
                 inputs.Add(new(input.Role, input.LogicalPath, -1, "missing"));

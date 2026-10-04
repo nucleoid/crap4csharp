@@ -36,7 +36,17 @@
             }
           }
         },
-        "inputs": { "type": "array", "maxItems": 10000 }
+        "inputs": {
+          "type": "array", "maxItems": 10000,
+          "items": {
+            "type": "object",
+            "required": ["role", "logicalPath", "locator", "length", "sha256", "generated"],
+            "properties": {
+              "repositoryPath": { "type": ["string", "null"] }
+            },
+            "additionalProperties": true
+          }
+        }
       }
     } },
     "builds": { "type": "array", "minItems": 1, "maxItems": 10000, "items": { "type": "object", "required": ["id", "contextId", "moduleIdentity", "assemblySha256", "mvid", "pdbSha256", "debugIdentity"] } },

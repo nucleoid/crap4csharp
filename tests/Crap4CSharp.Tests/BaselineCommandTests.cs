@@ -87,6 +87,20 @@ public sealed class BaselineCommandTests
         }, policy));
     }
 
+    [Fact]
+    public void CandidateGenerationRejectsCapturedSubsetScope()
+    {
+        var context = new ManifestContext("ctx", "App/App.csproj", "net10.0", "Release", "AnyCPU",
+            "", "", "", true, true,
+            [new ManifestInput("source", "One.cs", "inputs/one", 1, new string('a', 64), "utf-8", false),
+             new ManifestInput("source", "Two.cs", "inputs/two", 1, new string('b', 64), "utf-8", false)]);
+
+        var error = Assert.Throws<PolicyException>(() => BaselineCommand.ValidateCompleteScope(
+            EmptyManifest(context), new CapturedScope(["App/One.cs"])));
+
+        Assert.Equal("baseline.scopeIncomplete", error.Code);
+    }
+
     private static RunManifest EmptyManifest(ManifestContext context) => new(ManifestIdentity.SchemaVersion,
         CanonicalIdentity.Algorithm, new ManifestProducer("crap4csharp", "0.1.0", ComplexityRules.CallablesV1,
             ProjectAnalysisContext.ProtocolVersion, ManifestIdentity.CoverageProtocol, ManifestIdentity.PathProtocol),

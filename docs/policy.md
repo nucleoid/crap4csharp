@@ -31,7 +31,10 @@ crap4csharp check --reuse-artifacts artifacts/crap-run/manifest.json \
 
 The command resolves the merge base once, reads every enforcement overlay from that tree, independently observes
 the trusted scope, revalidates current project/source/PE/PDB evidence, and reports branch versions only as
-proposed differences. It consumes an existing bundle; fresh restore/build/test/coverage orchestration is separate.
+proposed differences. Authored source entries must carry hash-bound repository-relative paths; project-relative
+compiler names remain separate so linked files cannot be confused with similarly named files. Base-trusted checks
+also require captured Git HEAD/worktree-state evidence; revision `none` is local-only. The command consumes an
+existing bundle; fresh restore/build/test/coverage orchestration is separate.
 
 ## Candidate workflow
 

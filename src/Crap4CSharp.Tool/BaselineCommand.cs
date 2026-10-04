@@ -58,9 +58,12 @@ internal static class BaselineCommand
                 parsedPolicy.Policy.Ruleset);
             if (provenance.Status != ProvenanceStatus.Verified)
                 throw new InvalidDataException(string.Join(", ", provenance.Reasons));
-            var replay = AnalyzeCommand.Replay(options.Manifest, root, null, DateTimeOffset.UtcNow,
-                TimeSpan.Zero, cancellationToken);
-            var observations = Observations(replay).Where(item => !Excluded(parsedPolicy.Policy, item.Path)).ToArray();
+            var replay = AnalyzeCommand.Replay(bundle, root, DateTimeOffset.UtcNow,
+                TimeSpan.Zero, cancellationToken, allSources: true);
+            var captured = CapturedEvaluationInputs.Read(bundle);
+            ValidateCompleteScope(bundle.Manifest, captured.Scope);
+            var observations = Observations(replay, bundle.Manifest)
+                .Where(item => !Excluded(parsedPolicy.Policy, item.Path)).ToArray();
             var exemptionResolution = PolicyCheckCommand.ParseExemptions(exemptionBytes, replay);
             var ambiguous = observations.Where(item => item.IdentityAmbiguous).ToArray();
             observations = observations.Where(item => !item.IdentityAmbiguous).ToArray();
@@ -148,22 +151,26 @@ internal static class BaselineCommand
         return new BaselineCommandOptions(args[1], policy, manifest, output, overwrite, timeout);
     }
 
-    private static IEnumerable<PolicyObservation> Observations(ResultDocument result)
+    private static IEnumerable<PolicyObservation> Observations(ResultDocument result, RunManifest manifest)
     {
         foreach (var callable in result.Evaluation.Callables ?? [])
             if (callable.Applicability == "applicable")
+            {
+                var path = RepositorySourcePath(manifest, callable.ContextId, callable.Path);
                 yield return new PolicyObservation(callable.Kind is "Lambda" or "AnonymousMethod" ? "anonymous" : "method",
-                    callable.CallableId, "crap.thresholdExceeded", callable.Ruleset, callable.ContextId, callable.Path,
+                    callable.CallableId, "crap.thresholdExceeded", callable.Ruleset, callable.ContextId, path,
                     callable.BodyChecksum, callable.Complexity ?? 0, callable.Coverage, callable.Crap,
                     callable.CoverageReason, true, callable.CoverageReason == CoverageReasonCodes.AmbiguousCallableOwnership);
+            }
         foreach (var family in result.Evaluation.Families ?? [])
         {
             var roots = (result.Evaluation.Callables ?? []).Where(item => item.CallableId == family.RootCallableId).ToArray();
             if (roots.Length != 1)
                 throw new InvalidDataException("A callable family did not resolve to exactly one captured root.");
             var root = roots[0];
+            var path = RepositorySourcePath(manifest, root.ContextId, root.Path);
             yield return new PolicyObservation("family", family.FamilyId, CallableFamilyEvaluator.Rule,
-                result.ComplexityRulesetVersion, root.ContextId, root.Path, root.BodyChecksum, family.Complexity,
+                result.ComplexityRulesetVersion, root.ContextId, path, root.BodyChecksum, family.Complexity,
                 family.Coverage, family.Crap, family.IncompleteReasons.FirstOrDefault(), true,
                 family.IncompleteReasons.Contains(CoverageReasonCodes.AmbiguousCallableOwnership, StringComparer.Ordinal))
                 { RelatedEntityKeys = family.IncompleteCallableIds };
@@ -172,6 +179,14 @@ internal static class BaselineCommand
 
     private static bool Excluded(RepositoryPolicy policy, string path) => policy.Exclusions.Any(exclusion =>
         path == exclusion || path.StartsWith(exclusion.TrimEnd('/') + "/", StringComparison.Ordinal));
+
+    private static string RepositorySourcePath(RunManifest manifest, string contextId, string logicalPath)
+    {
+        var context = manifest.Contexts.Single(item => item.Id == contextId);
+        var input = context.Inputs.Single(item => item.Role == "source" && !item.Generated &&
+            item.LogicalPath == logicalPath);
+        return CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input);
+    }
 
     private static void ValidateExistingBaseline(string root, ParsedRepositoryPolicy parsed, string compatibilityHash)
     {
@@ -201,6 +216,17 @@ internal static class BaselineCommand
         if (!testProjects.SequenceEqual(policy.TestProjects.Order(StringComparer.Ordinal), StringComparer.Ordinal))
             throw new PolicyException("baseline.testTargetMismatch",
                 "Captured test execution targets differ from policy testProjects.");
+    }
+
+    internal static void ValidateCompleteScope(RunManifest manifest, CapturedScope captured)
+    {
+        var completeScope = manifest.Contexts.SelectMany(context => context.Inputs
+                .Where(input => input.Role == "source" && !input.Generated)
+                .Select(input => CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input)))
+            .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        if (!captured.Sources.Order(StringComparer.Ordinal).SequenceEqual(completeScope, StringComparer.Ordinal))
+            throw new PolicyException("baseline.scopeIncomplete",
+                "Baseline generation requires captured full production source scope.");
     }
 
     private static string RepositoryRelative(string root, string value)

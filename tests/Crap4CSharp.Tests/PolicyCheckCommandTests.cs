@@ -20,17 +20,20 @@ public sealed class PolicyCheckCommandTests
         Assert.Equal("policy.branchGeneratedSource", error.Code);
         PolicyCheckCommand.ValidateGeneratedInventory(Manifest(Context(
             [source with { LogicalPath = "obj/Release/Gate.g.cs" }])));
+        Assert.Throws<PolicyException>(() => PolicyCheckCommand.ValidateGeneratedInventory(Manifest(Context(
+            [source with { LogicalPath = "Legacy/obj/Gate.cs" }]))));
     }
 
     [Fact]
     public void DeletionOnlyHunkSelectsCurrentCallable()
     {
-        var callable = Callable("method", "observation", "src/Gate.cs", 10, 20);
-        var change = ChangedFile.Modified("src/Gate.cs", "old", "new", [], [new LineRange(12, 12)]);
+        var callable = Callable("method", "observation", "Gate.cs", 10, 20);
+        var change = ChangedFile.Modified("App/Gate.cs", "old", "new", [], [new LineRange(12, 12)]);
 
-        Assert.True(PolicyCheckCommand.IsSelected("base", false, [change], callable));
-        Assert.True(PolicyCheckCommand.IsSelected("base", true, [], callable));
-        Assert.True(PolicyCheckCommand.IsSelected("base", false, [], callable, ["src/Gate.cs"]));
+        Assert.True(PolicyCheckCommand.IsSelected("base", false, [change], callable, "App/Gate.cs"));
+        Assert.True(PolicyCheckCommand.IsSelected("base", true, [], callable, "App/Gate.cs"));
+        Assert.True(PolicyCheckCommand.IsSelected("base", false, [], callable, "App/Gate.cs", ["App/Gate.cs"]));
+        Assert.Equal("App/Gate.cs", CapturedEvaluationInputs.RepositorySourcePath("App/App.csproj", "Gate.cs"));
     }
 
     [Fact]
@@ -67,6 +70,53 @@ public sealed class PolicyCheckCommandTests
 
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("family", result.ExemptedEntityKeys);
+    }
+
+    [Fact]
+    public void DuplicateAnonymousBodiesCanUseOneNarrowTrustedExemption()
+    {
+        var first = Callable("same", "first", "Gate.cs", 10, 10) with
+        { CoverageReason = CoverageReasonCodes.AmbiguousCallableOwnership, FamilyIds = ["family"] };
+        var second = first with { ObservationId = "second", Span = new CallableSourceSpan(20, 1, 20, 2, 20, 2) };
+        var result = EmptyResult([first, second]);
+        var bytes = Encoding.UTF8.GetBytes("""
+            {"version":"callable-exemptions-v1","entries":[{
+              "ruleset":"callables-v1","contextId":"ctx","targetFramework":"net10.0",
+              "callableId":"same","bodyChecksum":"body","reasonCode":"coverage.ambiguousCallableOwnership",
+              "justification":"reviewed duplicate body","reviewReference":"review-1","familyIds":["family"]}]}
+            """);
+
+        var parsed = PolicyCheckCommand.ParseExemptions(
+            new Dictionary<string, byte[]> { ["quality/exemptions.json"] = bytes }, result);
+
+        Assert.Equal("same", Assert.Single(parsed.Active).EntityKey);
+        var evaluated = PolicyEvaluator.Evaluate(Policy(RepositoryPolicyMode.Strict), null,
+            [Observation("same", true)], parsed.Active);
+        Assert.Equal(0, evaluated.ExitCode);
+    }
+
+    [Fact]
+    public async Task FailureOutputNeverOverwritesAnExistingRepositoryFile()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-policy-failure-output");
+        var source = Path.Combine(directory.Path, "Gate.cs");
+        await File.WriteAllTextAsync(source, "class Gate {}", TestContext.Current.CancellationToken);
+        var output = new StringWriter();
+
+        var exit = await global::App.RunAsync(["check", "--reuse-artifacts", "missing.json", "--policy",
+            "missing-policy.json", "--base", "HEAD", "--output", "Gate.cs", "--format", "json"],
+            directory.Path, output, TextWriter.Null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, exit);
+        Assert.Equal("class Gate {}", await File.ReadAllTextAsync(source, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public void BaseTrustedCheckRejectsRevisionNone()
+    {
+        var error = Assert.Throws<PolicyException>(() =>
+            PolicyCheckCommand.ValidateTrustedRevision(Manifest(Context([]))));
+        Assert.Equal("provenance.gitRevisionRequired", error.Code);
     }
 
     [Fact]

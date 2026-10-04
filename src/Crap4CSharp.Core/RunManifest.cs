@@ -77,7 +77,10 @@ public sealed record ManifestParseOptions(string LanguageVersion, string SourceK
 public sealed record ManifestPathPolicy(string CasePolicy, IReadOnlyList<ManifestReportRootMapping> ReportRootMappings);
 public sealed record ManifestReportRootMapping(string ReportRoot, string LogicalRoot);
 public sealed record ManifestInput(string Role, string LogicalPath, string Locator, long Length, string Sha256,
-    string? Encoding, bool Generated);
+    string? Encoding, bool Generated)
+{
+    public string? RepositoryPath { get; init; }
+}
 public sealed record ManifestBuild(string Id, string ContextId, string ModuleIdentity, string AssemblySha256,
     string Mvid, string PdbSha256, string DebugIdentity);
 public sealed record ManifestExecution(string Id, string ContextId, string BuildId, bool Completed, int ExitCode,
@@ -213,9 +216,13 @@ public static class ManifestIdentity
         return unhashed with { ManifestHash = ManifestHash(unhashed) };
     }
 
-    private static string InputIdentity(ManifestInput input) => CanonicalIdentity.Tuple("input", input.Role,
-        input.LogicalPath, input.Locator, input.Length.ToString(System.Globalization.CultureInfo.InvariantCulture),
-        input.Sha256, input.Encoding, input.Generated.ToString());
+    private static string InputIdentity(ManifestInput input) => input.RepositoryPath is null
+        ? CanonicalIdentity.Tuple("input", input.Role, input.LogicalPath, input.Locator,
+            input.Length.ToString(System.Globalization.CultureInfo.InvariantCulture), input.Sha256,
+            input.Encoding, input.Generated.ToString())
+        : CanonicalIdentity.Tuple("input-repository-path-v1", input.Role, input.LogicalPath, input.RepositoryPath,
+            input.Locator, input.Length.ToString(System.Globalization.CultureInfo.InvariantCulture), input.Sha256,
+            input.Encoding, input.Generated.ToString());
 }
 
 public static class ProvenanceVerifier

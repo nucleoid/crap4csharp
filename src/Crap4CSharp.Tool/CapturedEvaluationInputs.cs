@@ -13,13 +13,28 @@ internal static class CapturedEvaluationInputs
         var policy = ParsePolicy(Bytes(bundle, "policy"));
         if (bundle.Manifest.Producer.ComplexityRuleset == ComplexityRules.CallablesV1 && policy.AllowMissingCoverage)
             throw new InvalidDataException("callables-v1 captured policy cannot allow missing coverage.");
-        var available = bundle.Manifest.Contexts.SelectMany(context => context.Inputs)
-            .Where(input => input.Role == "source" && !input.Generated).Select(input => input.LogicalPath)
+        var available = bundle.Manifest.Contexts.SelectMany(context => context.Inputs
+                .Where(input => input.Role == "source" && !input.Generated)
+                .Select(input => DeclaredRepositorySourcePath(context, input)))
             .ToHashSet(StringComparer.Ordinal);
         if (scope.Sources.Any(source => !available.Contains(source)))
             throw new InvalidDataException("Captured scope names a source outside the captured context inventory.");
         return (scope, policy);
     }
+
+    internal static string RepositorySourcePath(string project, string logicalPath)
+    {
+        var source = CanonicalIdentity.NormalizeLogicalPath(logicalPath);
+        if (source.StartsWith('<')) return source;
+        var normalizedProject = CanonicalIdentity.NormalizeLogicalPath(project);
+        var separator = normalizedProject.LastIndexOf('/');
+        return separator < 0 ? source : CanonicalIdentity.NormalizeLogicalPath(
+            normalizedProject[..(separator + 1)] + source);
+    }
+
+    internal static string DeclaredRepositorySourcePath(ManifestContext context, ManifestInput input) =>
+        input.RepositoryPath is null ? RepositorySourcePath(context.Project, input.LogicalPath) :
+            CanonicalIdentity.NormalizeLogicalPath(input.RepositoryPath);
 
     private static ImmutableArray<byte> Bytes(ArtifactBundle bundle, string kind)
     {

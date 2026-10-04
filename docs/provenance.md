@@ -68,7 +68,10 @@ one test must pass and the TRX test storage module must match the module identit
 hash-bound test assembly and portable PDB artifacts. v1 deliberately fails closed for PDB documents that do not
 carry SHA-256 checksums.
 
-The captured scope artifact is JSON `{"version":1,"sources":[...]}`; the captured policy artifact is either the
+The captured scope artifact is JSON `{"version":1,"sources":[...]}` using repository-relative source paths; the
+manifest separately retains each project's compiler logical path and a hash-bound `repositoryPath`. Trusted checks
+require that repository path for every authored source so nested projects and linked files intersect Git scope
+without filename or project-directory guesses. Older manifests without it remain capture-replay inputs only. The captured policy artifact is either the
 legacy threshold shape or a versioned repository policy. Replay applies those values and rejects live overrides.
 Captured baseline/exemption artifacts remain hash-bound inputs; trusted `check` obtains approved baseline and
 exemption bytes independently from one immutable Git tree. A Git revision may also bind
