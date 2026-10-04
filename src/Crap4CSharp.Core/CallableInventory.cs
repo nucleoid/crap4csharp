@@ -88,7 +88,7 @@ public static class CallableInventory
             .GetSemanticModel(tree);
         var contentIdentity = ProjectAnalysisContext.ContentHash(text);
         var candidates = Discover(root, tree).OrderBy(item => item.Span.Start).ThenByDescending(item => item.Span.Length)
-            .ThenBy(item => item.Kind).ToList();
+            .ThenBy(item => IsMemberInitializer(item.Kind) ? 0 : 1).ThenBy(item => item.Kind).ToList();
 
         // A partial definition and implementation are one logical authored callable.
         var applicableKeys = candidates.Where(item => item.Applicable).Select(item => (item.Kind, item.SemanticKey))
@@ -413,6 +413,8 @@ public static class CallableInventory
     private static bool IsAnonymous(CallableKind kind) => kind is CallableKind.Lambda or CallableKind.AnonymousMethod or
         CallableKind.FieldInitializer or CallableKind.EventInitializer or CallableKind.PropertyInitializer or
         CallableKind.PrimaryConstructorBaseArguments;
+    private static bool IsMemberInitializer(CallableKind kind) => kind is CallableKind.FieldInitializer or
+        CallableKind.EventInitializer or CallableKind.PropertyInitializer;
     private static bool CanOwn(Candidate parent, Candidate child)
     {
         var primaryConstructor = parent.Kind == CallableKind.Constructor && parent.Node is TypeDeclarationSyntax;
