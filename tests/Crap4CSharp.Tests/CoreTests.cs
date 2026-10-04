@@ -198,6 +198,33 @@ public sealed class CoreTests : IDisposable
     }
 
     [Fact]
+    public void ReadsCecilCustomModifiersWithoutCorruptingMethodIdentity()
+    {
+        var source = Write("Modified.cs", "class C { int P { init { } } }");
+        var openCover = Write("modified-open.xml", $"""
+            <CoverageSession><Modules><Module><Files><File uid="1" fullPath="{System.Security.SecurityElement.Escape(source)}" /></Files><Classes><Class><FullName>C</FullName><Methods>
+            <Method><Name>System.Void modreq(System.Runtime.CompilerServices.IsExternalInit) C::set_P(System.Int32)</Name><SequencePoints><SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method>
+            <Method><Name>System.Int32&amp; modreq(System.Runtime.InteropServices.InAttribute) C::get_Current()</Name><SequencePoints><SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method>
+            <Method><Name>System.Int32 C::M(System.Int32&amp; modreq(System.Runtime.InteropServices.InAttribute))</Name><SequencePoints><SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method>
+            </Methods></Class></Classes></Module></Modules></CoverageSession>
+            """);
+        var cobertura = Write("modified-cobertura.xml", $"""
+            <coverage><packages><package><classes><class name="C" filename="{System.Security.SecurityElement.Escape(source)}"><methods>
+            <method name="set_P" signature="(System.Int32 modreq(System.Runtime.CompilerServices.IsExternalInit))"><lines><line number="1" hits="1" /></lines></method>
+            <method name="get_Current" signature="()"><lines><line number="1" hits="1" /></lines></method>
+            <method name="M" signature="(System.Int32&amp; modreq(System.Runtime.InteropServices.InAttribute))"><lines><line number="1" hits="1" /></lines></method>
+            </methods></class></classes></package></packages></coverage>
+            """);
+
+        var openMethods = CoverageReader.Read(openCover);
+        var coberturaMethods = CoverageReader.Read(cobertura);
+
+        Assert.Equal(["get_Current", "M", "set_P"], openMethods.Select(item => item.MethodName).Order().ToArray());
+        Assert.Equal([0, 1, 1], openMethods.Select(item => item.ParameterCount).Order().ToArray());
+        Assert.Equal([0, 1, 1], coberturaMethods.Select(item => item.ParameterCount).Order().ToArray());
+    }
+
+    [Fact]
     public async Task MissingCoverageIsOperationalFailureUnlessExplicitlyAllowed()
     {
         var source = Write("Gate.cs", "class C {\n int Covered() => 1;\n int Missing() => 2;\n}");

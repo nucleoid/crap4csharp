@@ -280,6 +280,34 @@ public sealed class CallableCoverageTests
         Assert.All(overloads, item => Assert.False(item.IdentityAmbiguous));
     }
 
+    [Fact]
+    public void CecilCustomModifiersDoNotPreventAccessorReturnOrParameterMapping()
+    {
+        var inventory = Inventory("""
+            class C {
+              private int value;
+              int P { get => value; init { value = 1; } }
+              ref readonly int Current => ref value;
+              public virtual int M(in int item) => item;
+            }
+            """);
+        var init = Assert.Single(inventory.Callables, item => item.Kind == CallableKind.PropertyInit);
+        var current = Assert.Single(inventory.Callables, item => item.Name == "Current.get");
+        var method = Assert.Single(inventory.Callables, item => item.Name == "M");
+        var reports = new[]
+        {
+            CecilReport(init, "C", "System.Void modreq(System.Runtime.CompilerServices.IsExternalInit) C::set_P(System.Int32)"),
+            CecilReport(current, "C", "System.Int32& modreq(System.Runtime.InteropServices.InAttribute) C::get_Current()"),
+            CecilReport(method, "C", "System.Int32 C::M(System.Int32& modreq(System.Runtime.InteropServices.InAttribute))")
+        };
+
+        var resolved = CallableCoverageResolver.Resolve(inventory, reports);
+
+        Assert.All(resolved.Observations.Where(item => reports.Any(report =>
+            report.MethodName == inventory.Callables.Single(callable => callable.ObservationId == item.ObservationId)
+                .SemanticIdentity?.MetadataName)), item => Assert.Equal("known", item.Status));
+    }
+
     private static CallableInventoryResult Inventory(string source) => CallableInventory.Analyze(source, "C.cs",
         new CallableAnalysisContext("App.csproj", "net10.0", "Debug", "AnyCPU", "ctx", CSharpParseOptions.Default));
 
