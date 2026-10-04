@@ -80,7 +80,7 @@ internal static class BaselineCommand
             await output.WriteAsync(JsonSerializer.Serialize(summary, Json) + "\n");
             return policyResult.ExitCode;
         }
-        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or
+        catch (Exception exception) when (exception is ArgumentException or IOException or InvalidDataException or UnauthorizedAccessException or
             PolicyException or BaselineException or JsonException or OperationCanceledException or TimeoutException)
         {
             await output.WriteAsync(JsonSerializer.Serialize(new

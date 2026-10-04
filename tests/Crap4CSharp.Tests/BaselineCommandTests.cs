@@ -38,6 +38,26 @@ public sealed class BaselineCommandTests
         Assert.Null(context.CurrentRevalidation);
     }
 
+    [Fact]
+    public async Task MissingManifestIsStructuredOperationalFailureAndDoesNotWriteCandidate()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-baseline-missing-manifest");
+        await File.WriteAllTextAsync(Path.Combine(directory.Path, "policy.json"), PolicyTests.ValidPolicy
+            .Replace("\"incremental\"", "\"strict\"", StringComparison.Ordinal)
+            .Replace(",\n  \"baseline\": \"baseline.json\"", "", StringComparison.Ordinal),
+            TestContext.Current.CancellationToken);
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exit = await BaselineCommand.RunAsync(["baseline", "create", "--policy", "policy.json",
+            "--reuse-artifacts", "missing.json", "--output", "candidate.json"], directory.Path,
+            output, error, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, exit);
+        Assert.Contains("\"exitCode\": 1", output.ToString());
+        Assert.False(File.Exists(Path.Combine(directory.Path, "candidate.json")));
+    }
+
     private static RunManifest EmptyManifest(ManifestContext context) => new(ManifestIdentity.SchemaVersion,
         CanonicalIdentity.Algorithm, new ManifestProducer("crap4csharp", "0.1.0", ComplexityRules.CallablesV1,
             ProjectAnalysisContext.ProtocolVersion, ManifestIdentity.CoverageProtocol, ManifestIdentity.PathProtocol),
