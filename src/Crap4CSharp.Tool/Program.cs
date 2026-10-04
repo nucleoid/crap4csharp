@@ -551,6 +551,20 @@ internal static class App
     private static void RenderCallableHuman(ResultDocument result, TextWriter output)
     {
         output.WriteLine($"Ruleset: {result.ComplexityRulesetVersion}");
+        output.WriteLine(result.ComplexityRulesetVersion == ComplexityRules.OrdinaryMethodsV1
+            ? "Inventory: limited ordinary-methods only"
+            : "Inventory: authored callables-v1 regions");
+        if (result.Evaluation.Callables is null)
+        {
+            output.WriteLine("CRAP      CC  Coverage  Method");
+            foreach (var metric in result.Evaluation.Metrics)
+            {
+                var crap = metric.Crap?.ToString("0.00", CultureInfo.InvariantCulture) ?? "N/A";
+                var coverage = metric.Coverage is double value
+                    ? value.ToString("P1", CultureInfo.InvariantCulture) : "N/A";
+                output.WriteLine($"{crap,8} {metric.Complexity,3} {coverage,9}  {metric.Path}:{metric.Span.StartLine} {metric.MethodIdentity}");
+            }
+        }
         foreach (var item in result.Evaluation.Callables ?? [])
             output.WriteLine($"{item.Path}:{item.Span.StartLine} {item.Kind} {item.CallableId} CRAP={item.Crap?.ToString("0.00", CultureInfo.InvariantCulture) ?? "N/A"}");
         output.WriteLine($"Completeness: known={result.Evaluation.Coverage.Known}; unknown={result.Evaluation.Coverage.Unknown}");
@@ -642,6 +656,8 @@ internal static class App
         ProcessExecutor processExecutor, TextWriter progress, TextWriter diagnosticOutput, Action markAliasChecked)
     {
         var lines = new List<string>();
+        lines.Add($"Ruleset: {options.Ruleset}");
+        lines.Add("Inventory: limited ordinary-methods only");
         var commands = new List<CommandRecord>();
         var runArtifacts = new List<RunArtifact>();
         var generatedReports = new List<string>();

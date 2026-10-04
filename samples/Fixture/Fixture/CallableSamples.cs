@@ -80,4 +80,9 @@ public sealed class CallableSamples(int seed) : IProbe
     {
         public T Echo(T value) => value;
     }
+
+    public int ArrayLength(int[] values) => values.Length;
+    public int Sum(System.Collections.Generic.List<int> values) => values.Sum();
+    public string Describe(int value) => $"int:{value}";
+    public string Describe(string value) => $"string:{value}";
 }

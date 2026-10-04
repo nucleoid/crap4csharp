@@ -145,17 +145,20 @@ public sealed class CallableCoverageTests
     {
         var inventory = Inventory("""
             class Outer {
-              class Inner { public int Echo(int[] values) => values.Length; }
+              class Inner<T> { public T Echo(T value) => value; }
+              int ArrayLength(int[] values) => values.Length;
               int Sum(System.Collections.Generic.List<int> values) => values.Count;
               void Change(ref int value) => value++;
             }
             """);
         var echo = Assert.Single(inventory.Callables, item => item.Name == "Echo");
+        var array = Assert.Single(inventory.Callables, item => item.Name == "ArrayLength");
         var sum = Assert.Single(inventory.Callables, item => item.Name == "Sum");
         var change = Assert.Single(inventory.Callables, item => item.Name == "Change");
         var reports = new[]
         {
-            CecilReport(echo, "Outer/Inner", "System.Int32 Outer/Inner::Echo(System.Int32[])"),
+            CecilReport(echo, "Outer/Inner`1", "(T)"),
+            CecilReport(array, "Outer", "(System.Int32[])"),
             CecilReport(sum, "Outer", "System.Int32 Outer::Sum(System.Collections.Generic.List`1<System.Int32>)"),
             CecilReport(change, "Outer", "System.Void Outer::Change(System.Int32&)")
         };

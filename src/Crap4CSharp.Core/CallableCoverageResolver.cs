@@ -6,6 +6,17 @@ public sealed record CallableCoverageResolution(
 
 public static class CallableCoverageResolver
 {
+    private static readonly IReadOnlyDictionary<string, string> TypeAliases =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["bool"] = "System.Boolean", ["byte"] = "System.Byte", ["sbyte"] = "System.SByte",
+            ["char"] = "System.Char", ["decimal"] = "System.Decimal", ["double"] = "System.Double",
+            ["float"] = "System.Single", ["int"] = "System.Int32", ["uint"] = "System.UInt32",
+            ["long"] = "System.Int64", ["ulong"] = "System.UInt64", ["short"] = "System.Int16",
+            ["ushort"] = "System.UInt16", ["object"] = "System.Object", ["string"] = "System.String",
+            ["nint"] = "System.IntPtr", ["nuint"] = "System.UIntPtr", ["void"] = "System.Void"
+        };
+
     public static CallableCoverageResolution Resolve(
         CallableInventoryResult inventory,
         IEnumerable<CoverageMethod> reports,
@@ -147,7 +158,8 @@ public static class CallableCoverageResolver
         if (Normalize(report.RawSignature) == Normalize(semantic.ReportSignature)) return true;
         var parameters = ParameterTypes(report.RawSignature);
         return parameters is not null && parameters.SequenceEqual(
-            semantic.Parameters.Select(item => Normalize(item.Type)), StringComparer.Ordinal);
+            semantic.Parameters.Select(item => Normalize(item.Type) +
+                (item.RefKind == "none" ? string.Empty : "&")), StringComparer.Ordinal);
     }
 
     private static IReadOnlyList<string>? ParameterTypes(string signature)
@@ -173,13 +185,20 @@ public static class CallableCoverageResolver
         return output;
     }
 
-    private static string Normalize(string value) => value.Replace(" ", string.Empty, StringComparison.Ordinal)
-        .Replace("class", string.Empty, StringComparison.Ordinal)
-        .Replace("valuetype", string.Empty, StringComparison.Ordinal)
-        .Replace("global::", string.Empty, StringComparison.Ordinal).TrimEnd('&');
+    private static string Normalize(string value)
+    {
+        var normalized = System.Text.RegularExpressions.Regex.Replace(value,
+                @"\b(class|valuetype)\s+", string.Empty)
+            .Replace(" ", string.Empty, StringComparison.Ordinal)
+            .Replace("global::", string.Empty, StringComparison.Ordinal)
+            .Replace('/', '.').Replace('+', '.');
+        normalized = System.Text.RegularExpressions.Regex.Replace(normalized, @"`[0-9]+", string.Empty);
+        return System.Text.RegularExpressions.Regex.Replace(normalized,
+            @"\b(bool|byte|sbyte|char|decimal|double|float|int|uint|long|ulong|short|ushort|object|string|nint|nuint|void)\b",
+            match => TypeAliases[match.Value]);
+    }
     private static bool TypesEqual(string left, string right) =>
-        string.Equals(left, right, StringComparison.Ordinal) ||
-        string.Equals(left.Replace('+', '.'), right.Replace('+', '.'), StringComparison.Ordinal);
+        string.Equals(Normalize(left), Normalize(right), StringComparison.Ordinal);
     private static bool PathsEqual(string left, string? right) => right is not null &&
         string.Equals(left.Replace('\\', '/'), right.Replace('\\', '/'), StringComparison.Ordinal);
     private static bool IsGenerated(CoverageMethod report) => report.MethodName == "MoveNext" ||
