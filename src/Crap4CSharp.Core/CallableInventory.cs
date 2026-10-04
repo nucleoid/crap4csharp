@@ -381,19 +381,33 @@ public static class CallableInventory
     {
         if (type is IDynamicTypeSymbol) return "System.Object";
         if (type is IArrayTypeSymbol array)
-            return TypeName(array.ElementType) + "[" + new string(',', array.Rank - 1) + "]";
+            return TypeName(array.ElementType) + (array.Rank == 1 ? "[]" :
+                "[" + string.Join(",", Enumerable.Repeat("0...", array.Rank)) + "]");
         if (type is IPointerTypeSymbol pointer) return TypeName(pointer.PointedAtType) + "*";
         if (type is ITypeParameterSymbol parameter) return parameter.MetadataName;
         if (type is INamedTypeSymbol named)
         {
             var metadataType = named.IsTupleType ? named.TupleUnderlyingType ?? named : named;
             var name = MetadataTypeName(metadataType.OriginalDefinition);
-            return metadataType.TypeArguments.Length == 0 ? name :
-                $"{name}<{string.Join(",", metadataType.TypeArguments.Select(TypeName))}>";
+            var arguments = MetadataTypeArguments(metadataType).Select(TypeName).ToArray();
+            return arguments.Length == 0 ? name : $"{name}<{string.Join(",", arguments)}>";
         }
         return type.WithNullableAnnotation(NullableAnnotation.None)
             .ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)
             .Replace("global::", string.Empty, StringComparison.Ordinal);
+    }
+
+    private static IEnumerable<ITypeSymbol> MetadataTypeArguments(INamedTypeSymbol type)
+    {
+        var chain = new Stack<INamedTypeSymbol>();
+        for (var current = type; current is not null; current = current.ContainingType) chain.Push(current);
+        foreach (var current in chain)
+        {
+            var ownArity = current.Arity;
+            if (ownArity == 0) continue;
+            foreach (var argument in current.TypeArguments.Skip(current.TypeArguments.Length - ownArity))
+                yield return argument;
+        }
     }
 
     private static bool IsAnonymous(CallableKind kind) => kind is CallableKind.Lambda or CallableKind.AnonymousMethod or
