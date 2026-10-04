@@ -83,7 +83,8 @@ internal static class CurrentEvidenceAdapter
                         declaration.Length, source.ContentIdentity);
             }
             var parse = expected.ParseOptions ?? throw new InvalidDataException("Captured context has no parse options.");
-            if (parse.LanguageVersion != current.LanguageVersion.ToString() ||
+            if (!Microsoft.CodeAnalysis.CSharp.LanguageVersionFacts.TryParse(parse.LanguageVersion,
+                    out var capturedLanguageVersion) || capturedLanguageVersion != current.LanguageVersion ||
                 parse.SourceKind != current.SourceKind.ToString() ||
                 !parse.PreprocessorSymbols.Order(StringComparer.Ordinal).SequenceEqual(current.PreprocessorSymbols.Order(StringComparer.Ordinal)))
                 throw new InvalidDataException("Current project parse context differs from captured tested context.");
