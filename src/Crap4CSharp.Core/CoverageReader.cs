@@ -25,13 +25,24 @@ public sealed record CoverageMethod(string? File, string TypeName, string Method
 
 public static class CoverageReader
 {
+    public static IReadOnlyList<CoverageMethod> Read(ReadOnlySpan<byte> bytes, string logicalReportPath)
+    {
+        var parsed = ReadCapturedDocument(bytes, logicalReportPath);
+        return parsed.Document.Root?.Name.LocalName switch
+        {
+            "CoverageSession" => ReadOpenCoverCompatibility(parsed.Document, parsed.Directory, parsed.ReportId, true),
+            "coverage" => ReadCoberturaCompatibility(parsed.Document, parsed.Directory, parsed.ReportId, true),
+            var root => throw new InvalidDataException($"Unsupported coverage XML root '{root ?? "(missing)"}' in {logicalReportPath}")
+        };
+    }
+
     public static IReadOnlyList<CoverageMethod> Read(string reportPath)
     {
         var parsed = ReadDocument(reportPath);
         return parsed.Document.Root?.Name.LocalName switch
         {
-            "CoverageSession" => ReadOpenCoverCompatibility(parsed.Document, parsed.Directory, parsed.ReportId),
-            "coverage" => ReadCoberturaCompatibility(parsed.Document, parsed.Directory, parsed.ReportId),
+            "CoverageSession" => ReadOpenCoverCompatibility(parsed.Document, parsed.Directory, parsed.ReportId, false),
+            "coverage" => ReadCoberturaCompatibility(parsed.Document, parsed.Directory, parsed.ReportId, false),
             var root => throw new InvalidDataException($"Unsupported coverage XML root '{root ?? "(missing)"}' in {reportPath}")
         };
     }
@@ -68,6 +79,32 @@ public static class CoverageReader
         catch (XmlException exception)
         {
             throw new InvalidDataException($"Malformed coverage XML in {reportPath}: {exception.Message}", exception);
+        }
+    }
+
+    private static ParsedDocument ReadCapturedDocument(ReadOnlySpan<byte> bytes, string logicalReportPath)
+    {
+        if (bytes.Length > 100_000_000) throw new InvalidDataException($"Coverage XML exceeds the 100 MB limit: {logicalReportPath}");
+        try
+        {
+            using var stream = new MemoryStream(bytes.ToArray(), writable: false);
+            using var reader = XmlReader.Create(stream, new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Prohibit,
+                XmlResolver = null,
+                MaxCharactersInDocument = 100_000_000
+            });
+            var document = XDocument.Load(reader, LoadOptions.SetLineInfo);
+            var reportId = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+            var logical = logicalReportPath.Replace('\\', '/');
+            var slash = logical.LastIndexOf('/');
+            var root = OperatingSystem.IsWindows() ? @"C:\" : "/";
+            var directory = slash < 0 ? root : Path.Combine(root, logical[..slash].Replace('/', Path.DirectorySeparatorChar));
+            return new ParsedDocument(document, directory, reportId);
+        }
+        catch (XmlException exception)
+        {
+            throw new InvalidDataException($"Malformed coverage XML in {logicalReportPath}: {exception.Message}", exception);
         }
     }
 
@@ -238,7 +275,7 @@ public static class CoverageReader
             diagnostic.ContextId, diagnostic.Message);
 
     private static IReadOnlyList<CoverageMethod> ReadOpenCoverCompatibility(XDocument document, string baseDirectory,
-        string reportId)
+        string reportId, bool captured)
     {
         var output = new List<CoverageMethod>();
         foreach (var module in document.Descendants().Where(element => element.Name.LocalName == "Module"))
@@ -247,7 +284,7 @@ public static class CoverageReader
             var files = module.Descendants().Where(element => element.Name.LocalName == "File")
                 .Select(element => (Id: Attr(element, "uid"), Path: Attr(element, "fullPath")))
                 .Where(pair => pair.Id is not null && pair.Path is not null)
-                .ToDictionary(pair => pair.Id!, pair => ResolveNativePath(pair.Path!, baseDirectory), StringComparer.Ordinal);
+                .ToDictionary(pair => pair.Id!, pair => captured ? pair.Path : ResolveNativePath(pair.Path!, baseDirectory), StringComparer.Ordinal);
             foreach (var method in module.Descendants().Where(element => element.Name.LocalName == "Method"))
             {
                 var fullName = ChildValue(method, "Name") ?? string.Empty;
@@ -268,18 +305,31 @@ public static class CoverageReader
     }
 
     private static IReadOnlyList<CoverageMethod> ReadCoberturaCompatibility(XDocument document, string baseDirectory,
-        string reportId)
+        string reportId, bool captured)
     {
-        var sourceRoot = document.Root?.Elements().FirstOrDefault(element => element.Name.LocalName == "sources")?
-            .Elements().FirstOrDefault(element => element.Name.LocalName == "source")?.Value.Trim();
+        var sourceRoots = document.Root?.Elements().FirstOrDefault(element => element.Name.LocalName == "sources")?
+            .Elements().Where(element => element.Name.LocalName == "source").Select(element => element.Value.Trim())
+            .Where(value => value.Length > 0).Distinct(StringComparer.Ordinal).ToArray() ?? [];
         var output = new List<CoverageMethod>();
         foreach (var @class in document.Descendants().Where(element => element.Name.LocalName == "class"))
         {
             var moduleIdentity = @class.Ancestors().FirstOrDefault(element => element.Name.LocalName == "package")?.Attribute("name")?.Value;
             var typeName = Attr(@class, "name") ?? string.Empty;
             var filename = Attr(@class, "filename");
-            var file = filename is null ? null : ResolveNativePath(filename,
-                !string.IsNullOrWhiteSpace(sourceRoot) && Path.IsPathRooted(sourceRoot) ? sourceRoot : baseDirectory);
+            IReadOnlyList<string?> files;
+            if (filename is null) files = [null];
+            else if (captured)
+            {
+                if (IsLexicallyAbsolute(filename) || sourceRoots.Length == 0) files = [filename];
+                else files = sourceRoots.Select(sourceRoot => sourceRoot.Replace('\\', '/').TrimEnd('/') + "/" +
+                    filename.Replace('\\', '/').TrimStart('/')).Cast<string?>().ToArray();
+            }
+            else
+            {
+                var sourceRoot = sourceRoots.FirstOrDefault();
+                files = [ResolveNativePath(filename,
+                    !string.IsNullOrWhiteSpace(sourceRoot) && Path.IsPathRooted(sourceRoot) ? sourceRoot : baseDirectory)];
+            }
             var methodsContainer = @class.Elements().FirstOrDefault(element => element.Name.LocalName == "methods");
             if (methodsContainer is null) continue;
             foreach (var method in methodsContainer.Elements().Where(element => element.Name.LocalName == "method"))
@@ -290,11 +340,19 @@ public static class CoverageReader
                     .Select(element => (Line: IntAttr(element, "number"), Visits: IntAttr(element, "hits")))
                     .Where(point => point.Line is > 0 and < 0xFEEFEE && point.Visits is not null)
                     .Select(point => new CoveragePoint(point.Line!.Value, point.Visits!.Value)).ToArray();
-                output.Add(new CoverageMethod(file, typeName, name, ParseParameterCount(signature), points, moduleIdentity)
-                { ReportId = reportId });
+                output.AddRange(files.Select(file =>
+                    new CoverageMethod(file, typeName, name, ParseParameterCount(signature), points, moduleIdentity)
+                    { ReportId = reportId }));
             }
         }
         return output;
+    }
+
+    private static bool IsLexicallyAbsolute(string value)
+    {
+        var path = value.Replace('\\', '/');
+        return path.StartsWith('/') || path.StartsWith("//", StringComparison.Ordinal) ||
+            path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] == '/';
     }
 
     private static string? ResolveNativePath(string path, string baseDirectory)
@@ -386,7 +444,8 @@ public static class CoverageReader
             // before every indented single-line member.
             var syntheticColumns = StartColumn == 1 && EndColumn == 2;
             return new CoveragePoint(Line!.Value, Visits!.Value,
-                syntheticColumns ? null : StartColumn, EndLine, syntheticColumns ? null : EndColumn, Offset);
+                syntheticColumns ? null : StartColumn, syntheticColumns ? null : EndLine,
+                syntheticColumns ? null : EndColumn, Offset);
         }
     }
 }

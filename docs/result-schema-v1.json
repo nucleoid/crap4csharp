@@ -38,6 +38,7 @@
         "coverage": { "$ref": "#/$defs/coverageSummary" },
         "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact" } },
         "decision": { "$ref": "#/$defs/decision" },
+        "provenance": { "$ref": "#/$defs/provenance" },
         "coveragePathPolicy": { "$ref": "#/$defs/coveragePathPolicy" },
         "coverageDiagnostics": { "type": "array", "items": { "$ref": "#/$defs/coverageDiagnostic" } },
         "callables": { "type": "array", "items": { "type": "object" } },
@@ -107,6 +108,18 @@
     "decision": {
       "type": "object", "required": ["completed", "policyDecision", "reason"],
       "properties": { "completed": { "type": "boolean" }, "policyDecision": { "enum": ["pass", "fail", "notApplicable", "unknown"] }, "reason": { "type": "string" } },
+      "additionalProperties": true
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["status", "basis", "postflightVerified", "reusable", "reasons"],
+      "properties": {
+        "status": { "enum": ["unverified", "captured", "verified", "invalid"] },
+        "basis": { "enum": ["none", "captureConsistency", "currentWorkspaceMatch"] },
+        "postflightVerified": { "type": "boolean" },
+        "reusable": { "type": "boolean" },
+        "reasons": { "type": "array", "items": { "type": "string" } }
+      },
       "additionalProperties": true
     },
     "methodCoverageStatus": {

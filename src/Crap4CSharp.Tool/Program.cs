@@ -62,6 +62,8 @@ internal static class App
                              Load exact-match callable exemptions. CLI files are untrusted
                              local input and cannot approve enforcement by themselves.
           --syntax-only      Analyze captured source and coverage without launching child processes.
+          --reuse-artifacts <manifest>
+                             Replay a hash-bound captured bundle without loading projects or running processes.
           --format <value>   Render human (default) or json output.
           --output <path>    Atomically write the versioned JSON result document to path.
           -h, --help         Show help and perform no discovery, tests, or writes.
@@ -190,13 +192,17 @@ internal static class App
                     ? "check requires callables-v1; ordinary-methods-v1 is available through the legacy option-only invocation."
                     : "check orchestration is reserved for issue #10; use analyze --syntax-only for the issue #7 adapter.");
             cancellationToken.ThrowIfCancellationRequested();
-            var result = options.Ruleset == ComplexityRules.OrdinaryMethodsV1
+            var result = options.ReuseArtifacts is not null
+                ? AnalyzeCommand.Replay(options.ReuseArtifacts, workingDirectory, options.Output,
+                    startedAt, stopwatch.Elapsed, cancellationToken)
+                : options.Ruleset == ComplexityRules.OrdinaryMethodsV1
                 ? await AnalyzeLegacyCapturedInputsAsync(options, workingDirectory, startedAt, stopwatch, cancellationToken)
                 : AnalyzeCapturedInputs(options, workingDirectory, startedAt, stopwatch);
             var json = ResultWriter.Serialize(result);
             if (options.Output is not null)
             {
                 var inputs = options.Inputs.Concat(options.Coverage)
+                    .Concat(options.ReuseArtifacts is null ? [] : [options.ReuseArtifacts])
                     .Concat(options.Exemptions is null ? [] : [options.Exemptions]);
                 if (FindOutputAlias(options.Output, workingDirectory, inputs, [], null) is not null)
                     throw new ArgumentException("Output path aliases a source, coverage, or exemption input.");
@@ -209,7 +215,9 @@ internal static class App
         }
         catch (Exception exception) when (IsHandled(exception))
         {
-            var reason = exception is ArgumentException ? "arguments.invalid" :
+            var reason = exception is DecoderFallbackException && options?.ReuseArtifacts is not null ? "artifact.invalid" :
+                exception is ArgumentException ? "arguments.invalid" :
+                exception is InvalidDataException ? "artifact.invalid" :
                 exception is OperationCanceledException ? "run.cancelled" : "execution.failed";
             var ruleset = options?.Ruleset ?? PreDetectValue(args, "--ruleset") switch
             {
@@ -227,8 +235,16 @@ internal static class App
                     try
                     {
                         var inputs = options.Inputs.Concat(options.Coverage)
+                            .Concat(options.ReuseArtifacts is null ? [] : [options.ReuseArtifacts])
                             .Concat(options.Exemptions is null ? [] : [options.Exemptions]);
                         mayWrite = FindOutputAlias(destination, workingDirectory, inputs, [], null) is null;
+                        if (mayWrite && options.ReuseArtifacts is not null)
+                        {
+                            mayWrite = false;
+                            ArtifactBundle.RejectOutputAliasForLocator(options.ReuseArtifacts, destination,
+                                workingDirectory);
+                            mayWrite = true;
+                        }
                     }
                     catch (Exception aliasException) when (IsHandled(aliasException)) { }
                 }
@@ -279,6 +295,14 @@ internal static class App
             switch (arg)
             {
                 case "--syntax-only": options.SyntaxOnly = true; break;
+                case "--reuse-artifacts":
+                    if (!seen.Add(arg)) throw new ArgumentException("--reuse-artifacts may be specified only once.");
+                    options.ReuseArtifacts = Value();
+                    break;
+                case "--project":
+                    if (!seen.Add(arg)) throw new ArgumentException("--project may be specified only once.");
+                    options.Project = Value();
+                    break;
                 case "--coverage": options.Coverage.Add(Value()); break;
                 case "--coverage-path-map":
                     if (index + 2 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal) ||
@@ -305,6 +329,7 @@ internal static class App
                     options.Exemptions = Value();
                     break;
                 case "--threshold":
+                    if (!seen.Add(arg)) throw new ArgumentException("--threshold may be specified only once.");
                     if (!double.TryParse(Value(), NumberStyles.Float, CultureInfo.InvariantCulture, out var threshold) ||
                         !double.IsFinite(threshold) || threshold < 0)
                         throw new ArgumentException("Threshold must be a finite non-negative number.");
@@ -330,8 +355,18 @@ internal static class App
             throw new ArgumentException($"Unknown ruleset '{options.Ruleset}'.");
         if (options.Ruleset == ComplexityRules.CallablesV1 && options.AllowMissingCoverage)
             throw new ArgumentException("--allow-missing-coverage is only available with ordinary-methods-v1.");
-        if (options.Command == "analyze" && !options.SyntaxOnly)
-            throw new ArgumentException("Issue #7 analyze requires --syntax-only; project build orchestration is deferred to issue #10.");
+        if (options.ReuseArtifacts is not null)
+        {
+            if (options.Command != "analyze" || options.SyntaxOnly || options.Inputs.Count > 0 || options.Coverage.Count > 0 ||
+                options.CoveragePathMappings.Count > 0 || options.CoveragePathCase != CoveragePathCase.Auto ||
+                options.Exemptions is not null || options.Project is not null || options.AllowMissingCoverage ||
+                seen.Contains("--ruleset") || seen.Contains("--threshold"))
+                throw new ArgumentException("--reuse-artifacts cannot be combined with live source, project, coverage, mapping, case, syntax-only, or exemption inputs.");
+        }
+        else if (options.Command == "analyze" && !options.SyntaxOnly)
+            throw new ArgumentException("analyze requires either --reuse-artifacts or --syntax-only.");
+        if (options.Command == "analyze" && options.SyntaxOnly && options.Project is not null)
+            throw new ArgumentException("--project is not available with analyze --syntax-only.");
         return options;
     }
 
@@ -485,6 +520,7 @@ internal static class App
             findings, new CoverageSummary(callables.Length, callables.Count(item => item.CoverageStatus == "known"), unknown.Length,
                 reasonCounts), artifacts, reduced.Decision)
         {
+            Provenance = UnverifiedProvenance(),
             Callables = callables,
             Families = families,
             CallableExemptions = exemptionValidation.Matches,
@@ -942,6 +978,7 @@ internal static class App
                 new CoverageSummary(metrics.Length, metrics.Count(metric => metric.Coverage is not null), metrics.Count(metric => metric.Coverage is null), reasonCounts),
                 artifacts, reduced.Decision)
         {
+            Provenance = UnverifiedProvenance(),
             CoveragePathPolicy = new CoveragePathPolicyResult(options.CoveragePathCase.ToString().ToLowerInvariant(), pathMappings),
             CoverageDiagnostics = outcome.CoverageDiagnostics.GroupBy(diagnostic => diagnostic.Id, StringComparer.Ordinal)
                 .Select(group => group.First()).OrderBy(diagnostic => diagnostic.Code, StringComparer.Ordinal)
@@ -1053,7 +1090,11 @@ internal static class App
             outcome.Reason == "run.cancelled" ? "cancelled" : outcome.Reason == "crap.noEligibleMethods" ? "notApplicable" : "operationalError",
             outcome.Reason ?? "execution.failed", true)];
     private static bool IsHandled(Exception exception) => exception is ArgumentException or IOException or UnauthorizedAccessException or
+        DecoderFallbackException or
         InvalidDataException or InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception or OperationCanceledException;
+
+    private static EvaluationProvenance UnverifiedProvenance() =>
+        new("unverified", "none", false, false, []);
 
     private static IReadOnlyList<string> DeclaredSourceRoots(IEnumerable<string> resolvedInputs, string workingDirectory)
     {
@@ -1146,6 +1187,8 @@ internal static class App
         public required string Command { get; init; }
         public string Ruleset { get; set; } = ComplexityRules.CallablesV1;
         public bool SyntaxOnly { get; set; }
+        public string? ReuseArtifacts { get; set; }
+        public string? Project { get; set; }
         public double Threshold { get; set; } = 8;
         public bool AllowMissingCoverage { get; set; }
         public string Format { get; set; } = "human";

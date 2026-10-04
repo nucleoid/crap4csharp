@@ -85,4 +85,13 @@ public sealed class CallableSamples(int seed) : IProbe
     public int Sum(System.Collections.Generic.List<int> values) => values.Sum();
     public string Describe(int value) => $"int:{value}";
     public string Describe(string value) => $"string:{value}";
+
+    public void BlockBody()
+    {
+        changed = null;
+    }
+
+    public void Empty() { }
+    public int Zero() => 0;
+    static CallableSamples() { }
 }

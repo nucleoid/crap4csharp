@@ -28,6 +28,11 @@ public sealed class CallableCliTests : IDisposable
         using var document = JsonDocument.Parse(result.Output);
         Assert.Equal("callables-v1", document.RootElement.GetProperty("complexityRulesetVersion").GetString());
         Assert.Equal("analyze", document.RootElement.GetProperty("evaluation").GetProperty("invocationMode").GetString());
+        var provenance = document.RootElement.GetProperty("evaluation").GetProperty("provenance");
+        Assert.Equal("unverified", provenance.GetProperty("status").GetString());
+        Assert.Equal("none", provenance.GetProperty("basis").GetString());
+        Assert.False(provenance.GetProperty("postflightVerified").GetBoolean());
+        Assert.False(provenance.GetProperty("reusable").GetBoolean());
         var callable = Assert.Single(document.RootElement.GetProperty("evaluation").GetProperty("callables").EnumerateArray());
         Assert.Equal("method", callable.GetProperty("kind").GetString());
         Assert.Equal("known", callable.GetProperty("coverageStatus").GetString());
@@ -57,6 +62,8 @@ public sealed class CallableCliTests : IDisposable
         var legacy = await Run(null, "--format", "json", "--coverage", coverage, source);
         using var legacyDocument = JsonDocument.Parse(legacy.Output);
         Assert.Equal("ordinary-methods-v1", legacyDocument.RootElement.GetProperty("complexityRulesetVersion").GetString());
+        Assert.Equal("unverified", legacyDocument.RootElement.GetProperty("evaluation")
+            .GetProperty("provenance").GetProperty("status").GetString());
         Assert.Single(legacyDocument.RootElement.GetProperty("evaluation").GetProperty("metrics").EnumerateArray());
 
         var rejected = await Run(null, "check", "--ruleset", "ordinary-methods-v1", source);

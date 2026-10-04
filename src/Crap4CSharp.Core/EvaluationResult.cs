@@ -58,6 +58,8 @@ public sealed record EvaluationSection(
     IReadOnlyList<ArtifactIdentity> Artifacts,
     EvaluationDecision Decision)
 {
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public EvaluationProvenance? Provenance { get; init; }
     public CoveragePathPolicyResult CoveragePathPolicy { get; init; } = new("auto", []);
     public IReadOnlyList<CoverageDiagnostic> CoverageDiagnostics { get; init; } = [];
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

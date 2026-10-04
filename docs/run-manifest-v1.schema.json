@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/nucleoid/crap4csharp/docs/run-manifest-v1.schema.json",
+  "title": "Crap4CSharp run manifest v1",
+  "type": "object",
+  "required": ["manifestSchemaVersion", "identityAlgorithm", "producer", "capture", "revision", "roots", "contexts", "builds", "executions", "artifacts", "evaluationInputs", "manifestHash"],
+  "properties": {
+    "manifestSchemaVersion": { "const": "1.0" },
+    "identityAlgorithm": { "const": "sha256-canonical-v1" },
+    "manifestHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "producer": { "type": "object", "required": ["tool", "toolVersion", "complexityRuleset", "contextProtocol", "coverageProtocol", "pathProtocol"] },
+    "capture": { "type": "object", "required": ["state", "captureConsistent", "actualBindingComplete", "failureReasons"] },
+    "revision": { "type": "object", "required": ["kind", "repositoryIdentity", "workspaceIdentity"] },
+    "roots": { "type": "array", "items": { "type": "object" } },
+    "contexts": { "type": "array", "minItems": 1, "maxItems": 10000, "items": {
+      "type": "object",
+      "required": ["id", "project", "targetFramework", "configuration", "platform", "sourceSetHash", "contextHash", "inputClosureHash", "actualCompilerBindingComplete", "reuseRecipeComplete", "inputs", "parseOptions", "pathPolicy"],
+      "properties": {
+        "parseOptions": { "type": "object", "required": ["languageVersion", "sourceKind", "preprocessorSymbols", "features"] },
+        "pathPolicy": { "type": "object", "required": ["casePolicy", "reportRootMappings"] },
+        "inputs": { "type": "array", "maxItems": 10000 }
+      }
+    } },
+    "builds": { "type": "array", "minItems": 1, "maxItems": 10000, "items": { "type": "object", "required": ["id", "contextId", "moduleIdentity", "assemblySha256", "mvid", "pdbSha256", "debugIdentity"] } },
+    "executions": { "type": "array", "minItems": 1, "maxItems": 10000, "items": { "type": "object", "required": ["id", "contextId", "buildId", "completed", "exitCode", "totalTests", "passedTests", "failedTests", "skippedTests", "testModuleIdentity", "testAssemblySha256", "testMvid", "testPdbSha256", "testDebugIdentity"] } },
+    "artifacts": { "type": "array", "minItems": 1, "maxItems": 10000, "items": { "type": "object", "required": ["id", "kind", "locator", "length", "sha256"] } },
+    "evaluationInputs": { "type": "object" }
+  },
+  "additionalProperties": true
+}

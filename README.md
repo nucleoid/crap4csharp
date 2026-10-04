@@ -69,6 +69,11 @@ crap4csharp analyze --syntax-only --ruleset ordinary-methods-v1 --coverage cover
 
 # Load exact local exemptions for inspection (never trusted approval)
 crap4csharp analyze --syntax-only --callable-exemptions exemptions.json --coverage coverage.xml src
+
+# Replay a retained, hash-bound bundle without the original checkout or child processes.
+# Bundle production is intentionally pending the project-aware check orchestrator (#10);
+# current releases consume externally prepared compatible bundles but do not create them.
+crap4csharp analyze --reuse-artifacts artifacts/crap-run/manifest.json --format json
 ```
 
 With no `--coverage`, the tool creates a unique directory beneath the OS temporary directory and runs:
@@ -115,6 +120,11 @@ Output is ordered by numeric CRAP score descending, followed by unknown (`N/A`) 
 `--format human|json` controls console rendering (`human` is the default). JSON stdout contains exactly one UTF-8 document followed by a newline; progress and child diagnostics are routed to stderr. `--output <path>` always writes the JSON document through a unique sibling temporary file and atomic replacement, independent of console format. Destinations that alias source, project, or coverage inputs are rejected before any write.
 
 The v1 document separates deterministic `evaluation` evidence from volatile `run` metadata. Generated coverage uses a content-addressed logical identity in `evaluation`; its temporary physical location remains in `run`. The document reports the executing assembly's informational version, preserves raw finite score precision, stable finding IDs/order, explicit null coverage, conservative coverage reason codes, check status, policy decision, and actual 0/1/2 exit semantics. See [the result contract](docs/results.md) and [JSON Schema](docs/result-schema-v1.json). Incompatible major schema versions must be rejected; additive fields within major version 1 may be ignored by readers.
+
+Captured replay verifies bundle hashes and reports `captured`; it does not claim the current workspace was checked.
+Current-workspace `verified` evidence requires a separately captured matching revision, concrete worktree, source/context
+closure and successful generating execution. See [artifact provenance](docs/provenance.md) and the
+[run manifest schema](docs/run-manifest-v1.schema.json). Hashes are consistency evidence, not signatures or sandboxing.
 
 ## Exit codes
 
