@@ -62,6 +62,43 @@ public sealed class CallableCoverageTests
     }
 
     [Fact]
+    public void ColumnlessGetterPointSharingALineWithBodylessSetterIsAmbiguous()
+    {
+        var inventory = Inventory("interface C { int P { get => 1; set; } }");
+        var getter = Assert.Single(inventory.Callables, item => item.Kind == CallableKind.PropertyGet);
+        var setter = Assert.Single(inventory.Callables, item => item.Kind == CallableKind.PropertySet);
+
+        var resolved = CallableCoverageResolver.Resolve(inventory,
+            [Report(getter, [new CoveragePoint(getter.Span.StartLine, 7)])]);
+
+        var observation = Assert.Single(resolved.Observations,
+            item => item.ObservationId == getter.ObservationId);
+        Assert.Equal("unknown", observation.Status);
+        Assert.Equal(CoverageReasonCodes.AmbiguousCallableOwnership, observation.Reason);
+        Assert.Equal("not-applicable", Assert.Single(resolved.Observations,
+            item => item.ObservationId == setter.ObservationId).Status);
+    }
+
+    [Fact]
+    public void ColumnlessPointCannotChooseBetweenSameLineAccessorBodies()
+    {
+        var inventory = Inventory("class C { int field; int P { get => field; set => field = value; } }");
+        var accessors = inventory.Callables.Where(item =>
+            item.Kind is CallableKind.PropertyGet or CallableKind.PropertySet).ToArray();
+        Assert.Equal(2, accessors.Length);
+
+        var resolved = CallableCoverageResolver.Resolve(inventory,
+            accessors.Select(item => Report(item, [new CoveragePoint(item.Span.StartLine, 1)])));
+
+        Assert.All(resolved.Observations.Where(item =>
+            accessors.Any(accessor => accessor.ObservationId == item.ObservationId)), item =>
+        {
+            Assert.Equal("unknown", item.Status);
+            Assert.Equal(CoverageReasonCodes.AmbiguousCallableOwnership, item.Reason);
+        });
+    }
+
+    [Fact]
     public void ContextAndModuleIdentityNeverUnionAcrossLookalikes()
     {
         var inventory = Inventory("class C { int M() => 1; }");
@@ -161,6 +198,34 @@ public sealed class CallableCoverageTests
             CecilReport(array, "Outer", "(System.Int32[])"),
             CecilReport(sum, "Outer", "System.Int32 Outer::Sum(System.Collections.Generic.List`1<System.Int32>)"),
             CecilReport(change, "Outer", "System.Void Outer::Change(System.Int32&)")
+        };
+
+        var resolved = CallableCoverageResolver.Resolve(inventory, reports);
+
+        Assert.All(resolved.Observations, item => Assert.Equal("known", item.Status));
+    }
+
+    [Fact]
+    public void CecilStyleTupleDynamicNestedNullableAndNonGenericFrameworkTypesMatchSemanticIdentity()
+    {
+        var inventory = Inventory("""
+            class Outer {
+              int Tuple((int, int) value) => value.Item1;
+              int Dynamic(dynamic value) => value.GetHashCode();
+              int NullableList(System.Collections.Generic.List<int?> values) => values.Count;
+              int Enumerable(System.Collections.IEnumerable values) => 1;
+            }
+            """);
+        var tuple = Assert.Single(inventory.Callables, item => item.Name == "Tuple");
+        var dynamic = Assert.Single(inventory.Callables, item => item.Name == "Dynamic");
+        var nullable = Assert.Single(inventory.Callables, item => item.Name == "NullableList");
+        var enumerable = Assert.Single(inventory.Callables, item => item.Name == "Enumerable");
+        var reports = new[]
+        {
+            CecilReport(tuple, "Outer", "System.Int32 Outer::Tuple(System.ValueTuple`2<System.Int32,System.Int32>)"),
+            CecilReport(dynamic, "Outer", "System.Int32 Outer::Dynamic(System.Object)"),
+            CecilReport(nullable, "Outer", "System.Int32 Outer::NullableList(System.Collections.Generic.List`1<System.Nullable`1<System.Int32>>)"),
+            CecilReport(enumerable, "Outer", "System.Int32 Outer::Enumerable(System.Collections.IEnumerable)")
         };
 
         var resolved = CallableCoverageResolver.Resolve(inventory, reports);
