@@ -238,8 +238,12 @@ internal static class App
                             .Concat(options.Exemptions is null ? [] : [options.Exemptions]);
                         mayWrite = FindOutputAlias(destination, workingDirectory, inputs, [], null) is null;
                         if (mayWrite && options.ReuseArtifacts is not null)
+                        {
+                            mayWrite = false;
                             ArtifactBundle.Load(options.ReuseArtifacts, workingDirectory)
                                 .RejectOutputAlias(destination, workingDirectory);
+                            mayWrite = true;
+                        }
                     }
                     catch (Exception aliasException) when (IsHandled(aliasException)) { }
                 }

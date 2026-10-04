@@ -91,9 +91,15 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
     private static void ValidateShape(JsonElement root)
     {
         if (root.ValueKind != JsonValueKind.Object) throw new InvalidDataException("Artifact manifest must be an object.");
+        Require(root, "manifestSchemaVersion", "identityAlgorithm", "manifestHash");
         foreach (var property in new[] { "producer", "capture", "revision", "evaluationInputs" })
             if (!root.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.Object)
                 throw new InvalidDataException($"Artifact manifest is missing required object '{property}'.");
+        Require(root.GetProperty("producer"), "tool", "toolVersion", "complexityRuleset", "contextProtocol",
+            "coverageProtocol", "pathProtocol");
+        Require(root.GetProperty("capture"), "state", "captureConsistent", "actualBindingComplete", "failureReasons");
+        Require(root.GetProperty("revision"), "kind", "repositoryIdentity", "workspaceIdentity");
+        Require(root.GetProperty("evaluationInputs"), "scopeHash", "policyHash");
         foreach (var property in new[] { "roots", "contexts", "builds", "executions", "artifacts" })
         {
             if (!root.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.Array)
@@ -103,6 +109,36 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
         }
         if (root.GetProperty("contexts").GetArrayLength() == 0)
             throw new InvalidDataException("Artifact manifest contains no analysis context.");
+        foreach (var context in root.GetProperty("contexts").EnumerateArray())
+        {
+            Require(context, "id", "project", "targetFramework", "configuration", "platform", "sourceSetHash",
+                "contextHash", "inputClosureHash", "actualCompilerBindingComplete", "reuseRecipeComplete", "inputs",
+                "parseOptions", "pathPolicy");
+            if (context.GetProperty("inputs").ValueKind != JsonValueKind.Array ||
+                context.GetProperty("parseOptions").ValueKind != JsonValueKind.Object ||
+                context.GetProperty("pathPolicy").ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException("Artifact context has an invalid required member shape.");
+            Require(context.GetProperty("parseOptions"), "languageVersion", "sourceKind", "preprocessorSymbols", "features");
+            Require(context.GetProperty("pathPolicy"), "casePolicy", "reportRootMappings");
+            foreach (var input in context.GetProperty("inputs").EnumerateArray())
+                Require(input, "role", "logicalPath", "locator", "length", "sha256", "generated");
+        }
+        foreach (var build in root.GetProperty("builds").EnumerateArray())
+            Require(build, "id", "contextId", "moduleIdentity", "assemblySha256", "mvid", "pdbSha256", "debugIdentity");
+        foreach (var execution in root.GetProperty("executions").EnumerateArray())
+            Require(execution, "id", "contextId", "buildId", "completed", "exitCode", "totalTests", "passedTests",
+                "failedTests", "skippedTests");
+        foreach (var artifact in root.GetProperty("artifacts").EnumerateArray())
+            Require(artifact, "id", "kind", "locator", "length", "sha256");
+    }
+
+    private static void Require(JsonElement value, params string[] names)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+            throw new InvalidDataException("Artifact manifest contains a malformed object.");
+        foreach (var name in names)
+            if (!value.TryGetProperty(name, out var property) || property.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+                throw new InvalidDataException($"Artifact manifest is missing required property '{name}'.");
     }
 
     private static string? ResolveOwnedRegularFile(string root, string locator)

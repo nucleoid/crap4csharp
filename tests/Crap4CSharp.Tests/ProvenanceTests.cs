@@ -153,6 +153,21 @@ public sealed class ProvenanceTests
             ProvenanceVerifier.VerifyCapture(manifest, FixtureBytes()).Reasons);
     }
 
+    [Fact]
+    public void CanonicalManifestIdentityMatchesPublishedGoldenVector()
+    {
+        var manifest = Fixture();
+
+        Assert.Equal("352c257a192f9041fefd856032835e63731386e369e327be772c2580a375f928",
+            manifest.Contexts[0].SourceSetHash);
+        Assert.Equal("cde09b11c2e1f8023c5fac5f8468a48a42e2fae1fbcc253972ae49a24bb6f80b",
+            manifest.Contexts[0].InputClosureHash);
+        Assert.Equal("7ac8c7682d111361ff8bed3ed526c5b24c71b564f633d81e7ea603bcd7eee3ab",
+            manifest.Contexts[0].ContextHash);
+        Assert.Equal("792fe91028cd56a123d252b7bb040076ea58a422d8095ee022b670e6a97f601b",
+            manifest.ManifestHash);
+    }
+
     private static Dictionary<string, ImmutableArray<byte>> FixtureBytes() => new(StringComparer.Ordinal)
     {
         ["artifacts/source.bin"] = ImmutableArray.Create<byte>(1, 2, 3),

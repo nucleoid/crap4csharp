@@ -200,7 +200,9 @@ public static class ProvenanceVerifier
                 reasons.Add(ProvenanceReasonCodes.ContextChanged);
 
         var recipeComplete = manifest.Contexts.All(context => context.ReuseRecipeComplete);
-        if (!recipeComplete)
+        if (recipeComplete && !current.MembershipRecipeRevalidated)
+            reasons.Add(ProvenanceReasonCodes.ContextNotRevalidated);
+        else if (!recipeComplete)
             reasons.Add(requireReusableRecipe ? ProvenanceReasonCodes.ContextNotRevalidated
                 : ProvenanceReasonCodes.ReuseRecipeIncomplete);
         var nonFatal = !requireReusableRecipe ? ProvenanceReasonCodes.ReuseRecipeIncomplete : null;

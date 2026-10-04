@@ -1,35 +1,92 @@
+using System.Diagnostics;
 using Crap4CSharp.Core;
 
 internal static class CurrentEvidenceAdapter
 {
-    public static CurrentEvidence Capture(RunManifest manifest, string workspaceRoot,
-        string repositoryIdentity, string workspaceIdentity, string? head)
+    public static CurrentEvidence Capture(RunManifest manifest, string workspaceRoot)
     {
         var root = Path.GetFullPath(workspaceRoot);
+        var revision = manifest.Revision.Kind switch
+        {
+            "git" => ObserveGit(root),
+            "none" => new ObservedRevision("none",
+                CanonicalIdentity.Set("local-workspace-v1", [root]), null),
+            _ => throw new InvalidDataException($"Unsupported revision kind: {manifest.Revision.Kind}")
+        };
         var inputs = new List<CurrentInputEvidence>();
         foreach (var input in manifest.Contexts.SelectMany(context => context.Inputs).Where(input => !input.Generated)
-            .OrderBy(input => input.LogicalPath, StringComparer.Ordinal))
+            .GroupBy(input => input.Role + "\n" + input.LogicalPath, StringComparer.Ordinal)
+            .Select(group => group.First()).OrderBy(input => input.LogicalPath, StringComparer.Ordinal))
         {
             var logical = CanonicalIdentity.NormalizeLogicalPath(input.LogicalPath);
-            var path = Path.GetFullPath(logical.Replace('/', Path.DirectorySeparatorChar), root);
-            EnsureContained(root, path);
-            var info = new FileInfo(path);
-            if (!info.Exists) { inputs.Add(new(input.Role, input.LogicalPath, -1, "missing")); continue; }
-            var target = info.ResolveLinkTarget(true);
-            if (target is not null) EnsureContained(root, target.FullName);
-            if (info.Length > 100 * 1024 * 1024) throw new InvalidDataException($"Workspace input exceeds 100 MB: {logical}");
-            var bytes = File.ReadAllBytes(path);
+            var path = ResolveRegularFile(root, logical);
+            if (path is null)
+            {
+                inputs.Add(new(input.Role, input.LogicalPath, -1, "missing"));
+                continue;
+            }
+            var bytes = ArtifactBundle.ReadBounded(path, ArtifactBundle.MaxArtifactBytes, null, logical);
             inputs.Add(new(input.Role, input.LogicalPath, bytes.Length, CanonicalIdentity.Sha256(bytes)));
         }
-        var contexts = manifest.Contexts.ToDictionary(context => context.Id, context => context.ContextHash,
-            StringComparer.Ordinal);
-        return new CurrentEvidence(repositoryIdentity, workspaceIdentity, head, inputs, contexts);
+
+        // v1 manifests do not yet carry a complete executable membership recipe. Re-reading the saved list
+        // proves byte equality only; it cannot prove that no new glob/import/input appeared. Keep context hashes
+        // absent so VerifyCurrent returns contextNotRevalidated instead of manufacturing a fresh verification.
+        return new CurrentEvidence(revision.RepositoryIdentity, revision.WorkspaceIdentity, revision.Head,
+            inputs, new Dictionary<string, string>(StringComparer.Ordinal), false);
     }
 
-    private static void EnsureContained(string root, string path)
+    private static ObservedRevision ObserveGit(string root)
     {
-        var relative = Path.GetRelativePath(root, path);
-        if (relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) ||
-            Path.IsPathRooted(relative)) throw new InvalidDataException("Workspace input escapes the declared root.");
+        var repositoryRoot = Git(root, "rev-parse", "--show-toplevel");
+        var commonDirectory = Path.GetFullPath(Git(root, "rev-parse", "--git-common-dir"), root);
+        var worktreeDirectory = Path.GetFullPath(Git(root, "rev-parse", "--git-dir"), root);
+        var head = Git(root, "rev-parse", "HEAD");
+        return new ObservedRevision(
+            CanonicalIdentity.Set("git-repository-v1", [repositoryRoot, commonDirectory]),
+            CanonicalIdentity.Set("git-worktree-v1", [repositoryRoot, worktreeDirectory]), head);
     }
+
+    private static string Git(string root, params string[] arguments)
+    {
+        var start = new ProcessStartInfo("git")
+        {
+            WorkingDirectory = root,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        foreach (var argument in arguments) start.ArgumentList.Add(argument);
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("Unable to start git.");
+        var output = process.StandardOutput.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
+        if (!process.WaitForExit(10_000))
+        {
+            process.Kill(true);
+            throw new TimeoutException("Git identity observation timed out.");
+        }
+        if (process.ExitCode != 0)
+            throw new InvalidDataException($"Git identity observation failed: {error.Trim()}");
+        return output.Trim();
+    }
+
+    private static string? ResolveRegularFile(string root, string logical)
+    {
+        var current = root;
+        foreach (var part in logical.Split('/'))
+        {
+            current = Path.Combine(current, part);
+            var relative = Path.GetRelativePath(root, current);
+            if (relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+                throw new InvalidDataException("Workspace input escapes the declared root.");
+            if (!File.Exists(current) && !Directory.Exists(current)) return null;
+            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException($"Workspace input contains a symbolic link: {logical}");
+        }
+        if (Directory.Exists(current)) throw new InvalidDataException($"Workspace input is not a regular file: {logical}");
+        return current;
+    }
+
+    private sealed record ObservedRevision(string RepositoryIdentity, string WorkspaceIdentity, string? Head);
 }
