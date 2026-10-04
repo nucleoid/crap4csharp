@@ -104,6 +104,54 @@ public sealed class ProvenanceTests
             ProvenanceVerifier.VerifyCapture(manifest, bytes).Reasons);
     }
 
+    [Fact]
+    public void CaptureRequiresAHashBoundSuccessfulBuildAndExecutionGraph()
+    {
+        var original = Fixture();
+        var manifest = original with
+        {
+            Builds = [],
+            Executions = [],
+            Artifacts = [original.Artifacts[0], original.Artifacts[1] with
+            {
+                BuildId = null,
+                ExecutionId = null
+            }],
+            ManifestHash = null
+        };
+
+        var reasons = ProvenanceVerifier.VerifyCapture(manifest, FixtureBytes()).Reasons;
+
+        Assert.Contains("manifest.hashMissing", reasons);
+        Assert.Contains("provenance.buildEvidenceMissing", reasons);
+        Assert.Contains(ProvenanceReasonCodes.TestExecutionIncomplete, reasons);
+        Assert.Contains(ProvenanceReasonCodes.DanglingReference, reasons);
+    }
+
+    [Theory]
+    [InlineData("foo-v9", "1.0", "coverage-v1", "paths-v1")]
+    [InlineData("callables-v1", "0.0", "coverage-v1", "paths-v1")]
+    [InlineData("callables-v1", "1.0", "coverage-v9", "paths-v1")]
+    [InlineData("callables-v1", "1.0", "coverage-v1", "paths-v9")]
+    public void CaptureRejectsUnsupportedProducerAndProtocolIdentities(
+        string ruleset, string contextProtocol, string coverageProtocol, string pathProtocol)
+    {
+        var manifest = Fixture();
+        manifest = manifest with
+        {
+            Producer = manifest.Producer with
+            {
+                ComplexityRuleset = ruleset,
+                ContextProtocol = contextProtocol,
+                CoverageProtocol = coverageProtocol,
+                PathProtocol = pathProtocol
+            }
+        };
+
+        Assert.Contains("manifest.producerUnsupported",
+            ProvenanceVerifier.VerifyCapture(manifest, FixtureBytes()).Reasons);
+    }
+
     private static Dictionary<string, ImmutableArray<byte>> FixtureBytes() => new(StringComparer.Ordinal)
     {
         ["artifacts/source.bin"] = ImmutableArray.Create<byte>(1, 2, 3),

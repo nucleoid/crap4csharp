@@ -8,6 +8,42 @@ namespace Crap4CSharp.Tests;
 public sealed class AnalyzeCommandTests
 {
     [Fact]
+    public async Task TruncatedManifestReturnsOneStructuredJsonDocument()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-truncated-manifest");
+        var manifest = Path.Combine(directory.Path, "manifest.json");
+        File.WriteAllText(manifest, "{\"manifestSchemaVersion\":");
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var exit = await global::App.RunAsync(
+            ["analyze", "--reuse-artifacts", manifest, "--format", "json"],
+            directory.Path, output, error, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, exit);
+        using var document = JsonDocument.Parse(output.ToString());
+        Assert.Equal(1, document.RootElement.GetProperty("run").GetProperty("exitCode").GetInt32());
+        Assert.Equal("artifact.invalid", document.RootElement.GetProperty("evaluation")
+            .GetProperty("decision").GetProperty("reason").GetString());
+        Assert.DoesNotContain("JsonException", error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SyntaxOnlyRejectsProjectInsteadOfIgnoringIt()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-syntax-project");
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var exit = await global::App.RunAsync(
+            ["analyze", "--syntax-only", "--project", "App.csproj", "--format", "json"],
+            directory.Path, output, error, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, exit);
+        Assert.Contains("--project", error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task CapturedReplayUsesOnlyBundleBytesAndReportsCapturedProvenance()
     {
         using var directory = TestDirectory.Create("crap4csharp-captured-analyze");
