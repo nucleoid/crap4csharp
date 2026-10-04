@@ -140,6 +140,31 @@ public sealed class CallableCoverageTests
             item => item.ObservationId == getter.ObservationId).Status);
     }
 
+    [Fact]
+    public void CecilStyleNestedArrayGenericAndByRefTypesMatchSemanticIdentity()
+    {
+        var inventory = Inventory("""
+            class Outer {
+              class Inner { public int Echo(int[] values) => values.Length; }
+              int Sum(System.Collections.Generic.List<int> values) => values.Count;
+              void Change(ref int value) => value++;
+            }
+            """);
+        var echo = Assert.Single(inventory.Callables, item => item.Name == "Echo");
+        var sum = Assert.Single(inventory.Callables, item => item.Name == "Sum");
+        var change = Assert.Single(inventory.Callables, item => item.Name == "Change");
+        var reports = new[]
+        {
+            CecilReport(echo, "Outer/Inner", "System.Int32 Outer/Inner::Echo(System.Int32[])"),
+            CecilReport(sum, "Outer", "System.Int32 Outer::Sum(System.Collections.Generic.List`1<System.Int32>)"),
+            CecilReport(change, "Outer", "System.Void Outer::Change(System.Int32&)")
+        };
+
+        var resolved = CallableCoverageResolver.Resolve(inventory, reports);
+
+        Assert.All(resolved.Observations, item => Assert.Equal("known", item.Status));
+    }
+
     private static CallableInventoryResult Inventory(string source) => CallableInventory.Analyze(source, "C.cs",
         new CallableAnalysisContext("App.csproj", "net10.0", "Debug", "AnyCPU", "ctx", CSharpParseOptions.Default));
 
@@ -154,4 +179,14 @@ public sealed class CallableCoverageTests
             DocumentIdentities = ["doc"]
         };
     }
+
+    private static CoverageMethod CecilReport(CallableEntry target, string typeName, string signature) =>
+        new("C.cs", typeName, target.SemanticIdentity!.MetadataName, target.SemanticIdentity.Parameters.Count,
+            [new CoveragePoint(target.Span.StartLine, 1)], "module")
+        {
+            ContextId = "ctx",
+            RawSignature = signature,
+            GenericArity = target.SemanticIdentity.GenericArity,
+            DocumentIdentities = ["doc"]
+        };
 }

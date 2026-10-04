@@ -28,5 +28,9 @@ public sealed class CallableSamplesTests
         Assert.Equal(2, ((IProbe)sample).Read());
         Assert.Equal(3, (int)(sample + new CallableSamples(1)));
         Assert.Equal("ok", new CallableSamples.Box<string>().Echo("ok"));
+        Assert.Equal(2, sample.ArrayLength([1, 2]));
+        Assert.Equal(3, sample.Sum([1, 2]));
+        Assert.Equal("int:1", sample.Describe(1));
+        Assert.Equal("string:x", sample.Describe("x"));
     }
 }

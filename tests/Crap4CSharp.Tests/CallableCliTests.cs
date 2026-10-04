@@ -182,6 +182,26 @@ public sealed class CallableCliTests : IDisposable
     }
 
     [Fact]
+    public async Task LegacyHumanModesDiscloseRulesetLimitedInventoryAndMetrics()
+    {
+        var source = Write("LegacyHuman.cs", "class C { int M() => 1; }");
+        var coverage = WriteCoverage(source, 1);
+
+        var optionOnly = await Run(null, "--coverage", coverage, source);
+        var analyze = await Run(null, "analyze", "--syntax-only", "--ruleset", "ordinary-methods-v1",
+            "--coverage", coverage, source);
+
+        Assert.Equal(0, optionOnly.ExitCode);
+        Assert.Contains("Ruleset: ordinary-methods-v1", optionOnly.Output);
+        Assert.Contains("limited", optionOnly.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("M", optionOnly.Output);
+        Assert.Equal(0, analyze.ExitCode);
+        Assert.Contains("Ruleset: ordinary-methods-v1", analyze.Output);
+        Assert.Contains("limited", analyze.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("M", analyze.Output);
+    }
+
+    [Fact]
     public async Task HelpExposesRulesetAndExemptionContractsWithoutLaunchingAnything()
     {
         var launches = 0;

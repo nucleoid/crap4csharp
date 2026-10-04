@@ -50,6 +50,12 @@ foreach ($report in $reports) {
     if (@($document.evaluation.callables | Where-Object { $_.semanticSignature -like '*Box*Echo*' }).Count -eq 0) {
         throw 'Missing nested generic type method from real fixture inventory.'
     }
+    $requiredKnown = @('*Box*Echo*', '*ArrayLength*', '*Sum*List*', '*Describe*Int32*', '*Describe*String*')
+    foreach ($signature in $requiredKnown) {
+        if (@($known | Where-Object { $_.semanticSignature -like $signature }).Count -eq 0) {
+            throw "Real Coverlet semantic mapping was not known for '$signature'."
+        }
+    }
 
     $table = @($document.evaluation.callables | ForEach-Object {
         [ordered]@{
