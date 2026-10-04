@@ -135,6 +135,21 @@ public sealed class CallableCliTests : IDisposable
     }
 
     [Fact]
+    public async Task ModernSyntaxOnlyDeduplicatesByteIdenticalRepeatedReport()
+    {
+        var source = Write("Repeated.cs", "class C { int M() => 1; }");
+        var coverage = WriteCoverage(source, 1);
+        var result = await Run(null, "analyze", "--syntax-only", "--format", "json",
+            "--coverage", coverage, "--coverage", coverage, source);
+
+        Assert.Equal(0, result.ExitCode);
+        using var document = JsonDocument.Parse(result.Output);
+        var callable = Assert.Single(document.RootElement.GetProperty("evaluation")
+            .GetProperty("callables").EnumerateArray());
+        Assert.Equal(1, callable.GetProperty("coverage").GetDouble());
+    }
+
+    [Fact]
     public async Task ModernHumanOutputDisclosesRulesetCompletenessFindingsAndDecision()
     {
         var source = Write("Human.cs", "class C { int M() { System.Func<int> f = () => 1; return f(); } }");
@@ -188,12 +203,13 @@ public sealed class CallableCliTests : IDisposable
         using var firstDocument = JsonDocument.Parse(first.Output);
         var evaluation = firstDocument.RootElement.GetProperty("evaluation");
         var contextId = evaluation.GetProperty("contexts")[0].GetProperty("id").GetString();
+        var targetFramework = evaluation.GetProperty("contexts")[0].GetProperty("targetFramework").GetString();
         var lambda = Assert.Single(evaluation.GetProperty("callables").EnumerateArray(),
             item => item.GetProperty("kind").GetString() == "lambda");
         var familyId = Assert.Single(evaluation.GetProperty("families").EnumerateArray())
             .GetProperty("familyId").GetString();
         var exemption = Write("exemptions.json", $$"""
-            {"version":"callable-exemptions-v1","entries":[{"ruleset":"callables-v1","contextId":"{{contextId}}","targetFramework":"net10.0","callableId":"{{lambda.GetProperty("callableId").GetString()}}","bodyChecksum":"{{lambda.GetProperty("bodyChecksum").GetString()}}","reasonCode":"coverage.unsupportedGeneratedMapping","justification":"inspected locally","reviewReference":"local-review","familyIds":["{{familyId}}"]}]}
+            {"version":"callable-exemptions-v1","entries":[{"ruleset":"callables-v1","contextId":"{{contextId}}","targetFramework":"{{targetFramework}}","callableId":"{{lambda.GetProperty("callableId").GetString()}}","bodyChecksum":"{{lambda.GetProperty("bodyChecksum").GetString()}}","reasonCode":"coverage.unsupportedGeneratedMapping","justification":"inspected locally","reviewReference":"local-review","familyIds":["{{familyId}}"]}]}
             """);
 
         var result = await Run(null, "analyze", "--syntax-only", "--format", "json", "--coverage", coverage,

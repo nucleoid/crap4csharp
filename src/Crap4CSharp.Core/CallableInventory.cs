@@ -134,9 +134,10 @@ public static class CallableInventory
             .GroupBy(item => item.Entry.CallableId, StringComparer.Ordinal)
             .Where(group => group.Count() > 1)
             .SelectMany(group => group).Select(item => item.Entry.ObservationId).ToHashSet(StringComparer.Ordinal);
-        var entries = CollapsePartialDeclarations(built.Select(item => ambiguous.Contains(item.Entry.ObservationId)
+        var collapsed = CollapsePartialDeclarations(built.Select(item => ambiguous.Contains(item.Entry.ObservationId)
                 ? item.Entry with { IdentityAmbiguous = true, CoverageCapability = "unsupported", CoverageReason = "coverage.ambiguousCallableOwnership" }
-                : item.Entry))
+                : item.Entry)).ToArray();
+        var entries = MarkNamedIdentityCollisions(collapsed)
             .OrderBy(item => item.Path, StringComparer.Ordinal).ThenBy(item => item.Span.Start)
             .ThenBy(item => item.Kind).ThenBy(item => item.CallableId, StringComparer.Ordinal).ToArray();
         return new CallableInventoryResult(ComplexityRules.CallablesV1, context.ContextId, contentIdentity, entries)
@@ -155,7 +156,8 @@ public static class CallableInventory
                 item.TargetFramework != first.TargetFramework))
             throw new ArgumentException("Callable inventories must share one ruleset and analysis context.", nameof(inventories));
 
-        var callables = CollapsePartialDeclarations(inventories.SelectMany(item => item.Callables))
+        var callables = MarkNamedIdentityCollisions(
+                CollapsePartialDeclarations(inventories.SelectMany(item => item.Callables)))
             .OrderBy(item => item.Path, StringComparer.Ordinal).ThenBy(item => item.Span.Start)
             .ThenBy(item => item.Kind).ThenBy(item => item.CallableId, StringComparer.Ordinal).ToArray();
         return new CallableInventoryResult(first.Ruleset, first.ContextId,
@@ -172,6 +174,19 @@ public static class CallableInventory
             var applicable = values.Where(item => item.Applicability == CallableApplicability.Applicable).ToArray();
             return applicable.Length == 1 && values.Length > 1 ? applicable : values;
         });
+
+    private static IEnumerable<CallableEntry> MarkNamedIdentityCollisions(IEnumerable<CallableEntry> entries)
+    {
+        var values = entries.ToArray();
+        var collisions = values.GroupBy(item => item.CallableId, StringComparer.Ordinal)
+            .Where(group => group.Count(item => item.Applicability == CallableApplicability.Applicable) > 1)
+            .Select(group => group.Key).ToHashSet(StringComparer.Ordinal);
+        return values.Select(item => collisions.Contains(item.CallableId) &&
+                item.Applicability == CallableApplicability.Applicable
+            ? item with { IdentityAmbiguous = true, CoverageCapability = "unsupported",
+                CoverageReason = CoverageReasonCodes.AmbiguousCallableOwnership }
+            : item);
+    }
 
     private static List<Candidate> Discover(CompilationUnitSyntax root, SyntaxTree tree)
     {
@@ -248,7 +263,7 @@ public static class CallableInventory
                     AddAnonymous(output, anonymous, anonymous.Block, CallableKind.AnonymousMethod, "anonymous");
                     break;
                 case VariableDeclaratorSyntax variable when variable.Initializer is not null &&
-                    variable.Parent?.Parent is FieldDeclarationSyntax or EventFieldDeclarationSyntax:
+                    IsExecutableMemberInitializer(variable):
                     var declaration = variable.Parent?.Parent;
                     var kind = declaration is EventFieldDeclarationSyntax ? CallableKind.EventInitializer : CallableKind.FieldInitializer;
                     AddExpression(output, variable.Initializer.Value, variable.Initializer.Span, kind, variable.Identifier.ValueText,
@@ -364,10 +379,14 @@ public static class CallableInventory
 
     private static string TypeName(ITypeSymbol type)
     {
+        if (type is INamedTypeSymbol named &&
+            named.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T)
+            return $"System.Nullable`1<{TypeName(named.TypeArguments[0])}>";
         if (type.SpecialType != SpecialType.None)
             return type.SpecialType.ToString().Replace("System_", "System.", StringComparison.Ordinal);
-        return type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)
-            .Replace("global::", string.Empty, StringComparison.Ordinal).TrimEnd('?');
+        return type.WithNullableAnnotation(NullableAnnotation.None)
+            .ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)
+            .Replace("global::", string.Empty, StringComparison.Ordinal);
     }
 
     private static bool IsAnonymous(CallableKind kind) => kind is CallableKind.Lambda or CallableKind.AnonymousMethod or
@@ -379,8 +398,25 @@ public static class CallableInventory
         if (!primaryConstructor) return true;
         if (child.Kind is not (CallableKind.FieldInitializer or CallableKind.EventInitializer or
             CallableKind.PropertyInitializer or CallableKind.PrimaryConstructorBaseArguments)) return false;
+        if (IsStaticInitializer(child.Node)) return false;
         return child.Node.AncestorsAndSelf().OfType<TypeDeclarationSyntax>().FirstOrDefault() == parent.Node;
     }
+
+    private static bool IsExecutableMemberInitializer(VariableDeclaratorSyntax variable) =>
+        variable.Parent?.Parent switch
+        {
+            FieldDeclarationSyntax field => !field.Modifiers.Any(SyntaxKind.ConstKeyword),
+            EventFieldDeclarationSyntax => true,
+            _ => false
+        };
+
+    private static bool IsStaticInitializer(SyntaxNode node) =>
+        node.AncestorsAndSelf().Any(ancestor => ancestor switch
+        {
+            BaseFieldDeclarationSyntax field => field.Modifiers.Any(SyntaxKind.StaticKeyword),
+            PropertyDeclarationSyntax property => property.Modifiers.Any(SyntaxKind.StaticKeyword),
+            _ => false
+        });
 
     private static CallableKind AccessorKind(AccessorDeclarationSyntax accessor)
     {

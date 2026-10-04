@@ -217,11 +217,33 @@ internal static class App
                 _ => ComplexityRules.CallablesV1
             };
             var result = BuildCallableFailure(args[0], ruleset, reason, startedAt, stopwatch.Elapsed);
-            var json = ResultWriter.Serialize(result);
             var format = options?.Format ?? (HasJsonIntent(args) ? "json" : "human");
             var destination = options?.Output ?? PreDetectValue(args, "--output");
-            var mayWrite = destination is not null && args.Count(arg => arg == "--output") == 1 &&
-                IsAbsentOutputDestination(destination, workingDirectory);
+            var mayWrite = false;
+            if (destination is not null && args.Count(arg => arg == "--output") == 1)
+            {
+                if (options is not null)
+                {
+                    try
+                    {
+                        var inputs = options.Inputs.Concat(options.Coverage)
+                            .Concat(options.Exemptions is null ? [] : [options.Exemptions]);
+                        mayWrite = FindOutputAlias(destination, workingDirectory, inputs, [], null) is null;
+                    }
+                    catch (Exception aliasException) when (IsHandled(aliasException)) { }
+                }
+                else mayWrite = IsAbsentOutputDestination(destination, workingDirectory);
+            }
+            if (destination is not null && !mayWrite)
+                result = result with
+                {
+                    Evaluation = result.Evaluation with
+                    {
+                        Checks = result.Evaluation.Checks.Concat(
+                            [new CheckResult("output", "operationalError", "output.notWritten", true)]).ToArray()
+                    }
+                };
+            var json = ResultWriter.Serialize(result);
             if (mayWrite)
             {
                 try
@@ -348,8 +370,8 @@ internal static class App
         var reports = options.Coverage.Select(path => Path.GetFullPath(path, workingDirectory)).ToArray();
         foreach (var report in reports)
             if (!File.Exists(report)) throw new FileNotFoundException($"Coverage report not found: {report}", report);
-        var contextId = StableId("syntax-only", "net10.0", "Debug", "AnyCPU", ComplexityRules.CallablesV1);
-        var context = new CallableAnalysisContext(".", "net10.0", "Debug", "AnyCPU",
+        var contextId = StableId("syntax-only", "unknown", "unknown", "AnyCPU", ComplexityRules.CallablesV1);
+        var context = new CallableAnalysisContext(".", "unknown", "unknown", "AnyCPU",
             contextId, CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.Preview));
         var references = CaptureSyntaxReferences();
         var inventories = files.Select(path => CallableInventory.Analyze(File.ReadAllText(path),
@@ -367,6 +389,8 @@ internal static class App
         var resolver = new CoveragePathResolver(PathIdentityPolicy.Current, captured, preparedMappings,
             options.CoveragePathCase);
         var reads = reports.Select(report => CoverageReader.ReadDetailed(report, resolver)).ToArray();
+        if (reads.Select(item => item.ReportId).Distinct(StringComparer.Ordinal).Skip(1).Any())
+            throw new ArgumentException("Syntax-only callables-v1 cannot safely combine distinct coverage reports without explicit build-context identity.");
         ThrowHardCoverageDiagnostic(reads.SelectMany(read => read.Diagnostics));
         var logicalPaths = captured.Entries.ToDictionary(item => item.LocalPath, item => item.LogicalPath,
             PathIdentityPolicy.Current.Comparer);
@@ -457,7 +481,7 @@ internal static class App
             .OrderBy(item => item.Kind, StringComparer.Ordinal).ThenBy(item => item.Path, StringComparer.Ordinal).ToArray();
         var evaluation = new EvaluationSection("analyze", new PolicyOptions(options.Threshold, options.AllowMissingCoverage),
             new EvaluationScope(".", files.Select(path => NormalizePath(workingDirectory, path)).Order(StringComparer.Ordinal).ToArray()),
-            [new EvaluationContext(contextId, "syntaxOnly", null, "net10.0", "Debug", null, null)], checks, metrics,
+            [new EvaluationContext(contextId, "syntaxOnly", null, "unknown", "unknown", null, null)], checks, metrics,
             findings, new CoverageSummary(callables.Length, callables.Count(item => item.CoverageStatus == "known"), unknown.Length,
                 reasonCounts), artifacts, reduced.Decision)
         {

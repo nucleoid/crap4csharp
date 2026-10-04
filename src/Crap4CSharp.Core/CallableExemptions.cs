@@ -40,7 +40,12 @@ public static class CallableExemptions
             .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
         var byObservation = observations.GroupBy(item => item.CallableId, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
-        var familyById = families.ToDictionary(item => item.FamilyId, StringComparer.Ordinal);
+        var familyArray = families.ToArray();
+        var duplicateFamilyIds = familyArray.GroupBy(item => item.FamilyId, StringComparer.Ordinal)
+            .Where(group => group.Count() > 1).Select(group => group.Key).ToHashSet(StringComparer.Ordinal);
+        if (duplicateFamilyIds.Count > 0) errors.Add("exemption.ambiguousFamily");
+        var familyById = familyArray.GroupBy(item => item.FamilyId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
         var matches = new List<CallableExemptionMatch>();
         foreach (var entry in entries)
         {
@@ -58,7 +63,7 @@ public static class CallableExemptions
             if (observation.Status != "unknown" || observation.Reason != entry.ReasonCode || !IsUnsupported(entry.ReasonCode))
             { errors.Add("exemption.reasonNotUnsupported"); continue; }
 
-            var affectedFamilies = families.Where(family => family.IncompleteCallableIds.Contains(entry.CallableId, StringComparer.Ordinal))
+            var affectedFamilies = familyArray.Where(family => family.IncompleteCallableIds.Contains(entry.CallableId, StringComparer.Ordinal))
                 .Select(family => family.FamilyId).Order(StringComparer.Ordinal).ToArray();
             if (affectedFamilies.Except(entry.FamilyIds, StringComparer.Ordinal).Any())
             { errors.Add("exemption.familyAcknowledgementMissing"); continue; }

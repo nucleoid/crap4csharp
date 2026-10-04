@@ -24,7 +24,10 @@ No global install, source-tree modification, or package injection is performed b
 
 The option-only command remains the exact **`ordinary-methods-v1` legacy dialect**. The opt-in
 `analyze --syntax-only` command uses **`callables-v1`** by default and performs no build, restore,
-test, Git, or other child process. Full project-aware `check` orchestration remains deferred.
+test, Git, or other child process. Because syntax-only input has no trusted TFM/configuration
+provenance, its context is labeled `unknown`; distinct coverage documents are rejected instead of
+being optimistically unioned. Repeating the same byte-identical report is harmless. Full
+project-aware `check` orchestration remains deferred.
 
 ## Usage
 
