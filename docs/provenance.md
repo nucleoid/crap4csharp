@@ -52,9 +52,14 @@ also retains hash-bound assembly, portable PDB, and test-result artifacts for th
 not substitute for those bytes. Verification reads managed module metadata and MVID, matches the PE CodeView record
 to the portable PDB identity, requires the complete SHA-256 PDB document inventory and compiler language/symbol
 options to match the captured context, and checks reported coverage points against the matching PDB method sequence
-points. Execution outcome and counters come from the captured TRX; at least one test must pass and the TRX test
-storage module must match the module identity derived from the execution's hash-bound test assembly and portable
-PDB artifacts. v1 deliberately fails closed for PDB documents that do not carry SHA-256 checksums.
+points. Sequence-point formats retain exact coordinates when the report supplies them. Line-only formats such as
+Cobertura, and Coverlet OpenCover's synthetic `1..2` columns, establish only that every reported line is contained
+in a sequence-point span owned by the matching PDB method; they cannot distinguish same-line coverage from an older
+build. The separately hash-bound source, assembly and PDB still bind the evaluated code, but line evidence must not
+be described as byte-level coverage provenance. Execution outcome and counters come from the captured TRX; at least
+one test must pass and the TRX test storage module must match the module identity derived from the execution's
+hash-bound test assembly and portable PDB artifacts. v1 deliberately fails closed for PDB documents that do not
+carry SHA-256 checksums.
 
 The captured scope artifact is JSON `{"version":1,"sources":[...]}`; the captured policy artifact is JSON
 `{"version":1,"threshold":8,"allowMissingCoverage":false}`. Replay applies those values and rejects live overrides.

@@ -444,7 +444,8 @@ public static class CoverageReader
             // before every indented single-line member.
             var syntheticColumns = StartColumn == 1 && EndColumn == 2;
             return new CoveragePoint(Line!.Value, Visits!.Value,
-                syntheticColumns ? null : StartColumn, EndLine, syntheticColumns ? null : EndColumn, Offset);
+                syntheticColumns ? null : StartColumn, syntheticColumns ? null : EndLine,
+                syntheticColumns ? null : EndColumn, Offset);
         }
     }
 }

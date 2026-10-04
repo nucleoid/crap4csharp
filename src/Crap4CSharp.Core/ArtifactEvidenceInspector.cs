@@ -179,24 +179,43 @@ public static class ArtifactEvidenceInspector
     public static bool CoverageMatchesBuild(ImmutableArray<byte> bytes, string logicalPath,
         InspectedBuildEvidence build)
     {
-        var methods = CoverageReader.Read(bytes.AsSpan(), logicalPath);
-        if (methods.Count == 0) return false;
-        foreach (var reported in methods)
+        // A Coverlet document may contain every instrumented project in the test graph.
+        // This artifact is bound to one manifest build, so foreign modules are neither
+        // evidence for nor evidence against that build.
+        var methods = CoverageReader.Read(bytes.AsSpan(), logicalPath)
+            .Where(method => string.Equals(method.ModuleIdentity, build.ModuleIdentity, StringComparison.Ordinal))
+            .ToArray();
+        if (methods.Length == 0) return false;
+
+        // Cobertura expands one relative filename against each captured <source> root.
+        // Those paths are alternatives for one observation, not independent methods.
+        // Exactly one alternative must resolve to exactly one PDB method.
+        foreach (var alternatives in methods.GroupBy(CoverageObservationKey, StringComparer.Ordinal))
         {
-            if (!string.Equals(reported.ModuleIdentity, build.ModuleIdentity, StringComparison.Ordinal)) return false;
-            var candidates = build.Methods.Where(method =>
-                string.Equals(method.TypeName.Replace('+', '/'), reported.TypeName.Replace('+', '/'),
-                    StringComparison.Ordinal) &&
-                string.Equals(method.MethodName, reported.MethodName, StringComparison.Ordinal)).ToArray();
-            if (reported.MethodToken is { Length: > 0 } tokenText &&
-                int.TryParse(tokenText.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? tokenText[2..] : tokenText,
-                    System.Globalization.NumberStyles.HexNumber,
-                    System.Globalization.CultureInfo.InvariantCulture, out var token))
-                candidates = candidates.Where(method => method.MetadataToken == token).ToArray();
-            if (candidates.Count(method => PointsMatch(reported, method)) != 1) return false;
+            var matches = 0;
+            foreach (var reported in alternatives)
+            {
+                var candidates = build.Methods.Where(method =>
+                    string.Equals(method.TypeName.Replace('+', '/'), reported.TypeName.Replace('+', '/'),
+                        StringComparison.Ordinal) &&
+                    string.Equals(method.MethodName, reported.MethodName, StringComparison.Ordinal)).ToArray();
+                if (reported.MethodToken is { Length: > 0 } tokenText &&
+                    int.TryParse(tokenText.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? tokenText[2..] : tokenText,
+                        System.Globalization.NumberStyles.HexNumber,
+                        System.Globalization.CultureInfo.InvariantCulture, out var token))
+                    candidates = candidates.Where(method => method.MetadataToken == token).ToArray();
+                matches += candidates.Count(method => PointsMatch(reported, method));
+            }
+            if (matches != 1) return false;
         }
         return true;
     }
+
+    private static string CoverageObservationKey(CoverageMethod method) => CanonicalIdentity.Tuple(
+        "coverage-observation-v1", method.ModuleIdentity, method.TypeName, method.MethodName,
+        method.ParameterCount?.ToString(System.Globalization.CultureInfo.InvariantCulture), method.MethodToken,
+        string.Join("\0", method.SequencePoints.Select(point => string.Join(":", point.Line, point.Visits,
+            point.StartColumn, point.EndLine, point.EndColumn, point.Offset))));
 
     private static int Attribute(XElement element, string name) =>
         int.TryParse(element.Attribute(name)?.Value, System.Globalization.NumberStyles.None,
@@ -240,10 +259,18 @@ public static class ArtifactEvidenceInspector
             .Distinct(StringComparer.Ordinal).ToArray();
         if (documents.Length != 1) return false;
         var points = method.SequencePoints.Where(point => point.Document == documents[0]).ToArray();
-        if (reported.SequencePoints.All(point => point.StartColumn is null && point.EndLine is null &&
+        if (reported.SequencePoints.All(point => point.StartColumn is null &&
+                (point.EndLine is null || point.EndLine == point.Line) &&
                 point.EndColumn is null && point.Offset is null))
-            return reported.SequencePoints.Select(point => point.Line).Distinct().Order().SequenceEqual(
-                points.Select(point => point.StartLine).Distinct().Order());
+        {
+            var lines = reported.SequencePoints.Select(point => point.Line).Distinct().ToArray();
+            // Coverlet omits compiler boundary/brace sequence points and projects each
+            // retained point to line evidence. Every reported line must therefore be
+            // owned by the matching PDB method, but the report is not required to repeat
+            // every sequence point present in the portable PDB.
+            return lines.Length > 0 &&
+                lines.All(line => points.Any(point => line >= point.StartLine && line <= point.EndLine));
+        }
         return reported.SequencePoints.Count == points.Length && reported.SequencePoints.All(reportPoint =>
             points.Any(point => point.StartLine == reportPoint.Line &&
                 point.StartColumn == reportPoint.StartColumn &&

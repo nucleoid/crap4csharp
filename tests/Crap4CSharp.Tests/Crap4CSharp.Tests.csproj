@@ -10,11 +10,13 @@
     <ProjectReference Include="../../src/Crap4CSharp.Core/Crap4CSharp.Core.csproj" />
     <ProjectReference Include="../../src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj" />
     <ProjectReference Include="../Crap4CSharp.ProvenanceFixture/Crap4CSharp.ProvenanceFixture.csproj" />
+    <ProjectReference Include="../../samples/Fixture/Fixture/Fixture.csproj" />
     <None Include="Fixtures/results/*.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures/results/source.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures/results/coverage.xml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures/CoveragePaths/*.xml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures/legacy-1.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures/ProjectContexts/**/*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures/Provenance/*.xml" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
