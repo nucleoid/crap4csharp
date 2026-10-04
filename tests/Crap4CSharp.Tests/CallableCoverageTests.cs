@@ -234,6 +234,52 @@ public sealed class CallableCoverageTests
         Assert.All(resolved.Observations, item => Assert.Equal("known", item.Status));
     }
 
+    [Fact]
+    public void CecilStyleContainingGenericArgumentsAndMultidimensionalArraysMatchSemanticIdentity()
+    {
+        var inventory = Inventory("""
+            class Outer<T> { public class Inner { } }
+            class LinkedList<T> {
+              public class Node { }
+              int Remove(Node value) => 1;
+            }
+            class C {
+              int Nested(Outer<int>.Inner value) => 1;
+              int Matrix(int[,] values) => values.Length;
+            }
+            """);
+        var remove = Assert.Single(inventory.Callables, item => item.Name == "Remove");
+        var nested = Assert.Single(inventory.Callables, item => item.Name == "Nested");
+        var matrix = Assert.Single(inventory.Callables, item => item.Name == "Matrix");
+        var reports = new[]
+        {
+            CecilReport(remove, "LinkedList`1", "System.Int32 LinkedList`1::Remove(LinkedList`1/Node<T>)"),
+            CecilReport(nested, "C", "System.Int32 C::Nested(Outer`1/Inner<System.Int32>)"),
+            CecilReport(matrix, "C", "System.Int32 C::Matrix(System.Int32[0...,0...])")
+        };
+
+        var resolved = CallableCoverageResolver.Resolve(inventory, reports);
+
+        Assert.All(resolved.Observations, item => Assert.Equal("known", item.Status));
+    }
+
+    [Fact]
+    public void ConstructedContainingTypeArgumentsKeepOverloadEntityIdsDistinct()
+    {
+        var inventory = Inventory("""
+            class Outer<T> { public class Inner { } }
+            class C {
+              int M(Outer<int>.Inner value) => 1;
+              int M(Outer<string>.Inner value) => 2;
+            }
+            """);
+        var overloads = inventory.Callables.Where(item => item.Name == "M").ToArray();
+
+        Assert.Equal(2, overloads.Length);
+        Assert.Equal(2, overloads.Select(item => item.CallableId).Distinct(StringComparer.Ordinal).Count());
+        Assert.All(overloads, item => Assert.False(item.IdentityAmbiguous));
+    }
+
     private static CallableInventoryResult Inventory(string source) => CallableInventory.Analyze(source, "C.cs",
         new CallableAnalysisContext("App.csproj", "net10.0", "Debug", "AnyCPU", "ctx", CSharpParseOptions.Default));
 
