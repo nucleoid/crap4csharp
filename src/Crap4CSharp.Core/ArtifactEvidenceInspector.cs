@@ -319,8 +319,6 @@ public static class ArtifactEvidenceInspector
             // generated methods are not directly scored as authored callables.
             if (method.TypeName.Contains("/<", StringComparison.Ordinal))
                 return true;
-            if (lines.Any(line => !statementPoints.Any(point => line >= point.StartLine && line <= point.EndLine)))
-                return false;
             foreach (var point in statementPoints)
                 for (var line = point.StartLine; line <= point.EndLine; line++)
                     if (!lineSet.Contains(line) && !(method.MethodName is ".ctor" or ".cctor" &&

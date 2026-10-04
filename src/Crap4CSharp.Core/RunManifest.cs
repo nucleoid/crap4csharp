@@ -205,10 +205,12 @@ public static class ProvenanceVerifier
         ArgumentNullException.ThrowIfNull(manifest);
         ArgumentNullException.ThrowIfNull(artifactBytes);
         var reasons = StructuralReasons(manifest, artifactBytes, requiredRuleset, cancellationToken);
+        // Manifest v1 records only a producer assertion, not an executable
+        // membership recipe that a consumer can independently revalidate.
+        reasons.Add(ProvenanceReasonCodes.ReuseRecipeIncomplete);
         var invalid = reasons.Any(reason => reason != ProvenanceReasonCodes.ReuseRecipeIncomplete);
         return new ProvenanceResult(invalid ? ProvenanceStatus.Invalid : ProvenanceStatus.Captured,
-            invalid ? "none" : "captureConsistency", false,
-            !invalid && manifest.Contexts.All(context => context.ReuseRecipeComplete),
+            invalid ? "none" : "captureConsistency", false, false,
             reasons.Order(StringComparer.Ordinal).Distinct(StringComparer.Ordinal).ToArray());
     }
 
@@ -370,6 +372,7 @@ public static class ProvenanceVerifier
                 else inspectedBuilds[build.Id] = inspected;
             }
             catch (InvalidDataException) { reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete); }
+            catch (ArgumentException) { reasons.Add(ProvenanceReasonCodes.InvalidLocator); }
         }
         if (manifest.Executions.Any(item => !item.Completed || item.ExitCode != 0 || item.FailedTests != 0 || item.TotalTests <= 0 ||
                 item.PassedTests + item.FailedTests + item.SkippedTests != item.TotalTests ||

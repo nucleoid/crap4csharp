@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using Crap4CSharp.Core;
 
@@ -155,7 +156,14 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
                     throw new InvalidDataException("Artifact path mapping must contain string roots.");
             }
             foreach (var input in context.GetProperty("inputs").EnumerateArray())
+            {
                 Require(input, "role", "logicalPath", "locator", "length", "sha256", "generated");
+                if (input.GetProperty("logicalPath").ValueKind != JsonValueKind.String)
+                    throw new InvalidDataException("Artifact input logicalPath must be a string.");
+                try { CanonicalIdentity.NormalizeLogicalPath(input.GetProperty("logicalPath").GetString()!); }
+                catch (ArgumentException exception)
+                { throw new InvalidDataException("Artifact input logicalPath is not canonical.", exception); }
+            }
         }
         foreach (var build in root.GetProperty("builds").EnumerateArray())
             Require(build, "id", "contextId", "moduleIdentity", "assemblySha256", "mvid", "pdbSha256", "debugIdentity");
@@ -200,6 +208,15 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
         {
             current = Path.Combine(current, parts[index]);
             EnsureContained(root, current);
+            if (OperatingSystem.IsLinux())
+            {
+                var kind = LinuxFileKind(current);
+                if (kind == UnixFileKind.Missing) return null;
+                if (index < parts.Length - 1 && kind != UnixFileKind.Directory)
+                    throw new InvalidDataException($"Artifact path component is not a directory: {locator}");
+                if (index == parts.Length - 1 && kind != UnixFileKind.Regular)
+                    throw new InvalidDataException($"Artifact locator is not a regular file: {locator}");
+            }
             if (!File.Exists(current) && !Directory.Exists(current)) return null;
             var attributes = File.GetAttributes(current);
             if ((attributes & FileAttributes.ReparsePoint) != 0)
@@ -211,6 +228,40 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
         }
         return current;
     }
+
+    private static UnixFileKind LinuxFileKind(string path)
+    {
+        if (Statx(AtCurrentWorkingDirectory, path, AtSymlinkNoFollow, StatxType, out var status) == 0)
+            return (status.Mode & FileTypeMask) switch
+            {
+                RegularFile => UnixFileKind.Regular,
+                DirectoryFile => UnixFileKind.Directory,
+                _ => UnixFileKind.Special
+            };
+        return Marshal.GetLastPInvokeError() == NoSuchFileOrDirectory
+            ? UnixFileKind.Missing
+            : throw new InvalidDataException($"Unable to inspect artifact file type: {path}");
+    }
+
+    private enum UnixFileKind { Missing, Regular, Directory, Special }
+    private const int AtCurrentWorkingDirectory = -100;
+    private const int AtSymlinkNoFollow = 0x100;
+    private const uint StatxType = 0x0001;
+    private const ushort FileTypeMask = 0xf000;
+    private const ushort RegularFile = 0x8000;
+    private const ushort DirectoryFile = 0x4000;
+    private const int NoSuchFileOrDirectory = 2;
+
+    [StructLayout(LayoutKind.Explicit, Size = 256)]
+    private struct StatxBuffer
+    {
+        [FieldOffset(28)]
+        public ushort Mode;
+    }
+
+    [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
+    private static extern int Statx(int directoryFileDescriptor,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, out StatxBuffer status);
 
     internal static byte[] ReadBounded(string path, int maximum, long? expectedLength, string label)
     {

@@ -33,7 +33,10 @@ public sealed class ProvenanceTests
     {
         var manifest = Fixture();
         var bytes = FixtureBytes();
-        Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(manifest, bytes).Status);
+        var captured = ProvenanceVerifier.VerifyCapture(manifest, bytes);
+        Assert.Equal(ProvenanceStatus.Captured, captured.Status);
+        Assert.False(captured.Reusable);
+        Assert.Contains(ProvenanceReasonCodes.ReuseRecipeIncomplete, captured.Reasons);
 
         bytes["artifacts/coverage.xml"] = ImmutableArray.Create<byte>(4, 5, 7);
         Assert.Contains(ProvenanceReasonCodes.ArtifactChanged,
@@ -376,6 +379,33 @@ public sealed class ProvenanceTests
     }
 
     [Fact]
+    public void RealCoverletBraceLinesMatchDebugAndReleasePortablePdbs()
+    {
+        var assemblyPath = typeof(Fixture.CallableSamples).Assembly.Location;
+        var assembly = ImmutableArray.Create(File.ReadAllBytes(assemblyPath));
+        var pdb = ImmutableArray.Create(File.ReadAllBytes(Path.ChangeExtension(assemblyPath, ".pdb")));
+#if DEBUG
+        const string configuration = "debug";
+#else
+        const string configuration = "release";
+#endif
+        var reportPath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Provenance",
+            $"coverlet-braces-{configuration}.opencover.xml");
+        var report = ImmutableArray.Create(File.ReadAllBytes(reportPath));
+        Assert.Contains("Fixture.CallableSamples::BlockBody()", Encoding.UTF8.GetString(report.AsSpan()),
+            StringComparison.Ordinal);
+
+        var build = ArtifactEvidenceInspector.InspectBuild(assembly, pdb);
+        string[] sources = ["samples/Fixture/Fixture/CallableSamples.cs", "samples/Fixture/Fixture/Scorer.cs"];
+        var callableDocument = build.Documents.Keys.Single(path => path.Replace('\\', '/').EndsWith(sources[0],
+            StringComparison.Ordinal));
+        var pdbRoot = callableDocument.Replace('\\', '/')[..^sources[0].Length].TrimEnd('/');
+        var policy = new CapturedPathPolicy(true, [new ManifestReportRootMapping(pdbRoot, "")]);
+
+        Assert.True(ArtifactEvidenceInspector.CoverageMatchesBuild(report, reportPath, build, sources, policy));
+    }
+
+    [Fact]
     public void ForeignModulesInCoverletReportDoNotInvalidateTheBoundBuild()
     {
         var manifest = Fixture();
@@ -480,10 +510,12 @@ public sealed class ProvenanceTests
             ProvenanceVerifier.VerifyCapture(manifest, bytes).Reasons);
     }
 
-    [Fact]
-    public void RealVstestTrxDerivesSkippedTestsFromTotalMinusExecuted()
+    [Theory]
+    [InlineData("vstest-skipped.trx")]
+    [InlineData("mtp-skipped.trx")]
+    public void RealTrxRunnersDeriveSkippedTestsFromTotalMinusExecuted(string fixture)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Provenance", "vstest-skipped.trx");
+        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Provenance", fixture);
         var evidence = ArtifactEvidenceInspector.InspectTrx(ImmutableArray.Create(File.ReadAllBytes(path)));
 
         Assert.Equal(2, evidence.Total);

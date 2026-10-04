@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Runtime.InteropServices;
 using System.Text;
 using Crap4CSharp.Core;
 using Xunit;
@@ -130,6 +131,21 @@ public sealed class ArtifactCaptureTests
     }
 
     [Fact]
+    public void LoaderRejectsAFifoBeforeOpeningIt()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var directory = TestDirectory.Create("crap4csharp-bundle-fifo");
+        var fixture = CreateFixture();
+        var locator = ArtifactCaptureAdapter.PublishNew(fixture.Manifest, fixture.Bytes,
+            Path.Combine(directory.Path, "bundle"));
+        var source = Path.Combine(directory.Path, "bundle", "artifacts", "source.bin");
+        File.Delete(source);
+        Assert.Equal(0, MkFifo(source, Convert.ToUInt32("600", 8)));
+
+        Assert.Throws<InvalidDataException>(() => ArtifactBundle.Load(locator, directory.Path));
+    }
+
+    [Fact]
     public void LoaderRejectsDuplicatePropertiesAndDoesNotCaseFoldUnknownMembers()
     {
         using var directory = TestDirectory.Create("crap4csharp-bundle-duplicate-json");
@@ -171,6 +187,19 @@ public sealed class ArtifactCaptureTests
             Path.Combine(directory.Path, "bundle"));
         var json = File.ReadAllText(locator).Replace("\"roots\": [\n    {",
             "\"roots\": [\n    null,\n    {", StringComparison.Ordinal);
+        File.WriteAllText(locator, json);
+
+        Assert.Throws<InvalidDataException>(() => ArtifactBundle.Load(locator, directory.Path));
+    }
+
+    [Fact]
+    public void LoaderClassifiesANonCanonicalInputLogicalPathAsArtifactData()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-bundle-input-path");
+        var fixture = CreateFixture();
+        var locator = ArtifactCaptureAdapter.PublishNew(fixture.Manifest, fixture.Bytes,
+            Path.Combine(directory.Path, "bundle"));
+        var json = File.ReadAllText(locator).Replace(CompiledSource, "../outside.cs", StringComparison.Ordinal);
         File.WriteAllText(locator, json);
 
         Assert.Throws<InvalidDataException>(() => ArtifactBundle.Load(locator, directory.Path));
@@ -310,6 +339,9 @@ public sealed class ArtifactCaptureTests
             ["artifacts/policy.json"] = policy
         });
     }
+
+    [DllImport("libc", EntryPoint = "mkfifo", SetLastError = true)]
+    private static extern int MkFifo([MarshalAs(UnmanagedType.LPUTF8Str)] string path, uint mode);
 
     private sealed record FixtureData(RunManifest Manifest,
         IReadOnlyDictionary<string, ImmutableArray<byte>> Bytes);
