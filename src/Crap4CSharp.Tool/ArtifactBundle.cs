@@ -3,40 +3,179 @@ using System.Text.Json;
 using Crap4CSharp.Core;
 
 internal sealed record ArtifactBundle(RunManifest Manifest,
-    IReadOnlyDictionary<string, ImmutableArray<byte>> Bytes, string ManifestPath)
+    IReadOnlyDictionary<string, ImmutableArray<byte>> Bytes, string ManifestPath,
+    string BundleRoot, IReadOnlyList<string> ResolvedInputs)
 {
-    private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
+    internal const int MaxManifestBytes = 4 * 1024 * 1024;
+    internal const int MaxArtifactBytes = 100 * 1024 * 1024;
+    internal const long MaxBundleBytes = 512L * 1024 * 1024;
+    private const int MaxEntries = 10_000;
+    private static readonly JsonSerializerOptions Json = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Skip
+    };
 
     public static ArtifactBundle Load(string manifestPath, string workingDirectory)
     {
-        var fullManifest = Path.GetFullPath(manifestPath, workingDirectory);
-        var info = new FileInfo(fullManifest);
-        if (!info.Exists) throw new FileNotFoundException($"Artifact manifest not found: {fullManifest}", fullManifest);
-        if (info.Length > 4 * 1024 * 1024) throw new InvalidDataException("Artifact manifest exceeds the 4 MB limit.");
-        var root = info.DirectoryName ?? throw new InvalidDataException("Artifact manifest has no bundle root.");
-        var manifestBytes = File.ReadAllBytes(fullManifest);
-        var manifest = JsonSerializer.Deserialize<RunManifest>(manifestBytes, Json)
-            ?? throw new InvalidDataException("Artifact manifest is empty.");
+        string fullManifest;
+        try { fullManifest = Path.GetFullPath(manifestPath, workingDirectory); }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        { throw new InvalidDataException("Artifact manifest locator is invalid.", exception); }
+
+        if (!File.Exists(fullManifest))
+            throw new InvalidDataException($"Artifact manifest not found: {fullManifest}");
+        var root = Path.GetDirectoryName(fullManifest)
+            ?? throw new InvalidDataException("Artifact manifest has no bundle root.");
+        RejectLinks(root, fullManifest);
+        var manifestBytes = ReadBounded(fullManifest, MaxManifestBytes, null, "manifest.json");
+        RunManifest manifest;
+        try
+        {
+            using var document = JsonDocument.Parse(manifestBytes, new JsonDocumentOptions
+            { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = 32 });
+            ValidateShape(document.RootElement);
+            manifest = document.RootElement.Deserialize<RunManifest>(Json)
+                ?? throw new InvalidDataException("Artifact manifest is empty.");
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidDataException("Artifact manifest contains malformed JSON.", exception);
+        }
+
         var locators = manifest.Artifacts.Select(item => item.Locator)
             .Concat(manifest.Contexts.SelectMany(context => context.Inputs.Select(input => input.Locator)))
             .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        if (locators.Length > MaxEntries) throw new InvalidDataException("Artifact bundle contains too many entries.");
+        var declarations = manifest.Artifacts.Select(item => (item.Locator, item.Length))
+            .Concat(manifest.Contexts.SelectMany(context => context.Inputs.Select(input => (input.Locator, input.Length))))
+            .GroupBy(item => item.Locator, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group =>
+            {
+                var lengths = group.Select(item => item.Length).Distinct().ToArray();
+                if (lengths.Length != 1 || lengths[0] < 0 || lengths[0] > MaxArtifactBytes)
+                    throw new InvalidDataException($"Artifact has inconsistent or invalid declared length: {group.Key}");
+                return lengths[0];
+            }, StringComparer.Ordinal);
         var bytes = new Dictionary<string, ImmutableArray<byte>>(StringComparer.Ordinal);
+        var resolved = new List<string> { fullManifest };
         long total = manifestBytes.Length;
         foreach (var locator in locators)
         {
-            var normalized = CanonicalIdentity.NormalizeLogicalPath(locator);
-            var path = Path.GetFullPath(normalized.Replace('/', Path.DirectorySeparatorChar), root);
-            EnsureContained(root, path);
-            var artifact = new FileInfo(path);
-            if (!artifact.Exists) continue;
-            var target = artifact.ResolveLinkTarget(true);
-            if (target is not null) EnsureContained(root, target.FullName);
-            if (artifact.Length > 100 * 1024 * 1024) throw new InvalidDataException($"Artifact exceeds the 100 MB limit: {locator}");
-            total += artifact.Length;
-            if (total > 512L * 1024 * 1024) throw new InvalidDataException("Artifact bundle exceeds the 512 MB limit.");
-            bytes.Add(locator, ImmutableArray.Create(File.ReadAllBytes(path)));
+            string normalized;
+            try { normalized = CanonicalIdentity.NormalizeLogicalPath(locator); }
+            catch (ArgumentException exception)
+            { throw new InvalidDataException($"Artifact locator is invalid: {locator}", exception); }
+            var path = ResolveOwnedRegularFile(root, normalized);
+            if (path is null) continue;
+            var declared = declarations[locator];
+            if (declared > MaxBundleBytes - total)
+                throw new InvalidDataException("Artifact bundle exceeds the 512 MB limit.");
+            var value = ReadBounded(path, MaxArtifactBytes, declared, locator);
+            total += value.Length;
+            bytes.Add(locator, ImmutableArray.Create(value));
+            resolved.Add(path);
         }
-        return new ArtifactBundle(manifest, bytes, fullManifest);
+        return new ArtifactBundle(manifest, bytes, fullManifest, root,
+            resolved.Order(StringComparer.Ordinal).ToArray());
+    }
+
+    public void RejectOutputAlias(string output, string workingDirectory)
+    {
+        var candidate = Path.GetFullPath(output, workingDirectory);
+        if (RelatedPath(BundleRoot, candidate) || ResolvedInputs.Any(path => RelatedPath(path, candidate)))
+            throw new InvalidDataException("Output path aliases the artifact bundle or one of its inputs.");
+        RejectExistingLinkComponents(candidate);
+    }
+
+    private static void ValidateShape(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object) throw new InvalidDataException("Artifact manifest must be an object.");
+        foreach (var property in new[] { "producer", "capture", "revision", "evaluationInputs" })
+            if (!root.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException($"Artifact manifest is missing required object '{property}'.");
+        foreach (var property in new[] { "roots", "contexts", "builds", "executions", "artifacts" })
+        {
+            if (!root.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.Array)
+                throw new InvalidDataException($"Artifact manifest is missing required array '{property}'.");
+            if (value.GetArrayLength() > MaxEntries)
+                throw new InvalidDataException($"Artifact manifest array '{property}' exceeds the entry limit.");
+        }
+        if (root.GetProperty("contexts").GetArrayLength() == 0)
+            throw new InvalidDataException("Artifact manifest contains no analysis context.");
+    }
+
+    private static string? ResolveOwnedRegularFile(string root, string locator)
+    {
+        var current = root;
+        var parts = locator.Split('/');
+        for (var index = 0; index < parts.Length; index++)
+        {
+            current = Path.Combine(current, parts[index]);
+            EnsureContained(root, current);
+            if (!File.Exists(current) && !Directory.Exists(current)) return null;
+            var attributes = File.GetAttributes(current);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException($"Artifact path contains a symbolic link: {locator}");
+            if (index < parts.Length - 1 && (attributes & FileAttributes.Directory) == 0)
+                throw new InvalidDataException($"Artifact path component is not a directory: {locator}");
+            if (index == parts.Length - 1 && (attributes & FileAttributes.Directory) != 0)
+                throw new InvalidDataException($"Artifact locator is not a regular file: {locator}");
+        }
+        return current;
+    }
+
+    internal static byte[] ReadBounded(string path, int maximum, long? expectedLength, string label)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            64 * 1024, FileOptions.SequentialScan);
+        if (!stream.CanSeek) throw new InvalidDataException($"Artifact is not a seekable regular file: {label}");
+        if (stream.Length > maximum || expectedLength is long declared && stream.Length != declared)
+            throw new InvalidDataException($"Artifact length does not match its declaration: {label}");
+        using var output = new MemoryStream((int)Math.Min(stream.Length, maximum));
+        var buffer = new byte[64 * 1024];
+        long count = 0;
+        while (true)
+        {
+            var read = stream.Read(buffer, 0, (int)Math.Min(buffer.Length, maximum + 1L - count));
+            if (read == 0) break;
+            count += read;
+            if (count > maximum || expectedLength is long expected && count > expected)
+                throw new InvalidDataException($"Artifact exceeded its bounded declared length while reading: {label}");
+            output.Write(buffer, 0, read);
+        }
+        if (expectedLength is long exact && count != exact)
+            throw new InvalidDataException($"Artifact was truncated while reading: {label}");
+        return output.ToArray();
+    }
+
+    private static void RejectLinks(string root, string path)
+    {
+        EnsureContained(root, path);
+        RejectExistingLinkComponents(path);
+    }
+
+    private static void RejectExistingLinkComponents(string path)
+    {
+        var root = Path.GetPathRoot(path) ?? throw new InvalidDataException("Path has no root.");
+        var current = root;
+        foreach (var part in path[root.Length..].Split(Path.DirectorySeparatorChar,
+                     Path.AltDirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, part);
+            if (!File.Exists(current) && !Directory.Exists(current)) break;
+            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException("Path contains a symbolic link.");
+        }
+    }
+
+    private static bool RelatedPath(string left, string right)
+    {
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        static string Terminate(string path) => Path.TrimEndingDirectorySeparator(path) + Path.DirectorySeparatorChar;
+        return string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), comparison) ||
+            Terminate(Path.GetFullPath(left)).StartsWith(Terminate(Path.GetFullPath(right)), comparison) ||
+            Terminate(Path.GetFullPath(right)).StartsWith(Terminate(Path.GetFullPath(left)), comparison);
     }
 
     private static void EnsureContained(string root, string path)

@@ -57,11 +57,12 @@ public sealed class ProvenanceTests
     public void FreshBindingMayBeVerifiedWithoutBeingReusable()
     {
         var manifest = Fixture();
-        manifest = manifest with
+        manifest = ManifestIdentity.Seal(manifest with
         {
-            Contexts = [manifest.Contexts[0] with { ReuseRecipeComplete = false }]
-        };
-        var current = CurrentEvidence.FromManifest(manifest);
+            Contexts = [manifest.Contexts[0] with { ReuseRecipeComplete = false }],
+            ManifestHash = null
+        });
+        var current = EvidenceFrom(manifest);
         var fresh = ProvenanceVerifier.VerifyCurrent(manifest, FixtureBytes(), current, false);
         Assert.Equal(ProvenanceStatus.Verified, fresh.Status);
         Assert.False(fresh.Reusable);
@@ -76,7 +77,7 @@ public sealed class ProvenanceTests
     public void SameLineByteChangeInvalidatesCurrentWorkspaceEvidence()
     {
         var manifest = Fixture();
-        var current = CurrentEvidence.FromManifest(manifest) with
+        var current = EvidenceFrom(manifest) with
         {
             Inputs = [new CurrentInputEvidence("source", "src/C.cs", 3,
                 CanonicalIdentity.Sha256([1, 2, 4]))]
@@ -161,7 +162,7 @@ public sealed class ProvenanceTests
     private static RunManifest Fixture()
     {
         var sourceHash = CanonicalIdentity.Sha256([1, 2, 3]);
-        return new RunManifest("1.0", "sha256-canonical-v1",
+        var manifest = new RunManifest("1.0", "sha256-canonical-v1",
             new ManifestProducer("crap4csharp", "test", ComplexityRules.CallablesV1,
                 ProjectAnalysisContext.ProtocolVersion, "coverage-v1", "paths-v1"),
             new ManifestCapture("completed", true, true, []),
@@ -169,7 +170,12 @@ public sealed class ProvenanceTests
             [new ManifestRoot("workspace", "workspace", "sensitive")],
             [new ManifestContext("ctx", "App.csproj", "net10.0", "Debug", "AnyCPU",
                 "sources", "context", "closure", true, true,
-                [new ManifestInput("source", "src/C.cs", "artifacts/source.bin", 3, sourceHash, "utf-8", false)])],
+                [new ManifestInput("source", "src/C.cs", "artifacts/source.bin", 3, sourceHash, "utf-8", false)])
+            {
+                ParseOptions = new ManifestParseOptions("preview", "Regular", ["DEBUG"],
+                    new Dictionary<string, string>(StringComparer.Ordinal)),
+                PathPolicy = new ManifestPathPolicy("sensitive", [])
+            }],
             [new ManifestBuild("build", "ctx", "module", "dll", "mvid", "pdb", "portable-pdb")],
             [new ManifestExecution("test", "ctx", "build", true, 0, 1, 1, 0, 0)],
             [new ManifestArtifact("source", "source", "artifacts/source.bin", 3, sourceHash,
@@ -177,5 +183,14 @@ public sealed class ProvenanceTests
              new ManifestArtifact("coverage", "coverage", "artifacts/coverage.xml", 3,
                     CanonicalIdentity.Sha256([4, 5, 6]), "ctx", "build", "test", "opencover", "sequence-point")],
             new ManifestEvaluationInputs("scope", "policy", null, null), null);
+        return ManifestIdentity.Seal(manifest);
     }
+
+    private static CurrentEvidence EvidenceFrom(RunManifest manifest) => new(
+        manifest.Revision.RepositoryIdentity, manifest.Revision.WorkspaceIdentity, manifest.Revision.Head,
+        manifest.Contexts.SelectMany(context => context.Inputs.Where(input => !input.Generated)
+            .Select(input => new CurrentInputEvidence(input.Role, input.LogicalPath, input.Length, input.Sha256)))
+            .OrderBy(input => input.LogicalPath, StringComparer.Ordinal).ToArray(),
+        manifest.Contexts.ToDictionary(context => context.Id, context => context.ContextHash, StringComparer.Ordinal),
+        true);
 }

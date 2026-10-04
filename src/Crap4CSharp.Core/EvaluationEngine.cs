@@ -16,7 +16,7 @@ public static class EvaluationEngine
         var sourcePaths = input.Sources.Select(source => source.LogicalPath.Replace('\\', '/')).ToArray();
         var reports = input.Coverage.OrderBy(report => report.LogicalPath, StringComparer.Ordinal).Select(report =>
             CoverageReader.Read(report.Bytes.AsSpan(), report.LogicalPath).Select(method => method with
-            { ContextId = input.ContextId, File = NormalizeCapturedPath(method.File, sourcePaths) }).ToArray()).ToArray();
+            { ContextId = input.ContextId, File = CapturedLogicalPathResolver.Resolve(method.File, sourcePaths, input.PathPolicy) }).ToArray()).ToArray();
         cancellationToken.ThrowIfCancellationRequested();
         var matches = CoverageMatcher.ApplyDetailed(methods, reports);
         var metrics = matches.Select(match => new EvaluationMetric(input.ContextId,
@@ -44,14 +44,4 @@ public static class EvaluationEngine
         return new EvaluationSnapshot(CanonicalIdentity.Set("evaluation", values), metrics, findings, provenance, decision, exit);
     }
 
-    private static string? NormalizeCapturedPath(string? path, IReadOnlyList<string> sourcePaths)
-    {
-        if (path is null) return null;
-        var normalized = path.Replace('\\', '/');
-        if (normalized.Length >= 3 && char.IsAsciiLetter(normalized[0]) && normalized[1] == ':') normalized = normalized[2..];
-        normalized = normalized.TrimStart('/');
-        var matches = sourcePaths.Where(source => normalized == source ||
-            normalized.EndsWith("/" + source, StringComparison.Ordinal)).Distinct(StringComparer.Ordinal).ToArray();
-        return matches.Length == 1 ? matches[0] : normalized;
-    }
 }

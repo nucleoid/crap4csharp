@@ -96,18 +96,26 @@ public sealed class AnalyzeCommandTests
         var context = new ManifestContext("ctx", "missing/App.csproj", "net10.0", "Debug", "AnyCPU",
             "sources", "context", "closure", true, true,
             [new ManifestInput("source", "src/C.cs", "artifacts/source.bin", source.Length,
-                CanonicalIdentity.Sha256(source), "utf-8", false)]);
+                CanonicalIdentity.Sha256(source), "utf-8", false)])
+        {
+            ParseOptions = new ManifestParseOptions("preview", "Regular", [],
+                new Dictionary<string, string>(StringComparer.Ordinal)),
+            PathPolicy = new ManifestPathPolicy("sensitive", [])
+        };
         var manifest = new RunManifest("1.0", CanonicalIdentity.Algorithm,
             new ManifestProducer("crap4csharp", "test", ComplexityRules.OrdinaryMethodsV1,
                 ProjectAnalysisContext.ProtocolVersion, "coverage-v1", "paths-v1"),
             new ManifestCapture("completed", true, true, []),
             new ManifestRevision("none", "local", "deleted-original", null, null, null),
-            [new ManifestRoot("workspace", "workspace", "sensitive")], [context], [], [],
+            [new ManifestRoot("workspace", "workspace", "sensitive")], [context],
+            [new ManifestBuild("build", "ctx", "App", "dll", "mvid", "pdb", "portable-pdb")],
+            [new ManifestExecution("test", "ctx", "build", true, 0, 1, 1, 0, 0)],
             [new ManifestArtifact("source", "source", "artifacts/source.bin", source.Length,
                  CanonicalIdentity.Sha256(source), "ctx", null, null, null, null),
              new ManifestArtifact("coverage", "coverage", "artifacts/coverage.xml", coverage.Length,
-                 CanonicalIdentity.Sha256(coverage), "ctx", null, null, "cobertura", "line")],
+                 CanonicalIdentity.Sha256(coverage), "ctx", "build", "test", "cobertura", "line")],
             new ManifestEvaluationInputs("scope", "policy", null, null), null);
+        manifest = ManifestIdentity.Seal(manifest);
         var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true };
         var path = Path.Combine(root, "manifest.json");
         File.WriteAllText(path, JsonSerializer.Serialize(manifest, options));

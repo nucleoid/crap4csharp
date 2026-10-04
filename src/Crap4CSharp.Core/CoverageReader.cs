@@ -30,8 +30,8 @@ public static class CoverageReader
         var parsed = ReadCapturedDocument(bytes, logicalReportPath);
         return parsed.Document.Root?.Name.LocalName switch
         {
-            "CoverageSession" => ReadOpenCoverCompatibility(parsed.Document, parsed.Directory, parsed.ReportId),
-            "coverage" => ReadCoberturaCompatibility(parsed.Document, parsed.Directory, parsed.ReportId),
+            "CoverageSession" => ReadOpenCoverCompatibility(parsed.Document, parsed.Directory, parsed.ReportId, true),
+            "coverage" => ReadCoberturaCompatibility(parsed.Document, parsed.Directory, parsed.ReportId, true),
             var root => throw new InvalidDataException($"Unsupported coverage XML root '{root ?? "(missing)"}' in {logicalReportPath}")
         };
     }
@@ -41,8 +41,8 @@ public static class CoverageReader
         var parsed = ReadDocument(reportPath);
         return parsed.Document.Root?.Name.LocalName switch
         {
-            "CoverageSession" => ReadOpenCoverCompatibility(parsed.Document, parsed.Directory, parsed.ReportId),
-            "coverage" => ReadCoberturaCompatibility(parsed.Document, parsed.Directory, parsed.ReportId),
+            "CoverageSession" => ReadOpenCoverCompatibility(parsed.Document, parsed.Directory, parsed.ReportId, false),
+            "coverage" => ReadCoberturaCompatibility(parsed.Document, parsed.Directory, parsed.ReportId, false),
             var root => throw new InvalidDataException($"Unsupported coverage XML root '{root ?? "(missing)"}' in {reportPath}")
         };
     }
@@ -275,7 +275,7 @@ public static class CoverageReader
             diagnostic.ContextId, diagnostic.Message);
 
     private static IReadOnlyList<CoverageMethod> ReadOpenCoverCompatibility(XDocument document, string baseDirectory,
-        string reportId)
+        string reportId, bool captured)
     {
         var output = new List<CoverageMethod>();
         foreach (var module in document.Descendants().Where(element => element.Name.LocalName == "Module"))
@@ -284,7 +284,7 @@ public static class CoverageReader
             var files = module.Descendants().Where(element => element.Name.LocalName == "File")
                 .Select(element => (Id: Attr(element, "uid"), Path: Attr(element, "fullPath")))
                 .Where(pair => pair.Id is not null && pair.Path is not null)
-                .ToDictionary(pair => pair.Id!, pair => ResolveNativePath(pair.Path!, baseDirectory), StringComparer.Ordinal);
+                .ToDictionary(pair => pair.Id!, pair => captured ? pair.Path : ResolveNativePath(pair.Path!, baseDirectory), StringComparer.Ordinal);
             foreach (var method in module.Descendants().Where(element => element.Name.LocalName == "Method"))
             {
                 var fullName = ChildValue(method, "Name") ?? string.Empty;
@@ -305,7 +305,7 @@ public static class CoverageReader
     }
 
     private static IReadOnlyList<CoverageMethod> ReadCoberturaCompatibility(XDocument document, string baseDirectory,
-        string reportId)
+        string reportId, bool captured)
     {
         var sourceRoot = document.Root?.Elements().FirstOrDefault(element => element.Name.LocalName == "sources")?
             .Elements().FirstOrDefault(element => element.Name.LocalName == "source")?.Value.Trim();
@@ -315,7 +315,7 @@ public static class CoverageReader
             var moduleIdentity = @class.Ancestors().FirstOrDefault(element => element.Name.LocalName == "package")?.Attribute("name")?.Value;
             var typeName = Attr(@class, "name") ?? string.Empty;
             var filename = Attr(@class, "filename");
-            var file = filename is null ? null : ResolveNativePath(filename,
+            var file = filename is null ? null : captured ? filename : ResolveNativePath(filename,
                 !string.IsNullOrWhiteSpace(sourceRoot) && Path.IsPathRooted(sourceRoot) ? sourceRoot : baseDirectory);
             var methodsContainer = @class.Elements().FirstOrDefault(element => element.Name.LocalName == "methods");
             if (methodsContainer is null) continue;

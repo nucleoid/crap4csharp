@@ -193,7 +193,7 @@ internal static class App
                     : "check orchestration is reserved for issue #10; use analyze --syntax-only for the issue #7 adapter.");
             cancellationToken.ThrowIfCancellationRequested();
             var result = options.ReuseArtifacts is not null
-                ? AnalyzeCommand.Replay(options.ReuseArtifacts, workingDirectory, options.Threshold,
+                ? AnalyzeCommand.Replay(options.ReuseArtifacts, workingDirectory, options.Output, options.Threshold,
                     startedAt, stopwatch.Elapsed, cancellationToken)
                 : options.Ruleset == ComplexityRules.OrdinaryMethodsV1
                 ? await AnalyzeLegacyCapturedInputsAsync(options, workingDirectory, startedAt, stopwatch, cancellationToken)
@@ -216,6 +216,7 @@ internal static class App
         catch (Exception exception) when (IsHandled(exception))
         {
             var reason = exception is ArgumentException ? "arguments.invalid" :
+                exception is InvalidDataException ? "artifact.invalid" :
                 exception is OperationCanceledException ? "run.cancelled" : "execution.failed";
             var ruleset = options?.Ruleset ?? PreDetectValue(args, "--ruleset") switch
             {
@@ -236,6 +237,9 @@ internal static class App
                             .Concat(options.ReuseArtifacts is null ? [] : [options.ReuseArtifacts])
                             .Concat(options.Exemptions is null ? [] : [options.Exemptions]);
                         mayWrite = FindOutputAlias(destination, workingDirectory, inputs, [], null) is null;
+                        if (mayWrite && options.ReuseArtifacts is not null)
+                            ArtifactBundle.Load(options.ReuseArtifacts, workingDirectory)
+                                .RejectOutputAlias(destination, workingDirectory);
                     }
                     catch (Exception aliasException) when (IsHandled(aliasException)) { }
                 }
@@ -349,11 +353,14 @@ internal static class App
         {
             if (options.Command != "analyze" || options.SyntaxOnly || options.Inputs.Count > 0 || options.Coverage.Count > 0 ||
                 options.CoveragePathMappings.Count > 0 || options.CoveragePathCase != CoveragePathCase.Auto ||
-                options.Exemptions is not null || options.Project is not null)
+                options.Exemptions is not null || options.Project is not null || options.AllowMissingCoverage ||
+                seen.Contains("--ruleset"))
                 throw new ArgumentException("--reuse-artifacts cannot be combined with live source, project, coverage, mapping, case, syntax-only, or exemption inputs.");
         }
         else if (options.Command == "analyze" && !options.SyntaxOnly)
             throw new ArgumentException("analyze requires either --reuse-artifacts or --syntax-only.");
+        if (options.Command == "analyze" && options.SyntaxOnly && options.Project is not null)
+            throw new ArgumentException("--project is not available with analyze --syntax-only.");
         return options;
     }
 
