@@ -40,7 +40,8 @@ public static class CapturedLogicalPathResolver
     {
         var comparer = policy.CaseSensitive ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
         var sources = sourcePaths.Select(CanonicalIdentity.NormalizeLogicalPath).ToHashSet(comparer);
-        return methods.Select(method => method with { File = Resolve(method.File, sourcePaths, policy) })
+        var index = new CapturedLogicalPathIndex(sourcePaths, policy);
+        return methods.Select(method => method with { File = index.Resolve(method.File) })
             .GroupBy(MethodCandidateIdentity, StringComparer.Ordinal).Select(group =>
             {
                 var matches = group.Where(method => method.File is not null && sources.Contains(method.File))
@@ -50,36 +51,9 @@ public static class CapturedLogicalPathResolver
     }
 
     public static string? Resolve(string? reportedPath, IReadOnlyList<string> sourcePaths, CapturedPathPolicy policy)
-    {
-        if (reportedPath is null) return null;
-        var comparison = policy.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
-        var normalized = Normalize(reportedPath);
-        var sources = sourcePaths.Select(CanonicalIdentity.NormalizeLogicalPath).ToArray();
-        if (!IsAbsolute(normalized))
-        {
-            var relative = NormalizeRelative(normalized);
-            return sources.SingleOrDefault(source => string.Equals(source, relative, comparison));
-        }
+        => new CapturedLogicalPathIndex(sourcePaths, policy).Resolve(reportedPath);
 
-        var matches = new List<string>();
-        foreach (var mapping in policy.ReportRootMappings)
-        {
-            var root = Normalize(mapping.ReportRoot).TrimEnd('/');
-            if (!string.Equals(normalized, root, comparison) &&
-                !normalized.StartsWith(root + "/", comparison)) continue;
-            var suffix = normalized.Length == root.Length ? string.Empty : normalized[(root.Length + 1)..];
-            var logical = string.IsNullOrEmpty(suffix) ? mapping.LogicalRoot :
-                string.IsNullOrEmpty(mapping.LogicalRoot) ? suffix : mapping.LogicalRoot.TrimEnd('/') + "/" + suffix;
-            string candidate;
-            try { candidate = CanonicalIdentity.NormalizeLogicalPath(logical); }
-            catch (ArgumentException) { continue; }
-            matches.AddRange(sources.Where(source => string.Equals(source, candidate, comparison)));
-        }
-        return matches.Distinct(policy.CaseSensitive ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase)
-            .Count() == 1 ? matches[0] : normalized;
-    }
-
-    private static string NormalizeRelative(string path)
+    internal static string NormalizeRelative(string path)
     {
         var segments = new List<string>();
         foreach (var segment in path.Split('/', StringSplitOptions.RemoveEmptyEntries))
@@ -91,8 +65,8 @@ public static class CapturedLogicalPathResolver
         return CanonicalIdentity.NormalizeLogicalPath(string.Join('/', segments));
     }
 
-    private static string Normalize(string path) => path.Replace('\\', '/');
-    private static bool IsAbsolute(string path) => path.StartsWith('/') ||
+    internal static string Normalize(string path) => path.Replace('\\', '/');
+    internal static bool IsAbsolute(string path) => path.StartsWith('/') ||
         path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] == '/';
 
     private static string MethodCandidateIdentity(CoverageMethod method) => CanonicalIdentity.Tuple(
@@ -101,4 +75,50 @@ public static class CapturedLogicalPathResolver
         method.RawSignature, method.MethodToken,
         string.Join("\n", method.SequencePoints.Select(point => string.Join(":", point.Line, point.Visits,
             point.StartColumn, point.EndLine, point.EndColumn, point.Offset))));
+}
+
+public sealed class CapturedLogicalPathIndex
+{
+    private readonly StringComparer comparer;
+    private readonly StringComparison comparison;
+    private readonly IReadOnlyDictionary<string, string> sources;
+    private readonly (string Root, string LogicalRoot)[] mappings;
+
+    public CapturedLogicalPathIndex(IReadOnlyList<string> sourcePaths, CapturedPathPolicy policy)
+    {
+        comparer = policy.CaseSensitive ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
+        comparison = policy.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+        sources = sourcePaths.Select(CanonicalIdentity.NormalizeLogicalPath)
+            .Distinct(comparer).ToDictionary(path => path, path => path, comparer);
+        mappings = policy.ReportRootMappings.Select(mapping =>
+            (CapturedLogicalPathResolver.Normalize(mapping.ReportRoot).TrimEnd('/'), mapping.LogicalRoot)).ToArray();
+    }
+
+    public string? Resolve(string? reportedPath)
+    {
+        if (reportedPath is null) return null;
+        var normalized = CapturedLogicalPathResolver.Normalize(reportedPath);
+        if (!CapturedLogicalPathResolver.IsAbsolute(normalized))
+        {
+            var relative = CapturedLogicalPathResolver.NormalizeRelative(normalized);
+            return sources.TryGetValue(relative, out var source) ? source : relative;
+        }
+
+        string? match = null;
+        foreach (var mapping in mappings)
+        {
+            if (!string.Equals(normalized, mapping.Root, comparison) &&
+                !normalized.StartsWith(mapping.Root + "/", comparison)) continue;
+            var suffix = normalized.Length == mapping.Root.Length ? string.Empty : normalized[(mapping.Root.Length + 1)..];
+            var logical = string.IsNullOrEmpty(suffix) ? mapping.LogicalRoot :
+                string.IsNullOrEmpty(mapping.LogicalRoot) ? suffix : mapping.LogicalRoot.TrimEnd('/') + "/" + suffix;
+            string candidate;
+            try { candidate = CanonicalIdentity.NormalizeLogicalPath(logical); }
+            catch (ArgumentException) { continue; }
+            if (!sources.TryGetValue(candidate, out var source)) continue;
+            if (match is not null && !comparer.Equals(match, source)) return normalized;
+            match = source;
+        }
+        return match ?? normalized;
+    }
 }

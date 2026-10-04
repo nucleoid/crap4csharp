@@ -11,7 +11,7 @@ internal static class AnalyzeCommand
         var bundle = ArtifactBundle.Load(manifestPath, workingDirectory);
         if (outputPath is not null) bundle.RejectOutputAlias(outputPath, workingDirectory);
         var manifest = bundle.Manifest;
-        var provenance = ProvenanceVerifier.VerifyCapture(manifest, bundle.Bytes);
+        var provenance = ProvenanceVerifier.VerifyCaptureCancellable(manifest, bundle.Bytes, null, cancellationToken);
         var capturedEvaluation = CapturedEvaluationInputs.Read(bundle);
         var threshold = capturedEvaluation.Policy.Threshold;
         var scopedSources = capturedEvaluation.Scope.Sources.ToHashSet(StringComparer.Ordinal);

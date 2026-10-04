@@ -195,11 +195,16 @@ public static class ManifestIdentity
 public static class ProvenanceVerifier
 {
     public static ProvenanceResult VerifyCapture(RunManifest manifest,
-        IReadOnlyDictionary<string, ImmutableArray<byte>> artifactBytes, string? requiredRuleset = null)
+        IReadOnlyDictionary<string, ImmutableArray<byte>> artifactBytes, string? requiredRuleset = null) =>
+        VerifyCaptureCancellable(manifest, artifactBytes, requiredRuleset, default);
+
+    public static ProvenanceResult VerifyCaptureCancellable(RunManifest manifest,
+        IReadOnlyDictionary<string, ImmutableArray<byte>> artifactBytes, string? requiredRuleset,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(manifest);
         ArgumentNullException.ThrowIfNull(artifactBytes);
-        var reasons = StructuralReasons(manifest, artifactBytes, requiredRuleset);
+        var reasons = StructuralReasons(manifest, artifactBytes, requiredRuleset, cancellationToken);
         var invalid = reasons.Any(reason => reason != ProvenanceReasonCodes.ReuseRecipeIncomplete);
         return new ProvenanceResult(invalid ? ProvenanceStatus.Invalid : ProvenanceStatus.Captured,
             invalid ? "none" : "captureConsistency", false,
@@ -211,7 +216,7 @@ public static class ProvenanceVerifier
         IReadOnlyDictionary<string, ImmutableArray<byte>> artifactBytes, CurrentEvidence current,
         bool requireReusableRecipe, string? requiredRuleset = null)
     {
-        var reasons = StructuralReasons(manifest, artifactBytes, requiredRuleset);
+        var reasons = StructuralReasons(manifest, artifactBytes, requiredRuleset, default);
         if (!string.Equals(manifest.Revision.RepositoryIdentity, current.RepositoryIdentity, StringComparison.Ordinal))
             reasons.Add(ProvenanceReasonCodes.RevisionChanged);
         if (!string.Equals(manifest.Revision.WorkspaceIdentity, current.WorkspaceIdentity, StringComparison.Ordinal))
@@ -251,8 +256,10 @@ public static class ProvenanceVerifier
     }
 
     private static List<string> StructuralReasons(RunManifest manifest,
-        IReadOnlyDictionary<string, ImmutableArray<byte>> artifactBytes, string? requiredRuleset)
+        IReadOnlyDictionary<string, ImmutableArray<byte>> artifactBytes, string? requiredRuleset,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var reasons = new List<string>();
         if (manifest.ManifestSchemaVersion != ManifestIdentity.SchemaVersion) reasons.Add(ProvenanceReasonCodes.SchemaUnsupported);
         if (manifest.IdentityAlgorithm != CanonicalIdentity.Algorithm)
@@ -293,6 +300,7 @@ public static class ProvenanceVerifier
             reasons.Add(ProvenanceReasonCodes.ManifestHashChanged);
         foreach (var context in manifest.Contexts)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var sourceHash = ManifestIdentity.SourceSetHash(context);
             var closureHash = ManifestIdentity.InputClosureHash(context);
             if (sourceHash != context.SourceSetHash) reasons.Add(ProvenanceReasonCodes.SourceSetHashChanged);
@@ -320,6 +328,7 @@ public static class ProvenanceVerifier
         var inspectedBuilds = new Dictionary<string, InspectedBuildEvidence>(StringComparer.Ordinal);
         foreach (var build in manifest.Builds)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var assemblies = manifest.Artifacts.Where(artifact => artifact.Kind == "assembly" &&
                 artifact.ContextId == build.ContextId && artifact.BuildId == build.Id).ToArray();
             var pdbs = manifest.Artifacts.Where(artifact => artifact.Kind == "pdb" &&
@@ -370,6 +379,7 @@ public static class ProvenanceVerifier
             reasons.Add(ProvenanceReasonCodes.TestExecutionIncomplete);
         foreach (var execution in manifest.Executions)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var trxArtifacts = manifest.Artifacts.Where(artifact => artifact.Kind == "test-result" &&
                 artifact.ContextId == execution.ContextId && artifact.BuildId == execution.BuildId &&
                 artifact.ExecutionId == execution.Id).ToArray();
@@ -407,6 +417,7 @@ public static class ProvenanceVerifier
 
         foreach (var coverage in manifest.Artifacts.Where(item => item.Kind == "coverage"))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var build = manifest.Builds.FirstOrDefault(item => item.Id == coverage.BuildId);
             var execution = manifest.Executions.FirstOrDefault(item => item.Id == coverage.ExecutionId);
             if (coverage.ContextId is null || build is null || execution is null ||
@@ -428,8 +439,8 @@ public static class ProvenanceVerifier
                         !inspected.ModuleIdentities.Contains(build.ModuleIdentity, StringComparer.Ordinal) ||
                         !inspectedBuilds.TryGetValue(build.Id, out var inspectedBuild) ||
                         pathPolicy is null ||
-                        !ArtifactEvidenceInspector.CoverageMatchesBuild(coverageBytes, coverage.Locator,
-                            inspectedBuild, sourcePaths, pathPolicy))
+                        !ArtifactEvidenceInspector.CoverageMatchesBuildCancellable(coverageBytes, coverage.Locator,
+                            inspectedBuild, sourcePaths, pathPolicy, cancellationToken))
                         reasons.Add(ProvenanceReasonCodes.IncompatiblePointRepresentation);
                 }
                 catch (InvalidDataException) { reasons.Add(ProvenanceReasonCodes.IncompatiblePointRepresentation); }
@@ -444,6 +455,7 @@ public static class ProvenanceVerifier
 
         foreach (var artifact in manifest.Artifacts)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (!SafeLocator(artifact.Locator)) { reasons.Add(ProvenanceReasonCodes.InvalidLocator); continue; }
             if (!artifactBytes.TryGetValue(artifact.Locator, out var bytes))
             { reasons.Add(ProvenanceReasonCodes.ArtifactMissing); continue; }

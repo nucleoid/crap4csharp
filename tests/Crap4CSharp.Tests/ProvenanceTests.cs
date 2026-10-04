@@ -44,6 +44,16 @@ public sealed class ProvenanceTests
             ProvenanceVerifier.VerifyCapture(dangling, FixtureBytes()).Reasons);
     }
 
+    [Fact]
+    public void CaptureVerificationHonorsCancellationBeforeScanningArtifacts()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        Assert.Throws<OperationCanceledException>(() => ProvenanceVerifier.VerifyCaptureCancellable(
+            Fixture(), FixtureBytes(), null, cancellation.Token));
+    }
+
     [Theory]
     [InlineData("0.9", "sha256-canonical-v1", "manifest.schemaUnsupported")]
     [InlineData("1.0", "sha256-other", "manifest.identityAlgorithmUnsupported")]

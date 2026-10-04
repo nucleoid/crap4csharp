@@ -132,6 +132,20 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
                 throw new InvalidDataException("Artifact context has an invalid required member shape.");
             Require(context.GetProperty("parseOptions"), "languageVersion", "sourceKind", "preprocessorSymbols", "features");
             Require(context.GetProperty("pathPolicy"), "casePolicy", "reportRootMappings");
+            var symbols = context.GetProperty("parseOptions").GetProperty("preprocessorSymbols");
+            var features = context.GetProperty("parseOptions").GetProperty("features");
+            var mappings = context.GetProperty("pathPolicy").GetProperty("reportRootMappings");
+            if (symbols.ValueKind != JsonValueKind.Array || symbols.EnumerateArray().Any(item => item.ValueKind != JsonValueKind.String) ||
+                features.ValueKind != JsonValueKind.Object || features.EnumerateObject().Any(item => item.Value.ValueKind != JsonValueKind.String) ||
+                mappings.ValueKind != JsonValueKind.Array)
+                throw new InvalidDataException("Artifact context has invalid parse-option or path-policy members.");
+            foreach (var mapping in mappings.EnumerateArray())
+            {
+                Require(mapping, "reportRoot", "logicalRoot");
+                if (mapping.GetProperty("reportRoot").ValueKind != JsonValueKind.String ||
+                    mapping.GetProperty("logicalRoot").ValueKind != JsonValueKind.String)
+                    throw new InvalidDataException("Artifact path mapping must contain string roots.");
+            }
             foreach (var input in context.GetProperty("inputs").EnumerateArray())
                 Require(input, "role", "logicalPath", "locator", "length", "sha256", "generated");
         }

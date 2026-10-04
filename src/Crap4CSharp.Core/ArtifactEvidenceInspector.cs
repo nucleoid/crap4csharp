@@ -177,7 +177,12 @@ public static class ArtifactEvidenceInspector
     }
 
     public static bool CoverageMatchesBuild(ImmutableArray<byte> bytes, string logicalPath,
-        InspectedBuildEvidence build, IReadOnlyList<string> logicalSourcePaths, CapturedPathPolicy pathPolicy)
+        InspectedBuildEvidence build, IReadOnlyList<string> logicalSourcePaths, CapturedPathPolicy pathPolicy) =>
+        CoverageMatchesBuildCancellable(bytes, logicalPath, build, logicalSourcePaths, pathPolicy, default);
+
+    public static bool CoverageMatchesBuildCancellable(ImmutableArray<byte> bytes, string logicalPath,
+        InspectedBuildEvidence build, IReadOnlyList<string> logicalSourcePaths, CapturedPathPolicy pathPolicy,
+        CancellationToken cancellationToken)
     {
         // A Coverlet document may contain every instrumented project in the test graph.
         // This artifact is bound to one manifest build, so foreign modules are neither
@@ -186,10 +191,26 @@ public static class ArtifactEvidenceInspector
             .Where(method => string.Equals(method.ModuleIdentity, build.ModuleIdentity, StringComparison.Ordinal))
             .ToArray();
         if (methods.Length == 0) return false;
+        var pathIndex = new CapturedLogicalPathIndex(logicalSourcePaths, pathPolicy);
+        var methodIndex = build.Methods.GroupBy(MethodKey, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
+        var reportedLineCounts = new Dictionary<string, Dictionary<int, int>>(
+            pathPolicy.CaseSensitive ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase);
+        foreach (var method in methods)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var logical = pathIndex.Resolve(method.File);
+            if (logical is null || !logicalSourcePaths.Contains(logical,
+                    pathPolicy.CaseSensitive ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase)) continue;
+            if (!reportedLineCounts.TryGetValue(logical, out var counts))
+                reportedLineCounts.Add(logical, counts = []);
+            foreach (var line in method.SequencePoints.Select(point => point.Line).Distinct())
+                counts[line] = counts.GetValueOrDefault(line) + 1;
+        }
 
         if (InspectCoverage(bytes).Format != "cobertura")
-            return methods.All(reported => MatchingMethodCount(reported, methods, build,
-                logicalSourcePaths, pathPolicy) == 1);
+            return methods.All(reported => MatchingMethodCount(reported, methodIndex, pathIndex,
+                reportedLineCounts, cancellationToken) == 1);
 
         // Cobertura expands one relative filename against each captured <source> root.
         // Those paths are alternatives for one observation, not independent methods.
@@ -197,26 +218,31 @@ public static class ArtifactEvidenceInspector
         foreach (var alternatives in methods.GroupBy(CoverageObservationKey, StringComparer.Ordinal))
         {
             if (alternatives.Sum(reported =>
-                    MatchingMethodCount(reported, methods, build, logicalSourcePaths, pathPolicy)) != 1) return false;
+                    MatchingMethodCount(reported, methodIndex, pathIndex, reportedLineCounts,
+                        cancellationToken)) != 1) return false;
         }
         return true;
     }
 
-    private static int MatchingMethodCount(CoverageMethod reported, IReadOnlyList<CoverageMethod> allReported,
-        InspectedBuildEvidence build,
-        IReadOnlyList<string> logicalSourcePaths, CapturedPathPolicy pathPolicy)
+    private static int MatchingMethodCount(CoverageMethod reported,
+        IReadOnlyDictionary<string, InspectedMethodEvidence[]> methodIndex, CapturedLogicalPathIndex pathIndex,
+        IReadOnlyDictionary<string, Dictionary<int, int>> reportedLineCounts, CancellationToken cancellationToken)
     {
-        var candidates = build.Methods.Where(method =>
-            string.Equals(method.TypeName.Replace('+', '/'), reported.TypeName.Replace('+', '/'),
-                StringComparison.Ordinal) &&
-            string.Equals(method.MethodName, reported.MethodName, StringComparison.Ordinal)).ToArray();
+        cancellationToken.ThrowIfCancellationRequested();
+        var candidates = methodIndex.TryGetValue(MethodKey(reported.TypeName, reported.MethodName), out var indexed)
+            ? indexed : [];
         if (reported.MethodToken is { Length: > 0 } tokenText &&
             int.TryParse(tokenText.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? tokenText[2..] : tokenText,
                 System.Globalization.NumberStyles.HexNumber,
                 System.Globalization.CultureInfo.InvariantCulture, out var token))
             candidates = candidates.Where(method => method.MetadataToken == token).ToArray();
-        return candidates.Count(method => PointsMatch(reported, allReported, method, logicalSourcePaths, pathPolicy));
+        return candidates.Count(method => PointsMatch(reported, method, pathIndex, reportedLineCounts,
+            cancellationToken));
     }
+
+    private static string MethodKey(InspectedMethodEvidence method) => MethodKey(method.TypeName, method.MethodName);
+    private static string MethodKey(string typeName, string methodName) =>
+        CanonicalIdentity.Tuple("coverage-method-index-v1", typeName.Replace('+', '/'), methodName);
 
     private static string CoverageObservationKey(CoverageMethod method) => CanonicalIdentity.Tuple(
         "coverage-observation-v1", method.ModuleIdentity, method.TypeName, method.MethodName,
@@ -255,19 +281,18 @@ public static class ArtifactEvidenceInspector
         return string.IsNullOrEmpty(@namespace) ? name : @namespace + "." + name;
     }
 
-    private static bool PointsMatch(CoverageMethod reported, IReadOnlyList<CoverageMethod> allReported,
-        InspectedMethodEvidence method,
-        IReadOnlyList<string> logicalSourcePaths, CapturedPathPolicy pathPolicy)
+    private static bool PointsMatch(CoverageMethod reported, InspectedMethodEvidence method,
+        CapturedLogicalPathIndex pathIndex,
+        IReadOnlyDictionary<string, Dictionary<int, int>> reportedLineCounts, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (reported.File is null || reported.SequencePoints.Count == 0) return false;
-        var comparer = pathPolicy.CaseSensitive ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
-        var reportedLogical = ResolveBoundPath(reported.File, logicalSourcePaths, pathPolicy);
+        var reportedLogical = pathIndex.Resolve(reported.File);
         if (reportedLogical is null) return false;
         var resolvedPoints = method.SequencePoints.Select(point =>
-            (Point: point, Logical: ResolveBoundPath(point.Document, logicalSourcePaths, pathPolicy)))
-            .Where(item => item.Logical is not null && comparer.Equals(item.Logical, reportedLogical)).ToArray();
-        if (resolvedPoints.Length == 0 || resolvedPoints.Select(item => item.Logical).Distinct(comparer).Count() != 1)
-            return false;
+            (Point: point, Logical: pathIndex.Resolve(point.Document)))
+            .Where(item => item.Logical == reportedLogical).ToArray();
+        if (resolvedPoints.Length == 0) return false;
         var points = resolvedPoints.Select(item => item.Point).ToArray();
         if (reported.SequencePoints.All(point => point.StartColumn is null &&
                 (point.EndLine is null || point.EndLine == point.Line) &&
@@ -292,14 +317,11 @@ public static class ArtifactEvidenceInspector
                 return true;
             if (lines.Any(line => !statementPoints.Any(point => line >= point.StartLine && line <= point.EndLine)))
                 return false;
-            HashSet<int> linesAssignedElsewhere = method.MethodName is ".ctor" or ".cctor"
-                ? allReported.Where(other => !ReferenceEquals(other, reported) && other.File is not null &&
-                        comparer.Equals(ResolveBoundPath(other.File, logicalSourcePaths, pathPolicy), reportedLogical))
-                    .SelectMany(other => other.SequencePoints.Select(point => point.Line)).ToHashSet()
-                : [];
             foreach (var point in statementPoints)
                 for (var line = point.StartLine; line <= point.EndLine; line++)
-                    if (!lineSet.Contains(line) && !linesAssignedElsewhere.Contains(line)) return false;
+                    if (!lineSet.Contains(line) && !(method.MethodName is ".ctor" or ".cctor" &&
+                            reportedLineCounts.TryGetValue(reportedLogical, out var counts) &&
+                            counts.GetValueOrDefault(line) > (lineSet.Contains(line) ? 1 : 0))) return false;
             return true;
         }
         return reported.SequencePoints.Count == points.Length && reported.SequencePoints.All(reportPoint =>
@@ -310,11 +332,4 @@ public static class ArtifactEvidenceInspector
                 point.Offset == reportPoint.Offset));
     }
 
-    private static string? ResolveBoundPath(string path, IReadOnlyList<string> logicalSourcePaths,
-        CapturedPathPolicy pathPolicy)
-    {
-        var comparer = pathPolicy.CaseSensitive ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
-        var resolved = CapturedLogicalPathResolver.Resolve(path, logicalSourcePaths, pathPolicy);
-        return resolved is null ? null : logicalSourcePaths.SingleOrDefault(source => comparer.Equals(source, resolved));
-    }
 }
