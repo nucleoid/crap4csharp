@@ -25,14 +25,22 @@
             "provider": { "const": "sdk-project-context-output-v1" },
             "project": { "type": "string" },
             "assemblyPath": { "type": "string" },
-            "pdbPath": { "type": "string" }
+            "pdbPath": { "type": "string" },
+            "references": {
+              "type": "array",
+              "items": {
+                "type": "object", "required": ["logicalPath", "workspacePath"],
+                "properties": { "logicalPath": { "type": "string" }, "workspacePath": { "type": "string" } },
+                "additionalProperties": true
+              }
+            }
           }
         },
         "inputs": { "type": "array", "maxItems": 10000 }
       }
     } },
     "builds": { "type": "array", "minItems": 1, "maxItems": 10000, "items": { "type": "object", "required": ["id", "contextId", "moduleIdentity", "assemblySha256", "mvid", "pdbSha256", "debugIdentity"] } },
-    "executions": { "type": "array", "minItems": 1, "maxItems": 10000, "items": { "type": "object", "required": ["id", "contextId", "buildId", "completed", "exitCode", "totalTests", "passedTests", "failedTests", "skippedTests", "testModuleIdentity", "testAssemblySha256", "testMvid", "testPdbSha256", "testDebugIdentity"] } },
+    "executions": { "type": "array", "minItems": 1, "maxItems": 10000, "items": { "type": "object", "required": ["id", "contextId", "buildId", "completed", "exitCode", "totalTests", "passedTests", "failedTests", "skippedTests", "testModuleIdentity", "testAssemblySha256", "testMvid", "testPdbSha256", "testDebugIdentity"], "properties": { "testProject": { "type": "string" } } } },
     "artifacts": { "type": "array", "minItems": 1, "maxItems": 10000, "items": { "type": "object", "required": ["id", "kind", "locator", "length", "sha256"] } },
     "evaluationInputs": { "type": "object" }
   },

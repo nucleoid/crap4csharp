@@ -194,6 +194,8 @@ internal static class App
             options = ParseModern(args);
             if (options.Command == "check" && options.Ruleset == ComplexityRules.OrdinaryMethodsV1)
                 throw new ArgumentException("check requires callables-v1; ordinary-methods-v1 is available through the legacy option-only invocation.");
+            if (options.Command == "check" && options.ReuseArtifacts is null)
+                throw new ArgumentException("check callables-v1 currently requires --reuse-artifacts, --policy, and --base.");
             cancellationToken.ThrowIfCancellationRequested();
             var result = options.Command == "check"
                 ? await PolicyCheckCommand.RunAsync(options.ReuseArtifacts!, options.Policy!, options.Base!,
@@ -391,8 +393,6 @@ internal static class App
         }
         else if (options.Command == "analyze" && !options.SyntaxOnly)
             throw new ArgumentException("analyze requires either --reuse-artifacts or --syntax-only.");
-        else if (options.Command == "check")
-            throw new ArgumentException("check currently requires --reuse-artifacts, --policy, and --base.");
         if (options.Command == "analyze" && options.SyntaxOnly && options.Project is not null)
             throw new ArgumentException("--project is not available with analyze --syntax-only.");
         return options;

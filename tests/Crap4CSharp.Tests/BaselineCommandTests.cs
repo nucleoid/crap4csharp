@@ -48,6 +48,7 @@ public sealed class BaselineCommandTests
         using var directory = TestDirectory.Create("crap4csharp-baseline-missing-manifest");
         await File.WriteAllTextAsync(Path.Combine(directory.Path, "policy.json"), PolicyTests.ValidPolicy
             .Replace("\"incremental\"", "\"strict\"", StringComparison.Ordinal)
+            .Replace("\"scope\": \"base\"", "\"scope\": \"all\"", StringComparison.Ordinal)
             .Replace(",\n  \"baseline\": \"baseline.json\"", "", StringComparison.Ordinal),
             TestContext.Current.CancellationToken);
         using var output = new StringWriter();
@@ -60,6 +61,30 @@ public sealed class BaselineCommandTests
         Assert.Equal(1, exit);
         Assert.Contains("\"exitCode\": 1", output.ToString());
         Assert.False(File.Exists(Path.Combine(directory.Path, "candidate.json")));
+    }
+
+    [Fact]
+    public void CandidateGenerationRequiresEveryPolicyProjectFrameworkConfigurationAndTestTarget()
+    {
+        var policy = RepositoryPolicyParser.Parse(System.Text.Encoding.UTF8.GetBytes(PolicyTests.ValidPolicy),
+            "quality/policy.json").Policy;
+        var context = new ManifestContext("ctx", policy.ProductionProjects.Single(), "net10.0", "Release", "AnyCPU",
+            "sources", "context", "closure", true, true, []);
+        var valid = EmptyManifest(context) with
+        {
+            Executions = [new ManifestExecution("tests", "ctx", "build", true, 0, 1, 1, 0, 0)
+                { TestProject = policy.TestProjects.Single() }]
+        };
+
+        BaselineCommand.ValidatePolicyCoverage(valid, policy);
+        Assert.Throws<PolicyException>(() => BaselineCommand.ValidatePolicyCoverage(valid with
+        {
+            Contexts = [context with { TargetFramework = "net9.0" }]
+        }, policy));
+        Assert.Throws<PolicyException>(() => BaselineCommand.ValidatePolicyCoverage(valid with
+        {
+            Executions = [valid.Executions.Single() with { TestProject = "other.csproj" }]
+        }, policy));
     }
 
     private static RunManifest EmptyManifest(ManifestContext context) => new(ManifestIdentity.SchemaVersion,

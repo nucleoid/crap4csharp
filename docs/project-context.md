@@ -27,4 +27,6 @@ MSBuild evaluation and design-time loading can execute imported logic. This is a
 
 The protocol uses task-owned request/response files so loader logs cannot corrupt structured output. The child process is bounded and process-tree cancellation is inherited from the common runner.
 
-Public `check`, captured `analyze`, policy constraints, test execution, artifact replay, and coverage-to-context manifests are owned by later roadmap slices and are not advertised here.
+Captured `analyze` and trusted reused `check` consume this context through a hash-bound manifest. The supported
+current-revalidation recipe reloads the declared project/TFM/configuration and inspects current PE/PDB outputs; it
+does not itself restore, build, or test. Fresh execution and bundle production remain later orchestration work.

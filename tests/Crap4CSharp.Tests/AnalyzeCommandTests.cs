@@ -8,6 +8,36 @@ namespace Crap4CSharp.Tests;
 public sealed class AnalyzeCommandTests
 {
     private const string CompiledSource = "tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs";
+    [Theory]
+    [InlineData("--threshold", "999")]
+    [InlineData("--callable-exemptions", "branch.json")]
+    public async Task TrustedCheckRejectsBranchSuppliedPolicyWeakeningInputs(string option, string value)
+    {
+        using var directory = TestDirectory.Create("crap4csharp-check-override");
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var exit = await global::App.RunAsync(["check", "--reuse-artifacts", "manifest.json", "--policy",
+            "policy.json", "--base", "origin/main", option, value, "--format", "json"], directory.Path,
+            output, error, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, exit);
+        Assert.Contains("cannot be combined", error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TrustedCheckRequiresExplicitCiAuthorizedBase()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-check-base");
+        var error = new StringWriter();
+
+        var exit = await global::App.RunAsync(["check", "--reuse-artifacts", "manifest.json", "--policy",
+            "policy.json", "--format", "json"], directory.Path, TextWriter.Null, error,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, exit);
+        Assert.Contains("requires --policy and --base", error.ToString(), StringComparison.Ordinal);
+    }
     [Fact]
     public async Task TruncatedManifestReturnsOneStructuredJsonDocument()
     {

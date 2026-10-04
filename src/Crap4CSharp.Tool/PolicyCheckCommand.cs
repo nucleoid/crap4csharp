@@ -89,7 +89,9 @@ internal static class PolicyCheckCommand
         {
             Evaluation = evaluation,
             Run = replay.Run with { Status = evaluated.ExitCode == 1 ? "operationalError" : "completed",
-                ExitCode = evaluated.ExitCode }
+                ExitCode = evaluated.ExitCode,
+                Artifacts = replay.Run.Artifacts.Select(item => item.Kind == "manifest"
+                    ? item with { Reusable = provenance.Reusable } : item).ToArray() }
         };
     }
 
@@ -156,14 +158,36 @@ internal static class PolicyCheckCommand
                 var callableId = Text("callableId");
                 var contextId = Text("contextId");
                 var reason = Text("reasonCode");
+                var targetFramework = Text("targetFramework");
+                var context = result.Evaluation.Contexts.SingleOrDefault(item => item.Id == contextId);
+                if (context?.TargetFramework != targetFramework)
+                    throw new PolicyException("exemption.targetFrameworkMismatch",
+                        "Trusted exemption target framework does not match its context.");
+                var familyElement = entry.GetProperty("familyIds");
+                if (familyElement.ValueKind != JsonValueKind.Array ||
+                    familyElement.EnumerateArray().Any(item => item.ValueKind != JsonValueKind.String ||
+                        string.IsNullOrWhiteSpace(item.GetString())))
+                    throw new PolicyException("exemption.malformed", "Trusted exemption familyIds are invalid.");
+                var familyIds = familyElement.EnumerateArray().Select(item => item.GetString()!)
+                    .Order(StringComparer.Ordinal).ToArray();
+                if (familyIds.Distinct(StringComparer.Ordinal).Count() != familyIds.Length)
+                    throw new PolicyException("exemption.duplicateFamily", "Trusted exemption repeats a family identity.");
                 var matches = callables.Where(item => item.CallableId == callableId && item.ContextId == contextId &&
                     item.BodyChecksum == Text("bodyChecksum") && item.Ruleset == Text("ruleset") &&
                     item.CoverageReason == reason).ToArray();
                 if (matches.Length != 1 || reason is not (CoverageReasonCodes.UnsupportedGeneratedMapping or
                         CoverageReasonCodes.UnsupportedCallable or CoverageReasonCodes.AmbiguousCallableOwnership))
                     throw new PolicyException("exemption.unmatched", "Trusted exemption does not narrowly match one unsupported callable.");
+                if (!matches[0].FamilyIds.Order(StringComparer.Ordinal).SequenceEqual(familyIds, StringComparer.Ordinal))
+                    throw new PolicyException("exemption.familyAcknowledgementMismatch",
+                        "Trusted exemption must acknowledge exactly the affected callable families.");
+                var justification = Text("justification");
+                var reviewReference = Text("reviewReference");
+                if (new[] { callableId, contextId, reason, targetFramework, justification, reviewReference }
+                    .Any(value => value.Contains('*', StringComparison.Ordinal)))
+                    throw new PolicyException("exemption.wildcardRejected", "Trusted exemptions cannot contain wildcards.");
                 yield return new PolicyExemption(callableId, "crap.thresholdExceeded", contextId, reason,
-                    Text("justification"));
+                    justification);
             }
         }
     }
@@ -178,7 +202,7 @@ internal static class PolicyCheckCommand
     private static FindingResult ToFinding(PolicyFinding finding, ResultDocument result, double threshold)
     {
         var callable = (result.Evaluation.Callables ?? []).FirstOrDefault(item => item.CallableId == finding.EntityKey);
-        var span = callable is null ? new SourceSpan(0, 0) : new SourceSpan(callable.Span.StartLine, callable.Span.EndLine);
+        var span = callable is null ? new SourceSpan(1, 1) : new SourceSpan(callable.Span.StartLine, callable.Span.EndLine);
         return new FindingResult(FindingIdentity.Create(finding.ContextId, finding.Path, finding.EntityKey, span, finding.Code),
             finding.EntityKey, finding.Code, finding.Decision == "fail" ? "error" : "info", "policy",
             finding.ContextId, finding.Path, finding.EntityKey, callable?.SemanticSignature, span,

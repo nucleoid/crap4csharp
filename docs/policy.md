@@ -21,6 +21,17 @@ unless the trusted policy explicitly allows that exact class of override. A loca
 Captured `analyze` uses only the policy/baseline/exemption bytes stored in the bundle. It performs no Git, project,
 filesystem, or process acquisition. Supplying a separate inspection policy changes trust to `local-unreviewed`.
 
+Trusted enforcement is explicit:
+
+```bash
+crap4csharp check --reuse-artifacts artifacts/crap-run/manifest.json \
+  --policy quality/crap-policy.json --base origin/main --format json
+```
+
+The command resolves the merge base once, reads every enforcement overlay from that tree, independently observes
+the trusted scope, revalidates current project/source/reference/PE/PDB evidence, and reports branch versions only as
+proposed differences. It consumes an existing bundle; fresh restore/build/test/coverage orchestration is separate.
+
 ## Candidate workflow
 
 First adoption uses a strict policy without a baseline. Capture a complete successful build/test/coverage run, then:
@@ -38,6 +49,11 @@ candidate debt and retain exit `2`. Failed/skipped tests, unknown coverage, stal
 unsupported revalidation recipes, incompatible policy/ruleset/schema, or tampered bundle bytes fail `1` and write no
 candidate. Candidate metadata is deterministic and contains no timestamp. Generation is not approval: review the
 candidate, move it to the policy's baseline path, and commit both before enabling incremental CI.
+
+The candidate binds a policy compatibility hash rather than the full presentation hash. Strict adoption and
+incremental enforcement may differ only in mode, scope, and baseline location. Threshold, projects, test targets,
+TFMs, configuration, required checks, exclusions, ruleset, and the exact bytes of every exemption remain bound;
+changing any of them invalidates the baseline.
 
 `baseline update` follows the same rules and additionally requires a valid existing baseline referenced by the
 strict update policy. Deleted entries are reported and ignored during evaluation; checks never auto-trim them.

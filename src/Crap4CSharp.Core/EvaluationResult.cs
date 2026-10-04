@@ -72,7 +72,8 @@ public sealed record EvaluationSection(
     public IReadOnlyList<string>? ExemptionErrors { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public PolicyTrustResult? PolicyTrust { get; init; }
-    public IReadOnlyList<PolicyDifferenceResult> PolicyDifferences { get; init; } = [];
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<PolicyDifferenceResult>? PolicyDifferences { get; init; }
 }
 
 public sealed record PolicyTrustResult(string Trust, string Revision, string PolicyPath,

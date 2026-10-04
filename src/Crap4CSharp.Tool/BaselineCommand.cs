@@ -179,7 +179,7 @@ internal static class BaselineCommand
             parsed.Policy.Ruleset);
     }
 
-    private static void ValidatePolicyCoverage(RunManifest manifest, RepositoryPolicy policy)
+    internal static void ValidatePolicyCoverage(RunManifest manifest, RepositoryPolicy policy)
     {
         var contexts = manifest.Contexts.Select(context =>
             (Project: CanonicalIdentity.NormalizeLogicalPath(context.Project), context.TargetFramework,
