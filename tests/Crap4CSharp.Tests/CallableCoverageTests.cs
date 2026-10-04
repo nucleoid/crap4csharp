@@ -171,7 +171,8 @@ public sealed class CallableCoverageTests
         Assert.Null(lambda.SemanticIdentity);
 
         var resolved = CallableCoverageResolver.Resolve(inventory,
-            [Report(getter, [new CoveragePoint(getter.Span.StartLine, 1)])]);
+            [Report(getter, [new CoveragePoint(getter.Span.StartLine, 1, getter.Span.StartColumn,
+                getter.Span.EndLine, getter.Span.EndColumn)])]);
 
         Assert.Equal("known", Assert.Single(resolved.Observations,
             item => item.ObservationId == getter.ObservationId).Status);

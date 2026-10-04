@@ -379,11 +379,18 @@ public static class CallableInventory
 
     private static string TypeName(ITypeSymbol type)
     {
-        if (type is INamedTypeSymbol named &&
-            named.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T)
-            return $"System.Nullable`1<{TypeName(named.TypeArguments[0])}>";
-        if (type.SpecialType != SpecialType.None)
-            return type.SpecialType.ToString().Replace("System_", "System.", StringComparison.Ordinal);
+        if (type is IDynamicTypeSymbol) return "System.Object";
+        if (type is IArrayTypeSymbol array)
+            return TypeName(array.ElementType) + "[" + new string(',', array.Rank - 1) + "]";
+        if (type is IPointerTypeSymbol pointer) return TypeName(pointer.PointedAtType) + "*";
+        if (type is ITypeParameterSymbol parameter) return parameter.MetadataName;
+        if (type is INamedTypeSymbol named)
+        {
+            var metadataType = named.IsTupleType ? named.TupleUnderlyingType ?? named : named;
+            var name = MetadataTypeName(metadataType.OriginalDefinition);
+            return metadataType.TypeArguments.Length == 0 ? name :
+                $"{name}<{string.Join(",", metadataType.TypeArguments.Select(TypeName))}>";
+        }
         return type.WithNullableAnnotation(NullableAnnotation.None)
             .ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)
             .Replace("global::", string.Empty, StringComparison.Ordinal);

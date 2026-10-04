@@ -92,6 +92,16 @@ public static class CallableCoverageResolver
                     "Coverage points fall outside the authored callable span."));
                 continue;
             }
+            var lineOwnershipConflicts = ColumnlessOwnershipConflicts(candidate, inventory.Callables,
+                report.SequencePoints);
+            if (lineOwnershipConflicts.Count > 0)
+            {
+                observations[candidate.ObservationId].Reasons.Add(CoverageReasonCodes.AmbiguousCallableOwnership);
+                diagnostics.Add(Diagnostic(CoverageReasonCodes.AmbiguousCallableOwnership, report,
+                    [candidate, .. lineOwnershipConflicts],
+                    "Columnless coverage points share a source line with another authored callable region."));
+                continue;
+            }
 
             var accumulator = observations[candidate.ObservationId];
             if (string.IsNullOrWhiteSpace(report.ModuleIdentity))
@@ -212,6 +222,13 @@ public static class CallableCoverageResolver
         if (point.EndColumn is int end && endLine == span.EndLine && end > span.EndColumn) return false;
         return true;
     });
+
+    private static IReadOnlyList<CallableEntry> ColumnlessOwnershipConflicts(CallableEntry candidate,
+        IReadOnlyList<CallableEntry> inventory, IReadOnlyList<CoveragePoint> points) => inventory
+        .Where(other => other.ObservationId != candidate.ObservationId && PathsEqual(other.Path, candidate.Path) &&
+            points.Any(point => point.StartColumn is null &&
+                point.Line <= other.Span.EndLine && (point.EndLine ?? point.Line) >= other.Span.StartLine))
+        .OrderBy(other => other.ObservationId, StringComparer.Ordinal).ToArray();
 
     private static CoverageDiagnostic Diagnostic(string code, CoverageMethod report,
         IEnumerable<CallableEntry> candidates, string message) => CoverageDiagnostic.Create(code,

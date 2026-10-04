@@ -21,6 +21,11 @@ Coverlet OpenCover output does not provide a usable metadata token for those gen
 they remain explicit unsupported observations even when a separate portable PDB proves a kickoff
 relationship.
 
+Coverlet line rows can aggregate visits from multiple methods on one physical source line. A
+columnless point is therefore rejected as `coverage.ambiguousCallableOwnership` whenever that line
+also intersects any other inventoried callable region, including bodyless or unsupported regions.
+Only report columns that establish exclusive span ownership can disambiguate such same-line code.
+
 The portable-PDB mapper accepts captured bytes only, is bounded to 128 MiB per artifact, performs no
 filesystem/process/network/OS lookup, never loads the assembly, and requires exact logical document
 identity and checksum. Windows native PDB, SourceLink fetching, embedded-source recovery, private
