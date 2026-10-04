@@ -208,6 +208,21 @@ public sealed class ProvenanceTests
     public void CanonicalManifestIdentityMatchesPublishedGoldenVector()
     {
         var manifest = Fixture();
+        var golden = ManifestIdentity.Seal(manifest with
+        {
+            Builds = [manifest.Builds[0] with
+            {
+                ModuleIdentity = "module", AssemblySha256 = CanonicalIdentity.Sha256([7]), Mvid = "mvid",
+                PdbSha256 = CanonicalIdentity.Sha256([8]), DebugIdentity = "portable-pdb"
+            }],
+            Artifacts = manifest.Artifacts.Select(item => item.Kind switch
+            {
+                "assembly" => item with { Length = 1, Sha256 = CanonicalIdentity.Sha256([7]) },
+                "pdb" => item with { Length = 1, Sha256 = CanonicalIdentity.Sha256([8]) },
+                _ => item
+            }).ToArray(),
+            ManifestHash = null
+        });
 
         Assert.Equal("864f42d22774118aa30c2be59188cf321335366c5322a78565ba3e39b7d71a70",
             manifest.Contexts[0].SourceSetHash);
@@ -215,8 +230,8 @@ public sealed class ProvenanceTests
             manifest.Contexts[0].InputClosureHash);
         Assert.Equal("27e8ee19bc0a8943eb757235bf53b9c1aee69b42eb5b5310c3cef54c946e20b9",
             manifest.Contexts[0].ContextHash);
-        Assert.Equal("e646f745fce6767735343cfc10718ad333676fec06f980e211a7e54d920c5501",
-            manifest.ManifestHash);
+        Assert.Equal("0728361ba9941b470e0cad44b880e9611241fda960b14a08d96d9f863aaff95f",
+            golden.ManifestHash);
     }
 
     [Fact]

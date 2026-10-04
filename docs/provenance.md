@@ -18,7 +18,7 @@ manifest hash is accepted. The published test vector is:
 sourceSetHash   864f42d22774118aa30c2be59188cf321335366c5322a78565ba3e39b7d71a70
 inputClosureHash e281b69e9bae9ddabafdfad7e60ded5039e610cbf82aa373bf6c4c64bc730e21
 contextHash     27e8ee19bc0a8943eb757235bf53b9c1aee69b42eb5b5310c3cef54c946e20b9
-manifestHash    e646f745fce6767735343cfc10718ad333676fec06f980e211a7e54d920c5501
+manifestHash    0728361ba9941b470e0cad44b880e9611241fda960b14a08d96d9f863aaff95f
 ```
 
 Each context records effective language version, source kind, preprocessor symbols, feature flags, logical path case,
