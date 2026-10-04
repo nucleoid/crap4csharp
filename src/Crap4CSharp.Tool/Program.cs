@@ -38,6 +38,7 @@ internal static class App
           crap4csharp [options] [file-or-directory ...]
           crap4csharp analyze --syntax-only [options] [file-or-directory ...]
           crap4csharp check --ruleset callables-v1 [options]
+          crap4csharp baseline create|update --policy <path> --reuse-artifacts <manifest> --output <candidate>
 
         Options:
           --coverage <xml>   Use an OpenCover or Cobertura/Coverlet XML report; repeatable.
@@ -75,6 +76,8 @@ internal static class App
         CancellationToken cancellationToken, ProcessExecutor? processExecutor = null)
     {
         if (args.Any(arg => arg is "--help" or "-h")) { await output.WriteLineAsync(Help); return 0; }
+        if (args.Length > 0 && args[0] == "baseline")
+            return await BaselineCommand.RunAsync(args, workingDirectory, output, error, cancellationToken);
         if (args.Length > 0 && args[0] is "analyze" or "check")
             return await RunCallableCommandAsync(args, workingDirectory, output, error, cancellationToken);
 

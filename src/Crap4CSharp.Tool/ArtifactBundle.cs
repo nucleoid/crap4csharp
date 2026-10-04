@@ -143,6 +143,13 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
                 throw new InvalidDataException("Artifact context has an invalid required member shape.");
             Require(context.GetProperty("parseOptions"), "languageVersion", "sourceKind", "preprocessorSymbols", "features");
             Require(context.GetProperty("pathPolicy"), "casePolicy", "reportRootMappings");
+            if (context.TryGetProperty("currentRevalidation", out var revalidation) &&
+                revalidation.ValueKind != JsonValueKind.Null)
+            {
+                Require(revalidation, "provider", "project", "assemblyPath", "pdbPath");
+                if (revalidation.EnumerateObject().Any(item => item.Value.ValueKind != JsonValueKind.String))
+                    throw new InvalidDataException("Artifact current-revalidation recipe must contain string members.");
+            }
             var symbols = context.GetProperty("parseOptions").GetProperty("preprocessorSymbols");
             var features = context.GetProperty("parseOptions").GetProperty("features");
             var mappings = context.GetProperty("pathPolicy").GetProperty("reportRootMappings");

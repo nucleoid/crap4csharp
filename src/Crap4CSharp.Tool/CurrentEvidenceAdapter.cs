@@ -3,6 +3,8 @@ using Crap4CSharp.Core;
 
 internal static class CurrentEvidenceAdapter
 {
+    public const string SupportedRecipeProvider = "sdk-project-context-output-v1";
+
     public static CurrentEvidence Capture(RunManifest manifest, string workspaceRoot,
         Func<string, IReadOnlyList<string>, string>? gitExecutor = null, TimeSpan? gitTimeout = null)
     {
@@ -38,6 +40,65 @@ internal static class CurrentEvidenceAdapter
         // absent so VerifyCurrent returns contextNotRevalidated instead of manufacturing a fresh verification.
         return new CurrentEvidence(revision.RepositoryIdentity, revision.WorkspaceIdentity, revision.Head,
             inputs, new Dictionary<string, string>(StringComparer.Ordinal), false, revision.StateHash);
+    }
+
+    public static async Task<CurrentEvidence> CaptureSupportedAsync(RunManifest manifest, string workspaceRoot,
+        TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var basic = Capture(manifest, workspaceRoot);
+        var root = Path.GetFullPath(workspaceRoot);
+        var hashes = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var expected in manifest.Contexts.OrderBy(item => item.Id, StringComparer.Ordinal))
+        {
+            var recipe = expected.CurrentRevalidation;
+            if (!expected.ReuseRecipeComplete || recipe is null || recipe.Provider != SupportedRecipeProvider)
+                return basic;
+            var project = ResolveRegularFile(root, NormalizeRecipePath(recipe.Project))
+                ?? throw new InvalidDataException($"Current revalidation project is missing: {recipe.Project}");
+            var loaded = await ProjectContextLoader.LoadAsync(new ProjectContextLoadRequest(project,
+                expected.Configuration, expected.Platform, [expected.TargetFramework], true, true, timeout), cancellationToken);
+            if (!loaded.Success) throw new InvalidDataException(loaded.FailureReason ?? "Current project context revalidation failed.");
+            var candidates = loaded.Contexts.Where(context =>
+                string.Equals(context.TargetFramework, expected.TargetFramework, StringComparison.Ordinal) &&
+                string.Equals(context.Configuration, expected.Configuration, StringComparison.Ordinal) &&
+                string.Equals(context.Platform, expected.Platform, StringComparison.Ordinal)).ToArray();
+            if (candidates.Length != 1) throw new InvalidDataException("Current project context did not resolve uniquely.");
+            var current = candidates[0];
+            var expectedSources = expected.Inputs.Where(input => input.Role == "source")
+                .Select(input => (input.LogicalPath, input.Sha256, input.Generated)).OrderBy(item => item.LogicalPath, StringComparer.Ordinal).ToArray();
+            var currentSources = current.Sources.Select(source => (source.LogicalPath,
+                    source.ContentIdentity, source.IsGenerated)).OrderBy(item => item.LogicalPath, StringComparer.Ordinal).ToArray();
+            if (!expectedSources.SequenceEqual(currentSources))
+                throw new InvalidDataException("Current project source membership or content differs from captured tested inputs.");
+            var parse = expected.ParseOptions ?? throw new InvalidDataException("Captured context has no parse options.");
+            if (parse.LanguageVersion != current.LanguageVersion.ToString() ||
+                parse.SourceKind != current.SourceKind.ToString() ||
+                !parse.PreprocessorSymbols.Order(StringComparer.Ordinal).SequenceEqual(current.PreprocessorSymbols.Order(StringComparer.Ordinal)))
+                throw new InvalidDataException("Current project parse context differs from captured tested context.");
+
+            var assembly = ArtifactBundle.ReadBounded(ResolveRegularFile(root, NormalizeRecipePath(recipe.AssemblyPath))
+                ?? throw new InvalidDataException("Current assembly output is missing."), ArtifactBundle.MaxArtifactBytes, null, recipe.AssemblyPath);
+            var pdb = ArtifactBundle.ReadBounded(ResolveRegularFile(root, NormalizeRecipePath(recipe.PdbPath))
+                ?? throw new InvalidDataException("Current PDB output is missing."), ArtifactBundle.MaxArtifactBytes, null, recipe.PdbPath);
+            var build = manifest.Builds.SingleOrDefault(item => item.ContextId == expected.Id)
+                ?? throw new InvalidDataException("Captured context does not have exactly one build binding.");
+            var inspected = ArtifactEvidenceInspector.InspectBuild(System.Collections.Immutable.ImmutableArray.Create(assembly),
+                System.Collections.Immutable.ImmutableArray.Create(pdb));
+            if (CanonicalIdentity.Sha256(assembly) != build.AssemblySha256 ||
+                CanonicalIdentity.Sha256(pdb) != build.PdbSha256 || inspected.ModuleIdentity != build.ModuleIdentity ||
+                inspected.Mvid != build.Mvid || inspected.DebugIdentity != build.DebugIdentity)
+                throw new InvalidDataException("Current compiled output differs from captured tested build evidence.");
+            hashes.Add(expected.Id, expected.ContextHash);
+        }
+        return basic with { ContextHashes = hashes, MembershipRecipeRevalidated = true };
+    }
+
+    private static string NormalizeRecipePath(string value)
+    {
+        if (Path.IsPathRooted(value) || value.Contains('\\') || value.Split('/').Any(part => part is "" or "." or ".."))
+            throw new InvalidDataException("Current revalidation paths must be bounded repository-relative paths.");
+        try { return CanonicalIdentity.NormalizeLogicalPath(value); }
+        catch (ArgumentException exception) { throw new InvalidDataException("Current revalidation path is invalid.", exception); }
     }
 
     private static ObservedRevision ObserveGit(string root, IReadOnlyList<string> inputPaths,

@@ -62,6 +62,14 @@ internal static class CapturedEvaluationInputs
         {
             using var document = JsonDocument.Parse(bytes.ToArray(), new JsonDocumentOptions { MaxDepth = 8 });
             var root = document.RootElement;
+            if (root.TryGetProperty("schemaVersion", out var schema) &&
+                schema.ValueKind == JsonValueKind.String && schema.GetString() == RepositoryPolicy.Version)
+            {
+                var parsed = RepositoryPolicyParser.Parse(bytes.AsSpan(), "policy.json");
+                if (parsed.Policy.Mode != RepositoryPolicyMode.Strict)
+                    throw new InvalidDataException("Captured baseline onboarding policy must be strict.");
+                return new CapturedPolicy(parsed.Policy.Threshold, false);
+            }
             if (root.ValueKind != JsonValueKind.Object || root.GetProperty("version").GetInt32() != 1)
                 throw new InvalidDataException("Captured policy has an unsupported shape.");
             var threshold = root.GetProperty("threshold").GetDouble();

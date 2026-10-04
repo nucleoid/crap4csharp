@@ -67,8 +67,8 @@ public sealed record BaselineDocument(string SchemaVersion, string Ruleset, stri
     }
 
     public static BaselineDocument Generate(string policyHash, string ruleset, string sourceIdentity, string revision,
-        IEnumerable<PolicyObservation> observations) => new(Version, ruleset, policyHash, sourceIdentity, revision,
-        observations.Where(item => item.Crap is not null && item.Crap > 0 && item.Coverage is not null)
+        double threshold, IEnumerable<PolicyObservation> observations) => new(Version, ruleset, policyHash, sourceIdentity, revision,
+        observations.Where(item => item.Crap is not null && item.Crap > threshold && item.Coverage is not null)
             .Select(item => new BaselineEntry(item.Kind, item.EntityKey, item.Rule, item.Ruleset, item.Path,
                 item.BodyChecksum, item.Complexity, item.Coverage!.Value, item.Crap!.Value))
             .OrderBy(item => item.EntityKey, StringComparer.Ordinal).ThenBy(item => item.Rule, StringComparer.Ordinal).ToArray());

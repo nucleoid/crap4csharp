@@ -65,7 +65,9 @@ public sealed record ManifestContext(string Id, string Project, string TargetFra
 {
     public ManifestParseOptions? ParseOptions { get; init; }
     public ManifestPathPolicy? PathPolicy { get; init; }
+    public ManifestCurrentRevalidation? CurrentRevalidation { get; init; }
 }
+public sealed record ManifestCurrentRevalidation(string Provider, string Project, string AssemblyPath, string PdbPath);
 public sealed record ManifestParseOptions(string LanguageVersion, string SourceKind,
     IReadOnlyList<string> PreprocessorSymbols, IReadOnlyDictionary<string, string> Features);
 public sealed record ManifestPathPolicy(string CasePolicy, IReadOnlyList<ManifestReportRootMapping> ReportRootMappings);
@@ -153,6 +155,10 @@ public static class ManifestIdentity
             CanonicalIdentity.Tuple("context", value.Id, value.Project, value.TargetFramework, value.Configuration,
                 value.Platform, value.SourceSetHash, value.ContextHash, value.InputClosureHash,
                 value.ActualCompilerBindingComplete.ToString(), value.ReuseRecipeComplete.ToString())));
+        values.AddRange(manifest.Contexts.Where(value => value.CurrentRevalidation is not null).Select(value =>
+            CanonicalIdentity.Tuple("current-revalidation", value.Id, value.CurrentRevalidation!.Provider,
+                value.CurrentRevalidation.Project, value.CurrentRevalidation.AssemblyPath,
+                value.CurrentRevalidation.PdbPath)));
         values.AddRange(manifest.Contexts.SelectMany(context => context.Inputs.Select(input =>
             CanonicalIdentity.Tuple("context-input", context.Id, InputIdentity(input)))));
         values.AddRange(manifest.Builds.Select(value =>
