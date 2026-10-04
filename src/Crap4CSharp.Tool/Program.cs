@@ -249,13 +249,15 @@ internal static class App
                             .Concat(options.ReuseArtifacts is null ? [] : [options.ReuseArtifacts])
                             .Concat(options.Exemptions is null ? [] : [options.Exemptions])
                             .Concat(options.Policy is null ? [] : [options.Policy]);
-                        mayWrite = IsAbsentOutputDestination(destination, workingDirectory) &&
-                            FindOutputAlias(destination, workingDirectory, inputs, [], null) is null;
+                        mayWrite = FindOutputAlias(destination, workingDirectory, inputs, [], null) is null;
                         if (mayWrite && options.ReuseArtifacts is not null)
                         {
                             mayWrite = false;
                             ArtifactBundle.RejectOutputAliasForLocator(options.ReuseArtifacts, destination,
                                 workingDirectory);
+                            if (options.Command == "check" && options.Policy is not null && options.Base is not null)
+                                PolicyCheckCommand.RejectFailureOutputAlias(options.ReuseArtifacts, options.Policy,
+                                    options.Base, destination, workingDirectory);
                             mayWrite = true;
                         }
                     }

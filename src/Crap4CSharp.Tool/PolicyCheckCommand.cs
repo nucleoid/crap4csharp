@@ -332,6 +332,23 @@ internal static class PolicyCheckCommand
                 "Output path aliases a source or trusted policy overlay.");
     }
 
+    internal static void RejectFailureOutputAlias(string manifestPath, string policyPath, string baseRef,
+        string outputPath, string root)
+    {
+        var bundle = ArtifactBundle.Load(manifestPath, root);
+        ValidateRepositoryPaths(bundle.Manifest);
+        var trusted = TrustedPolicyLoader.LoadFromBase(baseRef, policyPath, repositoryRoot: root);
+        var protectedPaths = bundle.Manifest.Contexts.SelectMany(context => context.Inputs)
+            .Where(input => input.Role == "source" && !input.Generated && input.RepositoryPath is not null)
+            .Select(input => Path.GetFullPath(input.RepositoryPath!, root))
+            .Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
+            .ToArray();
+        var current = new CurrentEvidence("failure-output-alias-check", "failure-output-alias-check", null, [],
+            new Dictionary<string, string>(StringComparer.Ordinal))
+        { ProtectedPaths = protectedPaths };
+        RejectOutputAlias(outputPath, root, trusted, current);
+    }
+
     private readonly record struct ResolvedPolicyScope(IReadOnlyList<ChangedFile> Files, bool Widened,
         IReadOnlyList<string> ProductionExcludedPaths, ScopeRevision Revision);
 }

@@ -96,14 +96,14 @@ public sealed class PolicyCheckCommandTests
     }
 
     [Fact]
-    public async Task FailureOutputNeverOverwritesAnExistingRepositoryFile()
+    public async Task FailureOutputNeverOverwritesAnExplicitInputFile()
     {
         using var directory = TestDirectory.Create("crap4csharp-policy-failure-output");
         var source = Path.Combine(directory.Path, "Gate.cs");
         await File.WriteAllTextAsync(source, "class Gate {}", TestContext.Current.CancellationToken);
         var output = new StringWriter();
 
-        var exit = await global::App.RunAsync(["check", "--reuse-artifacts", "missing.json", "--policy",
+        var exit = await global::App.RunAsync(["check", "Gate.cs", "--reuse-artifacts", "missing.json", "--policy",
             "missing-policy.json", "--base", "HEAD", "--output", "Gate.cs", "--format", "json"],
             directory.Path, output, TextWriter.Null, TestContext.Current.CancellationToken);
 
