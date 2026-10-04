@@ -5,6 +5,7 @@ using Crap4CSharp.Core;
 
 internal static class ArtifactCaptureAdapter
 {
+    public const string CompilerEvidenceProvider = "validated-csc-inputs-v1";
     private static readonly JsonSerializerOptions Json = new()
     { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping, WriteIndented = true };
 
@@ -15,6 +16,11 @@ internal static class ArtifactCaptureAdapter
                 StringComparison.OrdinalIgnoreCase)))
             throw new InvalidDataException("The bundle entry name 'manifest.json' is reserved.");
         manifest = ManifestIdentity.Seal(manifest with { ManifestHash = null });
+        var declared = manifest.Artifacts.Select(artifact => artifact.Locator)
+            .Concat(manifest.Contexts.SelectMany(context => context.Inputs.Select(input => input.Locator)))
+            .ToHashSet(StringComparer.Ordinal);
+        if (!declared.SetEquals(artifacts.Keys))
+            throw new InvalidDataException("Published artifact bytes must exactly match declared bundle locators.");
         var verification = ProvenanceVerifier.VerifyCapture(manifest, artifacts);
         if (verification.Status == ProvenanceStatus.Invalid)
             throw new InvalidDataException($"Cannot publish invalid capture: {string.Join(", ", verification.Reasons)}");
@@ -56,4 +62,43 @@ internal static class ArtifactCaptureAdapter
         if (relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) ||
             Path.IsPathRooted(relative)) throw new InvalidDataException("Artifact locator escapes owned staging.");
     }
+
+    public static CapturePhaseValidation ValidatePhases(
+        string contextId,
+        IReadOnlyList<ManifestInput> authoredBefore,
+        IReadOnlyList<ManifestInput> authoredAfter,
+        IReadOnlyList<ManifestInput> generatedAfter,
+        CompilerInputObservation compilerObservation,
+        bool futureReuseRecipeComplete)
+    {
+        if (compilerObservation.Provider != CompilerEvidenceProvider || !compilerObservation.Complete ||
+            compilerObservation.ContextId != contextId)
+            return new(false, false, compilerObservation.FailureReason ?? "provenance.compilerEvidenceUnsupported");
+        var before = Identities(authoredBefore.Where(input => !input.Generated));
+        var after = Identities(authoredAfter.Where(input => !input.Generated));
+        if (!before.SequenceEqual(after, StringComparer.Ordinal))
+            return new(false, false, "provenance.authoredInputDrift");
+        var expected = Identities(authoredAfter.Concat(generatedAfter));
+        var observed = compilerObservation.Inputs.Select(input =>
+                $"source\n{input.LogicalPath}\n{input.ContentIdentity}\n{input.IsGenerated}")
+            .Order(StringComparer.Ordinal).ToArray();
+        if (!expected.SequenceEqual(observed, StringComparer.Ordinal))
+            return new(false, false, "provenance.compiledInputBindingIncomplete");
+        if (compilerObservation.AssemblyBytes.IsDefaultOrEmpty || compilerObservation.PdbBytes.IsDefaultOrEmpty ||
+            string.IsNullOrWhiteSpace(compilerObservation.ModuleIdentity) ||
+            string.IsNullOrWhiteSpace(compilerObservation.Mvid))
+            return new(false, false, "provenance.compiledOutputBindingIncomplete");
+        return new(true, futureReuseRecipeComplete,
+            futureReuseRecipeComplete ? null : ProvenanceReasonCodes.ReuseRecipeIncomplete);
+    }
+
+    private static string[] Identities(IEnumerable<ManifestInput> values) => values.Select(input =>
+            $"{input.Role}\n{input.LogicalPath}\n{input.Sha256}\n{input.Generated}")
+        .Order(StringComparer.Ordinal).ToArray();
 }
+
+internal sealed record CompilerInputObservation(string Provider, string ContextId,
+    IReadOnlyList<CompiledInputIdentity> Inputs, ImmutableArray<byte> AssemblyBytes,
+    ImmutableArray<byte> PdbBytes, string ModuleIdentity, string Mvid, bool Complete, string? FailureReason);
+
+internal sealed record CapturePhaseValidation(bool ActualBindingComplete, bool Reusable, string? Reason);

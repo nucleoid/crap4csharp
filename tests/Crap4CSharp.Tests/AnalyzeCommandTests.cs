@@ -112,14 +112,19 @@ public sealed class AnalyzeCommandTests
         var build = manifest.Builds[0] with { Id = "build-2", ContextId = "ctx-2" };
         var execution = manifest.Executions[0] with
         { Id = "test-2", ContextId = "ctx-2", BuildId = "build-2" };
-        var coverage = manifest.Artifacts.Single(item => item.Kind == "coverage") with
-        { Id = "coverage-2", ContextId = "ctx-2", BuildId = "build-2", ExecutionId = "test-2" };
+        var secondArtifacts = manifest.Artifacts.Where(item => item.ContextId == "ctx" && item.Kind != "source").Select(item => item with
+        {
+            Id = item.Id + "-2",
+            ContextId = "ctx-2",
+            BuildId = "build-2",
+            ExecutionId = item.ExecutionId is null ? null : "test-2"
+        }).ToArray();
         manifest = ManifestIdentity.Seal(manifest with
         {
             Contexts = [manifest.Contexts[0], second],
             Builds = [manifest.Builds[0], build],
             Executions = [manifest.Executions[0], execution],
-            Artifacts = [.. manifest.Artifacts, coverage],
+            Artifacts = [.. manifest.Artifacts, .. secondArtifacts],
             ManifestHash = null
         });
         WriteManifest(path, manifest);
@@ -187,8 +192,18 @@ public sealed class AnalyzeCommandTests
             <methods><method name="M" signature="()"><lines><line number="1" hits="1" /></lines></method></methods>
             </class></classes></package></packages></coverage>
             """);
+        var assembly = new byte[] { 7 };
+        var pdb = new byte[] { 8 };
+        var trx = new byte[] { 9 };
+        var scope = new byte[] { 10 };
+        var policy = new byte[] { 11 };
         File.WriteAllBytes(Path.Combine(artifacts, "source.bin"), source);
         File.WriteAllBytes(Path.Combine(artifacts, "coverage.xml"), coverage);
+        File.WriteAllBytes(Path.Combine(artifacts, "app.dll"), assembly);
+        File.WriteAllBytes(Path.Combine(artifacts, "app.pdb"), pdb);
+        File.WriteAllBytes(Path.Combine(artifacts, "results.trx"), trx);
+        File.WriteAllBytes(Path.Combine(artifacts, "scope.json"), scope);
+        File.WriteAllBytes(Path.Combine(artifacts, "policy.json"), policy);
         var context = new ManifestContext("ctx", "missing/App.csproj", "net10.0", "Debug", "AnyCPU",
             "sources", "context", "closure", true, true,
             [new ManifestInput("source", "src/C.cs", "artifacts/source.bin", source.Length,
@@ -199,18 +214,29 @@ public sealed class AnalyzeCommandTests
             PathPolicy = new ManifestPathPolicy("sensitive", [])
         };
         var manifest = new RunManifest("1.0", CanonicalIdentity.Algorithm,
-            new ManifestProducer("crap4csharp", "test", ComplexityRules.OrdinaryMethodsV1,
+            new ManifestProducer("crap4csharp", "0.1.0", ComplexityRules.OrdinaryMethodsV1,
                 ProjectAnalysisContext.ProtocolVersion, "coverage-v1", "paths-v1"),
             new ManifestCapture("completed", true, true, []),
             new ManifestRevision("none", "local", "deleted-original", null, null, null),
             [new ManifestRoot("workspace", "workspace", "sensitive")], [context],
-            [new ManifestBuild("build", "ctx", "App", "dll", "mvid", "pdb", "portable-pdb")],
+            [new ManifestBuild("build", "ctx", "App", CanonicalIdentity.Sha256(assembly), "mvid",
+                CanonicalIdentity.Sha256(pdb), "portable-pdb")],
             [new ManifestExecution("test", "ctx", "build", true, 0, 1, 1, 0, 0)],
             [new ManifestArtifact("source", "source", "artifacts/source.bin", source.Length,
                  CanonicalIdentity.Sha256(source), "ctx", null, null, null, null),
              new ManifestArtifact("coverage", "coverage", "artifacts/coverage.xml", coverage.Length,
-                 CanonicalIdentity.Sha256(coverage), "ctx", "build", "test", "cobertura", "line")],
-            new ManifestEvaluationInputs("scope", "policy", null, null), null);
+                 CanonicalIdentity.Sha256(coverage), "ctx", "build", "test", "cobertura", "line"),
+             new ManifestArtifact("assembly", "assembly", "artifacts/app.dll", assembly.Length,
+                 CanonicalIdentity.Sha256(assembly), "ctx", "build", null, null, null),
+             new ManifestArtifact("pdb", "pdb", "artifacts/app.pdb", pdb.Length,
+                 CanonicalIdentity.Sha256(pdb), "ctx", "build", null, null, null),
+             new ManifestArtifact("test-result", "test-result", "artifacts/results.trx", trx.Length,
+                 CanonicalIdentity.Sha256(trx), "ctx", "build", "test", "trx", null),
+             new ManifestArtifact("scope", "scope", "artifacts/scope.json", scope.Length,
+                 CanonicalIdentity.Sha256(scope), null, null, null, "json", null),
+             new ManifestArtifact("policy", "policy", "artifacts/policy.json", policy.Length,
+                 CanonicalIdentity.Sha256(policy), null, null, null, "json", null)],
+            new ManifestEvaluationInputs(CanonicalIdentity.Sha256(scope), CanonicalIdentity.Sha256(policy), null, null), null);
         manifest = ManifestIdentity.Seal(manifest);
         var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true };
         var path = Path.Combine(root, "manifest.json");

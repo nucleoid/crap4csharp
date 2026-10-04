@@ -1,5 +1,6 @@
 using System.Reflection;
 using Crap4CSharp.Core;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 
 internal static class AnalyzeCommand
@@ -26,6 +27,15 @@ internal static class AnalyzeCommand
                 }).ToArray();
                 var parseOptions = ParseOptions(context.ParseOptions!);
                 var pathPolicy = PathPolicy(context.PathPolicy!);
+                var references = context.Inputs.Where(input => input.Role == "reference")
+                    .OrderBy(input => input.LogicalPath, StringComparer.Ordinal).Select(input =>
+                    {
+                        if (!bundle.Bytes.TryGetValue(input.Locator, out var bytes))
+                            throw new InvalidDataException($"Captured reference is missing: {input.LogicalPath}");
+                        try { return MetadataReference.CreateFromImage(bytes); }
+                        catch (BadImageFormatException exception)
+                        { throw new InvalidDataException($"Captured reference is not a valid managed assembly: {input.LogicalPath}", exception); }
+                    }).ToArray();
                 var groups = manifest.Artifacts.Where(item => item.Kind == "coverage" && item.ContextId == context.Id)
                     .GroupBy(item => item.BuildId!, StringComparer.Ordinal)
                     .OrderBy(group => group.Key, StringComparer.Ordinal).ToArray();
@@ -41,7 +51,7 @@ internal static class AnalyzeCommand
                         return new CapturedCoverage(item.Locator, bytes, item.Format!, item.CoordinateKind!);
                     }).ToArray();
                     partitions.Add(manifest.Producer.ComplexityRuleset == ComplexityRules.CallablesV1
-                        ? EvaluateCallables(partitionId, context, build, sources, coverage, parseOptions, pathPolicy, threshold)
+                        ? EvaluateCallables(partitionId, context, build, sources, coverage, references, parseOptions, pathPolicy, threshold)
                         : EvaluateOrdinary(partitionId, sources, coverage, parseOptions, pathPolicy, threshold, provenance,
                             cancellationToken));
                 }
@@ -120,12 +130,13 @@ internal static class AnalyzeCommand
 
     private static ReplayPartition EvaluateCallables(string contextId, ManifestContext manifestContext,
         ManifestBuild build, IReadOnlyList<CapturedSource> sources, IReadOnlyList<CapturedCoverage> coverage,
-        CSharpParseOptions parseOptions, CapturedPathPolicy pathPolicy, double threshold)
+        IReadOnlyList<MetadataReference> references, CSharpParseOptions parseOptions,
+        CapturedPathPolicy pathPolicy, double threshold)
     {
         var context = new CallableAnalysisContext(manifestContext.Project, manifestContext.TargetFramework,
             manifestContext.Configuration, manifestContext.Platform, contextId, parseOptions);
         var inventory = CallableInventory.Merge(sources.Select(source =>
-            CallableInventory.Analyze(source.Text, source.LogicalPath, context, [])).ToArray());
+            CallableInventory.Analyze(source.Text, source.LogicalPath, context, references)).ToArray());
         var sourcePaths = sources.Select(source => source.LogicalPath).ToArray();
         var reports = coverage.SelectMany(report => CoverageReader.Read(report.Bytes.AsSpan(), report.LogicalPath))
             .Select(method => method with

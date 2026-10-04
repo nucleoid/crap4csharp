@@ -17,7 +17,7 @@ accepted. The published test vector is:
 sourceSetHash   352c257a192f9041fefd856032835e63731386e369e327be772c2580a375f928
 inputClosureHash cde09b11c2e1f8023c5fac5f8468a48a42e2fae1fbcc253972ae49a24bb6f80b
 contextHash     7ac8c7682d111361ff8bed3ed526c5b24c71b564f633d81e7ea603bcd7eee3ab
-manifestHash    792fe91028cd56a123d252b7bb040076ea58a422d8095ee022b670e6a97f601b
+manifestHash    37381bd2241d6593aac0040bf4d84cdd80a6bcde7689d90633b7f6c917cd43f0
 ```
 
 Each context records effective language version, source kind, preprocessor symbols, feature flags, logical path case,
@@ -46,6 +46,9 @@ input appeared.
 Coverage reports may union only within one context/build and coordinate representation. Different TFMs,
 configuration/platform/RID, source/context identities, DLL/PDB identities, or line-vs-sequence-point formats do not
 optimistically union. A manifest never upgrades unsupported generated-method mapping into known coverage.
+Every accepted coverage artifact references a successful completed execution and its same-context build. The bundle
+also retains hash-bound assembly, portable PDB, and test-result artifacts for that graph; booleans in the manifest do
+not substitute for those bytes.
 
 ## Assurance limits
 

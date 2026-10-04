@@ -154,6 +154,16 @@ public sealed class ProvenanceTests
     }
 
     [Fact]
+    public void CaptureRejectsAnUnsupportedProducerVersion()
+    {
+        var manifest = Fixture();
+        manifest = manifest with { Producer = manifest.Producer with { ToolVersion = "99.0.0" } };
+
+        Assert.Contains(ProvenanceReasonCodes.ProducerUnsupported,
+            ProvenanceVerifier.VerifyCapture(manifest, FixtureBytes()).Reasons);
+    }
+
+    [Fact]
     public void CanonicalManifestIdentityMatchesPublishedGoldenVector()
     {
         var manifest = Fixture();
@@ -164,21 +174,64 @@ public sealed class ProvenanceTests
             manifest.Contexts[0].InputClosureHash);
         Assert.Equal("7ac8c7682d111361ff8bed3ed526c5b24c71b564f633d81e7ea603bcd7eee3ab",
             manifest.Contexts[0].ContextHash);
-        Assert.Equal("792fe91028cd56a123d252b7bb040076ea58a422d8095ee022b670e6a97f601b",
+        Assert.Equal("37381bd2241d6593aac0040bf4d84cdd80a6bcde7689d90633b7f6c917cd43f0",
             manifest.ManifestHash);
+    }
+
+    [Fact]
+    public void ParseSymbolsAndLogicalCasePolicyArePartOfContextIdentity()
+    {
+        var manifest = Fixture();
+        var changedSymbols = ManifestIdentity.Seal(manifest with
+        {
+            Contexts = [manifest.Contexts[0] with
+            {
+                ParseOptions = manifest.Contexts[0].ParseOptions! with
+                { PreprocessorSymbols = ["DEBUG", "FEATURE"] }
+            }],
+            ManifestHash = null
+        });
+        var changedCase = ManifestIdentity.Seal(manifest with
+        {
+            Contexts = [manifest.Contexts[0] with
+            {
+                PathPolicy = manifest.Contexts[0].PathPolicy! with { CasePolicy = "insensitive" }
+            }],
+            ManifestHash = null
+        });
+
+        Assert.NotEqual(manifest.Contexts[0].ContextHash, changedSymbols.Contexts[0].ContextHash);
+        Assert.NotEqual(manifest.Contexts[0].ContextHash, changedCase.Contexts[0].ContextHash);
+        Assert.NotEqual(manifest.ManifestHash, changedSymbols.ManifestHash);
+        Assert.NotEqual(manifest.ManifestHash, changedCase.ManifestHash);
+    }
+
+    [Fact]
+    public void WindowsCapturedPathResolvesLogicallyWithoutTheOriginalDrive()
+    {
+        var result = CapturedLogicalPathResolver.Resolve(@"C:\agent\repo\src\C.cs", ["src/C.cs"],
+            new CapturedPathPolicy(false,
+                [new ManifestReportRootMapping(@"C:\agent\repo", "")]));
+
+        Assert.Equal("src/C.cs", result);
     }
 
     private static Dictionary<string, ImmutableArray<byte>> FixtureBytes() => new(StringComparer.Ordinal)
     {
         ["artifacts/source.bin"] = ImmutableArray.Create<byte>(1, 2, 3),
-        ["artifacts/coverage.xml"] = ImmutableArray.Create<byte>(4, 5, 6)
+        ["artifacts/coverage.xml"] = ImmutableArray.Create<byte>(4, 5, 6),
+        ["artifacts/app.dll"] = ImmutableArray.Create<byte>(7),
+        ["artifacts/app.pdb"] = ImmutableArray.Create<byte>(8),
+        ["artifacts/results.trx"] = ImmutableArray.Create<byte>(9),
+        ["artifacts/scope.json"] = ImmutableArray.Create<byte>(10),
+        ["artifacts/policy.json"] = ImmutableArray.Create<byte>(11)
     };
 
     private static RunManifest Fixture()
     {
         var sourceHash = CanonicalIdentity.Sha256([1, 2, 3]);
         var manifest = new RunManifest("1.0", "sha256-canonical-v1",
-            new ManifestProducer("crap4csharp", "test", ComplexityRules.CallablesV1,
+            new ManifestProducer("crap4csharp", "0.1.0", ComplexityRules.CallablesV1,
                 ProjectAnalysisContext.ProtocolVersion, "coverage-v1", "paths-v1"),
             new ManifestCapture("completed", true, true, []),
             new ManifestRevision("git", "repo", "worktree", "abc", null, null),
@@ -191,13 +244,24 @@ public sealed class ProvenanceTests
                     new Dictionary<string, string>(StringComparer.Ordinal)),
                 PathPolicy = new ManifestPathPolicy("sensitive", [])
             }],
-            [new ManifestBuild("build", "ctx", "module", "dll", "mvid", "pdb", "portable-pdb")],
+            [new ManifestBuild("build", "ctx", "module", CanonicalIdentity.Sha256([7]), "mvid",
+                CanonicalIdentity.Sha256([8]), "portable-pdb")],
             [new ManifestExecution("test", "ctx", "build", true, 0, 1, 1, 0, 0)],
             [new ManifestArtifact("source", "source", "artifacts/source.bin", 3, sourceHash,
                     "ctx", null, null, null, null),
              new ManifestArtifact("coverage", "coverage", "artifacts/coverage.xml", 3,
-                    CanonicalIdentity.Sha256([4, 5, 6]), "ctx", "build", "test", "opencover", "sequence-point")],
-            new ManifestEvaluationInputs("scope", "policy", null, null), null);
+                    CanonicalIdentity.Sha256([4, 5, 6]), "ctx", "build", "test", "opencover", "sequence-point"),
+             new ManifestArtifact("assembly", "assembly", "artifacts/app.dll", 1, CanonicalIdentity.Sha256([7]),
+                    "ctx", "build", null, null, null),
+             new ManifestArtifact("pdb", "pdb", "artifacts/app.pdb", 1, CanonicalIdentity.Sha256([8]),
+                    "ctx", "build", null, null, null),
+             new ManifestArtifact("test-result", "test-result", "artifacts/results.trx", 1, CanonicalIdentity.Sha256([9]),
+                    "ctx", "build", "test", "trx", null),
+             new ManifestArtifact("scope", "scope", "artifacts/scope.json", 1, CanonicalIdentity.Sha256([10]),
+                    null, null, null, "json", null),
+             new ManifestArtifact("policy", "policy", "artifacts/policy.json", 1, CanonicalIdentity.Sha256([11]),
+                    null, null, null, "json", null)],
+            new ManifestEvaluationInputs(CanonicalIdentity.Sha256([10]), CanonicalIdentity.Sha256([11]), null, null), null);
         return ManifestIdentity.Seal(manifest);
     }
 

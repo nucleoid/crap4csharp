@@ -91,6 +91,8 @@ public static class ManifestIdentity
     public const string SchemaVersion = "1.0";
     public const string CoverageProtocol = "coverage-v1";
     public const string PathProtocol = "paths-v1";
+    public const int ProducerMajorVersion = 0;
+    public const int ProducerMinorVersion = 1;
 
     public static string SourceSetHash(ManifestContext context) => CanonicalIdentity.Set("manifest-source-set-v1",
         context.Inputs.Where(input => input.Role == "source").Select(InputIdentity));
@@ -221,13 +223,15 @@ public static class ProvenanceVerifier
             reasons.Add(ProvenanceReasonCodes.IdentityAlgorithmUnsupported);
         if (requiredRuleset is not null && manifest.Producer.ComplexityRuleset != requiredRuleset)
             reasons.Add(ProvenanceReasonCodes.RulesetMismatch);
-        if (manifest.Producer.Tool != "crap4csharp" ||
+        if (manifest.Producer.Tool != "crap4csharp" || !SupportedToolVersion(manifest.Producer.ToolVersion) ||
             manifest.Producer.ComplexityRuleset is not (ComplexityRules.OrdinaryMethodsV1 or ComplexityRules.CallablesV1) ||
             manifest.Producer.ContextProtocol != ProjectAnalysisContext.ProtocolVersion ||
             manifest.Producer.CoverageProtocol != ManifestIdentity.CoverageProtocol ||
             manifest.Producer.PathProtocol != ManifestIdentity.PathProtocol)
             reasons.Add(ProvenanceReasonCodes.ProducerUnsupported);
         if (manifest.Capture.State != "completed" || !manifest.Capture.CaptureConsistent)
+            reasons.Add(ProvenanceReasonCodes.CaptureIncomplete);
+        if (manifest.Capture.FailureReasons.Count > 0)
             reasons.Add(ProvenanceReasonCodes.CaptureIncomplete);
         if (!manifest.Capture.ActualBindingComplete || manifest.Contexts.Any(context => !context.ActualCompilerBindingComplete))
             reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
@@ -246,6 +250,8 @@ public static class ProvenanceVerifier
                 item.BuildId is not null && !builds.Contains(item.BuildId) ||
                 item.ExecutionId is not null && !executions.Contains(item.ExecutionId)))
             reasons.Add(ProvenanceReasonCodes.DanglingReference);
+        if (manifest.Roots.Count == 0 || manifest.Roots.Any(root => root.CasePolicy is not ("sensitive" or "insensitive")))
+            reasons.Add(ProvenanceReasonCodes.ContextHashChanged);
         if (manifest.ManifestHash is null) reasons.Add(ProvenanceReasonCodes.ManifestHashMissing);
         else if (manifest.ManifestHash != ManifestIdentity.ManifestHash(manifest with { ManifestHash = null }))
             reasons.Add(ProvenanceReasonCodes.ManifestHashChanged);
@@ -259,10 +265,33 @@ public static class ProvenanceVerifier
                 reasons.Add(ProvenanceReasonCodes.ContextHashChanged);
             var contextBuilds = manifest.Builds.Where(build => build.ContextId == context.Id).ToArray();
             var contextExecutions = manifest.Executions.Where(execution => execution.ContextId == context.Id).ToArray();
+            var contextCoverage = manifest.Artifacts.Where(artifact => artifact.Kind == "coverage" &&
+                artifact.ContextId == context.Id).ToArray();
             if (contextBuilds.Length == 0) reasons.Add(ProvenanceReasonCodes.BuildEvidenceMissing);
             if (contextExecutions.Length == 0) reasons.Add(ProvenanceReasonCodes.TestExecutionIncomplete);
+            if (contextCoverage.Length == 0 || context.Inputs.All(input => input.Role != "source"))
+                reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
+            if (context.Inputs.Where(input => input.Role == "source").Any(input =>
+                    !string.Equals(input.Encoding, "utf-8", StringComparison.OrdinalIgnoreCase)))
+                reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
+            if (context.PathPolicy is { CasePolicy: "sensitive" or "insensitive" } pathPolicy)
+            {
+                var comparer = pathPolicy.CasePolicy == "sensitive" ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
+                if (context.Inputs.GroupBy(input => input.LogicalPath, comparer).Any(group => group.Count() > 1))
+                    reasons.Add(ProvenanceReasonCodes.DuplicateIdentity);
+            }
         }
+        if (manifest.Builds.Any(build => string.IsNullOrWhiteSpace(build.ModuleIdentity) ||
+                string.IsNullOrWhiteSpace(build.AssemblySha256) || string.IsNullOrWhiteSpace(build.PdbSha256) ||
+                manifest.Artifacts.Count(artifact => artifact.Kind == "assembly" && artifact.ContextId == build.ContextId &&
+                    artifact.BuildId == build.Id && artifact.Sha256 == build.AssemblySha256) != 1 ||
+                manifest.Artifacts.Count(artifact => artifact.Kind == "pdb" && artifact.ContextId == build.ContextId &&
+                    artifact.BuildId == build.Id && artifact.Sha256 == build.PdbSha256) != 1))
+            reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
         if (manifest.Executions.Any(item => !item.Completed || item.ExitCode != 0 || item.FailedTests != 0 || item.TotalTests <= 0 ||
+                item.PassedTests + item.FailedTests + item.SkippedTests != item.TotalTests ||
+                manifest.Artifacts.Count(artifact => artifact.Kind == "test-result" && artifact.ContextId == item.ContextId &&
+                    artifact.BuildId == item.BuildId && artifact.ExecutionId == item.Id) != 1 ||
                 !manifest.Builds.Any(build => build.Id == item.BuildId && build.ContextId == item.ContextId)))
             reasons.Add(ProvenanceReasonCodes.TestExecutionIncomplete);
 
@@ -271,10 +300,17 @@ public static class ProvenanceVerifier
             var build = manifest.Builds.SingleOrDefault(item => item.Id == coverage.BuildId);
             var execution = manifest.Executions.SingleOrDefault(item => item.Id == coverage.ExecutionId);
             if (coverage.ContextId is null || build is null || execution is null ||
+                string.IsNullOrWhiteSpace(coverage.Format) || string.IsNullOrWhiteSpace(coverage.CoordinateKind) ||
                 build.ContextId != coverage.ContextId || execution.ContextId != coverage.ContextId ||
                 execution.BuildId != build.Id || !execution.Completed || execution.ExitCode != 0 || execution.FailedTests != 0)
                 reasons.Add(ProvenanceReasonCodes.DanglingReference);
         }
+        ValidateEvaluationArtifact("scope", manifest.EvaluationInputs.ScopeHash, manifest.Artifacts, reasons);
+        ValidateEvaluationArtifact("policy", manifest.EvaluationInputs.PolicyHash, manifest.Artifacts, reasons);
+        if (manifest.EvaluationInputs.BaselineHash is not null)
+            ValidateEvaluationArtifact("baseline", manifest.EvaluationInputs.BaselineHash, manifest.Artifacts, reasons);
+        if (manifest.EvaluationInputs.ExemptionsHash is not null)
+            ValidateEvaluationArtifact("exemptions", manifest.EvaluationInputs.ExemptionsHash, manifest.Artifacts, reasons);
 
         foreach (var artifact in manifest.Artifacts)
         {
@@ -300,6 +336,21 @@ public static class ProvenanceVerifier
         if (manifest.Contexts.Any(context => context.ParseOptions is null || context.PathPolicy is null))
             reasons.Add(ProvenanceReasonCodes.ContextHashChanged);
         return reasons;
+    }
+
+    private static bool SupportedToolVersion(string value)
+    {
+        var stable = value.Split('+', 2)[0].Split('-', 2)[0];
+        return Version.TryParse(stable, out var version) && version.Major == ManifestIdentity.ProducerMajorVersion &&
+            version.Minor == ManifestIdentity.ProducerMinorVersion;
+    }
+
+    private static void ValidateEvaluationArtifact(string kind, string expectedHash,
+        IReadOnlyList<ManifestArtifact> artifacts, ICollection<string> reasons)
+    {
+        if (artifacts.Count(artifact => artifact.Kind == kind && artifact.Sha256 == expectedHash &&
+                artifact.ContextId is null && artifact.BuildId is null && artifact.ExecutionId is null) != 1)
+            reasons.Add(ProvenanceReasonCodes.ArtifactMissing);
     }
 
     private static void ValidateUnique(IEnumerable<string> ids, ICollection<string> reasons)
