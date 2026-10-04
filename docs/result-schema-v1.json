@@ -7,7 +7,7 @@
   "properties": {
     "schemaVersion": { "type": "string", "pattern": "^1\\.[0-9]+$" },
     "toolVersion": { "type": "string", "minLength": 1 },
-    "complexityRulesetVersion": { "const": "ordinary-methods-v1" },
+    "complexityRulesetVersion": { "enum": ["ordinary-methods-v1", "callables-v1"] },
     "evaluation": { "$ref": "#/$defs/evaluation" },
     "run": { "$ref": "#/$defs/run" }
   },
@@ -39,7 +39,11 @@
         "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact" } },
         "decision": { "$ref": "#/$defs/decision" },
         "coveragePathPolicy": { "$ref": "#/$defs/coveragePathPolicy" },
-        "coverageDiagnostics": { "type": "array", "items": { "$ref": "#/$defs/coverageDiagnostic" } }
+        "coverageDiagnostics": { "type": "array", "items": { "$ref": "#/$defs/coverageDiagnostic" } },
+        "callables": { "type": "array", "items": { "type": "object" } },
+        "families": { "type": "array", "items": { "type": "object" } },
+        "callableExemptions": { "type": "array", "items": { "type": "object" } },
+        "exemptionErrors": { "type": "array", "items": { "type": "string" } }
       }, "additionalProperties": true
     },
     "context": {

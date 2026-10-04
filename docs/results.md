@@ -10,7 +10,7 @@ The top-level `schemaVersion` is currently `1.0`. Readers must reject unsupporte
 
 Explicit coverage inputs retain their normalized workspace-relative paths. Coverage produced in an invocation-owned temporary directory uses a content-addressed logical path under `<generated>/coverage/` in `evaluation.artifacts`; its physical temporary location appears only in `run.artifacts`.
 
-Legacy syntax-only contexts use `analysisMode: "syntaxOnly"` and null project, target framework, configuration, source-set identity, and external-root identity. The tool's own `net10.0` target is not presented as the analyzed consumer's target.
+Syntax-only contexts use `analysisMode: "syntaxOnly"`. Modern callable adapters label target framework and configuration `unknown` rather than presenting the tool's own target as the analyzed consumer's context; legacy syntax-only contexts retain null project/target/configuration fields.
 
 ## Checks, decisions, and exits
 

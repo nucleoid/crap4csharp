@@ -52,4 +52,4 @@ Normalized results use stable codes and logical identities. Raw report/local pat
 | `coverage.noMatchingMethod` | No compatible source observation can be attributed |
 | `coverage.unavailable` | Coverage capture itself was unavailable |
 
-Unknown coverage remains `null`, never zero. `--allow-missing-coverage` permits method-level unknowns while known scores still gate; invalid mappings, malformed paths, and unsafe containment remain operational failures.
+Unknown coverage remains `null`, never zero. Under legacy `ordinary-methods-v1`, `--allow-missing-coverage` permits method-level unknowns while known scores still gate; `callables-v1` rejects that option. Invalid mappings, malformed paths, and unsafe containment remain operational failures.

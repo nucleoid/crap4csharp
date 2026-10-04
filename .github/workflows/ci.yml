@@ -21,4 +21,16 @@ jobs:
       - run: dotnet restore Crap4CSharp.slnx
       - run: dotnet build Crap4CSharp.slnx -c Release --no-restore
       - run: dotnet test Crap4CSharp.slnx -c Release --no-build
+      - name: Build top-level callable fixture
+        run: dotnet build samples/CallableTopLevel/CallableTopLevel.csproj -c Release -m:1 -p:RestoreDisableParallel=true
+      - name: Collect Debug callable coverage (OpenCover + Cobertura)
+        run: dotnet test samples/Fixture/Fixture.Tests/Fixture.Tests.csproj -c Debug -m:1 -p:RestoreDisableParallel=true --collect:"XPlat Code Coverage" --results-directory artifacts/callable-debug -- 'DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover,cobertura'
+      - name: Collect Release callable coverage (OpenCover + Cobertura)
+        run: dotnet test samples/Fixture/Fixture.Tests/Fixture.Tests.csproj -c Release --no-restore -m:1 -p:RestoreDisableParallel=true --collect:"XPlat Code Coverage" --results-directory artifacts/callable-release -- 'DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover,cobertura'
+      - name: Assert callable coverage script exit semantics
+        shell: pwsh
+        run: ./scripts/test-assert-callable-coverage.ps1 -RepoRoot $PWD
+      - name: Assert real callable coverage capability table
+        shell: pwsh
+        run: ./scripts/assert-callable-coverage.ps1 -RepoRoot $PWD -DebugResults artifacts/callable-debug -ReleaseResults artifacts/callable-release
       - run: dotnet pack src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj -c Release --no-build -o artifacts

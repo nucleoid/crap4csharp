@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Serialization;
 
 namespace Crap4CSharp.Core;
 
@@ -27,6 +28,14 @@ public static class CoverageReasonCodes
     public const string UnsupportedMultiDocumentMapping = "coverage.unsupportedMultiDocumentMapping";
     public const string ContextMismatch = "coverage.contextMismatch";
     public const string ContextUnbound = "coverage.contextUnbound";
+    public const string AmbiguousCallableOwnership = "coverage.ambiguousCallableOwnership";
+    public const string UnsupportedCallable = "scope.unsupportedCallable";
+    public const string PdbUnavailable = "coverage.pdbUnavailable";
+    public const string PdbMalformed = "coverage.pdbMalformed";
+    public const string PeUnavailable = "coverage.peUnavailable";
+    public const string PeMalformed = "coverage.peMalformed";
+    public const string PdbIdentityMismatch = "coverage.pdbIdentityMismatch";
+    public const string SourceChecksumMismatch = "coverage.sourceChecksumMismatch";
     public const string Unavailable = "coverage.unavailable";
 }
 
@@ -51,6 +60,38 @@ public sealed record EvaluationSection(
 {
     public CoveragePathPolicyResult CoveragePathPolicy { get; init; } = new("auto", []);
     public IReadOnlyList<CoverageDiagnostic> CoverageDiagnostics { get; init; } = [];
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<CallableResult>? Callables { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<CallableFamilyMetric>? Families { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<CallableExemptionMatch>? CallableExemptions { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? ExemptionErrors { get; init; }
+}
+
+public sealed record CallableResult(
+    string CallableId,
+    string ObservationId,
+    string Kind,
+    string? ParentId,
+    string ContextId,
+    string Path,
+    CallableSourceSpan Span,
+    int? Complexity,
+    string Applicability,
+    string CoverageStatus,
+    double? Coverage,
+    double? Crap,
+    string? CoverageReason,
+    string CoverageCapability,
+    string BodyChecksum)
+{
+    public string Ruleset { get; init; } = ComplexityRules.CallablesV1;
+    public string? SemanticSignature { get; init; }
+    public IReadOnlyList<string> Documents { get; init; } = [];
+    public string? MappingEvidenceKind { get; init; }
+    public IReadOnlyList<string> FamilyIds { get; init; } = [];
 }
 
 public sealed record PolicyOptions(double Threshold, bool AllowMissingCoverage, string ComparisonOperator = "gt");

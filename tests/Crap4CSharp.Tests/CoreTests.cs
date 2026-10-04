@@ -198,6 +198,62 @@ public sealed class CoreTests : IDisposable
     }
 
     [Fact]
+    public void ReadsCecilCustomModifiersWithoutCorruptingMethodIdentity()
+    {
+        var source = Write("Modified.cs", """
+            class C {
+              private int value;
+              int P { get => value; init { value = 1; } }
+              ref readonly int Current => ref value;
+              public virtual int M(in int item) => item;
+              public virtual int N(string text, in int item) => text.Length + item;
+            }
+            """);
+        var openCover = Write("modified-open.xml", $"""
+            <CoverageSession><Modules><Module><Files><File uid="1" fullPath="{System.Security.SecurityElement.Escape(source)}" /></Files><Classes><Class><FullName>C</FullName><Methods>
+            <Method><Name>System.Void modreq(System.Runtime.CompilerServices.IsExternalInit) C::set_P(System.Int32)</Name><SequencePoints><SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method>
+            <Method><Name>System.Int32&amp; modreq(System.Runtime.InteropServices.InAttribute) C::get_Current()</Name><SequencePoints><SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method>
+            <Method><Name>System.Int32 C::M(System.Int32&amp; modreq(System.Runtime.InteropServices.InAttribute))</Name><SequencePoints><SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints><FileRef uid="1" /></Method>
+            </Methods></Class></Classes></Module></Modules></CoverageSession>
+            """);
+        var cobertura = Write("modified-cobertura.xml", $"""
+            <coverage><packages><package name="module"><classes><class name="C" filename="{System.Security.SecurityElement.Escape(source)}"><methods>
+            <method name="set_P" signature="(System.Int32)"><lines><line number="3" hits="1" /></lines></method>
+            <method name="get_Current" signature="()"><lines><line number="4" hits="1" /></lines></method>
+            <method name="M" signature="(System.Runtime.InteropServices.InAttribute))"><lines><line number="5" hits="1" /></lines></method>
+            <method name="N" signature="(System.Runtime.InteropServices.InAttribute))"><lines><line number="6" hits="1" /></lines></method>
+            </methods></class></classes></package></packages></coverage>
+            """);
+
+        var openMethods = CoverageReader.Read(openCover);
+        var coberturaMethods = CoverageReader.Read(cobertura);
+
+        Assert.Equal(["get_Current", "M", "set_P"], openMethods.Select(item => item.MethodName).Order().ToArray());
+        Assert.Equal([0, 1, 1], openMethods.Select(item => item.ParameterCount).Order().ToArray());
+        Assert.Null(Assert.Single(coberturaMethods, item => item.MethodName == "M").ParameterCount);
+        Assert.Null(Assert.Single(coberturaMethods, item => item.MethodName == "N").ParameterCount);
+
+        var root = Path.GetDirectoryName(source)!;
+        var pathPolicy = PathIdentityPolicy.Sensitive;
+        var pathResolver = new CoveragePathResolver(pathPolicy,
+            new CoverageSourceInventory(pathPolicy,
+                [new CoverageSourceEntry(source, source, root, source, root, null)],
+                [new CoverageSourceRoot(root, root)], root), [], CoveragePathCase.Auto);
+        var reports = CoverageReader.ReadDetailed(cobertura, pathResolver).Methods
+            .Select(item => item with { ContextId = "ctx" }).ToArray();
+        var inventory = CallableInventory.Analyze(File.ReadAllText(source), source,
+            new CallableAnalysisContext("App.csproj", "net10.0", "Debug", "AnyCPU", "ctx",
+                Microsoft.CodeAnalysis.CSharp.CSharpParseOptions.Default));
+
+        var resolved = CallableCoverageResolver.Resolve(inventory, reports);
+
+        Assert.Equal("known", Assert.Single(resolved.Observations, item => item.ObservationId ==
+            Assert.Single(inventory.Callables, callable => callable.Name == "M").ObservationId).Status);
+        Assert.Equal("known", Assert.Single(resolved.Observations, item => item.ObservationId ==
+            Assert.Single(inventory.Callables, callable => callable.Name == "N").ObservationId).Status);
+    }
+
+    [Fact]
     public async Task MissingCoverageIsOperationalFailureUnlessExplicitlyAllowed()
     {
         var source = Write("Gate.cs", "class C {\n int Covered() => 1;\n int Missing() => 2;\n}");

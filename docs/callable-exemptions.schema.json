@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/nucleoid/crap4csharp/blob/main/docs/callable-exemptions.schema.json",
+  "title": "Crap4CSharp exact callable exemptions v1",
+  "type": "object",
+  "required": ["version", "entries"],
+  "properties": {
+    "version": { "const": "callable-exemptions-v1" },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["ruleset", "contextId", "targetFramework", "callableId", "bodyChecksum", "reasonCode", "justification", "reviewReference", "familyIds"],
+        "properties": {
+          "ruleset": { "const": "callables-v1" },
+          "contextId": { "type": "string", "minLength": 1 },
+          "targetFramework": { "type": "string", "minLength": 1 },
+          "callableId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "bodyChecksum": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "reasonCode": { "enum": ["coverage.unsupportedGeneratedMapping", "scope.unsupportedCallable", "coverage.ambiguousCallableOwnership"] },
+          "justification": { "type": "string", "minLength": 1 },
+          "reviewReference": { "type": "string", "minLength": 1 },
+          "familyIds": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

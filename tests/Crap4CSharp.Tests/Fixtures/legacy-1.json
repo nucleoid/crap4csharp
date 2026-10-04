@@ -1,0 +1,9 @@
+{
+  "ruleset": "ordinary-methods-v1",
+  "source": "class Legacy { Legacy() { if (true) { } } int Outer(int x) { int Local(int y) => y > 0 ? 1 : 0; System.Func<int,int> f = y => y > 0 ? 1 : 0; if (x > 0) return Local(x); return f(x); } int Expression(int x) => x > 0 ? 1 : 0; }",
+  "methods": [
+    { "displayName": "Legacy.Expression(int)", "complexity": 2 },
+    { "displayName": "Legacy.Outer(int)", "complexity": 2 }
+  ],
+  "excludedKinds": ["constructor", "local-function", "lambda"]
+}

@@ -101,6 +101,25 @@ public sealed class CoverageDiagnosticTests : IDisposable
     }
 
     [Fact]
+    public void OpenCoverContainingTypeArityIsNotMethodGenericArity()
+    {
+        var source = Write("Nested.cs", "class Outer { class Inner<T> { T Echo(T value) => value; } }");
+        var report = Write("nested-generic.xml", $"""
+            <CoverageSession><Modules><Module><ModuleName>Fixture</ModuleName><Files>
+            <File uid="1" fullPath="{Escape(source)}" />
+            </Files><Classes><Class><FullName>Outer/Inner`1</FullName><Methods><Method>
+            <Name>T Outer/Inner`1::Echo(T)</Name><FileRef uid="1" />
+            <SequencePoints><SequencePoint vc="1" sl="1" fileid="1" /></SequencePoints>
+            </Method></Methods></Class></Classes></Module></Modules></CoverageSession>
+            """);
+
+        var method = Assert.Single(CoverageReader.ReadDetailed(report, Resolver([source])).Methods);
+
+        Assert.Null(method.GenericArity);
+        Assert.Equal("Echo", method.MethodName);
+    }
+
+    [Fact]
     public void MissingOpenCoverFileIdProducesStableMissingPathEvidence()
     {
         var report = Write("missing-id.xml", """
