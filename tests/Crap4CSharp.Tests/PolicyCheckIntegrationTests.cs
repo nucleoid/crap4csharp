@@ -8,15 +8,22 @@ namespace Crap4CSharp.Tests;
 
 public sealed class PolicyCheckIntegrationTests
 {
+#if DEBUG
+    private const string BuildConfiguration = "Debug";
+    private const string PolicyLogical = "tests/Fixtures/policy-check/policy.json";
+#else
+    private const string BuildConfiguration = "Release";
+    private const string PolicyLogical = "tests/Fixtures/policy-check/policy-release.json";
+#endif
+
     [Fact]
     public async Task TrustedCheckRunsEndToEndAgainstFreshCurrentProjectEvidence()
     {
         var repository = RepositoryRoot();
         const string projectLogical = "tests/Crap4CSharp.ProvenanceFixture/Crap4CSharp.ProvenanceFixture.csproj";
-        const string policyLogical = "tests/Fixtures/policy-check/policy.json";
         var project = Path.Combine(repository, projectLogical.Replace('/', Path.DirectorySeparatorChar));
         var projectDirectory = Path.GetDirectoryName(project)!;
-        var request = new ProjectContextLoadRequest(project, "Debug", "AnyCPU", ["net10.0"], true, true,
+        var request = new ProjectContextLoadRequest(project, BuildConfiguration, "AnyCPU", ["net10.0"], true, true,
             TimeSpan.FromMinutes(2));
         var loaded = await ProjectContextLoader.LoadAsync(request, TestContext.Current.CancellationToken);
         Assert.True(loaded.Success, loaded.FailureReason ?? string.Join(Environment.NewLine, loaded.Diagnostics));
@@ -51,8 +58,8 @@ public sealed class PolicyCheckIntegrationTests
         var scope = ImmutableArray.Create(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
         { version = 1, sources = inputs.Where(item => !item.Generated).Select(item => item.LogicalPath).ToArray() })));
         var policyBytes = await File.ReadAllBytesAsync(Path.Combine(repository,
-            policyLogical.Replace('/', Path.DirectorySeparatorChar)), TestContext.Current.CancellationToken);
-        var policy = RepositoryPolicyParser.Parse(policyBytes, policyLogical);
+            PolicyLogical.Replace('/', Path.DirectorySeparatorChar)), TestContext.Current.CancellationToken);
+        var policy = RepositoryPolicyParser.Parse(policyBytes, PolicyLogical);
         var canonicalPolicy = ImmutableArray.Create(policy.CanonicalBytes);
         foreach (var item in new[]
         {
@@ -108,7 +115,7 @@ public sealed class PolicyCheckIntegrationTests
         var output = new StringWriter();
         var error = new StringWriter();
 
-        var exit = await global::App.RunAsync(["check", "--reuse-artifacts", locator, "--policy", policyLogical,
+        var exit = await global::App.RunAsync(["check", "--reuse-artifacts", locator, "--policy", PolicyLogical,
             "--base", "HEAD", "--format", "json"], repository, output, error,
             TestContext.Current.CancellationToken);
 

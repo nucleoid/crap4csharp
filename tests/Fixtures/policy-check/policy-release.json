@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "repository-policy-v1",
+  "mode": "strict",
+  "productionProjects": ["tests/Crap4CSharp.ProvenanceFixture/Crap4CSharp.ProvenanceFixture.csproj"],
+  "testProjects": ["tests/Crap4CSharp.ProvenanceFixture/Crap4CSharp.ProvenanceFixture.csproj"],
+  "configuration": "Release",
+  "targetFrameworks": ["net10.0"],
+  "scope": "all",
+  "threshold": 100,
+  "missingCoverage": "fail",
+  "requiredChecks": ["tests", "coverage", "crap"],
+  "exclusions": [],
+  "ruleset": "callables-v1",
+  "exemptionFiles": []
+}
