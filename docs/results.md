@@ -15,9 +15,13 @@ Syntax-only contexts use `analysisMode: "syntaxOnly"`. Modern callable adapters 
 Captured replay adds `evaluation.provenance` with `status`
 (`unverified|captured|verified|invalid`), `basis`
 (`none|captureConsistency|currentWorkspaceMatch`), `postflightVerified`,
-`reusable`, and sorted `reasons`. `captured` establishes consistency among
-the retained source, PE/PDB, coverage and TRX evidence; it does not claim that
-the current checkout was inspected. Current-workspace `verified` is reserved
+`reusable`, and sorted `reasons`. `captured` establishes byte identity and the
+document/method/line relationships that can be derived independently from the retained
+source, PE/PDB, coverage and TRX artifacts. The manifest records which successful
+execution produced a coverage artifact; neither that coverage-to-execution association
+nor the test assembly's relationship to the production assembly is derived from the
+artifact bytes. `captured` does not claim that the current checkout was inspected.
+Current-workspace `verified` is reserved
 for the future project-aware check producer. The result schema treats this as
 an additive field within v1.
 

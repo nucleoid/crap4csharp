@@ -283,6 +283,58 @@ public sealed class ProvenanceTests
     }
 
     [Fact]
+    public void CaptureRejectsLineCoverageThatOmitsAStatementLine()
+    {
+        var manifest = Fixture();
+        var bytes = FixtureBytes();
+        var incomplete = "<coverage><packages><package name=\"Crap4CSharp.ProvenanceFixture\"><classes>" +
+            "<class name=\"Crap4CSharp.ProvenanceFixture.CompiledEvidence\" " +
+            "filename=\"tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs\"><methods>" +
+            "<method name=\"M\" signature=\"()\"><lines><line number=\"9\" hits=\"1\" /></lines></method>" +
+            "</methods></class></classes></package></packages></coverage>";
+        ReplaceCoverage(ref manifest, bytes, incomplete, "cobertura", "line");
+
+        Assert.Contains(ProvenanceReasonCodes.IncompatiblePointRepresentation,
+            ProvenanceVerifier.VerifyCapture(manifest, bytes).Reasons);
+    }
+
+    [Fact]
+    public void CapturedPdbPathMapIsAppliedWithoutHostSuffixGuessing()
+    {
+        var parts = FixtureParts();
+        Assert.All(parts.Build.Documents.Keys, path => Assert.StartsWith("/_/", path));
+        Assert.Equal(ProvenanceStatus.Captured,
+            ProvenanceVerifier.VerifyCapture(Fixture(), parts.Bytes).Status);
+    }
+
+    [Fact]
+    public void CapturedPdbPathWithoutAnExplicitMappingIsRejected()
+    {
+        var manifest = Fixture();
+        manifest = ManifestIdentity.Seal(manifest with
+        {
+            Contexts = [manifest.Contexts[0] with
+            {
+                PathPolicy = new ManifestPathPolicy("sensitive", [])
+            }],
+            ManifestHash = null
+        });
+
+        Assert.Contains(ProvenanceReasonCodes.ActualBindingIncomplete,
+            ProvenanceVerifier.VerifyCapture(manifest, FixtureBytes()).Reasons);
+    }
+
+    [Fact]
+    public void LogicalMappingsDistinguishRootAndNestedSameNamedFiles()
+    {
+        string[] sources = ["Helpers.cs", "Sub/Helpers.cs"];
+        var policy = new CapturedPathPolicy(true, [new ManifestReportRootMapping("/repo", "")]);
+
+        Assert.Equal("Helpers.cs", CapturedLogicalPathResolver.Resolve("/repo/Helpers.cs", sources, policy));
+        Assert.Equal("Sub/Helpers.cs", CapturedLogicalPathResolver.Resolve("/repo/Sub/Helpers.cs", sources, policy));
+    }
+
+    [Fact]
     public void CoverletOpenCoverLineProjectionMatchesPortablePdb()
     {
         var manifest = Fixture();
@@ -304,17 +356,13 @@ public sealed class ProvenanceTests
         var report = ImmutableArray.Create(File.ReadAllBytes(reportPath));
 
         var build = ArtifactEvidenceInspector.InspectBuild(assembly, pdb);
-        var unmatchedNames = CoverageReader.Read(report.AsSpan(), reportPath)
-            .Where(item => item.ModuleIdentity == build.ModuleIdentity && !build.Methods.Any(method =>
-                CoverletLineMatches(item, method)))
-            .Select(item => item.TypeName + "::" + item.MethodName + " report=" +
-                string.Join(',', item.SequencePoints.Select(point => point.Line)) + " pdb=" +
-                string.Join(';', build.Methods.Where(method => method.MethodName == item.MethodName)
-                    .Select(method => string.Join(',', method.SequencePoints.Select(point =>
-                        point.StartLine + "-" + point.EndLine)))))
-            .Distinct().ToArray();
-        Assert.True(ArtifactEvidenceInspector.CoverageMatchesBuild(report, reportPath, build),
-            "Methods absent from PDB inspection: " + string.Join(", ", unmatchedNames));
+        string[] sources = ["samples/Fixture/Fixture/CallableSamples.cs", "samples/Fixture/Fixture/Scorer.cs"];
+        var scorerDocument = build.Documents.Keys.Single(path => path.Replace('\\', '/').EndsWith(sources[1],
+            StringComparison.Ordinal));
+        var pdbRoot = scorerDocument.Replace('\\', '/')[..^sources[1].Length].TrimEnd('/');
+        var policy = new CapturedPathPolicy(true, [new ManifestReportRootMapping(pdbRoot, "")]);
+
+        Assert.True(ArtifactEvidenceInspector.CoverageMatchesBuild(report, reportPath, build, sources, policy));
     }
 
     [Fact]
@@ -341,7 +389,7 @@ public sealed class ProvenanceTests
         var xml = $$"""
             <coverage><sources><source>/definitely/wrong</source><source>{{root}}</source></sources><packages>
               <package name="{{build.ModuleIdentity}}"><classes><class name="Crap4CSharp.ProvenanceFixture.CompiledEvidence" filename="{{CompiledSource}}"><methods>
-                <method name="M" signature="()"><lines><line number="7" hits="1" /></lines></method>
+                <method name="M" signature="()"><lines><line number="9" hits="1" /><line number="10" hits="1" /></lines></method>
               </methods></class></classes></package>
             </packages></coverage>
             """;
@@ -510,7 +558,7 @@ public sealed class ProvenanceTests
                 ParseOptions = new ManifestParseOptions(parts.Build.LanguageVersion, "Regular",
                     parts.Build.PreprocessorSymbols,
                     new Dictionary<string, string>(StringComparer.Ordinal)),
-                PathPolicy = new ManifestPathPolicy("sensitive", [])
+                PathPolicy = new ManifestPathPolicy("sensitive", [new ManifestReportRootMapping("/_/", "")])
             }],
             [new ManifestBuild("build", "ctx", parts.Build.ModuleIdentity,
                 CanonicalIdentity.Sha256(parts.Bytes["artifacts/app.dll"].AsSpan()), parts.Build.Mvid,
@@ -577,7 +625,7 @@ public sealed class ProvenanceTests
         {
             ["artifacts/source.bin"] = ImmutableArray.Create(CompiledSourceBytes()),
             ["artifacts/coverage.xml"] = ImmutableArray.Create(Encoding.UTF8.GetBytes(
-                "<coverage><packages><package name=\"Crap4CSharp.ProvenanceFixture\"><classes><class name=\"Crap4CSharp.ProvenanceFixture.CompiledEvidence\" filename=\"tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs\"><methods><method name=\"M\" signature=\"()\"><lines><line number=\"7\" hits=\"1\" /></lines></method></methods></class></classes></package></packages></coverage>")),
+                "<coverage><packages><package name=\"Crap4CSharp.ProvenanceFixture\"><classes><class name=\"Crap4CSharp.ProvenanceFixture.CompiledEvidence\" filename=\"tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs\"><methods><method name=\"M\" signature=\"()\"><lines><line number=\"9\" hits=\"1\" /><line number=\"10\" hits=\"1\" /></lines></method></methods></class></classes></package></packages></coverage>")),
             ["artifacts/app.dll"] = assembly,
             ["artifacts/app.pdb"] = pdb,
             ["artifacts/results.trx"] = trx,
@@ -623,7 +671,12 @@ public sealed class ProvenanceTests
     {
         var method = build.Methods.Single(item => item.TypeName == "Crap4CSharp.ProvenanceFixture.CompiledEvidence" &&
             item.MethodName == "M");
-        var point = method.SequencePoints.Single();
+        var points = method.SequencePoints.Where(point => point.StartLine != point.EndLine ||
+            point.EndColumn != point.StartColumn + 1).ToArray();
+        var document = points.Select(point => point.Document).Distinct(StringComparer.Ordinal).Single();
+        var projectedPoints = string.Concat(points.SelectMany(point =>
+            Enumerable.Range(point.StartLine, point.EndLine - point.StartLine + 1)).Distinct().Order()
+            .Select(line => $"<SequencePoint vc=\"1\" sl=\"{line}\" sc=\"1\" el=\"{line}\" ec=\"2\" fileid=\"1\" />"));
         var foreign = includeForeignModule
             ? """
               <Module><ModuleName>Foreign.Project</ModuleName><Files><File uid="2" fullPath="foreign.cs" /></Files>
@@ -634,26 +687,13 @@ public sealed class ProvenanceTests
             : string.Empty;
         return $$"""
             <CoverageSession><Modules>
-              <Module><ModuleName>{{build.ModuleIdentity}}</ModuleName><Files><File uid="1" fullPath="{{point.Document}}" /></Files>
+              <Module><ModuleName>{{build.ModuleIdentity}}</ModuleName><Files><File uid="1" fullPath="{{document}}" /></Files>
                 <Classes><Class><FullName>{{method.TypeName}}</FullName><Methods><Method><Name>System.Int32 {{method.TypeName}}::M()</Name>
-                  <FileRef uid="1" /><SequencePoints><SequencePoint vc="1" sl="{{point.StartLine}}" sc="1" el="{{point.StartLine}}" ec="2" fileid="1" /></SequencePoints>
+                  <FileRef uid="1" /><SequencePoints>{{projectedPoints}}</SequencePoints>
                 </Method></Methods></Class></Classes></Module>
               {{foreign}}
             </Modules></CoverageSession>
             """;
-    }
-
-    private static bool CoverletLineMatches(CoverageMethod reported, InspectedMethodEvidence method)
-    {
-        if (reported.File is null || reported.TypeName.Replace('+', '/') != method.TypeName.Replace('+', '/') ||
-            reported.MethodName != method.MethodName) return false;
-        var file = reported.File.Replace('\\', '/');
-        var points = method.SequencePoints.Where(point => point.Document == file ||
-            point.Document.EndsWith("/" + file, StringComparison.Ordinal) ||
-            file.EndsWith("/" + point.Document, StringComparison.Ordinal)).ToArray();
-        var lines = reported.SequencePoints.Select(point => point.Line).Distinct().ToArray();
-        return points.Length > 0 && lines.All(line =>
-            points.Any(point => line >= point.StartLine && line <= point.EndLine));
     }
 
     private static CurrentEvidence EvidenceFrom(RunManifest manifest) => new(

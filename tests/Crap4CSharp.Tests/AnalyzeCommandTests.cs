@@ -251,7 +251,7 @@ public sealed class AnalyzeCommandTests
             <class name="Crap4CSharp.ProvenanceFixture.CompiledEvidence" filename="tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs">
             <methods>
               <method name=".ctor" signature="()"><lines><line number="5" hits="1" /></lines></method>
-              <method name="M" signature="()"><lines><line number="7" hits="1" /></lines></method>
+              <method name="M" signature="()"><lines><line number="9" hits="1" /><line number="10" hits="1" /></lines></method>
             </methods>
             </class></classes></package></packages></coverage>
             """);
@@ -289,7 +289,7 @@ public sealed class AnalyzeCommandTests
         var coverage = Encoding.UTF8.GetBytes("""
             <coverage><packages><package name="Crap4CSharp.ProvenanceFixture"><classes>
             <class name="Crap4CSharp.ProvenanceFixture.CompiledEvidence" filename="tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs">
-            <methods><method name="M" signature="()"><lines><line number="7" hits="1" /></lines></method></methods>
+            <methods><method name="M" signature="()"><lines><line number="9" hits="1" /><line number="10" hits="1" /></lines></method></methods>
             </class></classes></package></packages></coverage>
             """);
         var assemblyPath = typeof(Crap4CSharp.ProvenanceFixture.CompiledEvidence).Assembly.Location;
@@ -322,7 +322,7 @@ public sealed class AnalyzeCommandTests
             ParseOptions = new ManifestParseOptions(inspected.LanguageVersion, "Regular",
                 inspected.PreprocessorSymbols,
                 new Dictionary<string, string>(StringComparer.Ordinal)),
-            PathPolicy = new ManifestPathPolicy("sensitive", [])
+            PathPolicy = new ManifestPathPolicy("sensitive", [new ManifestReportRootMapping("/_/", "")])
         };
         var manifest = new RunManifest("1.0", CanonicalIdentity.Algorithm,
             new ManifestProducer("crap4csharp", "0.1.0", ComplexityRules.OrdinaryMethodsV1,

@@ -346,11 +346,13 @@ public static class ProvenanceVerifier
                     reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
                 var context = manifest.Contexts.FirstOrDefault(item => item.Id == build.ContextId);
                 var sources = context?.Inputs.Where(input => input.Role == "source").ToArray() ?? [];
-                if (context is null || sources.Any(input =>
-                        MatchingDocumentHashes(inspected.Documents, input.LogicalPath).Count != 1 ||
-                        MatchingDocumentHashes(inspected.Documents, input.LogicalPath)[0] != input.Sha256) ||
-                    inspected.Documents.Keys.Any(document =>
-                        sources.Count(input => DocumentMatches(document, input.LogicalPath)) != 1) ||
+                var pathPolicy = context?.PathPolicy is null ? null : new CapturedPathPolicy(
+                    context.PathPolicy.CasePolicy == "sensitive", context.PathPolicy.ReportRootMappings);
+                var resolvedDocuments = context is null || pathPolicy is null ? null :
+                    ResolveDocuments(inspected.Documents, sources.Select(input => input.LogicalPath).ToArray(), pathPolicy);
+                if (context is null || resolvedDocuments is null || resolvedDocuments.Count != sources.Length ||
+                    sources.Any(input => !resolvedDocuments.TryGetValue(input.LogicalPath, out var hash) ||
+                        hash != input.Sha256) ||
                     context.ParseOptions is null ||
                     context.ParseOptions.LanguageVersion != inspected.LanguageVersion ||
                     !context.ParseOptions.PreprocessorSymbols.Order(StringComparer.Ordinal)
@@ -417,10 +419,17 @@ public static class ProvenanceVerifier
                 try
                 {
                     var inspected = ArtifactEvidenceInspector.InspectCoverage(coverageBytes);
+                    var context = manifest.Contexts.FirstOrDefault(item => item.Id == build.ContextId);
+                    var sourcePaths = context?.Inputs.Where(input => input.Role == "source")
+                        .Select(input => input.LogicalPath).ToArray() ?? [];
+                    var pathPolicy = context?.PathPolicy is null ? null : new CapturedPathPolicy(
+                        context.PathPolicy.CasePolicy == "sensitive", context.PathPolicy.ReportRootMappings);
                     if (coverage.Format != inspected.Format || coverage.CoordinateKind != inspected.CoordinateKind ||
                         !inspected.ModuleIdentities.Contains(build.ModuleIdentity, StringComparer.Ordinal) ||
                         !inspectedBuilds.TryGetValue(build.Id, out var inspectedBuild) ||
-                        !ArtifactEvidenceInspector.CoverageMatchesBuild(coverageBytes, coverage.Locator, inspectedBuild))
+                        pathPolicy is null ||
+                        !ArtifactEvidenceInspector.CoverageMatchesBuild(coverageBytes, coverage.Locator,
+                            inspectedBuild, sourcePaths, pathPolicy))
                         reasons.Add(ProvenanceReasonCodes.IncompatiblePointRepresentation);
                 }
                 catch (InvalidDataException) { reasons.Add(ProvenanceReasonCodes.IncompatiblePointRepresentation); }
@@ -483,19 +492,18 @@ public static class ProvenanceVerifier
     }
     private static string InputKey(ManifestInput input) => input.Role + "\n" + input.LogicalPath;
     private static string InputKey(CurrentInputEvidence input) => input.Role + "\n" + input.LogicalPath;
-    private static IReadOnlyList<string> MatchingDocumentHashes(IReadOnlyDictionary<string, string> documents,
-        string logicalPath)
+    private static IReadOnlyDictionary<string, string>? ResolveDocuments(
+        IReadOnlyDictionary<string, string> documents, IReadOnlyList<string> logicalPaths,
+        CapturedPathPolicy pathPolicy)
     {
-        var normalized = logicalPath.Replace('\\', '/');
-        return documents.Where(pair => pair.Key.Replace('\\', '/').Equals(normalized, StringComparison.Ordinal) ||
-                pair.Key.Replace('\\', '/').EndsWith("/" + normalized, StringComparison.Ordinal))
-            .Select(pair => pair.Value).Distinct(StringComparer.Ordinal).ToArray();
-    }
-    private static bool DocumentMatches(string document, string logicalPath)
-    {
-        var normalizedDocument = document.Replace('\\', '/');
-        var normalizedLogical = logicalPath.Replace('\\', '/');
-        return normalizedDocument.Equals(normalizedLogical, StringComparison.Ordinal) ||
-            normalizedDocument.EndsWith("/" + normalizedLogical, StringComparison.Ordinal);
+        var comparer = pathPolicy.CaseSensitive ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
+        var resolved = new Dictionary<string, string>(comparer);
+        foreach (var document in documents)
+        {
+            var logical = CapturedLogicalPathResolver.Resolve(document.Key, logicalPaths, pathPolicy);
+            var source = logical is null ? null : logicalPaths.SingleOrDefault(path => comparer.Equals(path, logical));
+            if (source is null || !resolved.TryAdd(source, document.Value)) return null;
+        }
+        return resolved;
     }
 }

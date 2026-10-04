@@ -23,7 +23,8 @@ manifestHash    149010ba02d88ba95e606ec5375e6fd55d02f660eb1cd77b4429a144ad6ce730
 
 Each context records effective language version, source kind, preprocessor symbols, feature flags, logical path case,
 and explicit report-root mappings. Replay uses only those saved logical facts; it does not inspect the host path policy,
-current directory, original checkout, Git, MSBuild, or processes.
+current directory, original checkout, Git, MSBuild, or processes. PDB documents and coverage report paths must resolve
+through those mappings (or already be exact logical paths); replay does not guess identities from filename suffixes.
 
 ## States
 
@@ -54,7 +55,11 @@ to the portable PDB identity, requires the complete SHA-256 PDB document invento
 options to match the captured context, and checks reported coverage points against the matching PDB method sequence
 points. Sequence-point formats retain exact coordinates when the report supplies them. Line-only formats such as
 Cobertura, and Coverlet OpenCover's synthetic `1..2` columns, establish only that every reported line is contained
-in a sequence-point span owned by the matching PDB method; they cannot distinguish same-line coverage from an older
+in a sequence-point span owned by the matching PDB method and that the complete non-boundary statement-line set is
+present for directly represented methods. Constructor PDB methods may also contain lowered member initializers, and
+state-machine `MoveNext` methods contain compiler control points that Coverlet does not project; v1 validates those
+line observations by containment but does not claim a complete authored-line denominator from the lowered method
+shape. Line formats cannot distinguish same-line coverage from an older
 build. The separately hash-bound source, assembly and PDB still bind the evaluated code, but line evidence must not
 be described as byte-level coverage provenance. Execution outcome and counters come from the captured TRX; at least
 one test must pass and the TRX test storage module must match the module identity derived from the execution's

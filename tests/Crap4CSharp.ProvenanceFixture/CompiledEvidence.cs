@@ -4,5 +4,9 @@ public sealed class CompiledEvidence
 {
     public CompiledEvidence() { }
 
-    public int M() => 1;
+    public int M()
+    {
+        var value = 1;
+        return value;
+    }
 }
