@@ -336,11 +336,8 @@ public static class CoverageReader
 
     private static int? ParseParameterCount(string signature)
     {
-        signature = CoverageSignature.StripCustomModifiers(signature);
-        var open = signature.IndexOf('(');
-        var close = signature.LastIndexOf(')');
-        if (open < 0 || close < open) return null;
-        var contents = signature[(open + 1)..close].Trim();
+        if (!CoverageSignature.TryGetParameterContents(signature, out var parameterContents)) return null;
+        var contents = parameterContents.Trim();
         if (contents.Length == 0) return 0;
         var depth = 0;
         var count = 1;

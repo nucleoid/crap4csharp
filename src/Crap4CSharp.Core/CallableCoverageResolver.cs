@@ -56,7 +56,14 @@ public static class CallableCoverageResolver
                 item.CoverageCapability == "semantic-ordinary" && SpanContains(item.Span, report.SequencePoints)).ToArray();
 
             if (byIdentity.Length == 0 && report.MethodName.Length > 0)
-                candidates = [];
+            {
+                candidates = HasIncompleteSignature(report)
+                    ? inventory.Callables.Where(item => PathsEqual(item.Path, report.File) &&
+                        SemanticHeaderMatches(item.SemanticIdentity, report)).ToArray()
+                    : [];
+                if (candidates.Length == 1 && candidates[0].Applicability != CallableApplicability.Applicable)
+                    candidates = [];
+            }
             if (candidates.Length != 1)
             {
                 var code = candidates.Length > 1 || byPath.Length > 1 && report.MethodName.Length == 0
@@ -172,13 +179,17 @@ public static class CallableCoverageResolver
                 (item.RefKind == "none" ? string.Empty : "&")), StringComparer.Ordinal);
     }
 
+    private static bool SemanticHeaderMatches(CallableSemanticIdentity? semantic, CoverageMethod report) =>
+        semantic is not null && semantic.MetadataName == report.MethodName &&
+        TypesEqual(semantic.TypeName, report.TypeName) &&
+        (report.GenericArity is not int arity || arity == semantic.GenericArity);
+
+    private static bool HasIncompleteSignature(CoverageMethod report) => report.RawSignature is not null &&
+        !CoverageSignature.TryGetParameterContents(report.RawSignature, out _);
+
     private static IReadOnlyList<string>? ParameterTypes(string signature)
     {
-        signature = CoverageSignature.StripCustomModifiers(signature);
-        var open = signature.IndexOf('(');
-        var close = signature.LastIndexOf(')');
-        if (open < 0 || close < open) return null;
-        var value = signature[(open + 1)..close];
+        if (!CoverageSignature.TryGetParameterContents(signature, out var value)) return null;
         if (string.IsNullOrWhiteSpace(value)) return [];
         var output = new List<string>();
         var start = 0;
