@@ -75,7 +75,14 @@ public sealed record ManifestInput(string Role, string LogicalPath, string Locat
 public sealed record ManifestBuild(string Id, string ContextId, string ModuleIdentity, string AssemblySha256,
     string Mvid, string PdbSha256, string DebugIdentity);
 public sealed record ManifestExecution(string Id, string ContextId, string BuildId, bool Completed, int ExitCode,
-    int TotalTests, int PassedTests, int FailedTests, int SkippedTests);
+    int TotalTests, int PassedTests, int FailedTests, int SkippedTests)
+{
+    public string TestModuleIdentity { get; init; } = "";
+    public string TestAssemblySha256 { get; init; } = "";
+    public string TestMvid { get; init; } = "";
+    public string TestPdbSha256 { get; init; } = "";
+    public string TestDebugIdentity { get; init; } = "";
+}
 public sealed record ManifestArtifact(string Id, string Kind, string Locator, long Length, string Sha256,
     string? ContextId, string? BuildId, string? ExecutionId, string? Format, string? CoordinateKind);
 public sealed record ManifestEvaluationInputs(string ScopeHash, string PolicyHash, string? BaselineHash,
@@ -157,7 +164,9 @@ public static class ManifestIdentity
                 value.TotalTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 value.PassedTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 value.FailedTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                value.SkippedTests.ToString(System.Globalization.CultureInfo.InvariantCulture))));
+                value.SkippedTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                value.TestModuleIdentity, value.TestAssemblySha256, value.TestMvid, value.TestPdbSha256,
+                value.TestDebugIdentity)));
         values.AddRange(manifest.Artifacts.Select(value =>
             CanonicalIdentity.Tuple("artifact", value.Id, value.Kind, value.Locator,
                 value.Length.ToString(System.Globalization.CultureInfo.InvariantCulture), value.Sha256,
@@ -308,6 +317,7 @@ public static class ProvenanceVerifier
                     reasons.Add(ProvenanceReasonCodes.DuplicateIdentity);
             }
         }
+        var inspectedBuilds = new Dictionary<string, InspectedBuildEvidence>(StringComparer.Ordinal);
         foreach (var build in manifest.Builds)
         {
             var assemblies = manifest.Artifacts.Where(artifact => artifact.Kind == "assembly" &&
@@ -335,10 +345,18 @@ public static class ProvenanceVerifier
                     inspected.DebugIdentity != build.DebugIdentity)
                     reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
                 var context = manifest.Contexts.FirstOrDefault(item => item.Id == build.ContextId);
-                if (context is null || context.Inputs.Where(input => input.Role == "source").Any(input =>
+                var sources = context?.Inputs.Where(input => input.Role == "source").ToArray() ?? [];
+                if (context is null || sources.Any(input =>
                         MatchingDocumentHashes(inspected.Documents, input.LogicalPath).Count != 1 ||
-                        MatchingDocumentHashes(inspected.Documents, input.LogicalPath)[0] != input.Sha256))
+                        MatchingDocumentHashes(inspected.Documents, input.LogicalPath)[0] != input.Sha256) ||
+                    inspected.Documents.Keys.Any(document =>
+                        sources.Count(input => DocumentMatches(document, input.LogicalPath)) != 1) ||
+                    context.ParseOptions is null ||
+                    context.ParseOptions.LanguageVersion != inspected.LanguageVersion ||
+                    !context.ParseOptions.PreprocessorSymbols.Order(StringComparer.Ordinal)
+                        .SequenceEqual(inspected.PreprocessorSymbols, StringComparer.Ordinal))
                     reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
+                else inspectedBuilds[build.Id] = inspected;
             }
             catch (InvalidDataException) { reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete); }
         }
@@ -359,8 +377,27 @@ public static class ProvenanceVerifier
             try
             {
                 var inspected = ArtifactEvidenceInspector.InspectTrx(trxBytes);
+                var testAssemblies = manifest.Artifacts.Where(artifact => artifact.Kind == "test-assembly" &&
+                    artifact.ContextId == execution.ContextId && artifact.BuildId == execution.BuildId &&
+                    artifact.ExecutionId == execution.Id).ToArray();
+                var testPdbs = manifest.Artifacts.Where(artifact => artifact.Kind == "test-pdb" &&
+                    artifact.ContextId == execution.ContextId && artifact.BuildId == execution.BuildId &&
+                    artifact.ExecutionId == execution.Id).ToArray();
+                if (testAssemblies.Length != 1 || testPdbs.Length != 1 ||
+                    !artifactBytes.TryGetValue(testAssemblies[0].Locator, out var testAssemblyBytes) ||
+                    !artifactBytes.TryGetValue(testPdbs[0].Locator, out var testPdbBytes))
+                {
+                    reasons.Add(ProvenanceReasonCodes.TestExecutionIncomplete);
+                    continue;
+                }
+                var testBuild = ArtifactEvidenceInspector.InspectBuild(testAssemblyBytes, testPdbBytes);
                 if (inspected.Total != execution.TotalTests || inspected.Passed != execution.PassedTests ||
-                    inspected.Failed != execution.FailedTests || inspected.Skipped != execution.SkippedTests)
+                    inspected.Failed != execution.FailedTests || inspected.Skipped != execution.SkippedTests ||
+                    testAssemblies[0].Sha256 != execution.TestAssemblySha256 ||
+                    testPdbs[0].Sha256 != execution.TestPdbSha256 ||
+                    testBuild.ModuleIdentity != execution.TestModuleIdentity ||
+                    testBuild.Mvid != execution.TestMvid || testBuild.DebugIdentity != execution.TestDebugIdentity ||
+                    !inspected.StorageModules.Contains(testBuild.ModuleIdentity, StringComparer.OrdinalIgnoreCase))
                     reasons.Add(ProvenanceReasonCodes.TestExecutionIncomplete);
             }
             catch (InvalidDataException) { reasons.Add(ProvenanceReasonCodes.TestExecutionIncomplete); }
@@ -381,7 +418,9 @@ public static class ProvenanceVerifier
                 {
                     var inspected = ArtifactEvidenceInspector.InspectCoverage(coverageBytes);
                     if (coverage.Format != inspected.Format || coverage.CoordinateKind != inspected.CoordinateKind ||
-                        !inspected.ModuleIdentities.Contains(build.ModuleIdentity, StringComparer.Ordinal))
+                        !inspected.ModuleIdentities.Contains(build.ModuleIdentity, StringComparer.Ordinal) ||
+                        !inspectedBuilds.TryGetValue(build.Id, out var inspectedBuild) ||
+                        !ArtifactEvidenceInspector.CoverageMatchesBuild(coverageBytes, coverage.Locator, inspectedBuild))
                         reasons.Add(ProvenanceReasonCodes.IncompatiblePointRepresentation);
                 }
                 catch (InvalidDataException) { reasons.Add(ProvenanceReasonCodes.IncompatiblePointRepresentation); }
@@ -451,5 +490,12 @@ public static class ProvenanceVerifier
         return documents.Where(pair => pair.Key.Replace('\\', '/').Equals(normalized, StringComparison.Ordinal) ||
                 pair.Key.Replace('\\', '/').EndsWith("/" + normalized, StringComparison.Ordinal))
             .Select(pair => pair.Value).Distinct(StringComparer.Ordinal).ToArray();
+    }
+    private static bool DocumentMatches(string document, string logicalPath)
+    {
+        var normalizedDocument = document.Replace('\\', '/');
+        var normalizedLogical = logicalPath.Replace('\\', '/');
+        return normalizedDocument.Equals(normalizedLogical, StringComparison.Ordinal) ||
+            normalizedDocument.EndsWith("/" + normalizedLogical, StringComparison.Ordinal);
     }
 }

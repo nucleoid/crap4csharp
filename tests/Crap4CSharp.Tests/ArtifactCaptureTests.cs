@@ -7,7 +7,7 @@ namespace Crap4CSharp.Tests;
 
 public sealed class ArtifactCaptureTests
 {
-    private const string CompiledSource = "tests/Crap4CSharp.Tests/ProvenanceCompiledFixture.cs";
+    private const string CompiledSource = "tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs";
     [Fact]
     public void PublicationSealsVerifiesAndNeverOverwritesADestination()
     {
@@ -72,9 +72,9 @@ public sealed class ArtifactCaptureTests
             "rev-parse --git-common-dir" => Path.Combine(directory.Path, ".git"),
             "rev-parse --git-dir" => Path.Combine(directory.Path, ".git", "worktrees", "fixture"),
             "rev-parse HEAD" => "abc",
-            "status --porcelain=v1 -z --untracked-files=all -- tests/Crap4CSharp.Tests/ProvenanceCompiledFixture.cs" => state,
+            "status --porcelain=v1 -z --untracked-files=all -- tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs" => state,
             "submodule status --recursive" => "",
-            "diff --cached --binary --full-index -- tests/Crap4CSharp.Tests/ProvenanceCompiledFixture.cs" => "",
+            "diff --cached --binary --full-index -- tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs" => "",
             var command => throw new InvalidOperationException(command)
         };
         var manifest = ManifestIdentity.Seal(fixture.Manifest with
@@ -136,10 +136,14 @@ public sealed class ArtifactCaptureTests
             CanonicalIdentity.Sha256([1, 2, 3]), "utf-8", false);
         var generated = new ManifestInput("source", "obj/G.g.cs", "artifacts/generated.bin", 2,
             CanonicalIdentity.Sha256([4, 5]), "utf-8", true);
+        var assemblyPath = typeof(Crap4CSharp.ProvenanceFixture.CompiledEvidence).Assembly.Location;
+        var assembly = ImmutableArray.Create(File.ReadAllBytes(assemblyPath));
+        var pdb = ImmutableArray.Create(File.ReadAllBytes(Path.ChangeExtension(assemblyPath, ".pdb")));
+        var inspected = ArtifactEvidenceInspector.InspectBuild(assembly, pdb);
         var observed = new CompilerInputObservation(ArtifactCaptureAdapter.CompilerEvidenceProvider, "ctx",
             [new CompiledInputIdentity(authored.LogicalPath, authored.Sha256, false),
              new CompiledInputIdentity(generated.LogicalPath, generated.Sha256, true)],
-            ImmutableArray.Create<byte>(6), ImmutableArray.Create<byte>(7), "App", "mvid", true, null);
+            assembly, pdb, inspected.ModuleIdentity, inspected.Mvid, true, null);
 
         var fresh = ArtifactCaptureAdapter.ValidatePhases("ctx", [authored], [authored], [generated], observed, false);
         var reusable = ArtifactCaptureAdapter.ValidatePhases("ctx", [authored], [authored], [generated], observed, true);
@@ -185,13 +189,14 @@ public sealed class ArtifactCaptureTests
     {
         var source = ImmutableArray.Create(CompiledSourceBytes());
         var coverage = ImmutableArray.Create(Encoding.UTF8.GetBytes(
-            "<coverage><packages><package name=\"Crap4CSharp.Tests\"><classes><class name=\"Crap4CSharp.Tests.ProvenanceCompiledFixture\" filename=\"tests/Crap4CSharp.Tests/ProvenanceCompiledFixture.cs\"><methods><method name=\"M\" signature=\"()\"><lines><line number=\"7\" hits=\"1\" /></lines></method></methods></class></classes></package></packages></coverage>"));
-        var assemblyPath = typeof(ProvenanceCompiledFixture).Assembly.Location;
+            "<coverage><packages><package name=\"Crap4CSharp.ProvenanceFixture\"><classes><class name=\"Crap4CSharp.ProvenanceFixture.CompiledEvidence\" filename=\"tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs\"><methods><method name=\"M\" signature=\"()\"><lines><line number=\"7\" hits=\"1\" /></lines></method></methods></class></classes></package></packages></coverage>"));
+        var assemblyPath = typeof(Crap4CSharp.ProvenanceFixture.CompiledEvidence).Assembly.Location;
         var assembly = ImmutableArray.Create(File.ReadAllBytes(assemblyPath));
         var pdb = ImmutableArray.Create(File.ReadAllBytes(Path.ChangeExtension(assemblyPath, ".pdb")));
         var inspected = ArtifactEvidenceInspector.InspectBuild(assembly, pdb);
         var trx = ImmutableArray.Create(Encoding.UTF8.GetBytes("""
             <TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
+              <TestDefinitions><UnitTest storage="Crap4CSharp.ProvenanceFixture.dll" /></TestDefinitions>
               <ResultSummary outcome="Completed"><Counters total="1" executed="1" passed="1" failed="0"
                 error="0" timeout="0" aborted="0" inconclusive="0" notExecuted="0" /></ResultSummary>
             </TestRun>
@@ -205,7 +210,8 @@ public sealed class ArtifactCaptureTests
             [new ManifestInput("source", CompiledSource, "artifacts/source.bin", source.Length,
                 CanonicalIdentity.Sha256(source.AsSpan()), "utf-8", false)])
         {
-            ParseOptions = new ManifestParseOptions("preview", "Regular", [],
+            ParseOptions = new ManifestParseOptions(inspected.LanguageVersion, "Regular",
+                inspected.PreprocessorSymbols,
                 new Dictionary<string, string>(StringComparer.Ordinal)),
             PathPolicy = new ManifestPathPolicy("sensitive", [])
         };
@@ -218,7 +224,14 @@ public sealed class ArtifactCaptureTests
             [new ManifestBuild("build", "ctx", inspected.ModuleIdentity,
                 CanonicalIdentity.Sha256(assembly.AsSpan()), inspected.Mvid,
                 CanonicalIdentity.Sha256(pdb.AsSpan()), inspected.DebugIdentity)],
-            [new ManifestExecution("test", "ctx", "build", true, 0, 1, 1, 0, 0)],
+            [new ManifestExecution("test", "ctx", "build", true, 0, 1, 1, 0, 0)
+            {
+                TestModuleIdentity = inspected.ModuleIdentity,
+                TestAssemblySha256 = CanonicalIdentity.Sha256(assembly.AsSpan()),
+                TestMvid = inspected.Mvid,
+                TestPdbSha256 = CanonicalIdentity.Sha256(pdb.AsSpan()),
+                TestDebugIdentity = inspected.DebugIdentity
+            }],
             [new ManifestArtifact("source", "source", "artifacts/source.bin", source.Length,
                     CanonicalIdentity.Sha256(source.AsSpan()), "ctx", null, null, null, null),
              new ManifestArtifact("coverage", "coverage", "artifacts/coverage.xml", coverage.Length,
@@ -229,6 +242,10 @@ public sealed class ArtifactCaptureTests
                     CanonicalIdentity.Sha256(pdb.AsSpan()), "ctx", "build", null, null, null),
              new ManifestArtifact("test-result", "test-result", "artifacts/results.trx", trx.Length,
                     CanonicalIdentity.Sha256(trx.AsSpan()), "ctx", "build", "test", "trx", null),
+             new ManifestArtifact("test-assembly", "test-assembly", "artifacts/app.dll", assembly.Length,
+                    CanonicalIdentity.Sha256(assembly.AsSpan()), "ctx", "build", "test", null, null),
+             new ManifestArtifact("test-pdb", "test-pdb", "artifacts/app.pdb", pdb.Length,
+                    CanonicalIdentity.Sha256(pdb.AsSpan()), "ctx", "build", "test", null, null),
              new ManifestArtifact("scope", "scope", "artifacts/scope.json", scope.Length,
                     CanonicalIdentity.Sha256(scope.AsSpan()), null, null, null, "json", null),
              new ManifestArtifact("policy", "policy", "artifacts/policy.json", policy.Length,

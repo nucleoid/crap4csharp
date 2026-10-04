@@ -78,7 +78,7 @@ internal static class ArtifactCaptureAdapter
         var after = Identities(authoredAfter.Where(input => !input.Generated));
         if (!before.SequenceEqual(after, StringComparer.Ordinal))
             return new(false, false, "provenance.authoredInputDrift");
-        var expected = Identities(authoredAfter.Concat(generatedAfter));
+        var expected = Identities(authoredAfter.Concat(generatedAfter).Where(input => input.Role == "source"));
         var observed = compilerObservation.Inputs.Select(input =>
                 $"source\n{input.LogicalPath}\n{input.ContentIdentity}\n{input.IsGenerated}")
             .Order(StringComparer.Ordinal).ToArray();
@@ -88,6 +88,18 @@ internal static class ArtifactCaptureAdapter
             string.IsNullOrWhiteSpace(compilerObservation.ModuleIdentity) ||
             string.IsNullOrWhiteSpace(compilerObservation.Mvid))
             return new(false, false, "provenance.compiledOutputBindingIncomplete");
+        try
+        {
+            var inspected = ArtifactEvidenceInspector.InspectBuild(compilerObservation.AssemblyBytes,
+                compilerObservation.PdbBytes);
+            if (inspected.ModuleIdentity != compilerObservation.ModuleIdentity ||
+                inspected.Mvid != compilerObservation.Mvid)
+                return new(false, false, "provenance.compiledOutputBindingIncomplete");
+        }
+        catch (InvalidDataException)
+        {
+            return new(false, false, "provenance.compiledOutputBindingIncomplete");
+        }
         return new(true, futureReuseRecipeComplete,
             futureReuseRecipeComplete ? null : ProvenanceReasonCodes.ReuseRecipeIncomplete);
     }

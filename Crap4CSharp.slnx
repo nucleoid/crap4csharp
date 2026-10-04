@@ -4,6 +4,7 @@
     <Project Path="src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Crap4CSharp.ProvenanceFixture/Crap4CSharp.ProvenanceFixture.csproj" />
     <Project Path="tests/Crap4CSharp.Tests/Crap4CSharp.Tests.csproj" />
   </Folder>
 </Solution>

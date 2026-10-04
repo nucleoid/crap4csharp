@@ -15,10 +15,10 @@ It excludes only `manifestHash` itself; source-set, input-closure and context ha
 manifest hash is accepted. The published test vector is:
 
 ```text
-sourceSetHash   2fcf2db1d70b98d6d21703f0e4f2dc1653a69c815127ea1c4ffc08faac6b57ea
-inputClosureHash 7d898082e4d73b0a846d0e36bb0c0e9f253383b6da17cb8927b0d08445dfd254
-contextHash     bdf3277f889c3bd5c1d9b949d281e9a8ad551b9052f9fa2a67499747a681cc66
-manifestHash    ccf42f44a8c89cefcb302316363bd2ca5d303e13eeadea6b48ce97f6bc0f9195
+sourceSetHash   864f42d22774118aa30c2be59188cf321335366c5322a78565ba3e39b7d71a70
+inputClosureHash e281b69e9bae9ddabafdfad7e60ded5039e610cbf82aa373bf6c4c64bc730e21
+contextHash     27e8ee19bc0a8943eb757235bf53b9c1aee69b42eb5b5310c3cef54c946e20b9
+manifestHash    149010ba02d88ba95e606ec5375e6fd55d02f660eb1cd77b4429a144ad6ce730
 ```
 
 Each context records effective language version, source kind, preprocessor symbols, feature flags, logical path case,
@@ -50,7 +50,11 @@ optimistically union. A manifest never upgrades unsupported generated-method map
 Every accepted coverage artifact references a successful completed execution and its same-context build. The bundle
 also retains hash-bound assembly, portable PDB, and test-result artifacts for that graph; booleans in the manifest do
 not substitute for those bytes. Verification reads managed module metadata and MVID, matches the PE CodeView record
-to the portable PDB identity, and derives execution counters from the captured TRX.
+to the portable PDB identity, requires the complete SHA-256 PDB document inventory and compiler language/symbol
+options to match the captured context, and checks reported coverage points against the matching PDB method sequence
+points. Execution outcome and counters come from the captured TRX; at least one test must pass and the TRX test
+storage module must match the module identity derived from the execution's hash-bound test assembly and portable
+PDB artifacts. v1 deliberately fails closed for PDB documents that do not carry SHA-256 checksums.
 
 The captured scope artifact is JSON `{"version":1,"sources":[...]}`; the captured policy artifact is JSON
 `{"version":1,"threshold":8,"allowMissingCoverage":false}`. Replay applies those values and rejects live overrides.

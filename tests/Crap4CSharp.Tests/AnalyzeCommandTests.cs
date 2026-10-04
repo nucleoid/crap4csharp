@@ -7,7 +7,7 @@ namespace Crap4CSharp.Tests;
 
 public sealed class AnalyzeCommandTests
 {
-    private const string CompiledSource = "tests/Crap4CSharp.Tests/ProvenanceCompiledFixture.cs";
+    private const string CompiledSource = "tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs";
     [Fact]
     public async Task TruncatedManifestReturnsOneStructuredJsonDocument()
     {
@@ -247,8 +247,8 @@ public sealed class AnalyzeCommandTests
         using var directory = TestDirectory.Create("crap4csharp-callables-replay");
         var path = CreateBundle(directory.Path);
         var coverage = Encoding.UTF8.GetBytes("""
-            <coverage><packages><package name="Crap4CSharp.Tests"><classes>
-            <class name="Crap4CSharp.Tests.ProvenanceCompiledFixture" filename="tests/Crap4CSharp.Tests/ProvenanceCompiledFixture.cs">
+            <coverage><packages><package name="Crap4CSharp.ProvenanceFixture"><classes>
+            <class name="Crap4CSharp.ProvenanceFixture.CompiledEvidence" filename="tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs">
             <methods>
               <method name=".ctor" signature="()"><lines><line number="5" hits="1" /></lines></method>
               <method name="M" signature="()"><lines><line number="7" hits="1" /></lines></method>
@@ -287,12 +287,12 @@ public sealed class AnalyzeCommandTests
         Directory.CreateDirectory(artifacts);
         var source = CompiledSourceBytes();
         var coverage = Encoding.UTF8.GetBytes("""
-            <coverage><packages><package name="Crap4CSharp.Tests"><classes>
-            <class name="Crap4CSharp.Tests.ProvenanceCompiledFixture" filename="tests/Crap4CSharp.Tests/ProvenanceCompiledFixture.cs">
+            <coverage><packages><package name="Crap4CSharp.ProvenanceFixture"><classes>
+            <class name="Crap4CSharp.ProvenanceFixture.CompiledEvidence" filename="tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs">
             <methods><method name="M" signature="()"><lines><line number="7" hits="1" /></lines></method></methods>
             </class></classes></package></packages></coverage>
             """);
-        var assemblyPath = typeof(ProvenanceCompiledFixture).Assembly.Location;
+        var assemblyPath = typeof(Crap4CSharp.ProvenanceFixture.CompiledEvidence).Assembly.Location;
         var assembly = File.ReadAllBytes(assemblyPath);
         var pdb = File.ReadAllBytes(Path.ChangeExtension(assemblyPath, ".pdb"));
         var inspected = ArtifactEvidenceInspector.InspectBuild(
@@ -300,6 +300,7 @@ public sealed class AnalyzeCommandTests
             System.Collections.Immutable.ImmutableArray.Create(pdb));
         var trx = Encoding.UTF8.GetBytes("""
             <TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
+              <TestDefinitions><UnitTest storage="Crap4CSharp.ProvenanceFixture.dll" /></TestDefinitions>
               <ResultSummary outcome="Completed"><Counters total="1" executed="1" passed="1" failed="0"
                 error="0" timeout="0" aborted="0" inconclusive="0" notExecuted="0" /></ResultSummary>
             </TestRun>
@@ -318,7 +319,8 @@ public sealed class AnalyzeCommandTests
             [new ManifestInput("source", CompiledSource, "artifacts/source.bin", source.Length,
                 CanonicalIdentity.Sha256(source), "utf-8", false)])
         {
-            ParseOptions = new ManifestParseOptions("preview", "Regular", [],
+            ParseOptions = new ManifestParseOptions(inspected.LanguageVersion, "Regular",
+                inspected.PreprocessorSymbols,
                 new Dictionary<string, string>(StringComparer.Ordinal)),
             PathPolicy = new ManifestPathPolicy("sensitive", [])
         };
@@ -330,7 +332,14 @@ public sealed class AnalyzeCommandTests
             [new ManifestRoot("workspace", "workspace", "sensitive")], [context],
             [new ManifestBuild("build", "ctx", inspected.ModuleIdentity, CanonicalIdentity.Sha256(assembly),
                 inspected.Mvid, CanonicalIdentity.Sha256(pdb), inspected.DebugIdentity)],
-            [new ManifestExecution("test", "ctx", "build", true, 0, 1, 1, 0, 0)],
+            [new ManifestExecution("test", "ctx", "build", true, 0, 1, 1, 0, 0)
+            {
+                TestModuleIdentity = inspected.ModuleIdentity,
+                TestAssemblySha256 = CanonicalIdentity.Sha256(assembly),
+                TestMvid = inspected.Mvid,
+                TestPdbSha256 = CanonicalIdentity.Sha256(pdb),
+                TestDebugIdentity = inspected.DebugIdentity
+            }],
             [new ManifestArtifact("source", "source", "artifacts/source.bin", source.Length,
                  CanonicalIdentity.Sha256(source), "ctx", null, null, null, null),
              new ManifestArtifact("coverage", "coverage", "artifacts/coverage.xml", coverage.Length,
@@ -341,6 +350,10 @@ public sealed class AnalyzeCommandTests
                  CanonicalIdentity.Sha256(pdb), "ctx", "build", null, null, null),
              new ManifestArtifact("test-result", "test-result", "artifacts/results.trx", trx.Length,
                  CanonicalIdentity.Sha256(trx), "ctx", "build", "test", "trx", null),
+             new ManifestArtifact("test-assembly", "test-assembly", "artifacts/app.dll", assembly.Length,
+                 CanonicalIdentity.Sha256(assembly), "ctx", "build", "test", null, null),
+             new ManifestArtifact("test-pdb", "test-pdb", "artifacts/app.pdb", pdb.Length,
+                 CanonicalIdentity.Sha256(pdb), "ctx", "build", "test", null, null),
              new ManifestArtifact("scope", "scope", "artifacts/scope.json", scope.Length,
                  CanonicalIdentity.Sha256(scope), null, null, null, "json", null),
              new ManifestArtifact("policy", "policy", "artifacts/policy.json", policy.Length,

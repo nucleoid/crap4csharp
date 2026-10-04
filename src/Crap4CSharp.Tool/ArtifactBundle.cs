@@ -137,7 +137,8 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
             Require(build, "id", "contextId", "moduleIdentity", "assemblySha256", "mvid", "pdbSha256", "debugIdentity");
         foreach (var execution in root.GetProperty("executions").EnumerateArray())
             Require(execution, "id", "contextId", "buildId", "completed", "exitCode", "totalTests", "passedTests",
-                "failedTests", "skippedTests");
+                "failedTests", "skippedTests", "testModuleIdentity", "testAssemblySha256", "testMvid",
+                "testPdbSha256", "testDebugIdentity");
         foreach (var artifact in root.GetProperty("artifacts").EnumerateArray())
             Require(artifact, "id", "kind", "locator", "length", "sha256");
     }
