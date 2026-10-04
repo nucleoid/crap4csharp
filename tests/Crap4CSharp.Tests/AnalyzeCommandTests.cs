@@ -7,6 +7,7 @@ namespace Crap4CSharp.Tests;
 
 public sealed class AnalyzeCommandTests
 {
+    private const string CompiledSource = "tests/Crap4CSharp.Tests/ProvenanceCompiledFixture.cs";
     [Fact]
     public async Task TruncatedManifestReturnsOneStructuredJsonDocument()
     {
@@ -160,6 +161,27 @@ public sealed class AnalyzeCommandTests
     }
 
     [Fact]
+    public async Task NonIntegralCapturedVersionReturnsStructuredArtifactFailure()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-captured-version-shape");
+        var manifestPath = CreateBundle(Path.Combine(directory.Path, "bundle"));
+        ReplaceEvaluationArtifact(manifestPath, "policy",
+            Encoding.UTF8.GetBytes("""{"version":1.5,"threshold":8,"allowMissingCoverage":false}"""));
+        var destination = Path.Combine(directory.Path, "failure.json");
+        var output = new StringWriter();
+
+        var exit = await global::App.RunAsync(
+            ["analyze", "--reuse-artifacts", manifestPath, "--output", destination, "--format", "json"],
+            directory.Path, output, TextWriter.Null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, exit);
+        Assert.True(File.Exists(destination));
+        using var document = JsonDocument.Parse(output.ToString());
+        Assert.Equal("artifact.invalid", document.RootElement.GetProperty("evaluation")
+            .GetProperty("decision").GetProperty("reason").GetString());
+    }
+
+    [Fact]
     public async Task ReplayOutputCannotAliasAnyBundleEntry()
     {
         using var directory = TestDirectory.Create("crap4csharp-output-alias");
@@ -224,26 +246,25 @@ public sealed class AnalyzeCommandTests
     {
         using var directory = TestDirectory.Create("crap4csharp-callables-replay");
         var path = CreateBundle(directory.Path);
-        var source = Encoding.UTF8.GetBytes("class C { C() { } }");
         var coverage = Encoding.UTF8.GetBytes("""
-            <coverage><packages><package name="Crap4CSharp.Core"><classes><class name="C" filename="src/C.cs">
-            <methods><method name=".ctor" signature="()"><lines><line number="1" hits="1" /></lines></method></methods>
+            <coverage><packages><package name="Crap4CSharp.Tests"><classes>
+            <class name="Crap4CSharp.Tests.ProvenanceCompiledFixture" filename="tests/Crap4CSharp.Tests/ProvenanceCompiledFixture.cs">
+            <methods>
+              <method name=".ctor" signature="()"><lines><line number="5" hits="1" /></lines></method>
+              <method name="M" signature="()"><lines><line number="7" hits="1" /></lines></method>
+            </methods>
             </class></classes></package></packages></coverage>
             """);
-        File.WriteAllBytes(Path.Combine(directory.Path, "artifacts", "source.bin"), source);
         File.WriteAllBytes(Path.Combine(directory.Path, "artifacts", "coverage.xml"), coverage);
         var manifest = ReadManifest(path);
-        var input = manifest.Contexts[0].Inputs[0] with { Length = source.Length, Sha256 = CanonicalIdentity.Sha256(source) };
         var artifacts = manifest.Artifacts.Select(item => item.Kind switch
         {
-            "source" => item with { Length = source.Length, Sha256 = CanonicalIdentity.Sha256(source) },
             "coverage" => item with { Length = coverage.Length, Sha256 = CanonicalIdentity.Sha256(coverage) },
             _ => item
         }).ToArray();
         manifest = ManifestIdentity.Seal(manifest with
         {
             Producer = manifest.Producer with { ComplexityRuleset = ComplexityRules.CallablesV1 },
-            Contexts = [manifest.Contexts[0] with { Inputs = [input] }],
             Artifacts = artifacts,
             ManifestHash = null
         });
@@ -264,13 +285,14 @@ public sealed class AnalyzeCommandTests
     {
         var artifacts = Path.Combine(root, "artifacts");
         Directory.CreateDirectory(artifacts);
-        var source = Encoding.UTF8.GetBytes("class C { int M() => 1; }");
+        var source = CompiledSourceBytes();
         var coverage = Encoding.UTF8.GetBytes("""
-            <coverage><packages><package name="Crap4CSharp.Core"><classes><class name="C" filename="src/C.cs">
-            <methods><method name="M" signature="()"><lines><line number="1" hits="1" /></lines></method></methods>
+            <coverage><packages><package name="Crap4CSharp.Tests"><classes>
+            <class name="Crap4CSharp.Tests.ProvenanceCompiledFixture" filename="tests/Crap4CSharp.Tests/ProvenanceCompiledFixture.cs">
+            <methods><method name="M" signature="()"><lines><line number="7" hits="1" /></lines></method></methods>
             </class></classes></package></packages></coverage>
             """);
-        var assemblyPath = typeof(CanonicalIdentity).Assembly.Location;
+        var assemblyPath = typeof(ProvenanceCompiledFixture).Assembly.Location;
         var assembly = File.ReadAllBytes(assemblyPath);
         var pdb = File.ReadAllBytes(Path.ChangeExtension(assemblyPath, ".pdb"));
         var inspected = ArtifactEvidenceInspector.InspectBuild(
@@ -282,7 +304,7 @@ public sealed class AnalyzeCommandTests
                 error="0" timeout="0" aborted="0" inconclusive="0" notExecuted="0" /></ResultSummary>
             </TestRun>
             """);
-        var scope = Encoding.UTF8.GetBytes("""{"version":1,"sources":["src/C.cs"]}""");
+        var scope = Encoding.UTF8.GetBytes($$"""{"version":1,"sources":["{{CompiledSource}}"]}""");
         var policy = Encoding.UTF8.GetBytes("""{"version":1,"threshold":8,"allowMissingCoverage":false}""");
         File.WriteAllBytes(Path.Combine(artifacts, "source.bin"), source);
         File.WriteAllBytes(Path.Combine(artifacts, "coverage.xml"), coverage);
@@ -293,7 +315,7 @@ public sealed class AnalyzeCommandTests
         File.WriteAllBytes(Path.Combine(artifacts, "policy.json"), policy);
         var context = new ManifestContext("ctx", "missing/App.csproj", "net10.0", "Debug", "AnyCPU",
             "sources", "context", "closure", true, true,
-            [new ManifestInput("source", "src/C.cs", "artifacts/source.bin", source.Length,
+            [new ManifestInput("source", CompiledSource, "artifacts/source.bin", source.Length,
                 CanonicalIdentity.Sha256(source), "utf-8", false)])
         {
             ParseOptions = new ManifestParseOptions("preview", "Regular", [],
@@ -355,5 +377,17 @@ public sealed class AnalyzeCommandTests
         };
         WriteManifest(manifestPath, ManifestIdentity.Seal(manifest with
         { Artifacts = artifacts, EvaluationInputs = evaluation, ManifestHash = null }));
+    }
+
+    private static byte[] CompiledSourceBytes()
+    {
+        var root = new DirectoryInfo(AppContext.BaseDirectory);
+        while (root is not null)
+        {
+            var candidate = Path.Combine(root.FullName, CompiledSource.Replace('/', Path.DirectorySeparatorChar));
+            if (File.Exists(candidate)) return File.ReadAllBytes(candidate);
+            root = root.Parent;
+        }
+        throw new FileNotFoundException($"Could not locate {CompiledSource}.");
     }
 }

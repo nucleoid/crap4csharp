@@ -316,21 +316,19 @@ public static class CoverageReader
             var moduleIdentity = @class.Ancestors().FirstOrDefault(element => element.Name.LocalName == "package")?.Attribute("name")?.Value;
             var typeName = Attr(@class, "name") ?? string.Empty;
             var filename = Attr(@class, "filename");
-            string? file;
-            if (filename is null) file = null;
+            IReadOnlyList<string?> files;
+            if (filename is null) files = [null];
             else if (captured)
             {
-                if (IsLexicallyAbsolute(filename)) file = filename;
-                else if (sourceRoots.Length == 0) file = filename;
-                else if (sourceRoots.Length == 1) file = sourceRoots[0].Replace('\\', '/').TrimEnd('/') + "/" +
-                    filename.Replace('\\', '/').TrimStart('/');
-                else throw new InvalidDataException("Captured Cobertura report has ambiguous source roots.");
+                if (IsLexicallyAbsolute(filename) || sourceRoots.Length == 0) files = [filename];
+                else files = sourceRoots.Select(sourceRoot => sourceRoot.Replace('\\', '/').TrimEnd('/') + "/" +
+                    filename.Replace('\\', '/').TrimStart('/')).Cast<string?>().ToArray();
             }
             else
             {
                 var sourceRoot = sourceRoots.FirstOrDefault();
-                file = ResolveNativePath(filename,
-                    !string.IsNullOrWhiteSpace(sourceRoot) && Path.IsPathRooted(sourceRoot) ? sourceRoot : baseDirectory);
+                files = [ResolveNativePath(filename,
+                    !string.IsNullOrWhiteSpace(sourceRoot) && Path.IsPathRooted(sourceRoot) ? sourceRoot : baseDirectory)];
             }
             var methodsContainer = @class.Elements().FirstOrDefault(element => element.Name.LocalName == "methods");
             if (methodsContainer is null) continue;
@@ -342,8 +340,9 @@ public static class CoverageReader
                     .Select(element => (Line: IntAttr(element, "number"), Visits: IntAttr(element, "hits")))
                     .Where(point => point.Line is > 0 and < 0xFEEFEE && point.Visits is not null)
                     .Select(point => new CoveragePoint(point.Line!.Value, point.Visits!.Value)).ToArray();
-                output.Add(new CoverageMethod(file, typeName, name, ParseParameterCount(signature), points, moduleIdentity)
-                { ReportId = reportId });
+                output.AddRange(files.Select(file =>
+                    new CoverageMethod(file, typeName, name, ParseParameterCount(signature), points, moduleIdentity)
+                    { ReportId = reportId }));
             }
         }
         return output;

@@ -26,9 +26,11 @@ internal static class CapturedEvaluationInputs
 
     private static ImmutableArray<byte> Bytes(ArtifactBundle bundle, string kind)
     {
-        var artifact = bundle.Manifest.Artifacts.SingleOrDefault(item => item.Kind == kind &&
-            item.ContextId is null && item.BuildId is null && item.ExecutionId is null)
-            ?? throw new InvalidDataException($"Captured {kind} artifact is missing.");
+        var artifacts = bundle.Manifest.Artifacts.Where(item => item.Kind == kind &&
+            item.ContextId is null && item.BuildId is null && item.ExecutionId is null).ToArray();
+        if (artifacts.Length != 1)
+            throw new InvalidDataException($"Captured {kind} artifact must be declared exactly once.");
+        var artifact = artifacts[0];
         return bundle.Bytes.TryGetValue(artifact.Locator, out var bytes) ? bytes
             : throw new InvalidDataException($"Captured {kind} bytes are missing.");
     }
@@ -49,7 +51,8 @@ internal static class CapturedEvaluationInputs
                 throw new InvalidDataException("Captured scope contains duplicate source identities.");
             return new CapturedScope(values);
         }
-        catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException or ArgumentException)
+        catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException or
+            ArgumentException or FormatException or OverflowException)
         { throw new InvalidDataException("Captured scope JSON is malformed.", exception); }
     }
 
@@ -66,7 +69,8 @@ internal static class CapturedEvaluationInputs
                 throw new InvalidDataException("Captured policy threshold must be finite and non-negative.");
             return new CapturedPolicy(threshold, root.GetProperty("allowMissingCoverage").GetBoolean());
         }
-        catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException)
+        catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException or
+            FormatException or OverflowException)
         { throw new InvalidDataException("Captured policy JSON is malformed.", exception); }
     }
 }

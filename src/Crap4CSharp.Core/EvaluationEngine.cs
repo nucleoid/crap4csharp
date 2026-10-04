@@ -15,8 +15,8 @@ public static class EvaluationEngine
             .ToArray();
         var sourcePaths = input.Sources.Select(source => source.LogicalPath.Replace('\\', '/')).ToArray();
         var reports = input.Coverage.OrderBy(report => report.LogicalPath, StringComparer.Ordinal).Select(report =>
-            CoverageReader.Read(report.Bytes.AsSpan(), report.LogicalPath).Select(method => method with
-            { ContextId = input.ContextId, File = CapturedLogicalPathResolver.Resolve(method.File, sourcePaths, input.PathPolicy) })
+            CapturedLogicalPathResolver.ResolveMethods(CoverageReader.Read(report.Bytes.AsSpan(), report.LogicalPath),
+                sourcePaths, input.PathPolicy).Select(method => method with { ContextId = input.ContextId })
             .Where(method => input.ExpectedModuleIdentity is null ||
                 string.Equals(method.ModuleIdentity, input.ExpectedModuleIdentity, StringComparison.Ordinal)).ToArray()).ToArray();
         cancellationToken.ThrowIfCancellationRequested();

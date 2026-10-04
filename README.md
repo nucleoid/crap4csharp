@@ -70,7 +70,9 @@ crap4csharp analyze --syntax-only --ruleset ordinary-methods-v1 --coverage cover
 # Load exact local exemptions for inspection (never trusted approval)
 crap4csharp analyze --syntax-only --callable-exemptions exemptions.json --coverage coverage.xml src
 
-# Replay a retained, hash-bound bundle without the original checkout or child processes
+# Replay a retained, hash-bound bundle without the original checkout or child processes.
+# Bundle production is intentionally pending the project-aware check orchestrator (#10);
+# current releases consume externally prepared compatible bundles but do not create them.
 crap4csharp analyze --reuse-artifacts artifacts/crap-run/manifest.json --format json
 ```
 

@@ -30,6 +30,32 @@ public sealed class EvaluationEngineTests
         Assert.Throws<InvalidDataException>(() => CoverageReader.Read(bytes, "captured/report.xml"));
     }
 
+    [Fact]
+    public void CapturedCoberturaChoosesTheOnlyMappedSourceRoot()
+    {
+        var source = CapturedSource.Create("src/C.cs",
+            Encoding.UTF8.GetBytes("class C { int M() => 1; }"));
+        var report = ImmutableArray.Create(Encoding.UTF8.GetBytes("""
+            <coverage><sources><source>C:\wrong</source><source>C:\agent\repo</source></sources>
+            <packages><package name="App"><classes><class name="C" filename="src/C.cs">
+            <methods><method name="M" signature="()"><lines><line number="1" hits="1" /></lines></method></methods>
+            </class></classes></package></packages></coverage>
+            """));
+        var input = new EvaluationInput("ctx", [source],
+            [new CapturedCoverage("coverage.xml", report, "cobertura", "line")],
+            CSharpParseOptions.Default, new PolicyOptions(8, false),
+            new ProvenanceResult(ProvenanceStatus.Captured, "captureConsistency", false, true, []))
+        {
+            PathPolicy = new CapturedPathPolicy(false,
+                [new ManifestReportRootMapping(@"C:\agent\repo", "")])
+        };
+
+        var result = EvaluationEngine.Evaluate(input, CancellationToken.None);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(1, Assert.Single(result.Metrics).Coverage);
+    }
+
     private static EvaluationSnapshot Evaluate(IReadOnlyList<CapturedSource> sources,
         IReadOnlyList<CapturedCoverage> coverage, string culture)
     {

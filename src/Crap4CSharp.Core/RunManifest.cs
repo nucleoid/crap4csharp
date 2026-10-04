@@ -334,6 +334,11 @@ public static class ProvenanceVerifier
                 if (inspected.ModuleIdentity != build.ModuleIdentity || inspected.Mvid != build.Mvid ||
                     inspected.DebugIdentity != build.DebugIdentity)
                     reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
+                var context = manifest.Contexts.FirstOrDefault(item => item.Id == build.ContextId);
+                if (context is null || context.Inputs.Where(input => input.Role == "source").Any(input =>
+                        MatchingDocumentHashes(inspected.Documents, input.LogicalPath).Count != 1 ||
+                        MatchingDocumentHashes(inspected.Documents, input.LogicalPath)[0] != input.Sha256))
+                    reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
             }
             catch (InvalidDataException) { reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete); }
         }
@@ -363,13 +368,24 @@ public static class ProvenanceVerifier
 
         foreach (var coverage in manifest.Artifacts.Where(item => item.Kind == "coverage"))
         {
-            var build = manifest.Builds.SingleOrDefault(item => item.Id == coverage.BuildId);
-            var execution = manifest.Executions.SingleOrDefault(item => item.Id == coverage.ExecutionId);
+            var build = manifest.Builds.FirstOrDefault(item => item.Id == coverage.BuildId);
+            var execution = manifest.Executions.FirstOrDefault(item => item.Id == coverage.ExecutionId);
             if (coverage.ContextId is null || build is null || execution is null ||
                 string.IsNullOrWhiteSpace(coverage.Format) || string.IsNullOrWhiteSpace(coverage.CoordinateKind) ||
                 build.ContextId != coverage.ContextId || execution.ContextId != coverage.ContextId ||
                 execution.BuildId != build.Id || !execution.Completed || execution.ExitCode != 0 || execution.FailedTests != 0)
                 reasons.Add(ProvenanceReasonCodes.DanglingReference);
+            if (build is not null && artifactBytes.TryGetValue(coverage.Locator, out var coverageBytes))
+            {
+                try
+                {
+                    var inspected = ArtifactEvidenceInspector.InspectCoverage(coverageBytes);
+                    if (coverage.Format != inspected.Format || coverage.CoordinateKind != inspected.CoordinateKind ||
+                        !inspected.ModuleIdentities.Contains(build.ModuleIdentity, StringComparer.Ordinal))
+                        reasons.Add(ProvenanceReasonCodes.IncompatiblePointRepresentation);
+                }
+                catch (InvalidDataException) { reasons.Add(ProvenanceReasonCodes.IncompatiblePointRepresentation); }
+            }
         }
         ValidateEvaluationArtifact("scope", manifest.EvaluationInputs.ScopeHash, manifest.Artifacts, reasons);
         ValidateEvaluationArtifact("policy", manifest.EvaluationInputs.PolicyHash, manifest.Artifacts, reasons);
@@ -428,4 +444,12 @@ public static class ProvenanceVerifier
     }
     private static string InputKey(ManifestInput input) => input.Role + "\n" + input.LogicalPath;
     private static string InputKey(CurrentInputEvidence input) => input.Role + "\n" + input.LogicalPath;
+    private static IReadOnlyList<string> MatchingDocumentHashes(IReadOnlyDictionary<string, string> documents,
+        string logicalPath)
+    {
+        var normalized = logicalPath.Replace('\\', '/');
+        return documents.Where(pair => pair.Key.Replace('\\', '/').Equals(normalized, StringComparison.Ordinal) ||
+                pair.Key.Replace('\\', '/').EndsWith("/" + normalized, StringComparison.Ordinal))
+            .Select(pair => pair.Value).Distinct(StringComparer.Ordinal).ToArray();
+    }
 }

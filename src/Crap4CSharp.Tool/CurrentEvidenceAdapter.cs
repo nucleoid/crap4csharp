@@ -4,12 +4,15 @@ using Crap4CSharp.Core;
 internal static class CurrentEvidenceAdapter
 {
     public static CurrentEvidence Capture(RunManifest manifest, string workspaceRoot,
-        Func<string, IReadOnlyList<string>, string>? gitExecutor = null)
+        Func<string, IReadOnlyList<string>, string>? gitExecutor = null, TimeSpan? gitTimeout = null)
     {
         var root = Path.GetFullPath(workspaceRoot);
         var revision = manifest.Revision.Kind switch
         {
-            "git" => ObserveGit(root, gitExecutor ?? Git),
+            "git" => ObserveGit(root, manifest.Contexts.SelectMany(context => context.Inputs)
+                .Where(input => !input.Generated).Select(input => input.LogicalPath)
+                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
+                gitExecutor ?? ((path, arguments) => Git(path, arguments, gitTimeout ?? TimeSpan.FromSeconds(10)))),
             "none" => new ObservedRevision("none",
                 CanonicalIdentity.Set("local-workspace-v1", [root]), null, null),
             _ => throw new InvalidDataException($"Unsupported revision kind: {manifest.Revision.Kind}")
@@ -37,17 +40,18 @@ internal static class CurrentEvidenceAdapter
             inputs, new Dictionary<string, string>(StringComparer.Ordinal), false, revision.StateHash);
     }
 
-    private static ObservedRevision ObserveGit(string root,
+    private static ObservedRevision ObserveGit(string root, IReadOnlyList<string> inputPaths,
         Func<string, IReadOnlyList<string>, string> git)
     {
         string Run(params string[] arguments) => git(root, arguments);
-        var repositoryRoot = Run("rev-parse", "--show-toplevel");
-        var commonDirectory = Path.GetFullPath(Run("rev-parse", "--git-common-dir"), root);
-        var worktreeDirectory = Path.GetFullPath(Run("rev-parse", "--git-dir"), root);
-        var head = Run("rev-parse", "HEAD");
-        var status = Run("status", "--porcelain=v1", "-z", "--untracked-files=all");
+        static string Line(string value) => value.TrimEnd('\r', '\n');
+        var repositoryRoot = Line(Run("rev-parse", "--show-toplevel"));
+        var commonDirectory = Path.GetFullPath(Line(Run("rev-parse", "--git-common-dir")), root);
+        var worktreeDirectory = Path.GetFullPath(Line(Run("rev-parse", "--git-dir")), root);
+        var head = Line(Run("rev-parse", "HEAD"));
+        var status = git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", .. inputPaths]);
         var submodules = Run("submodule", "status", "--recursive");
-        var staged = Run("diff", "--cached", "--binary", "--full-index");
+        var staged = git(root, ["diff", "--cached", "--binary", "--full-index", "--", .. inputPaths]);
         var stateHash = CanonicalIdentity.Set("git-workspace-state-v1",
             [CanonicalIdentity.Tuple("status", status),
              CanonicalIdentity.Tuple("submodules", submodules),
@@ -57,7 +61,7 @@ internal static class CurrentEvidenceAdapter
             CanonicalIdentity.Set("git-worktree-v1", [repositoryRoot, worktreeDirectory]), head, stateHash);
     }
 
-    private static string Git(string root, IReadOnlyList<string> arguments)
+    private static string Git(string root, IReadOnlyList<string> arguments, TimeSpan timeoutValue)
     {
         var start = new ProcessStartInfo("git")
         {
@@ -67,9 +71,10 @@ internal static class CurrentEvidenceAdapter
             UseShellExecute = false,
             CreateNoWindow = true
         };
+        start.ArgumentList.Add("--no-optional-locks");
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Unable to start git.");
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var timeout = new CancellationTokenSource(timeoutValue);
         var outputTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
         var errorTask = process.StandardError.ReadToEndAsync(timeout.Token);
         try
@@ -86,7 +91,7 @@ internal static class CurrentEvidenceAdapter
         var error = errorTask.Result;
         if (process.ExitCode != 0)
             throw new InvalidDataException($"Git identity observation failed: {error.Trim()}");
-        return output.Trim();
+        return output;
     }
 
     private static string? ResolveRegularFile(string root, string logical)

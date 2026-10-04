@@ -7,6 +7,7 @@ namespace Crap4CSharp.Tests;
 
 public sealed class ArtifactCaptureTests
 {
+    private const string CompiledSource = "tests/Crap4CSharp.Tests/ProvenanceCompiledFixture.cs";
     [Fact]
     public void PublicationSealsVerifiesAndNeverOverwritesADestination()
     {
@@ -40,8 +41,7 @@ public sealed class ArtifactCaptureTests
     public void SavedInputListCannotMasqueradeAsRevalidatedCurrentContext()
     {
         using var directory = TestDirectory.Create("crap4csharp-current-evidence");
-        Directory.CreateDirectory(Path.Combine(directory.Path, "src"));
-        File.WriteAllBytes(Path.Combine(directory.Path, "src", "C.cs"), [1, 2, 3]);
+        WriteCompiledSource(directory.Path);
         var fixture = CreateFixture();
         var manifest = ManifestIdentity.Seal(fixture.Manifest with
         {
@@ -63,8 +63,7 @@ public sealed class ArtifactCaptureTests
     public void GitCurrentEvidenceBindsStatusSubmodulesAndStagedDiff()
     {
         using var directory = TestDirectory.Create("crap4csharp-git-state");
-        Directory.CreateDirectory(Path.Combine(directory.Path, "src"));
-        File.WriteAllBytes(Path.Combine(directory.Path, "src", "C.cs"), [1, 2, 3]);
+        WriteCompiledSource(directory.Path);
         Directory.CreateDirectory(Path.Combine(directory.Path, ".git", "worktrees", "fixture"));
         var fixture = CreateFixture();
         string Run(string state, string _, IReadOnlyList<string> arguments) => string.Join(" ", arguments) switch
@@ -73,9 +72,9 @@ public sealed class ArtifactCaptureTests
             "rev-parse --git-common-dir" => Path.Combine(directory.Path, ".git"),
             "rev-parse --git-dir" => Path.Combine(directory.Path, ".git", "worktrees", "fixture"),
             "rev-parse HEAD" => "abc",
-            "status --porcelain=v1 -z --untracked-files=all" => state,
+            "status --porcelain=v1 -z --untracked-files=all -- tests/Crap4CSharp.Tests/ProvenanceCompiledFixture.cs" => state,
             "submodule status --recursive" => "",
-            "diff --cached --binary --full-index" => "",
+            "diff --cached --binary --full-index -- tests/Crap4CSharp.Tests/ProvenanceCompiledFixture.cs" => "",
             var command => throw new InvalidOperationException(command)
         };
         var manifest = ManifestIdentity.Seal(fixture.Manifest with
@@ -87,7 +86,7 @@ public sealed class ArtifactCaptureTests
         var clean = CurrentEvidenceAdapter.Capture(manifest, directory.Path,
             (root, arguments) => Run("", root, arguments));
         var dirty = CurrentEvidenceAdapter.Capture(manifest, directory.Path,
-            (root, arguments) => Run(" M src/C.cs", root, arguments));
+            (root, arguments) => Run(" M " + CompiledSource, root, arguments));
 
         Assert.NotNull(clean.StateHash);
         Assert.NotEqual(clean.StateHash, dirty.StateHash);
@@ -184,10 +183,10 @@ public sealed class ArtifactCaptureTests
 
     private static FixtureData CreateFixture()
     {
-        var source = ImmutableArray.Create<byte>(1, 2, 3);
+        var source = ImmutableArray.Create(CompiledSourceBytes());
         var coverage = ImmutableArray.Create(Encoding.UTF8.GetBytes(
-            "<coverage><packages><package name=\"App\"><classes /></package></packages></coverage>"));
-        var assemblyPath = typeof(CanonicalIdentity).Assembly.Location;
+            "<coverage><packages><package name=\"Crap4CSharp.Tests\"><classes><class name=\"Crap4CSharp.Tests.ProvenanceCompiledFixture\" filename=\"tests/Crap4CSharp.Tests/ProvenanceCompiledFixture.cs\"><methods><method name=\"M\" signature=\"()\"><lines><line number=\"7\" hits=\"1\" /></lines></method></methods></class></classes></package></packages></coverage>"));
+        var assemblyPath = typeof(ProvenanceCompiledFixture).Assembly.Location;
         var assembly = ImmutableArray.Create(File.ReadAllBytes(assemblyPath));
         var pdb = ImmutableArray.Create(File.ReadAllBytes(Path.ChangeExtension(assemblyPath, ".pdb")));
         var inspected = ArtifactEvidenceInspector.InspectBuild(assembly, pdb);
@@ -197,12 +196,13 @@ public sealed class ArtifactCaptureTests
                 error="0" timeout="0" aborted="0" inconclusive="0" notExecuted="0" /></ResultSummary>
             </TestRun>
             """));
-        var scope = ImmutableArray.Create(Encoding.UTF8.GetBytes("""{"version":1,"sources":["src/C.cs"]}"""));
+        var scope = ImmutableArray.Create(Encoding.UTF8.GetBytes(
+            $$"""{"version":1,"sources":["{{CompiledSource}}"]}"""));
         var policy = ImmutableArray.Create(Encoding.UTF8.GetBytes(
             """{"version":1,"threshold":8,"allowMissingCoverage":false}"""));
         var context = new ManifestContext("ctx", "App.csproj", "net10.0", "Debug", "AnyCPU",
             "", "", "", true, true,
-            [new ManifestInput("source", "src/C.cs", "artifacts/source.bin", source.Length,
+            [new ManifestInput("source", CompiledSource, "artifacts/source.bin", source.Length,
                 CanonicalIdentity.Sha256(source.AsSpan()), "utf-8", false)])
         {
             ParseOptions = new ManifestParseOptions("preview", "Regular", [],
@@ -249,4 +249,23 @@ public sealed class ArtifactCaptureTests
 
     private sealed record FixtureData(RunManifest Manifest,
         IReadOnlyDictionary<string, ImmutableArray<byte>> Bytes);
+
+    private static void WriteCompiledSource(string root)
+    {
+        var path = Path.Combine(root, CompiledSource.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllBytes(path, CompiledSourceBytes());
+    }
+
+    private static byte[] CompiledSourceBytes()
+    {
+        var root = new DirectoryInfo(AppContext.BaseDirectory);
+        while (root is not null)
+        {
+            var candidate = Path.Combine(root.FullName, CompiledSource.Replace('/', Path.DirectorySeparatorChar));
+            if (File.Exists(candidate)) return File.ReadAllBytes(candidate);
+            root = root.Parent;
+        }
+        throw new FileNotFoundException($"Could not locate {CompiledSource}.");
+    }
 }

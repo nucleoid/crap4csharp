@@ -150,12 +150,9 @@ internal static class AnalyzeCommand
         var inventory = CallableInventory.Merge(sources.Select(source =>
             CallableInventory.Analyze(source.Text, source.LogicalPath, context, references)).ToArray());
         var sourcePaths = sources.Select(source => source.LogicalPath).ToArray();
-        var reports = coverage.SelectMany(report => CoverageReader.Read(report.Bytes.AsSpan(), report.LogicalPath))
-            .Select(method => method with
-            {
-                ContextId = contextId,
-                File = CapturedLogicalPathResolver.Resolve(method.File, sourcePaths, pathPolicy)
-            }).ToArray();
+        var reports = coverage.SelectMany(report => CapturedLogicalPathResolver.ResolveMethods(
+                CoverageReader.Read(report.Bytes.AsSpan(), report.LogicalPath), sourcePaths, pathPolicy))
+            .Select(method => method with { ContextId = contextId }).ToArray();
         var resolution = CallableCoverageResolver.Resolve(inventory, reports, build.ModuleIdentity);
         var observations = resolution.Observations.ToDictionary(item => item.ObservationId!, StringComparer.Ordinal);
         var families = CallableFamilyEvaluator.Evaluate(inventory, resolution.Observations, threshold);

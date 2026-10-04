@@ -35,6 +35,20 @@ public sealed class EvaluationSnapshot : IEquatable<EvaluationSnapshot>
 
 public static class CapturedLogicalPathResolver
 {
+    public static IReadOnlyList<CoverageMethod> ResolveMethods(IEnumerable<CoverageMethod> methods,
+        IReadOnlyList<string> sourcePaths, CapturedPathPolicy policy)
+    {
+        var comparer = policy.CaseSensitive ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
+        var sources = sourcePaths.Select(CanonicalIdentity.NormalizeLogicalPath).ToHashSet(comparer);
+        return methods.Select(method => method with { File = Resolve(method.File, sourcePaths, policy) })
+            .GroupBy(MethodCandidateIdentity, StringComparer.Ordinal).Select(group =>
+            {
+                var matches = group.Where(method => method.File is not null && sources.Contains(method.File))
+                    .Select(method => method.File!).Distinct(comparer).ToArray();
+                return group.First() with { File = matches.Length == 1 ? matches[0] : null };
+            }).ToArray();
+    }
+
     public static string? Resolve(string? reportedPath, IReadOnlyList<string> sourcePaths, CapturedPathPolicy policy)
     {
         if (reportedPath is null) return null;
@@ -80,4 +94,11 @@ public static class CapturedLogicalPathResolver
     private static string Normalize(string path) => path.Replace('\\', '/');
     private static bool IsAbsolute(string path) => path.StartsWith('/') ||
         path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] == '/';
+
+    private static string MethodCandidateIdentity(CoverageMethod method) => CanonicalIdentity.Tuple(
+        "captured-coverage-method-candidate-v1", method.ReportId, method.ModuleIdentity, method.TypeName,
+        method.MethodName, method.ParameterCount?.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        method.RawSignature, method.MethodToken,
+        string.Join("\n", method.SequencePoints.Select(point => string.Join(":", point.Line, point.Visits,
+            point.StartColumn, point.EndLine, point.EndColumn, point.Offset))));
 }

@@ -7,6 +7,7 @@ namespace Crap4CSharp.Tests;
 
 public sealed class ProvenanceTests
 {
+    private const string CompiledSource = "tests/Crap4CSharp.Tests/ProvenanceCompiledFixture.cs";
     [Fact]
     public void CanonicalIdentityBindsExactBytesAndLogicalIdentity()
     {
@@ -88,9 +89,10 @@ public sealed class ProvenanceTests
     public void SameLineByteChangeInvalidatesCurrentWorkspaceEvidence()
     {
         var manifest = Fixture();
+        var expected = manifest.Contexts[0].Inputs[0];
         var current = EvidenceFrom(manifest) with
         {
-            Inputs = [new CurrentInputEvidence("source", "src/C.cs", 3,
+            Inputs = [new CurrentInputEvidence(expected.Role, expected.LogicalPath, expected.Length,
                 CanonicalIdentity.Sha256([1, 2, 4]))]
         };
         var result = ProvenanceVerifier.VerifyCurrent(manifest, FixtureBytes(), current, false);
@@ -189,6 +191,29 @@ public sealed class ProvenanceTests
     }
 
     [Fact]
+    public void CaptureRejectsSourceBytesNotNamedByThePortablePdb()
+    {
+        var manifest = Fixture();
+        var bytes = FixtureBytes();
+        var changed = ImmutableArray.Create(Encoding.UTF8.GetBytes("namespace Other; internal class Different { }"));
+        bytes["artifacts/source.bin"] = changed;
+        var context = manifest.Contexts[0];
+        var input = context.Inputs[0] with
+        { Length = changed.Length, Sha256 = CanonicalIdentity.Sha256(changed.AsSpan()) };
+        var artifacts = manifest.Artifacts.Select(item => item.Kind == "source"
+            ? item with { Length = changed.Length, Sha256 = input.Sha256 } : item).ToArray();
+        manifest = ManifestIdentity.Seal(manifest with
+        {
+            Contexts = [context with { Inputs = [input] }],
+            Artifacts = artifacts,
+            ManifestHash = null
+        });
+
+        Assert.Contains(ProvenanceReasonCodes.ActualBindingIncomplete,
+            ProvenanceVerifier.VerifyCapture(manifest, bytes).Reasons);
+    }
+
+    [Fact]
     public void CaptureDerivesExecutionCountsFromActualTrx()
     {
         var manifest = Fixture();
@@ -202,6 +227,43 @@ public sealed class ProvenanceTests
 
         Assert.Contains(ProvenanceReasonCodes.TestExecutionIncomplete,
             ProvenanceVerifier.VerifyCapture(manifest, bytes).Reasons);
+    }
+
+    [Fact]
+    public void CaptureRejectsAFailedTrxEvenWhenItsCountersLookSuccessful()
+    {
+        var manifest = Fixture();
+        var bytes = FixtureBytes();
+        var failed = ImmutableArray.Create(Encoding.UTF8.GetBytes("""
+            <TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
+              <ResultSummary outcome="Failed"><Counters total="1" executed="1" passed="1" failed="0"
+                error="0" timeout="0" aborted="0" disconnected="0" passedButRunAborted="0"
+                notRunnable="0" inconclusive="0" notExecuted="0" /></ResultSummary>
+            </TestRun>
+            """));
+        bytes["artifacts/results.trx"] = failed;
+        var artifacts = manifest.Artifacts.Select(item => item.Kind == "test-result"
+            ? item with { Length = failed.Length, Sha256 = CanonicalIdentity.Sha256(failed.AsSpan()) }
+            : item).ToArray();
+        manifest = ManifestIdentity.Seal(manifest with { Artifacts = artifacts, ManifestHash = null });
+
+        Assert.Contains(ProvenanceReasonCodes.TestExecutionIncomplete,
+            ProvenanceVerifier.VerifyCapture(manifest, bytes).Reasons);
+    }
+
+    [Fact]
+    public void CaptureDerivesCoverageFormatAndCoordinatesFromTheXml()
+    {
+        var manifest = Fixture();
+        manifest = ManifestIdentity.Seal(manifest with
+        {
+            Artifacts = manifest.Artifacts.Select(item => item.Kind == "coverage"
+                ? item with { Format = "opencover", CoordinateKind = "sequence-point" } : item).ToArray(),
+            ManifestHash = null
+        });
+
+        Assert.Contains(ProvenanceReasonCodes.IncompatiblePointRepresentation,
+            ProvenanceVerifier.VerifyCapture(manifest, FixtureBytes()).Reasons);
     }
 
     [Fact]
@@ -224,13 +286,13 @@ public sealed class ProvenanceTests
             ManifestHash = null
         });
 
-        Assert.Equal("864f42d22774118aa30c2be59188cf321335366c5322a78565ba3e39b7d71a70",
+        Assert.Equal("2fcf2db1d70b98d6d21703f0e4f2dc1653a69c815127ea1c4ffc08faac6b57ea",
             manifest.Contexts[0].SourceSetHash);
-        Assert.Equal("e281b69e9bae9ddabafdfad7e60ded5039e610cbf82aa373bf6c4c64bc730e21",
+        Assert.Equal("7d898082e4d73b0a846d0e36bb0c0e9f253383b6da17cb8927b0d08445dfd254",
             manifest.Contexts[0].InputClosureHash);
-        Assert.Equal("27e8ee19bc0a8943eb757235bf53b9c1aee69b42eb5b5310c3cef54c946e20b9",
+        Assert.Equal("bdf3277f889c3bd5c1d9b949d281e9a8ad551b9052f9fa2a67499747a681cc66",
             manifest.Contexts[0].ContextHash);
-        Assert.Equal("0728361ba9941b470e0cad44b880e9611241fda960b14a08d96d9f863aaff95f",
+        Assert.Equal("ccf42f44a8c89cefcb302316363bd2ca5d303e13eeadea6b48ce97f6bc0f9195",
             golden.ManifestHash);
     }
 
@@ -277,7 +339,8 @@ public sealed class ProvenanceTests
     private static RunManifest Fixture()
     {
         var parts = FixtureParts();
-        var sourceHash = CanonicalIdentity.Sha256([1, 2, 3]);
+        var source = parts.Bytes["artifacts/source.bin"];
+        var sourceHash = CanonicalIdentity.Sha256(source.AsSpan());
         var manifest = new RunManifest("1.0", "sha256-canonical-v1",
             new ManifestProducer("crap4csharp", "0.1.0", ComplexityRules.CallablesV1,
                 ProjectAnalysisContext.ProtocolVersion, "coverage-v1", "paths-v1"),
@@ -286,7 +349,8 @@ public sealed class ProvenanceTests
             [new ManifestRoot("workspace", "workspace", "sensitive")],
             [new ManifestContext("ctx", "App.csproj", "net10.0", "Debug", "AnyCPU",
                 "sources", "context", "closure", true, true,
-                [new ManifestInput("source", "src/C.cs", "artifacts/source.bin", 3, sourceHash, "utf-8", false)])
+                [new ManifestInput("source", CompiledSource, "artifacts/source.bin", source.Length,
+                    sourceHash, "utf-8", false)])
             {
                 ParseOptions = new ManifestParseOptions("preview", "Regular", ["DEBUG"],
                     new Dictionary<string, string>(StringComparer.Ordinal)),
@@ -296,10 +360,12 @@ public sealed class ProvenanceTests
                 CanonicalIdentity.Sha256(parts.Bytes["artifacts/app.dll"].AsSpan()), parts.Build.Mvid,
                 CanonicalIdentity.Sha256(parts.Bytes["artifacts/app.pdb"].AsSpan()), parts.Build.DebugIdentity)],
             [new ManifestExecution("test", "ctx", "build", true, 0, 1, 1, 0, 0)],
-            [new ManifestArtifact("source", "source", "artifacts/source.bin", 3, sourceHash,
+            [new ManifestArtifact("source", "source", "artifacts/source.bin", source.Length, sourceHash,
                     "ctx", null, null, null, null),
-             new ManifestArtifact("coverage", "coverage", "artifacts/coverage.xml", 3,
-                    CanonicalIdentity.Sha256([4, 5, 6]), "ctx", "build", "test", "opencover", "sequence-point"),
+             new ManifestArtifact("coverage", "coverage", "artifacts/coverage.xml",
+                    parts.Bytes["artifacts/coverage.xml"].Length,
+                    CanonicalIdentity.Sha256(parts.Bytes["artifacts/coverage.xml"].AsSpan()),
+                    "ctx", "build", "test", "cobertura", "line"),
              new ManifestArtifact("assembly", "assembly", "artifacts/app.dll", parts.Bytes["artifacts/app.dll"].Length,
                     CanonicalIdentity.Sha256(parts.Bytes["artifacts/app.dll"].AsSpan()),
                     "ctx", "build", null, null, null),
@@ -326,7 +392,7 @@ public sealed class ProvenanceTests
 
     private static (Dictionary<string, ImmutableArray<byte>> Bytes, InspectedBuildEvidence Build) FixtureParts()
     {
-        var assemblyPath = typeof(CanonicalIdentity).Assembly.Location;
+        var assemblyPath = typeof(ProvenanceCompiledFixture).Assembly.Location;
         var assembly = ImmutableArray.Create(File.ReadAllBytes(assemblyPath));
         var pdb = ImmutableArray.Create(File.ReadAllBytes(Path.ChangeExtension(assemblyPath, ".pdb")));
         var trx = ImmutableArray.Create(Encoding.UTF8.GetBytes("""
@@ -337,17 +403,30 @@ public sealed class ProvenanceTests
             """));
         var bytes = new Dictionary<string, ImmutableArray<byte>>(StringComparer.Ordinal)
         {
-            ["artifacts/source.bin"] = ImmutableArray.Create<byte>(1, 2, 3),
-            ["artifacts/coverage.xml"] = ImmutableArray.Create<byte>(4, 5, 6),
+            ["artifacts/source.bin"] = ImmutableArray.Create(CompiledSourceBytes()),
+            ["artifacts/coverage.xml"] = ImmutableArray.Create(Encoding.UTF8.GetBytes(
+                "<coverage><packages><package name=\"Crap4CSharp.Tests\"><classes><class name=\"Crap4CSharp.Tests.ProvenanceCompiledFixture\" filename=\"tests/Crap4CSharp.Tests/ProvenanceCompiledFixture.cs\"><methods><method name=\"M\" signature=\"()\"><lines><line number=\"7\" hits=\"1\" /></lines></method></methods></class></classes></package></packages></coverage>")),
             ["artifacts/app.dll"] = assembly,
             ["artifacts/app.pdb"] = pdb,
             ["artifacts/results.trx"] = trx,
             ["artifacts/scope.json"] = ImmutableArray.Create(
-                Encoding.UTF8.GetBytes("""{"version":1,"sources":["src/C.cs"]}""")),
+                Encoding.UTF8.GetBytes($$"""{"version":1,"sources":["{{CompiledSource}}"]}""")),
             ["artifacts/policy.json"] = ImmutableArray.Create(
                 Encoding.UTF8.GetBytes("""{"version":1,"threshold":8,"allowMissingCoverage":false}"""))
         };
         return (bytes, ArtifactEvidenceInspector.InspectBuild(assembly, pdb));
+    }
+
+    private static byte[] CompiledSourceBytes()
+    {
+        var root = new DirectoryInfo(AppContext.BaseDirectory);
+        while (root is not null)
+        {
+            var candidate = Path.Combine(root.FullName, CompiledSource.Replace('/', Path.DirectorySeparatorChar));
+            if (File.Exists(candidate)) return File.ReadAllBytes(candidate);
+            root = root.Parent;
+        }
+        throw new FileNotFoundException($"Could not locate {CompiledSource}.");
     }
 
     private static CurrentEvidence EvidenceFrom(RunManifest manifest) => new(
