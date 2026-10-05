@@ -116,7 +116,12 @@ public sealed class CallableCliTests : IDisposable
     [Fact]
     public async Task ModernFailureAtomicallyReplacesExistingNonAliasingOutput()
     {
-        var destination = Write("existing-result.json", """{"stale":"pass"}""");
+        // Only a real prior result is an authorized overwrite destination; an arbitrary
+        // JSON consumer configuration must not become a result merely because it is JSON.
+        var previous = await Run(null, "check", "--ruleset", "callables-v1", "--format", "json");
+        var priorDocument = System.Text.Json.Nodes.JsonNode.Parse(previous.Output)!;
+        priorDocument["stale"] = "pass";
+        var destination = Write("existing-result.json", priorDocument.ToJsonString());
         var result = await Run(null, "check", "--ruleset", "callables-v1", "--format", "json",
             "--output", destination);
 
@@ -124,6 +129,24 @@ public sealed class CallableCliTests : IDisposable
         using var written = JsonDocument.Parse(File.ReadAllText(destination));
         Assert.Equal(1, written.RootElement.GetProperty("run").GetProperty("exitCode").GetInt32());
         Assert.False(written.RootElement.TryGetProperty("stale", out _));
+    }
+
+    [Fact]
+    public async Task ModernFailurePreservesArbitraryExistingJsonConsumerConfiguration()
+    {
+        const string original = """{"stale":"pass"}""";
+        var destination = Write("consumer-configuration.json", original);
+        var stamp = File.GetLastWriteTimeUtc(destination);
+        var result = await Run(null, "check", "--ruleset", "callables-v1", "--format", "json",
+            "--output", destination);
+        Assert.Equal(1, result.ExitCode);
+        using var stdout = JsonDocument.Parse(result.Output);
+        Assert.Equal("arguments.invalid", stdout.RootElement.GetProperty("evaluation")
+            .GetProperty("decision").GetProperty("reason").GetString());
+        Assert.Contains(stdout.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
+            check => check.GetProperty("reason").GetString() == "output.notWritten");
+        Assert.Equal(original, File.ReadAllText(destination));
+        Assert.Equal(stamp, File.GetLastWriteTimeUtc(destination));
     }
 
     [Fact]
