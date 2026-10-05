@@ -224,7 +224,9 @@ internal static class App
         }
         catch (Exception exception) when (IsHandled(exception))
         {
-            var reason = exception is DecoderFallbackException && options?.ReuseArtifacts is not null ? "artifact.invalid" :
+            var reason = exception is PolicyException policyException ? policyException.Code :
+                exception is BaselineException baselineException ? baselineException.Code :
+                exception is DecoderFallbackException && options?.ReuseArtifacts is not null ? "artifact.invalid" :
                 exception is ArgumentException ? "arguments.invalid" :
                 exception is InvalidDataException ? "artifact.invalid" :
                 exception is OperationCanceledException ? "run.cancelled" : "execution.failed";
