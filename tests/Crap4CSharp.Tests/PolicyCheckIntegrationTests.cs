@@ -26,6 +26,19 @@ public sealed class PolicyCheckIntegrationTests
         var (locator, manifest, manifestContext, inputs, bytes) = await CreateBundle(repository, projectLogical,
             PolicyLogical, typeof(Crap4CSharp.ProvenanceFixture.CompiledEvidence).Assembly.Location,
             Path.Combine(directory.Path, "bundle"));
+        // Every declared consumer-input role and the actual recipe outputs must be protected,
+        // independently of the CLI's early refusal of existing result destinations.
+        var declaredFile = Path.Combine(repository, PolicyLogical.Replace('/', Path.DirectorySeparatorChar));
+        var declaredBytes = await File.ReadAllBytesAsync(declaredFile, TestContext.Current.CancellationToken);
+        var protectedManifest = manifest with { Contexts = [manifestContext with { Inputs =
+            [.. inputs, new ManifestInput("configuration", PolicyLogical, "inputs/configuration.bin",
+                declaredBytes.Length, CanonicalIdentity.Sha256(declaredBytes), "utf-8", false)
+                { RepositoryPath = PolicyLogical }] }] };
+        var current = await CurrentEvidenceAdapter.CaptureSupportedAsync(protectedManifest, repository,
+            TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+        Assert.Contains(declaredFile, current.ProtectedPaths!);
+        Assert.Contains(typeof(Crap4CSharp.ProvenanceFixture.CompiledEvidence).Assembly.Location, current.ProtectedPaths!);
+        Assert.Contains(Path.ChangeExtension(typeof(Crap4CSharp.ProvenanceFixture.CompiledEvidence).Assembly.Location, ".pdb"), current.ProtectedPaths!);
         var output = new StringWriter();
         var error = new StringWriter();
 
