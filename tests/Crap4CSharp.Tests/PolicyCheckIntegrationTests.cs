@@ -139,6 +139,22 @@ public sealed class PolicyCheckIntegrationTests
         Assert.Equal("verified", result.RootElement.GetProperty("evaluation").GetProperty("provenance")
             .GetProperty("status").GetString());
 
+        foreach (var consumerFile in new[] { "App.csproj", "Directory.Build.props", "Shared/Util.cs", "global.json" })
+        {
+            var destination = Path.Combine(directory.Path, "consumer", consumerFile);
+            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+            var original = Encoding.UTF8.GetBytes("must not be overwritten by result JSON");
+            await File.WriteAllBytesAsync(destination, original, TestContext.Current.CancellationToken);
+            var stamp = File.GetLastWriteTimeUtc(destination);
+            var guardedOutput = new StringWriter();
+            var guardedExit = await global::App.RunAsync(["check", "--reuse-artifacts", locator,
+                "--policy", PolicyLogical, "--base", "HEAD", "--format", "json", "--output", destination],
+                repository, guardedOutput, TextWriter.Null, TestContext.Current.CancellationToken);
+            Assert.Equal(1, guardedExit);
+            Assert.Equal(original, await File.ReadAllBytesAsync(destination, TestContext.Current.CancellationToken));
+            Assert.Equal(stamp, File.GetLastWriteTimeUtc(destination));
+        }
+
         foreach (var forgedPath in new[] { "Crap4CSharp.slnx", "does-not-exist.cs",
                      "src/App/Migrations/Gate.cs" })
         {
