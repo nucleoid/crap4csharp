@@ -69,10 +69,29 @@ public static class ProjectTargetSelector
 public static class ProjectContextLoader
 {
     internal const string LoaderCommand = "__crap4csharp-project-context-v1";
-    internal static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    internal static readonly JsonSerializerOptions JsonOptions = CreateTransportOptions();
+
+    private static JsonSerializerOptions CreateTransportOptions()
     {
-        Converters = { new JsonStringEnumConverter() }
-    };
+        // Private subprocess transport retains local physical evidence; ordinary result JSON omits it.
+        var resolver = new System.Text.Json.Serialization.Metadata.DefaultJsonTypeInfoResolver();
+        resolver.Modifiers.Add(info =>
+        {
+            var propertyName = info.Type == typeof(ProjectSourceIdentity) ? nameof(ProjectSourceIdentity.ResolvedPath) :
+                info.Type == typeof(ProjectAnalysisContext) ? nameof(ProjectAnalysisContext.ProtectedPaths) : null;
+            if (propertyName is null) return;
+            var member = info.Type.GetProperty(propertyName)!;
+            var name = JsonNamingPolicy.CamelCase.ConvertName(propertyName);
+            var existing = info.Properties.FirstOrDefault(property => property.Name == name);
+            if (existing is not null) info.Properties.Remove(existing);
+            var property = info.CreateJsonPropertyInfo(member.PropertyType, name);
+            property.Get = member.GetValue;
+            property.Set = member.SetValue;
+            info.Properties.Add(property);
+        });
+        return new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        { TypeInfoResolver = resolver, Converters = { new JsonStringEnumConverter() } };
+    }
 
     public static Task<ProjectContextLoadResult> LoadAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken) =>
         LoadAsync(request, cancellationToken, ResolveSdkAsync);

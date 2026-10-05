@@ -126,7 +126,8 @@ internal static class MsBuildProjectLoader
                 ? ProjectAnalysisContext.ContentHash(await File.ReadAllBytesAsync(document.FilePath, cancellationToken))
                 : ProjectAnalysisContext.ContentHash(text);
             var identity = new ProjectSourceIdentity(Logical(root, document.FilePath), logical.Replace('\\', '/'),
-                contentIdentity, generated, !IsWithin(root, document.FilePath));
+                contentIdentity, generated, !IsWithin(root, document.FilePath))
+            { ResolvedPath = Path.GetFullPath(document.FilePath) };
             if (generated && !request.IncludeGenerated) exclusions.Add(new(identity.PhysicalPath, identity.LogicalPath, "generated.defaultExcluded", identity.ContentIdentity));
             else sources.Add(identity);
         }
@@ -174,7 +175,15 @@ internal static class MsBuildProjectLoader
             parseOptions.PreprocessorSymbolNames, parseOptions.Kind,
             metadata.Imports.Where(path => !IsWithin(metadata.ProjectExtensionsPath, path))
                 .Select(path => ImportIdentity(root, request.SdkPath, path)).Append(RestoreIdentity(metadata.AssetsFile)),
-            sources, new ProjectExclusionPolicy(request.IncludeTests, request.IncludeGenerated), adapter, exclusions);
+            sources, new ProjectExclusionPolicy(request.IncludeTests, request.IncludeGenerated), adapter, exclusions) with
+        {
+            ProtectedPaths = metadata.AuthoredInputs.Concat(metadata.Imports)
+                .Append(projectPath).Append(metadata.AssetsFile)
+                .Concat(project.MetadataReferences.Select(reference => reference.Display)
+                    .Where(path => path is not null && File.Exists(path)).Select(path => path!))
+                .Concat(sources.Where(source => source.ResolvedPath is not null).Select(source => source.ResolvedPath!))
+                .Select(Path.GetFullPath).Distinct(PathComparer).Order(StringComparer.Ordinal).ToArray()
+        };
     }
 
     private static MSBuildWorkspace CreateWorkspace(string configuration, string? platform, string? framework,

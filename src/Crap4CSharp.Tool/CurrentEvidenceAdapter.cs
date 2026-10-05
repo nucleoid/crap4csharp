@@ -79,8 +79,22 @@ internal static class CurrentEvidenceAdapter
                     source.ContentIdentity, source.IsGenerated)).OrderBy(item => item.LogicalPath, StringComparer.Ordinal).ToArray();
             if (!expectedSources.SequenceEqual(currentSources))
                 throw new InvalidDataException("Current project source membership or content differs from captured tested inputs.");
-            foreach (var source in current.Sources)
-                protectedPaths.Add(Path.GetFullPath(source.PhysicalPath, Path.GetDirectoryName(project)!));
+            foreach (var path in current.ProtectedPaths) protectedPaths.Add(path);
+            foreach (var source in current.Sources.Where(source => source.ResolvedPath is not null))
+                protectedPaths.Add(source.ResolvedPath!);
+            foreach (var source in current.Sources.Where(source => !source.IsGenerated))
+            {
+                var declaration = expected.Inputs.Single(input => input.Role == "source" && !input.Generated &&
+                    input.LogicalPath == source.LogicalPath);
+                var physical = source.ResolvedPath ?? throw new InvalidDataException(
+                    "Current authored source has no resolved physical repository path.");
+                var repositoryPath = Path.GetRelativePath(root, physical).Replace('\\', '/');
+                if (repositoryPath == ".." || repositoryPath.StartsWith("../", StringComparison.Ordinal) ||
+                    Path.IsPathRooted(repositoryPath) || declaration.RepositoryPath != repositoryPath)
+                    throw new InvalidDataException("Captured source repository path differs from its current physical repository path.");
+                _ = ResolveRegularFile(root, NormalizeRecipePath(repositoryPath)) ??
+                    throw new InvalidDataException("Current authored source repository path is missing.");
+            }
             foreach (var source in current.Sources.Where(source => !source.IsGenerated))
             {
                 var declaration = expected.Inputs.Single(input => input.Role == "source" && !input.Generated &&
@@ -135,6 +149,8 @@ internal static class CurrentEvidenceAdapter
         string Run(params string[] arguments) => git(root, arguments);
         static string Line(string value) => value.TrimEnd('\r', '\n');
         var repositoryRoot = Line(Run("rev-parse", "--show-toplevel"));
+        if (!PathIdentityPolicy.Current.Comparer.Equals(Path.GetFullPath(repositoryRoot), root))
+            throw new InvalidDataException("Current workspace must equal the Git repository root.");
         var commonDirectory = Path.GetFullPath(Line(Run("rev-parse", "--git-common-dir")), root);
         var worktreeDirectory = Path.GetFullPath(Line(Run("rev-parse", "--git-dir")), root);
         var head = Line(Run("rev-parse", "HEAD"));
