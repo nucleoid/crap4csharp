@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Text;
 using System.Text.Json;
+using System.Xml.Linq;
 using Crap4CSharp.Core;
 using Xunit;
 
@@ -171,10 +172,160 @@ public sealed class PolicyCheckIntegrationTests
         Assert.Equal(stamp, File.GetLastWriteTimeUtc(source));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CommittedTrustedExemptionsSurviveEditingAnotherSourceInTheSameProject(bool duplicateAnonymous)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-committed-exemption-context");
+        const string projectLogical = "App/App.csproj";
+        var project = fixture.Write(projectLogical, "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework><AssemblyName>Crap4CSharp.ProvenanceFixture</AssemblyName><LangVersion>latest</LangVersion><DebugType>portable</DebugType></PropertyGroup></Project>");
+        var original = await File.ReadAllTextAsync(Path.Combine(RepositoryRoot(),
+            "tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs"), TestContext.Current.CancellationToken);
+        // Duplicate identity uses an explicit exact-point protocol control below; Coverlet's
+        // columnless projection merges parent/lambda points and must remain fail-closed.
+        var newline = original.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        var code = duplicateAnonymous ? original.Replace("var value = 1;",
+                "return ((System.Func<int>)(" + newline + "            () => 1))() + ((System.Func<int>)(" + newline +
+                "            () => 1))();", StringComparison.Ordinal)
+                .Replace("return value;", "", StringComparison.Ordinal)
+            : original.Replace("public int M()", "public async System.Threading.Tasks.Task<int> M()", StringComparison.Ordinal)
+                .Replace("var value = 1;", "var value = await System.Threading.Tasks.Task.FromResult(1);", StringComparison.Ordinal);
+        fixture.Write("App/CompiledEvidence.cs", code);
+        var testProject = fixture.Write("App.Tests/App.Tests.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net10.0</TargetFramework><IsTestProject>true</IsTestProject></PropertyGroup>
+              <ItemGroup>
+                <ProjectReference Include="../App/App.csproj" />
+                <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" />
+                <PackageReference Include="xunit.v3" Version="3.2.2" />
+                <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+                <PackageReference Include="coverlet.collector" Version="6.0.4" />
+              </ItemGroup>
+            </Project>
+            """);
+        fixture.Write("App.Tests/GateTests.cs", duplicateAnonymous
+            ? "public class GateTests { [Xunit.Fact] public void M() { Xunit.Assert.Equal(2, new Crap4CSharp.ProvenanceFixture.CompiledEvidence().M()); } }"
+            : "public class GateTests { [Xunit.Fact] public async System.Threading.Tasks.Task M() { Xunit.Assert.Equal(1, await new Crap4CSharp.ProvenanceFixture.CompiledEvidence().M()); } }");
+        async Task<string> CaptureCoverage(string label)
+        {
+            var builtTests = await ProcessRunner.RunAsync("dotnet", ["build", testProject, "-c", BuildConfiguration,
+                "--no-restore", "-m:1", "-nr:false", "-p:BuildProjectReferences=false"], fixture.Path,
+                TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+            Assert.True(builtTests.ExitCode == 0, builtTests.StandardOutput + builtTests.StandardError);
+            var results = Path.Combine(fixture.Path, label);
+            var tested = await ProcessRunner.RunAsync("dotnet", ["test", testProject, "-c", BuildConfiguration,
+                "--no-build", "--no-restore", "-m:1", "-nr:false", "--collect:XPlat Code Coverage", "--results-directory", results,
+                "--", "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover"], fixture.Path,
+                TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+            Assert.True(tested.ExitCode == 0, tested.StandardOutput + tested.StandardError);
+            var collected = Assert.Single(Directory.EnumerateFiles(results, "coverage.opencover.xml", SearchOption.AllDirectories));
+            if (!duplicateAnonymous) return collected;
+            // Adapter control, NOT a claim that Coverlet emits exclusive parent/lambda coordinates.
+            // The real invocation above exercises the fixture. Model a supported exact-point report
+            // independently from its lossy collector projection, binding every point to the actual PDB.
+            var path = Path.Combine(fixture.Path, "App", "bin", BuildConfiguration, "net10.0", "Crap4CSharp.ProvenanceFixture.dll");
+            var evidence = ArtifactEvidenceInspector.InspectBuild(ImmutableArray.Create(await File.ReadAllBytesAsync(path, TestContext.Current.CancellationToken)),
+                ImmutableArray.Create(await File.ReadAllBytesAsync(Path.ChangeExtension(path, ".pdb"), TestContext.Current.CancellationToken)));
+            var documents = evidence.Documents.Keys.Order(StringComparer.Ordinal).Select((document, index) => (document, id: index + 1)).ToDictionary(item => item.document, item => item.id);
+            var files = new XElement("Files", documents.Select(item => new XElement("File",
+                new XAttribute("uid", item.Value), new XAttribute("fullPath", item.Key))));
+            var classes = new XElement("Classes");
+            foreach (var group in evidence.Methods.Where(method => method.SequencePoints.Count > 0).GroupBy(method => method.TypeName))
+            {
+                var methods = new XElement("Methods");
+                foreach (var method in group)
+                {
+                    var points = new XElement("SequencePoints", method.SequencePoints.Select(point => new XElement("SequencePoint",
+                        new XAttribute("vc", 1), new XAttribute("offset", point.Offset),
+                        new XAttribute("sl", point.StartLine), new XAttribute("sc", point.StartColumn),
+                        new XAttribute("el", point.EndLine), new XAttribute("ec", point.EndColumn),
+                        new XAttribute("fileid", documents[point.Document]))));
+                    var returnType = method.MethodName is ".ctor" or ".cctor" ? "System.Void " : "System.Int32 ";
+                    methods.Add(new XElement("Method", new XElement("Name", returnType + method.TypeName + "::" + method.MethodName + "()"), points));
+                }
+                classes.Add(new XElement("Class", new XElement("FullName", group.Key), methods));
+            }
+            var xml = new XElement("CoverageSession", new XElement("Modules", new XElement("Module",
+                new XElement("ModuleName", evidence.ModuleIdentity), files, classes)));
+            var control = Path.Combine(results, "exact-point-control.xml");
+            await File.WriteAllTextAsync(control, xml.ToString(), TestContext.Current.CancellationToken);
+            return control;
+        }
+        string Policy(string[] exemptions) => JsonSerializer.Serialize(new
+        {
+            schemaVersion = RepositoryPolicy.Version, mode = "strict", productionProjects = new[] { projectLogical },
+            testProjects = new[] { projectLogical }, configuration = BuildConfiguration, targetFrameworks = new[] { "net10.0" },
+            scope = "all", threshold = 100, missingCoverage = "fail", requiredChecks = new[] { "tests", "coverage", "crap" },
+            exclusions = Array.Empty<string>(), ruleset = ComplexityRules.CallablesV1, exemptionFiles = exemptions
+        });
+        fixture.Write("policy.json", Policy([]));
+        async Task<string> Git(params string[] args)
+        {
+            var result = await ProcessRunner.RunAsync("git", args, fixture.Path, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            Assert.True(result.ExitCode == 0, result.StandardError);
+            return result.StandardOutput.Trim();
+        }
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "fixture@example.invalid");
+        await Git("config", "user.name", "Fixture");
+        await Git("add", "--", projectLogical, "App/CompiledEvidence.cs", "policy.json");
+        await Git("commit", "--quiet", "-m", "exemption fixture bootstrap");
+        var restore = await ProjectBuildPreparation.RestoreAsync(testProject, TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+        Assert.True(restore.ExitCode == 0, restore.StandardOutput + restore.StandardError);
+        var build = await ProjectBuildPreparation.BuildAsync(project, BuildConfiguration, "net10.0", "AnyCPU", TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+        Assert.True(build.ExitCode == 0, build.StandardOutput + build.StandardError);
+        var assemblyPath = Path.Combine(fixture.Path, "App", "bin", BuildConfiguration, "net10.0", "Crap4CSharp.ProvenanceFixture.dll");
+        var (probeLocator, _, reviewedContext, _, _) = await CreateBundle(fixture.Path, projectLogical, "policy.json", assemblyPath,
+            Path.Combine(fixture.Path, "reviewed-probe"), coveragePath: await CaptureCoverage("reviewed-coverage"));
+        var probe = AnalyzeCommand.Replay(probeLocator, fixture.Path, null, DateTimeOffset.UnixEpoch,
+            TimeSpan.Zero, TestContext.Current.CancellationToken, allSources: true);
+        var unsupported = probe.Evaluation.Callables!.Where(item => item.CoverageReason ==
+            (duplicateAnonymous ? CoverageReasonCodes.AmbiguousCallableOwnership : CoverageReasonCodes.UnsupportedGeneratedMapping) &&
+                (!duplicateAnonymous || item.Kind == "Lambda"))
+            .GroupBy(item => item.CallableId).ToArray();
+        Assert.Single(unsupported);
+        var entries = unsupported.Select(group =>
+        {
+            var item = group.First();
+            var entry = new Dictionary<string, object>
+            {
+                ["ruleset"] = item.Ruleset, ["contextId"] = item.ContextId, ["targetFramework"] = "net10.0",
+                ["callableId"] = item.CallableId, ["bodyChecksum"] = item.BodyChecksum, ["reasonCode"] = item.CoverageReason!,
+                ["justification"] = "reviewed fixture limitation", ["reviewReference"] = "fixture-review",
+                ["familyIds"] = item.FamilyIds
+            };
+            if (duplicateAnonymous) entry["memberCount"] = group.Count();
+            return entry;
+        }).ToArray();
+        fixture.Write("exemptions.json", JsonSerializer.Serialize(new { version = CallableExemptions.Version, entries }));
+        fixture.Write("policy.json", Policy(["exemptions.json"]));
+        await Git("add", "--", "policy.json", "exemptions.json");
+        await Git("commit", "--quiet", "-m", "approve exact unsupported callable exemption");
+        var approvedBase = await Git("rev-parse", "HEAD");
+        fixture.Write("App/Different.cs", "namespace Crap4CSharp.ProvenanceFixture; public class Different { }");
+        await Git("add", "--", "App/Different.cs");
+        await Git("commit", "--quiet", "-m", "unrelated authored context change");
+        build = await ProjectBuildPreparation.BuildAsync(project, BuildConfiguration, "net10.0", "AnyCPU", TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+        Assert.True(build.ExitCode == 0, build.StandardOutput + build.StandardError);
+        var (locator, _, currentContext, _, currentBytes) = await CreateBundle(fixture.Path, projectLogical, "policy.json", assemblyPath,
+            Path.Combine(fixture.Path, "current-bundle"), coveragePath: await CaptureCoverage("current-coverage"));
+        Assert.NotEqual(reviewedContext.Id, currentContext.Id);
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var exit = await global::App.RunAsync(["check", "--reuse-artifacts", locator, "--policy", "policy.json",
+            "--base", approvedBase, "--format", "json"], fixture.Path, output, error, TestContext.Current.CancellationToken);
+        Assert.True(exit == 0, error + Environment.NewLine + output + Environment.NewLine +
+            Encoding.UTF8.GetString(currentBytes["evidence/coverage.xml"].AsSpan()));
+        using var result = JsonDocument.Parse(output.ToString());
+        Assert.Contains(result.RootElement.GetProperty("evaluation").GetProperty("callableExemptions").EnumerateArray(),
+            entry => entry.GetProperty("status").GetString() == "exempted-unsupported");
+    }
+
     private static async Task<(string Locator, RunManifest Manifest, ManifestContext Context,
         List<ManifestInput> Inputs, Dictionary<string, ImmutableArray<byte>> Bytes)> CreateBundle(
         string repository, string projectLogical, string policyLogical, string assemblyPath,
-        string bundleDirectory, string? baseRevision = null)
+        string bundleDirectory, string? baseRevision = null, string? coveragePath = null)
     {
         var project = Path.Combine(repository, projectLogical.Replace('/', Path.DirectorySeparatorChar));
         var projectDirectory = Path.GetDirectoryName(project)!;
@@ -203,7 +354,9 @@ public sealed class PolicyCheckIntegrationTests
             });
         }
 
-        var coverage = ImmutableArray.Create(Encoding.UTF8.GetBytes(
+        var coverage = coveragePath is not null
+            ? ImmutableArray.Create(await File.ReadAllBytesAsync(coveragePath, TestContext.Current.CancellationToken))
+            : ImmutableArray.Create(Encoding.UTF8.GetBytes(
             "<coverage><packages><package name=\"Crap4CSharp.ProvenanceFixture\"><classes><class name=\"Crap4CSharp.ProvenanceFixture.CompiledEvidence\" filename=\"CompiledEvidence.cs\"><methods><method name=\".ctor\" signature=\"()\"><lines><line number=\"5\" hits=\"1\" /></lines></method><method name=\"M\" signature=\"()\"><lines><line number=\"9\" hits=\"1\" /><line number=\"10\" hits=\"1\" /></lines></method></methods></class></classes></package></packages></coverage>"));
         var trx = ImmutableArray.Create(Encoding.UTF8.GetBytes($$"""
             <TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
@@ -263,7 +416,7 @@ public sealed class PolicyCheckIntegrationTests
             Artifact("test-assembly", "test-assembly", "evidence/test.dll", assembly, context.ContextId, build.Id, execution.Id),
             Artifact("test-pdb", "test-pdb", "evidence/test.pdb", pdb, context.ContextId, build.Id, execution.Id),
             Artifact("test-result", "test-result", "evidence/results.trx", trx, context.ContextId, build.Id, execution.Id, "trx"),
-            Artifact("coverage", "coverage", "evidence/coverage.xml", coverage, context.ContextId, build.Id, execution.Id, "cobertura", "line")
+            Artifact("coverage", "coverage", "evidence/coverage.xml", coverage, context.ContextId, build.Id, execution.Id, coveragePath is null ? "cobertura" : "opencover", coveragePath is null ? "line" : "sequence-point")
         };
         var manifest = new RunManifest(ManifestIdentity.SchemaVersion, CanonicalIdentity.Algorithm,
             new ManifestProducer("crap4csharp", "0.1.0", ComplexityRules.CallablesV1,
