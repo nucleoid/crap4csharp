@@ -55,6 +55,13 @@ public static class PolicyEvaluator
             if (item.Coverage is null || item.Crap is null || !double.IsFinite(item.Crap.Value) ||
                 !double.IsFinite(item.Coverage.Value))
             {
+                // CRAP is bounded below by complexity even when coverage is unknown.
+                // A reviewed unsupported mapping cannot waive a provable violation.
+                if (item.Complexity > policy.Threshold)
+                {
+                    findings.Add(Finding("crap.thresholdExceeded", item, "fail"));
+                    continue;
+                }
                 var exemption = exemptions.FirstOrDefault(value => value.EntityKey == item.EntityKey &&
                     value.Rule == item.Rule && value.ContextId == item.ContextId && value.CoverageReason == item.CoverageReason &&
                     !string.IsNullOrWhiteSpace(value.Reason) && IsNarrowUnsupportedReason(value.CoverageReason));

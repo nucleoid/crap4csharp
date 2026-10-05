@@ -190,7 +190,9 @@ internal static class PolicyCheckCommand
                 var contextId = Text("contextId");
                 var reason = Text("reasonCode");
                 var targetFramework = Text("targetFramework");
-                var context = result.Evaluation.Contexts.SingleOrDefault(item => item.Id == contextId);
+                // Context IDs bind observations to source content, not approved debt identities.
+                // Callable IDs already bind the project, TFM, configuration and platform.
+                var candidates = callables.Where(item => item.CallableId == callableId).ToArray();
                 var familyElement = entry.GetProperty("familyIds");
                 if (familyElement.ValueKind != JsonValueKind.Array ||
                     familyElement.EnumerateArray().Any(item => item.ValueKind != JsonValueKind.String ||
@@ -202,9 +204,17 @@ internal static class PolicyCheckCommand
                     throw new PolicyException("exemption.duplicateFamily", "Trusted exemption repeats a family identity.");
                 var bodyChecksum = Text("bodyChecksum");
                 var ruleset = Text("ruleset");
-                var matches = callables.Where(item => item.CallableId == callableId && item.ContextId == contextId &&
-                    item.BodyChecksum == bodyChecksum && item.Ruleset == ruleset &&
-                    item.CoverageReason == reason).ToArray();
+                var matches = candidates.Where(item => item.BodyChecksum == bodyChecksum &&
+                    item.Ruleset == ruleset && item.CoverageReason == reason).ToArray();
+                if (reason == CoverageReasonCodes.AmbiguousCallableOwnership && matches.Length > 0 &&
+                    candidates.Length != matches.Length)
+                    throw new PolicyException("exemption.ambiguityWidened",
+                        "Trusted ambiguity exemption does not cover every current body sharing this identity.");
+                var currentContextIds = matches.Select(item => item.ContextId).Distinct(StringComparer.Ordinal).ToArray();
+                if (currentContextIds.Length > 1)
+                    throw new PolicyException("exemption.multiplyMatched", "Trusted exemption spans multiple current contexts.");
+                var context = currentContextIds.Length == 1
+                    ? result.Evaluation.Contexts.SingleOrDefault(item => item.Id == currentContextIds[0]) : null;
                 if (reason is not (CoverageReasonCodes.UnsupportedGeneratedMapping or
                         CoverageReasonCodes.UnsupportedCallable or CoverageReasonCodes.AmbiguousCallableOwnership))
                     throw new PolicyException("exemption.reasonNotUnsupported", "Trusted exemption reason is not narrowly unsupported.");
@@ -227,7 +237,7 @@ internal static class PolicyCheckCommand
                     continue;
                 }
                 var entityKey = callableId;
-                active.Add(new PolicyExemption(entityKey, "crap.thresholdExceeded", contextId, reason, justification));
+                active.Add(new PolicyExemption(entityKey, "crap.thresholdExceeded", context!.Id, reason, justification));
                 reported.Add(new CallableExemptionMatch(entityKey, "exempted-unsupported", reason, justification,
                     reviewReference, familyIds, true));
             }
