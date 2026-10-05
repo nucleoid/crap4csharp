@@ -57,6 +57,9 @@ public sealed record ProjectAnalysisContext(
     [JsonIgnore]
     public IReadOnlyList<string> ProtectedPaths { get; init; } = [];
 
+    [JsonIgnore]
+    public IReadOnlyList<string> GeneratedTransitionPaths { get; init; } = [];
+
     public static ProjectAnalysisContext Create(
         string projectPath,
         string assemblyName,
