@@ -335,6 +335,75 @@ public sealed class PolicyCheckIntegrationTests
             entry => entry.GetProperty("status").GetString() == "exempted-unsupported");
     }
 
+    [Theory]
+    [InlineData("obj/CompiledEvidence.cs", "", false, 2)]
+    [InlineData("Legacy/CompiledEvidence.cs", "obj/CompiledEvidence.cs", false, 2)]
+    [InlineData("CompiledEvidence.cs", "", true, 0)]
+    public async Task CommittedCliEnforcesTargetAddedAuthoredInputsAndAcceptsActualIntermediateLayout(
+        string physical, string link, bool customIntermediate, int expectedExit)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-generated-cli");
+        const string projectLogical = "App.csproj";
+        if (customIntermediate)
+            fixture.Write("Directory.Build.props", "<Project><PropertyGroup><BaseIntermediateOutputPath>artifacts/intermediate/</BaseIntermediateOutputPath></PropertyGroup></Project>");
+        var project = fixture.Write(projectLogical, $$"""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net10.0</TargetFramework><AssemblyName>Crap4CSharp.ProvenanceFixture</AssemblyName><EnableDefaultCompileItems>false</EnableDefaultCompileItems><DebugType>portable</DebugType></PropertyGroup>
+              <Target Name="AddAuthoredInput" BeforeTargets="CoreCompile">
+                <ItemGroup><Compile Include="{{physical}}" Link="{{link}}" /></ItemGroup>
+              </Target>
+            </Project>
+            """);
+        var original = await File.ReadAllTextAsync(Path.Combine(RepositoryRoot(),
+            "tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs"), TestContext.Current.CancellationToken);
+        var source = fixture.Write(physical, original);
+        fixture.Write("policy.json", JsonSerializer.Serialize(new
+        {
+            schemaVersion = RepositoryPolicy.Version, mode = "strict", productionProjects = new[] { projectLogical },
+            testProjects = new[] { projectLogical }, configuration = BuildConfiguration, targetFrameworks = new[] { "net10.0" },
+            scope = "all", threshold = customIntermediate ? 100 : 0, missingCoverage = "fail",
+            requiredChecks = new[] { "tests", "coverage", "crap" }, exclusions = Array.Empty<string>(),
+            ruleset = ComplexityRules.CallablesV1, exemptionFiles = Array.Empty<string>()
+        }));
+        async Task Git(params string[] args)
+        {
+            var result = await ProcessRunner.RunAsync("git", args, fixture.Path, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            Assert.True(result.ExitCode == 0, result.StandardError);
+        }
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "fixture@example.invalid");
+        await Git("config", "user.name", "Fixture");
+        await Git("add", "-f", "--", projectLogical, physical, "policy.json");
+        if (customIntermediate) await Git("add", "--", "Directory.Build.props");
+        await Git("commit", "--quiet", "-m", "trusted target-added authored source");
+        var before = await File.ReadAllBytesAsync(source, TestContext.Current.CancellationToken);
+        var stamp = File.GetLastWriteTimeUtc(source);
+        var restored = await ProjectBuildPreparation.RestoreAsync(project, TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+        Assert.True(restored.ExitCode == 0, restored.StandardOutput + restored.StandardError);
+        var built = await ProjectBuildPreparation.BuildAsync(project, BuildConfiguration, "net10.0", "AnyCPU", TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+        Assert.True(built.ExitCode == 0, built.StandardOutput + built.StandardError);
+        // CLI/current-binding integration uses the existing explicit synthetic test-result and
+        // coverage adapter controls, with real compiled PE/PDB and committed consumer inputs.
+        var (locator, _, context, _, _) = await CreateBundle(fixture.Path, projectLogical, "policy.json",
+            Path.Combine(fixture.Path, "bin", BuildConfiguration, "net10.0", "Crap4CSharp.ProvenanceFixture.dll"),
+            Path.Combine(fixture.Path, "bundle"));
+        var authored = Assert.Single(context.Inputs, input => input.RepositoryPath == physical);
+        Assert.False(authored.Generated);
+        if (customIntermediate)
+            Assert.Contains(context.Inputs, input => input.Generated && input.RepositoryPath!.StartsWith("artifacts/intermediate/", StringComparison.Ordinal));
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var exit = await global::App.RunAsync(["check", "--reuse-artifacts", locator, "--policy", "policy.json",
+            "--base", "HEAD", "--format", "json"], fixture.Path, output, error, TestContext.Current.CancellationToken);
+        Assert.True(exit == expectedExit, error + Environment.NewLine + output);
+        using var resultDocument = JsonDocument.Parse(output.ToString());
+        Assert.Equal("base-trusted", resultDocument.RootElement.GetProperty("evaluation").GetProperty("policyTrust").GetProperty("trust").GetString());
+        if (!customIntermediate)
+            Assert.Equal("crap.thresholdExceeded", resultDocument.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("reason").GetString());
+        Assert.Equal(before, await File.ReadAllBytesAsync(source, TestContext.Current.CancellationToken));
+        Assert.Equal(stamp, File.GetLastWriteTimeUtc(source));
+    }
+
     private static async Task<(string Locator, RunManifest Manifest, ManifestContext Context,
         List<ManifestInput> Inputs, Dictionary<string, ImmutableArray<byte>> Bytes)> CreateBundle(
         string repository, string projectLogical, string policyLogical, string assemblyPath,
@@ -370,7 +439,10 @@ public sealed class PolicyCheckIntegrationTests
         var coverage = coveragePath is not null
             ? ImmutableArray.Create(await File.ReadAllBytesAsync(coveragePath, TestContext.Current.CancellationToken))
             : ImmutableArray.Create(Encoding.UTF8.GetBytes(
-            "<coverage><packages><package name=\"Crap4CSharp.ProvenanceFixture\"><classes><class name=\"Crap4CSharp.ProvenanceFixture.CompiledEvidence\" filename=\"CompiledEvidence.cs\"><methods><method name=\".ctor\" signature=\"()\"><lines><line number=\"5\" hits=\"1\" /></lines></method><method name=\"M\" signature=\"()\"><lines><line number=\"9\" hits=\"1\" /><line number=\"10\" hits=\"1\" /></lines></method></methods></class></classes></package></packages></coverage>"));
+            "<coverage><packages><package name=\"Crap4CSharp.ProvenanceFixture\"><classes><class name=\"Crap4CSharp.ProvenanceFixture.CompiledEvidence\" filename=\"CompiledEvidence.cs\"><methods><method name=\".ctor\" signature=\"()\"><lines><line number=\"5\" hits=\"1\" /></lines></method><method name=\"M\" signature=\"()\"><lines><line number=\"9\" hits=\"1\" /><line number=\"10\" hits=\"1\" /></lines></method></methods></class></classes></package></packages></coverage>".Replace("filename=\"CompiledEvidence.cs\"",
+                "filename=\"" + context.Sources.Single(source => !source.IsGenerated &&
+                    source.LogicalPath.EndsWith("CompiledEvidence.cs", StringComparison.Ordinal)).LogicalPath + "\"",
+                StringComparison.Ordinal)));
         var trx = ImmutableArray.Create(Encoding.UTF8.GetBytes($$"""
             <TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
               <TestDefinitions><UnitTest storage="{{inspected.ModuleIdentity}}.dll" /></TestDefinitions>
@@ -402,7 +474,9 @@ public sealed class PolicyCheckIntegrationTests
                 inspected.PreprocessorSymbols, new Dictionary<string, string>()),
             PathPolicy = new ManifestPathPolicy("sensitive",
                 [new ManifestReportRootMapping("/_/tests/Crap4CSharp.ProvenanceFixture", ""),
-                 new ManifestReportRootMapping(projectDirectory.Replace('\\', '/'), "")]),
+                 new ManifestReportRootMapping(projectDirectory.Replace('\\', '/'), ""),
+                 .. context.Sources.Select(source => new ManifestReportRootMapping(
+                     source.ResolvedPath!.Replace('\\', '/'), source.LogicalPath))]),
             CurrentRevalidation = new ManifestCurrentRevalidation(CurrentEvidenceAdapter.SupportedRecipeProvider,
                 projectLogical, Path.GetRelativePath(repository, assemblyPath).Replace('\\', '/'),
                 Path.GetRelativePath(repository, pdbPath).Replace('\\', '/'))
