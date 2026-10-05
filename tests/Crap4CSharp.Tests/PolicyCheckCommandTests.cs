@@ -155,6 +155,26 @@ public sealed class PolicyCheckCommandTests
     }
 
     [Fact]
+    public void AmbiguityExemptionCannotCoverAdditionalIdenticalMembers()
+    {
+        var first = Callable("same", "first", "Gate.cs", 10, 10) with
+        { Kind = "Lambda", CoverageReason = CoverageReasonCodes.AmbiguousCallableOwnership, FamilyIds = ["family"] };
+        var second = first with { ObservationId = "second" };
+        var third = first with { ObservationId = "third" };
+        var bytes = Encoding.UTF8.GetBytes("""
+            {"version":"callable-exemptions-v1","entries":[{
+              "ruleset":"callables-v1","contextId":"ctx","targetFramework":"net10.0",
+              "callableId":"same","bodyChecksum":"body","reasonCode":"coverage.ambiguousCallableOwnership",
+              "justification":"reviewed two copies","reviewReference":"review-1","familyIds":["family"],"memberCount":2}]}
+            """);
+
+        var error = Assert.Throws<PolicyException>(() => PolicyCheckCommand.ParseExemptions(
+            new Dictionary<string, byte[]> { ["quality/exemptions.json"] = bytes }, EmptyResult([first, second, third])));
+
+        Assert.Equal("exemption.ambiguityWidened", error.Code);
+    }
+
+    [Fact]
     public async Task FailureOutputNeverOverwritesAnExplicitInputFile()
     {
         using var directory = TestDirectory.Create("crap4csharp-policy-failure-output");
