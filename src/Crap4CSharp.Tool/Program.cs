@@ -197,6 +197,8 @@ internal static class App
             if (options.Command == "check" && options.ReuseArtifacts is null)
                 throw new ArgumentException("check callables-v1 currently requires --reuse-artifacts, --policy, and --base.");
             cancellationToken.ThrowIfCancellationRequested();
+            if (options.Command == "check" && options.Output is not null)
+                OutputDestinationSafety.RejectExistingConsumerFile(options.Output, workingDirectory);
             var result = options.Command == "check"
                 ? await PolicyCheckCommand.RunAsync(options.ReuseArtifacts!, options.Policy!, options.Base!,
                     workingDirectory, options.Output, options.Timeout, startedAt, stopwatch.Elapsed, cancellationToken)
@@ -251,6 +253,8 @@ internal static class App
                             .Concat(options.ReuseArtifacts is null ? [] : [options.ReuseArtifacts])
                             .Concat(options.Exemptions is null ? [] : [options.Exemptions])
                             .Concat(options.Policy is null ? [] : [options.Policy]);
+                        if (options.Command == "check")
+                            OutputDestinationSafety.RejectExistingConsumerFile(destination, workingDirectory);
                         mayWrite = FindOutputAlias(destination, workingDirectory, inputs, [], null) is null;
                         if (mayWrite && options.ReuseArtifacts is not null)
                         {

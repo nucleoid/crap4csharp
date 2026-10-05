@@ -201,7 +201,7 @@ public sealed class PolicyCheckIntegrationTests
             directory.Path, output, TextWriter.Null, TestContext.Current.CancellationToken);
         Assert.Equal(1, exit);
         using var result = JsonDocument.Parse(output.ToString());
-        Assert.Equal("artifact.invalid", result.RootElement.GetProperty("evaluation").GetProperty("decision")
+        Assert.Equal("output.aliasesPolicyInput", result.RootElement.GetProperty("evaluation").GetProperty("decision")
             .GetProperty("reason").GetString());
         Assert.Equal(original, await File.ReadAllBytesAsync(path, TestContext.Current.CancellationToken));
         Assert.Equal(stamp, File.GetLastWriteTimeUtc(path));

@@ -18,6 +18,7 @@ internal static class BaselineCommand
         {
             var options = Parse(args);
             var root = Path.GetFullPath(workingDirectory);
+            OutputDestinationSafety.RejectExistingConsumerFile(options.Output, root, baseline: true);
             var policyPath = RepositoryRelative(root, options.Policy);
             var policyBytes = File.ReadAllBytes(Path.Combine(root, policyPath.Replace('/', Path.DirectorySeparatorChar)));
             var parsedPolicy = RepositoryPolicyParser.Parse(policyBytes, policyPath);
