@@ -320,15 +320,12 @@ internal static class PolicyCheckCommand
 
     internal static void ValidateGeneratedInventory(RunManifest manifest)
     {
-        var branchClassifiedGenerated = manifest.Contexts.SelectMany(context => context.Inputs)
-            .Where(input => input.Role == "source" && input.Generated)
-            .Where(input => !input.LogicalPath.StartsWith("obj/", StringComparison.OrdinalIgnoreCase) &&
-                !input.LogicalPath.StartsWith("<generated>/", StringComparison.Ordinal))
-            .Select(input => input.LogicalPath).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
-        if (branchClassifiedGenerated.Length > 0)
+        // A logical Link path is never generation evidence. The current adapter independently reloads
+        // the context and compares generated membership after physical output/Git classification.
+        if (manifest.Contexts.Any(context => context.Inputs.Any(input => input.Role == "source" && input.Generated) &&
+            (!context.ReuseRecipeComplete || context.CurrentRevalidation is not { Provider: CurrentEvidenceAdapter.SupportedRecipeProvider })))
             throw new PolicyException("policy.branchGeneratedSource",
-                "A production source was classified as generated outside an evaluated obj output: " +
-                string.Join(", ", branchClassifiedGenerated));
+                "Generated inventory requires independently revalidated physical compiler-input classification.");
     }
 
     private static string RepositorySourcePath(RunManifest manifest, string contextId, string logicalPath)

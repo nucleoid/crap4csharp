@@ -80,3 +80,20 @@ ruleset. Paths, line numbers, source hashes, and body fingerprints are observati
 body replacement retains only the component ceilings and reports the fingerprint difference. Rename/signature/ref
 kind/project/TFM changes create new identity. Anonymous identities include parent/kind/token fingerprint and reject
 ambiguity; family guards use the stable outer entity and `crap.nestedFamilyRisk`.
+
+## Narrow exemptions and safe destinations
+
+Reviewed exemptions match stable callable identity, current target framework, body checksum, ruleset and the exact
+unsupported reason; captured content-context IDs are diagnostic, not stable approval keys. Duplicate anonymous
+bodies additionally require the reviewed `memberCount` and every member's matching body/family acknowledgement.
+Named collisions cannot use an anonymous exemption. Exemptions never waive a known complexity above threshold.
+
+Generated compiler documents are classified using their physical evaluated `IntermediateOutputPath` or
+`BaseIntermediateOutputPath`, never `Link` or an `obj/` spelling. Git-tracked compiler files and target-added sources
+outside those outputs remain authored. Current revalidation independently repeats this classification, including
+custom artifacts layouts; a producer's generated flag is not proof. Generator trees are separately identified.
+
+Check output refuses an existing destination unless it is a prior result document; baseline replacement requires
+an existing valid candidate plus `--overwrite`. Explicit source, project, import, artifact and policy input aliases
+remain forbidden even when their bytes resemble a result/candidate. This refusal also runs before loader failures,
+so an unsuccessful command cannot replace a consumer input with diagnostics.
