@@ -96,6 +96,25 @@ public sealed class PolicyCheckIntegrationTests
             .GetProperty("decision").GetProperty("reason").GetString());
     }
 
+    [Fact]
+    public async Task CurrentRevalidationRejectsRecipeForAnotherDeclaredProductionProject()
+    {
+        var repository = RepositoryRoot();
+        const string projectLogical = "tests/Crap4CSharp.ProvenanceFixture/Crap4CSharp.ProvenanceFixture.csproj";
+        using var directory = TestDirectory.Create("crap4csharp-project-recipe-binding");
+        var (_, manifest, context, _, _) = await CreateBundle(repository, projectLogical,
+            PolicyLogical, typeof(Crap4CSharp.ProvenanceFixture.CompiledEvidence).Assembly.Location,
+            Path.Combine(directory.Path, "bundle"));
+        // Keep the genuine current recipe, source paths and PE/PDB, but assert that
+        // these observations belong to a different policy production project.
+        var forged = manifest with { Contexts = [context with
+            { Project = "Shadow/Crap4CSharp.ProvenanceFixture.csproj" }] };
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            CurrentEvidenceAdapter.CaptureSupportedAsync(forged, repository,
+                TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken));
+        Assert.Contains("project", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Theory]
     [InlineData("App.csproj")]
     [InlineData("Directory.Build.props")]
