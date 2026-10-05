@@ -21,110 +21,10 @@ public sealed class PolicyCheckIntegrationTests
     {
         var repository = RepositoryRoot();
         const string projectLogical = "tests/Crap4CSharp.ProvenanceFixture/Crap4CSharp.ProvenanceFixture.csproj";
-        var project = Path.Combine(repository, projectLogical.Replace('/', Path.DirectorySeparatorChar));
-        var projectDirectory = Path.GetDirectoryName(project)!;
-        var request = new ProjectContextLoadRequest(project, BuildConfiguration, "AnyCPU", ["net10.0"], true, true,
-            TimeSpan.FromMinutes(2));
-        var loaded = await ProjectContextLoader.LoadAsync(request, TestContext.Current.CancellationToken);
-        Assert.True(loaded.Success, loaded.FailureReason ?? string.Join(Environment.NewLine, loaded.Diagnostics));
-        var context = Assert.Single(loaded.Contexts);
-        var assemblyPath = typeof(Crap4CSharp.ProvenanceFixture.CompiledEvidence).Assembly.Location;
-        var pdbPath = Path.ChangeExtension(assemblyPath, ".pdb");
-        var assembly = ImmutableArray.Create(await File.ReadAllBytesAsync(assemblyPath, TestContext.Current.CancellationToken));
-        var pdb = ImmutableArray.Create(await File.ReadAllBytesAsync(pdbPath, TestContext.Current.CancellationToken));
-        var inspected = ArtifactEvidenceInspector.InspectBuild(assembly, pdb);
-        var bytes = new Dictionary<string, ImmutableArray<byte>>(StringComparer.Ordinal);
-        var inputs = new List<ManifestInput>();
-        var index = 0;
-        foreach (var source in context.Sources.OrderBy(item => item.LogicalPath, StringComparer.Ordinal))
-        {
-            var physical = Path.GetFullPath(source.PhysicalPath, projectDirectory);
-            var value = ImmutableArray.Create(await File.ReadAllBytesAsync(physical, TestContext.Current.CancellationToken));
-            var sourceLocator = $"inputs/source-{index++}.bin";
-            bytes.Add(sourceLocator, value);
-            inputs.Add(new ManifestInput("source", source.LogicalPath, sourceLocator, value.Length,
-                CanonicalIdentity.Sha256(value.AsSpan()), "utf-8", source.IsGenerated)
-            {
-                RepositoryPath = Path.GetRelativePath(repository, physical).Replace('\\', '/')
-            });
-        }
-
-        var coverage = ImmutableArray.Create(Encoding.UTF8.GetBytes(
-            "<coverage><packages><package name=\"Crap4CSharp.ProvenanceFixture\"><classes><class name=\"Crap4CSharp.ProvenanceFixture.CompiledEvidence\" filename=\"CompiledEvidence.cs\"><methods><method name=\".ctor\" signature=\"()\"><lines><line number=\"5\" hits=\"1\" /></lines></method><method name=\"M\" signature=\"()\"><lines><line number=\"9\" hits=\"1\" /><line number=\"10\" hits=\"1\" /></lines></method></methods></class></classes></package></packages></coverage>"));
-        var trx = ImmutableArray.Create(Encoding.UTF8.GetBytes($$"""
-            <TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
-              <TestDefinitions><UnitTest storage="{{inspected.ModuleIdentity}}.dll" /></TestDefinitions>
-              <ResultSummary outcome="Completed"><Counters total="1" executed="1" passed="1" failed="0"
-                error="0" timeout="0" aborted="0" inconclusive="0" notExecuted="0" /></ResultSummary>
-            </TestRun>
-            """));
-        var scope = ImmutableArray.Create(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
-        {
-            version = 1,
-            sources = inputs.Where(item => !item.Generated)
-                .Select(item => item.RepositoryPath).ToArray()
-        })));
-        var policyBytes = await File.ReadAllBytesAsync(Path.Combine(repository,
-            PolicyLogical.Replace('/', Path.DirectorySeparatorChar)), TestContext.Current.CancellationToken);
-        var policy = RepositoryPolicyParser.Parse(policyBytes, PolicyLogical);
-        var canonicalPolicy = ImmutableArray.Create(policy.CanonicalBytes);
-        foreach (var item in new[]
-        {
-            ("evidence/app.dll", assembly), ("evidence/app.pdb", pdb), ("evidence/test.dll", assembly),
-            ("evidence/test.pdb", pdb), ("evidence/results.trx", trx), ("evidence/coverage.xml", coverage),
-            ("evaluation/scope.json", scope), ("evaluation/policy.json", canonicalPolicy)
-        }) bytes.Add(item.Item1, item.Item2);
-
-        var manifestContext = new ManifestContext(context.ContextId, projectLogical, context.TargetFramework,
-            context.Configuration, context.Platform, "", "", "", true, true, inputs)
-        {
-            ParseOptions = new ManifestParseOptions(inspected.LanguageVersion, context.SourceKind.ToString(),
-                inspected.PreprocessorSymbols, new Dictionary<string, string>()),
-            PathPolicy = new ManifestPathPolicy("sensitive",
-                [new ManifestReportRootMapping("/_/tests/Crap4CSharp.ProvenanceFixture", "")]),
-            CurrentRevalidation = new ManifestCurrentRevalidation(CurrentEvidenceAdapter.SupportedRecipeProvider,
-                projectLogical, Path.GetRelativePath(repository, assemblyPath).Replace('\\', '/'),
-                Path.GetRelativePath(repository, pdbPath).Replace('\\', '/'))
-        };
-        var build = new ManifestBuild("build", context.ContextId, inspected.ModuleIdentity,
-            CanonicalIdentity.Sha256(assembly.AsSpan()), inspected.Mvid, CanonicalIdentity.Sha256(pdb.AsSpan()),
-            inspected.DebugIdentity);
-        var execution = new ManifestExecution("test", context.ContextId, build.Id, true, 0, 1, 1, 0, 0)
-        {
-            TestProject = projectLogical, TestModuleIdentity = inspected.ModuleIdentity,
-            TestAssemblySha256 = CanonicalIdentity.Sha256(assembly.AsSpan()), TestMvid = inspected.Mvid,
-            TestPdbSha256 = CanonicalIdentity.Sha256(pdb.AsSpan()), TestDebugIdentity = inspected.DebugIdentity
-        };
-        ManifestArtifact Artifact(string id, string kind, string locator, ImmutableArray<byte> value,
-            string? contextId = null, string? buildId = null, string? executionId = null, string? format = null,
-            string? coordinate = null) => new(id, kind, locator, value.Length, CanonicalIdentity.Sha256(value.AsSpan()),
-                contextId, buildId, executionId, format, coordinate);
-        var artifacts = new[]
-        {
-            Artifact("scope", "scope", "evaluation/scope.json", scope),
-            Artifact("policy", "policy", "evaluation/policy.json", canonicalPolicy),
-            Artifact("assembly", "assembly", "evidence/app.dll", assembly, context.ContextId, build.Id),
-            Artifact("pdb", "pdb", "evidence/app.pdb", pdb, context.ContextId, build.Id),
-            Artifact("test-assembly", "test-assembly", "evidence/test.dll", assembly, context.ContextId, build.Id, execution.Id),
-            Artifact("test-pdb", "test-pdb", "evidence/test.pdb", pdb, context.ContextId, build.Id, execution.Id),
-            Artifact("test-result", "test-result", "evidence/results.trx", trx, context.ContextId, build.Id, execution.Id, "trx"),
-            Artifact("coverage", "coverage", "evidence/coverage.xml", coverage, context.ContextId, build.Id, execution.Id, "cobertura", "line")
-        };
-        var manifest = new RunManifest(ManifestIdentity.SchemaVersion, CanonicalIdentity.Algorithm,
-            new ManifestProducer("crap4csharp", "0.1.0", ComplexityRules.CallablesV1,
-                ProjectAnalysisContext.ProtocolVersion, ManifestIdentity.CoverageProtocol, ManifestIdentity.PathProtocol),
-            new ManifestCapture("completed", true, true, []),
-            new ManifestRevision("git", "pending", "pending", "pending", null, "pending"),
-            [new ManifestRoot("workspace", "workspace", "sensitive")], [manifestContext], [build], [execution], artifacts,
-            new ManifestEvaluationInputs(CanonicalIdentity.Sha256(scope.AsSpan()), policy.Hash, null, null), null);
-        var observed = CurrentEvidenceAdapter.Capture(manifest, repository);
-        manifest = manifest with
-        {
-            Revision = new ManifestRevision("git", observed.RepositoryIdentity, observed.WorkspaceIdentity,
-                observed.Head, null, observed.Head) { StateHash = observed.StateHash }
-        };
         using var directory = TestDirectory.Create("crap4csharp-policy-check-e2e");
-        var locator = ArtifactCaptureAdapter.PublishNew(manifest, bytes, Path.Combine(directory.Path, "bundle"));
+        var (locator, manifest, manifestContext, inputs, bytes) = await CreateBundle(repository, projectLogical,
+            PolicyLogical, typeof(Crap4CSharp.ProvenanceFixture.CompiledEvidence).Assembly.Location,
+            Path.Combine(directory.Path, "bundle"));
         var output = new StringWriter();
         var error = new StringWriter();
 
@@ -205,6 +105,181 @@ public sealed class PolicyCheckIntegrationTests
             .GetProperty("reason").GetString());
         Assert.Equal(original, await File.ReadAllBytesAsync(path, TestContext.Current.CancellationToken));
         Assert.Equal(stamp, File.GetLastWriteTimeUtc(path));
+    }
+
+    [Fact]
+    public async Task CommittedBaseScopeSubdirectoryProjectSelectsDebtAndRejectsForgedRepositoryPaths()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-committed-base-scope");
+        const string projectLogical = "App/App.csproj";
+        var project = fixture.Write(projectLogical, "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework><AssemblyName>Crap4CSharp.ProvenanceFixture</AssemblyName><LangVersion>latest</LangVersion><DebugType>portable</DebugType></PropertyGroup></Project>");
+        var originalSource = await File.ReadAllTextAsync(Path.Combine(RepositoryRoot(),
+            "tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs"), TestContext.Current.CancellationToken);
+        var source = fixture.Write("App/CompiledEvidence.cs", originalSource);
+        fixture.Write("policy.json", JsonSerializer.Serialize(new
+        {
+            schemaVersion = RepositoryPolicy.Version, mode = "strict", productionProjects = new[] { projectLogical },
+            testProjects = new[] { projectLogical }, configuration = BuildConfiguration, targetFrameworks = new[] { "net10.0" },
+            scope = "base", threshold = 0, missingCoverage = "fail", requiredChecks = new[] { "tests", "coverage", "crap" },
+            exclusions = Array.Empty<string>(), ruleset = ComplexityRules.CallablesV1, exemptionFiles = Array.Empty<string>()
+        }));
+        async Task<string> Git(params string[] args)
+        {
+            var result = await ProcessRunner.RunAsync("git", args, fixture.Path, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            Assert.True(result.ExitCode == 0, result.StandardError);
+            return result.StandardOutput.Trim();
+        }
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "fixture@example.invalid");
+        await Git("config", "user.name", "Fixture");
+        await Git("add", "--", projectLogical, "App/CompiledEvidence.cs", "policy.json");
+        await Git("commit", "--quiet", "-m", "trusted base policy");
+        var baseRevision = await Git("rev-parse", "HEAD");
+        await File.WriteAllTextAsync(source, originalSource.Replace("var value = 1;", "var value = 2;", StringComparison.Ordinal), TestContext.Current.CancellationToken);
+        await Git("add", "--", "App/CompiledEvidence.cs");
+        await Git("commit", "--quiet", "-m", "committed callable edit");
+        var before = await File.ReadAllBytesAsync(source, TestContext.Current.CancellationToken);
+        var stamp = File.GetLastWriteTimeUtc(source);
+        var restored = await ProjectBuildPreparation.RestoreAsync(project, TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+        Assert.True(restored.ExitCode == 0, restored.StandardOutput + restored.StandardError);
+        var built = await ProjectBuildPreparation.BuildAsync(project, BuildConfiguration, "net10.0", "AnyCPU", TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+        Assert.True(built.ExitCode == 0, built.StandardOutput + built.StandardError);
+        var (locator, manifest, context, _, bytes) = await CreateBundle(fixture.Path, projectLogical, "policy.json",
+            Path.Combine(fixture.Path, "App", "bin", BuildConfiguration, "net10.0", "Crap4CSharp.ProvenanceFixture.dll"),
+            Path.Combine(fixture.Path, "bundle"), baseRevision);
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var exit = await global::App.RunAsync(["check", "--reuse-artifacts", locator, "--policy", "policy.json",
+            "--base", baseRevision, "--format", "json"], fixture.Path, output, error, TestContext.Current.CancellationToken);
+        Assert.True(exit == 2, error + Environment.NewLine + output);
+        using var result = JsonDocument.Parse(output.ToString());
+        Assert.Equal("base-trusted", result.RootElement.GetProperty("evaluation").GetProperty("policyTrust").GetProperty("trust").GetString());
+        Assert.Equal("crap.thresholdExceeded", result.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("reason").GetString());
+        Assert.NotEmpty(result.RootElement.GetProperty("evaluation").GetProperty("findings").EnumerateArray());
+        foreach (var forgedPath in new[] { "App/App.csproj", "App/not-present.cs", "App/Migrations/Gate.cs" })
+        {
+            var forged = manifest with { Contexts = [context with { Inputs = context.Inputs.Select(input =>
+                input.Generated ? input : input with { RepositoryPath = forgedPath }).ToArray() }] };
+            var forgedLocator = ArtifactCaptureAdapter.PublishNew(forged, bytes,
+                Path.Combine(fixture.Path, "forged-" + Guid.NewGuid().ToString("N")));
+            var forgedOutput = new StringWriter();
+            var forgedExit = await global::App.RunAsync(["check", "--reuse-artifacts", forgedLocator, "--policy", "policy.json",
+                "--base", baseRevision, "--format", "json"], fixture.Path, forgedOutput, TextWriter.Null, TestContext.Current.CancellationToken);
+            Assert.Equal(1, forgedExit);
+        }
+        Assert.Equal(before, await File.ReadAllBytesAsync(source, TestContext.Current.CancellationToken));
+        Assert.Equal(stamp, File.GetLastWriteTimeUtc(source));
+    }
+
+    private static async Task<(string Locator, RunManifest Manifest, ManifestContext Context,
+        List<ManifestInput> Inputs, Dictionary<string, ImmutableArray<byte>> Bytes)> CreateBundle(
+        string repository, string projectLogical, string policyLogical, string assemblyPath,
+        string bundleDirectory, string? baseRevision = null)
+    {
+        var project = Path.Combine(repository, projectLogical.Replace('/', Path.DirectorySeparatorChar));
+        var projectDirectory = Path.GetDirectoryName(project)!;
+        var request = new ProjectContextLoadRequest(project, BuildConfiguration, "AnyCPU", ["net10.0"], true, true,
+            TimeSpan.FromMinutes(2));
+        var loaded = await ProjectContextLoader.LoadAsync(request, TestContext.Current.CancellationToken);
+        Assert.True(loaded.Success, loaded.FailureReason ?? string.Join(Environment.NewLine, loaded.Diagnostics));
+        var context = Assert.Single(loaded.Contexts);
+        var pdbPath = Path.ChangeExtension(assemblyPath, ".pdb");
+        var assembly = ImmutableArray.Create(await File.ReadAllBytesAsync(assemblyPath, TestContext.Current.CancellationToken));
+        var pdb = ImmutableArray.Create(await File.ReadAllBytesAsync(pdbPath, TestContext.Current.CancellationToken));
+        var inspected = ArtifactEvidenceInspector.InspectBuild(assembly, pdb);
+        var bytes = new Dictionary<string, ImmutableArray<byte>>(StringComparer.Ordinal);
+        var inputs = new List<ManifestInput>();
+        var index = 0;
+        foreach (var source in context.Sources.OrderBy(item => item.LogicalPath, StringComparer.Ordinal))
+        {
+            var physical = Path.GetFullPath(source.ResolvedPath ?? source.PhysicalPath, projectDirectory);
+            var value = ImmutableArray.Create(await File.ReadAllBytesAsync(physical, TestContext.Current.CancellationToken));
+            var sourceLocator = $"inputs/source-{index++}.bin";
+            bytes.Add(sourceLocator, value);
+            inputs.Add(new ManifestInput("source", source.LogicalPath, sourceLocator, value.Length,
+                CanonicalIdentity.Sha256(value.AsSpan()), "utf-8", source.IsGenerated)
+            {
+                RepositoryPath = Path.GetRelativePath(repository, physical).Replace('\\', '/')
+            });
+        }
+
+        var coverage = ImmutableArray.Create(Encoding.UTF8.GetBytes(
+            "<coverage><packages><package name=\"Crap4CSharp.ProvenanceFixture\"><classes><class name=\"Crap4CSharp.ProvenanceFixture.CompiledEvidence\" filename=\"CompiledEvidence.cs\"><methods><method name=\".ctor\" signature=\"()\"><lines><line number=\"5\" hits=\"1\" /></lines></method><method name=\"M\" signature=\"()\"><lines><line number=\"9\" hits=\"1\" /><line number=\"10\" hits=\"1\" /></lines></method></methods></class></classes></package></packages></coverage>"));
+        var trx = ImmutableArray.Create(Encoding.UTF8.GetBytes($$"""
+            <TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
+              <TestDefinitions><UnitTest storage="{{inspected.ModuleIdentity}}.dll" /></TestDefinitions>
+              <ResultSummary outcome="Completed"><Counters total="1" executed="1" passed="1" failed="0"
+                error="0" timeout="0" aborted="0" inconclusive="0" notExecuted="0" /></ResultSummary>
+            </TestRun>
+            """));
+        var scope = ImmutableArray.Create(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+            version = 1,
+            sources = inputs.Where(item => !item.Generated)
+                .Select(item => item.RepositoryPath).ToArray()
+        })));
+        var policyBytes = await File.ReadAllBytesAsync(Path.Combine(repository,
+            policyLogical.Replace('/', Path.DirectorySeparatorChar)), TestContext.Current.CancellationToken);
+        var policy = RepositoryPolicyParser.Parse(policyBytes, policyLogical);
+        var canonicalPolicy = ImmutableArray.Create(policy.CanonicalBytes);
+        foreach (var item in new[]
+        {
+            ("evidence/app.dll", assembly), ("evidence/app.pdb", pdb), ("evidence/test.dll", assembly),
+            ("evidence/test.pdb", pdb), ("evidence/results.trx", trx), ("evidence/coverage.xml", coverage),
+            ("evaluation/scope.json", scope), ("evaluation/policy.json", canonicalPolicy)
+        }) bytes.Add(item.Item1, item.Item2);
+
+        var manifestContext = new ManifestContext(context.ContextId, projectLogical, context.TargetFramework,
+            context.Configuration, context.Platform, "", "", "", true, true, inputs)
+        {
+            ParseOptions = new ManifestParseOptions(inspected.LanguageVersion, context.SourceKind.ToString(),
+                inspected.PreprocessorSymbols, new Dictionary<string, string>()),
+            PathPolicy = new ManifestPathPolicy("sensitive",
+                [new ManifestReportRootMapping("/_/tests/Crap4CSharp.ProvenanceFixture", ""),
+                 new ManifestReportRootMapping(projectDirectory.Replace('\\', '/'), "")]),
+            CurrentRevalidation = new ManifestCurrentRevalidation(CurrentEvidenceAdapter.SupportedRecipeProvider,
+                projectLogical, Path.GetRelativePath(repository, assemblyPath).Replace('\\', '/'),
+                Path.GetRelativePath(repository, pdbPath).Replace('\\', '/'))
+        };
+        var build = new ManifestBuild("build", context.ContextId, inspected.ModuleIdentity,
+            CanonicalIdentity.Sha256(assembly.AsSpan()), inspected.Mvid, CanonicalIdentity.Sha256(pdb.AsSpan()),
+            inspected.DebugIdentity);
+        var execution = new ManifestExecution("test", context.ContextId, build.Id, true, 0, 1, 1, 0, 0)
+        {
+            TestProject = projectLogical, TestModuleIdentity = inspected.ModuleIdentity,
+            TestAssemblySha256 = CanonicalIdentity.Sha256(assembly.AsSpan()), TestMvid = inspected.Mvid,
+            TestPdbSha256 = CanonicalIdentity.Sha256(pdb.AsSpan()), TestDebugIdentity = inspected.DebugIdentity
+        };
+        ManifestArtifact Artifact(string id, string kind, string locator, ImmutableArray<byte> value,
+            string? contextId = null, string? buildId = null, string? executionId = null, string? format = null,
+            string? coordinate = null) => new(id, kind, locator, value.Length, CanonicalIdentity.Sha256(value.AsSpan()),
+                contextId, buildId, executionId, format, coordinate);
+        var artifacts = new[]
+        {
+            Artifact("scope", "scope", "evaluation/scope.json", scope),
+            Artifact("policy", "policy", "evaluation/policy.json", canonicalPolicy),
+            Artifact("assembly", "assembly", "evidence/app.dll", assembly, context.ContextId, build.Id),
+            Artifact("pdb", "pdb", "evidence/app.pdb", pdb, context.ContextId, build.Id),
+            Artifact("test-assembly", "test-assembly", "evidence/test.dll", assembly, context.ContextId, build.Id, execution.Id),
+            Artifact("test-pdb", "test-pdb", "evidence/test.pdb", pdb, context.ContextId, build.Id, execution.Id),
+            Artifact("test-result", "test-result", "evidence/results.trx", trx, context.ContextId, build.Id, execution.Id, "trx"),
+            Artifact("coverage", "coverage", "evidence/coverage.xml", coverage, context.ContextId, build.Id, execution.Id, "cobertura", "line")
+        };
+        var manifest = new RunManifest(ManifestIdentity.SchemaVersion, CanonicalIdentity.Algorithm,
+            new ManifestProducer("crap4csharp", "0.1.0", ComplexityRules.CallablesV1,
+                ProjectAnalysisContext.ProtocolVersion, ManifestIdentity.CoverageProtocol, ManifestIdentity.PathProtocol),
+            new ManifestCapture("completed", true, true, []),
+            new ManifestRevision("git", "pending", "pending", "pending", null, "pending"),
+            [new ManifestRoot("workspace", "workspace", "sensitive")], [manifestContext], [build], [execution], artifacts,
+            new ManifestEvaluationInputs(CanonicalIdentity.Sha256(scope.AsSpan()), policy.Hash, null, null), null);
+        var observed = CurrentEvidenceAdapter.Capture(manifest, repository);
+        manifest = manifest with
+        {
+            Revision = new ManifestRevision("git", observed.RepositoryIdentity, observed.WorkspaceIdentity,
+                observed.Head, baseRevision, observed.Head) { StateHash = observed.StateHash }
+        };
+        var locator = ArtifactCaptureAdapter.PublishNew(manifest, bytes, bundleDirectory);
+        return (locator, manifest, manifestContext, inputs, bytes);
     }
 
     private static string RepositoryRoot()
