@@ -7,21 +7,19 @@ namespace Crap4CSharp.Tests;
 
 public sealed class PolicyCheckCommandTests
 {
-    [Fact]
-    public void BranchClassifiedGeneratedSourceOutsideObjFailsClosed()
+    [Theory]
+    [InlineData("src/Gate.g.cs")]
+    [InlineData("obj/Release/Gate.g.cs")]
+    [InlineData("artifacts/intermediate/Release/Gate.g.cs")]
+    public void LogicalGeneratedPrefixNeverSubstitutesForIndependentCurrentRecipe(string logicalPath)
     {
-        var source = new ManifestInput("source", "src/Gate.g.cs", "inputs/gate.bin", 1, new string('a', 64),
-            "utf-8", true);
+        var source = new ManifestInput("source", logicalPath, "inputs/gate.bin", 1, new string('a', 64), "utf-8", true);
         var context = Context([source]);
-        var manifest = Manifest(context);
-
-        var error = Assert.Throws<PolicyException>(() => PolicyCheckCommand.ValidateGeneratedInventory(manifest));
-
+        var error = Assert.Throws<PolicyException>(() => PolicyCheckCommand.ValidateGeneratedInventory(Manifest(context)));
         Assert.Equal("policy.branchGeneratedSource", error.Code);
-        PolicyCheckCommand.ValidateGeneratedInventory(Manifest(Context(
-            [source with { LogicalPath = "obj/Release/Gate.g.cs" }])));
-        Assert.Throws<PolicyException>(() => PolicyCheckCommand.ValidateGeneratedInventory(Manifest(Context(
-            [source with { LogicalPath = "Legacy/obj/Gate.cs" }]))));
+        PolicyCheckCommand.ValidateGeneratedInventory(Manifest(context with
+        { CurrentRevalidation = new ManifestCurrentRevalidation(CurrentEvidenceAdapter.SupportedRecipeProvider,
+            "App/App.csproj", "App/bin/App.dll", "App/bin/App.pdb") }));
     }
 
     [Fact]
