@@ -67,6 +67,9 @@ internal static class CurrentEvidenceAdapter
             var recipe = expected.CurrentRevalidation;
             if (!expected.ReuseRecipeComplete || recipe is null || recipe.Provider != SupportedRecipeProvider)
                 return basic;
+            if (!string.Equals(NormalizeRecipePath(recipe.Project), NormalizeRecipePath(expected.Project),
+                    StringComparison.Ordinal))
+                throw new InvalidDataException("Current revalidation recipe project differs from its declared production project.");
             var project = ResolveRegularFile(root, NormalizeRecipePath(recipe.Project))
                 ?? throw new InvalidDataException($"Current revalidation project is missing: {recipe.Project}");
             var loaded = await ProjectContextLoader.LoadAsync(new ProjectContextLoadRequest(project,
