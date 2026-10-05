@@ -100,6 +100,59 @@ public sealed class ArtifactCaptureTests
     }
 
     [Fact]
+    public void GitCurrentEvidenceAcceptsRootTopologyDespiteDifferentPhysicalSpelling()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-git-root-topology");
+        var manifest = CreateFixture().Manifest with
+        { Revision = new ManifestRevision("git", "repo", "worktree", "abc", null, null) };
+        var current = CurrentEvidenceAdapter.Capture(manifest, directory.Path, (_, arguments) =>
+            string.Join(" ", arguments) switch
+            {
+                "rev-parse --show-prefix" => "\n",
+                "rev-parse --show-toplevel" => Path.Combine(directory.Path, "canonical-long-spelling"),
+                "rev-parse --git-common-dir" or "rev-parse --git-dir" => ".git",
+                "rev-parse HEAD" => "abc",
+                _ => ""
+            });
+        Assert.Equal("abc", current.Head);
+    }
+
+    [Fact]
+    public void GitCurrentEvidenceBoundsArgumentsForTwoThousandDeclaredInputs()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-git-command-bound");
+        var fixture = CreateFixture();
+        var paths = Enumerable.Range(0, 2000).Select(index =>
+            $"src/LongProjectDirectoryName/LongSourceFileName{index:D4}.cs").ToArray();
+        var context = fixture.Manifest.Contexts.Single() with { Inputs = paths.Select(path =>
+            new ManifestInput("source", path, "inputs/unused", 0, new string('a', 64), "utf-8", false)
+            { RepositoryPath = path }).ToArray() };
+        var manifest = fixture.Manifest with { Contexts = [context],
+            Revision = new ManifestRevision("git", "repo", "worktree", "abc", null, null) };
+        var observedPaths = new HashSet<string>(StringComparer.Ordinal);
+        var largest = 0;
+        string Run(string _, IReadOnlyList<string> arguments)
+        {
+            largest = Math.Max(largest, arguments.Sum(argument => argument.Length + 3));
+            Assert.True(largest < 16000, $"Git command grew to {largest} characters.");
+            if (arguments[0] == "status")
+                foreach (var path in arguments.SkipWhile(argument => argument != "--").Skip(1))
+                    observedPaths.Add(path);
+            return string.Join(" ", arguments) switch
+            {
+                "rev-parse --show-prefix" => "",
+                "rev-parse --show-toplevel" => directory.Path,
+                "rev-parse --git-common-dir" or "rev-parse --git-dir" => ".git",
+                "rev-parse HEAD" => "abc",
+                _ => ""
+            };
+        }
+        var current = CurrentEvidenceAdapter.Capture(manifest, directory.Path, Run);
+        Assert.Equal(paths.Order(StringComparer.Ordinal), observedPaths.Order(StringComparer.Ordinal));
+        Assert.NotNull(current.StateHash);
+    }
+
+    [Fact]
     public void GitCurrentEvidenceBindsStatusSubmodulesAndStagedDiff()
     {
         using var directory = TestDirectory.Create("crap4csharp-git-state");
