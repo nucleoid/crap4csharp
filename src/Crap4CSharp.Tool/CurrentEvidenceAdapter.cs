@@ -55,6 +55,13 @@ internal static class CurrentEvidenceAdapter
         var hashes = new Dictionary<string, string>(StringComparer.Ordinal);
         var verifiedInputs = new Dictionary<string, CurrentInputEvidence>(StringComparer.Ordinal);
         var protectedPaths = new HashSet<string>(PathIdentityPolicy.Current.Comparer);
+        foreach (var context in manifest.Contexts)
+        foreach (var input in context.Inputs.Where(input => !input.Generated))
+        {
+            var repositoryPath = CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input);
+            var path = ResolveRegularFile(root, NormalizeRecipePath(repositoryPath));
+            if (path is not null) protectedPaths.Add(path);
+        }
         foreach (var expected in manifest.Contexts.OrderBy(item => item.Id, StringComparer.Ordinal))
         {
             var recipe = expected.CurrentRevalidation;
@@ -114,10 +121,14 @@ internal static class CurrentEvidenceAdapter
                 !parse.PreprocessorSymbols.Order(StringComparer.Ordinal).SequenceEqual(current.PreprocessorSymbols.Order(StringComparer.Ordinal)))
                 throw new InvalidDataException("Current project parse context differs from captured tested context.");
 
-            var assembly = ArtifactBundle.ReadBounded(ResolveRegularFile(root, NormalizeRecipePath(recipe.AssemblyPath))
-                ?? throw new InvalidDataException("Current assembly output is missing."), ArtifactBundle.MaxArtifactBytes, null, recipe.AssemblyPath);
-            var pdb = ArtifactBundle.ReadBounded(ResolveRegularFile(root, NormalizeRecipePath(recipe.PdbPath))
-                ?? throw new InvalidDataException("Current PDB output is missing."), ArtifactBundle.MaxArtifactBytes, null, recipe.PdbPath);
+            var assemblyPath = ResolveRegularFile(root, NormalizeRecipePath(recipe.AssemblyPath))
+                ?? throw new InvalidDataException("Current assembly output is missing.");
+            var pdbPath = ResolveRegularFile(root, NormalizeRecipePath(recipe.PdbPath))
+                ?? throw new InvalidDataException("Current PDB output is missing.");
+            protectedPaths.Add(assemblyPath);
+            protectedPaths.Add(pdbPath);
+            var assembly = ArtifactBundle.ReadBounded(assemblyPath, ArtifactBundle.MaxArtifactBytes, null, recipe.AssemblyPath);
+            var pdb = ArtifactBundle.ReadBounded(pdbPath, ArtifactBundle.MaxArtifactBytes, null, recipe.PdbPath);
             var build = manifest.Builds.SingleOrDefault(item => item.ContextId == expected.Id)
                 ?? throw new InvalidDataException("Captured context does not have exactly one build binding.");
             var inspected = ArtifactEvidenceInspector.InspectBuild(System.Collections.Immutable.ImmutableArray.Create(assembly),
