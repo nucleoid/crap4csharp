@@ -141,7 +141,7 @@ internal static class PolicyCheckCommand
             var path = RepositorySourcePath(manifest, first.ContextId, first.Path);
             if (Excluded(policy, path)) continue;
             yield return new PolicyObservation("anonymous", first.CallableId, "crap.thresholdExceeded",
-                first.Ruleset, first.ContextId, path, first.BodyChecksum, first.Complexity ?? 0, null, null,
+                first.Ruleset, first.ContextId, path, first.BodyChecksum, values.Max(item => item.Complexity ?? 0), null, null,
                 CoverageReasonCodes.AmbiguousCallableOwnership,
                 values.Any(item => selected.GetValueOrDefault(item.ObservationId)), true);
         }
@@ -181,8 +181,10 @@ internal static class PolicyCheckCommand
                 throw new PolicyException("exemption.malformed", $"Trusted exemption file is malformed: {file.Key}");
             foreach (var entry in root.GetProperty("entries").EnumerateArray())
             {
-                RequireKeys(entry, ["ruleset", "contextId", "targetFramework", "callableId", "bodyChecksum",
-                    "reasonCode", "justification", "reviewReference", "familyIds"]);
+                string[] requiredKeys = ["ruleset", "contextId", "targetFramework", "callableId", "bodyChecksum",
+                    "reasonCode", "justification", "reviewReference", "familyIds"];
+                RequireKeys(entry, entry.TryGetProperty("memberCount", out var memberCount)
+                    ? [.. requiredKeys, "memberCount"] : requiredKeys);
                 string Text(string name) => entry.GetProperty(name).ValueKind == JsonValueKind.String &&
                     !string.IsNullOrWhiteSpace(entry.GetProperty(name).GetString()) ? entry.GetProperty(name).GetString()! :
                     throw new PolicyException("exemption.malformed", $"Trusted exemption field '{name}' is invalid.");
@@ -210,6 +212,12 @@ internal static class PolicyCheckCommand
                     candidates.Length != matches.Length)
                     throw new PolicyException("exemption.ambiguityWidened",
                         "Trusted ambiguity exemption does not cover every current body sharing this identity.");
+                if (reason == CoverageReasonCodes.AmbiguousCallableOwnership && matches.Length > 0 &&
+                    (memberCount.ValueKind != JsonValueKind.Number || !memberCount.TryGetInt32(out var reviewedCount) ||
+                     reviewedCount < 1 || reviewedCount != matches.Length ||
+                     matches.Any(item => item.Kind is not ("Lambda" or "AnonymousMethod" or "lambda" or "anonymous-method"))))
+                    throw new PolicyException("exemption.ambiguityWidened",
+                        "An ambiguity exemption must name the exact reviewed anonymous member count; named collisions cannot be waived.");
                 var currentContextIds = matches.Select(item => item.ContextId).Distinct(StringComparer.Ordinal).ToArray();
                 if (currentContextIds.Length > 1)
                     throw new PolicyException("exemption.multiplyMatched", "Trusted exemption spans multiple current contexts.");

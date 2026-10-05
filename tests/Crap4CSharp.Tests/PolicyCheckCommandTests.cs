@@ -77,13 +77,14 @@ public sealed class PolicyCheckCommandTests
     {
         var first = Callable("same", "first", "Gate.cs", 10, 10) with
         { CoverageReason = CoverageReasonCodes.AmbiguousCallableOwnership, FamilyIds = ["family"] };
+        first = first with { Kind = "Lambda" };
         var second = first with { ObservationId = "second", Span = new CallableSourceSpan(20, 1, 20, 2, 20, 2) };
         var result = EmptyResult([first, second]);
         var bytes = Encoding.UTF8.GetBytes("""
             {"version":"callable-exemptions-v1","entries":[{
               "ruleset":"callables-v1","contextId":"ctx","targetFramework":"net10.0",
               "callableId":"same","bodyChecksum":"body","reasonCode":"coverage.ambiguousCallableOwnership",
-              "justification":"reviewed duplicate body","reviewReference":"review-1","familyIds":["family"]}]}
+              "justification":"reviewed duplicate body","reviewReference":"review-1","familyIds":["family"],"memberCount":2}]}
             """);
 
         var parsed = PolicyCheckCommand.ParseExemptions(
