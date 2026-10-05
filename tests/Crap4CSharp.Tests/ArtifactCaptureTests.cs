@@ -87,6 +87,19 @@ public sealed class ArtifactCaptureTests
     }
 
     [Fact]
+    public void GitCurrentEvidenceRejectsNonRepositoryRoot()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-wrong-workspace-root");
+        var fixture = CreateFixture();
+        var manifest = fixture.Manifest with
+        { Revision = new ManifestRevision("git", "repo", "worktree", "abc", null, null) };
+        var error = Assert.Throws<InvalidDataException>(() => CurrentEvidenceAdapter.Capture(manifest,
+            directory.Path, (_, arguments) => arguments.SequenceEqual(new[] { "rev-parse", "--show-toplevel" })
+                ? Path.GetDirectoryName(directory.Path)! : ""));
+        Assert.Contains("repository root", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void GitCurrentEvidenceBindsStatusSubmodulesAndStagedDiff()
     {
         using var directory = TestDirectory.Create("crap4csharp-git-state");

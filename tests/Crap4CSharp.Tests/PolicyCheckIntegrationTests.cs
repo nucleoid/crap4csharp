@@ -139,6 +139,19 @@ public sealed class PolicyCheckIntegrationTests
         Assert.Equal("verified", result.RootElement.GetProperty("evaluation").GetProperty("provenance")
             .GetProperty("status").GetString());
 
+        foreach (var forgedPath in new[] { "Crap4CSharp.slnx", "does-not-exist.cs",
+                     "src/App/Migrations/Gate.cs" })
+        {
+            var forgedContext = manifestContext with
+            { Inputs = inputs.Select(input => input.Generated ? input : input with
+                { RepositoryPath = forgedPath }).ToArray() };
+            var forged = manifest with { Contexts = [forgedContext] };
+            var pathError = await Assert.ThrowsAsync<InvalidDataException>(() =>
+                CurrentEvidenceAdapter.CaptureSupportedAsync(forged, repository, TimeSpan.FromMinutes(2),
+                    TestContext.Current.CancellationToken));
+            Assert.Contains("repository path", pathError.Message, StringComparison.OrdinalIgnoreCase);
+        }
+
         var nonGitManifest = manifest with
         { Revision = new ManifestRevision("none", "none", "workspace", null, null, null) };
         var nonGitLocator = ArtifactCaptureAdapter.PublishNew(nonGitManifest, bytes,
