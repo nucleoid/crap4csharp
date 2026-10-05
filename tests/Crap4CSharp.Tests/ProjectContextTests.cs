@@ -101,6 +101,57 @@ public sealed class ProjectContextTests
         finally { Directory.Delete(root, true); }
     }
 
+    [Theory]
+    [InlineData("obj/Gate.cs", "")]
+    [InlineData("Legacy/Gate.cs", "obj/Gate.cs")]
+    public async Task CommittedTargetAddedCompileCannotHideAuthoredCodeAsGenerated(string physical, string link)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-target-added-authored");
+        var project = fixture.Write("App.csproj", $$"""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net10.0</TargetFramework><EnableDefaultCompileItems>false</EnableDefaultCompileItems></PropertyGroup>
+              <Target Name="AddGate" BeforeTargets="CoreCompile">
+                <ItemGroup><Compile Include="{{physical}}" Link="{{link}}" /></ItemGroup>
+              </Target>
+            </Project>
+            """);
+        var sourcePath = fixture.Write(physical, "public class Gate { public int M(int n) { if(n>0) return 1; if(n<0) return 2; return 0; } }");
+        async Task Git(params string[] args)
+        {
+            var result = await ProcessRunner.RunAsync("git", args, fixture.Path, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            Assert.True(result.ExitCode == 0, result.StandardError);
+        }
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "fixture@example.invalid");
+        await Git("config", "user.name", "Fixture");
+        await Git("add", "-f", "--", "App.csproj", physical);
+        await Git("commit", "--quiet", "-m", "authored target input");
+        var restore = await ProjectBuildPreparation.RestoreAsync(project, TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+        Assert.True(restore.ExitCode == 0, restore.StandardOutput + restore.StandardError);
+        var loaded = await ProjectContextLoader.LoadAsync(new(project, "Debug", null, [], false, false, TimeSpan.FromMinutes(2)), TestContext.Current.CancellationToken);
+        Assert.True(loaded.Success, string.Join(Environment.NewLine, loaded.Diagnostics));
+        var context = Assert.Single(loaded.Contexts);
+        var source = Assert.Single(context.Sources, item => item.ResolvedPath == sourcePath);
+        Assert.False(source.IsGenerated);
+        Assert.DoesNotContain(context.Exclusions, item => item.LogicalPath == source.LogicalPath);
+    }
+
+    [Fact]
+    public async Task ActualIntermediateOutputLayoutIsGeneratedWithoutAnObjLogicalPrefix()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-artifacts-generated");
+        fixture.Write("Directory.Build.props", "<Project><PropertyGroup><BaseIntermediateOutputPath>artifacts/intermediate/</BaseIntermediateOutputPath></PropertyGroup></Project>");
+        var project = fixture.Write("App.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>");
+        fixture.Write("Gate.cs", "public class Gate { public int M() => 1; }");
+        var restore = await ProjectBuildPreparation.RestoreAsync(project, TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+        Assert.True(restore.ExitCode == 0, restore.StandardOutput + restore.StandardError);
+        var loaded = await ProjectContextLoader.LoadAsync(new(project, "Debug", null, [], false, true, TimeSpan.FromMinutes(2)), TestContext.Current.CancellationToken);
+        Assert.True(loaded.Success, string.Join(Environment.NewLine, loaded.Diagnostics));
+        var context = Assert.Single(loaded.Contexts);
+        Assert.Contains(context.Sources, source => source.IsGenerated && source.ResolvedPath is not null &&
+            source.ResolvedPath.Contains("artifacts" + Path.DirectorySeparatorChar + "intermediate", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task ContextIdentityIsIndependentOfCloneRoot()
     {
