@@ -96,6 +96,65 @@ public sealed class PolicyCheckCommandTests
     }
 
     [Fact]
+    public void TrustedExemptionSurvivesCurrentContextContentChange()
+    {
+        var callable = Callable("same", "current", "Gate.cs", 10, 10) with
+        {
+            ContextId = "current-context",
+            CoverageReason = CoverageReasonCodes.UnsupportedCallable
+        };
+        var result = EmptyResult([callable], "current-context");
+        var bytes = Encoding.UTF8.GetBytes("""
+            {"version":"callable-exemptions-v1","entries":[{
+              "ruleset":"callables-v1","contextId":"reviewed-base-context","targetFramework":"net10.0",
+              "callableId":"same","bodyChecksum":"body","reasonCode":"scope.unsupportedCallable",
+              "justification":"reviewed exact callable","reviewReference":"review-1","familyIds":[]}]}
+            """);
+
+        var parsed = PolicyCheckCommand.ParseExemptions(
+            new Dictionary<string, byte[]> { ["quality/exemptions.json"] = bytes }, result);
+        var evaluated = PolicyEvaluator.Evaluate(Policy(RepositoryPolicyMode.Strict), null,
+            [Observation("same", true) with { ContextId = "current-context", CoverageReason = CoverageReasonCodes.UnsupportedCallable }],
+            parsed.Active);
+
+        Assert.Single(parsed.Active);
+        Assert.Equal(0, evaluated.ExitCode);
+    }
+
+    [Fact]
+    public void UnsupportedExemptionCannotHideKnownComplexityViolation()
+    {
+        var observation = Observation("leaf", true) with
+        { CoverageReason = CoverageReasonCodes.UnsupportedCallable, Complexity = 6 };
+        var exemption = new PolicyExemption("leaf", "crap.thresholdExceeded", "old-context",
+            CoverageReasonCodes.UnsupportedCallable, "reviewed");
+
+        var result = PolicyEvaluator.Evaluate(Policy(RepositoryPolicyMode.Strict), null, [observation], [exemption]);
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.Contains(result.Findings, finding => finding.Code == "crap.thresholdExceeded");
+    }
+
+    [Fact]
+    public void AmbiguityExemptionCannotCoverDifferentBodies()
+    {
+        var first = Callable("same", "first", "Gate.cs", 10, 10) with
+        { CoverageReason = CoverageReasonCodes.AmbiguousCallableOwnership, FamilyIds = ["family"] };
+        var second = first with { ObservationId = "second", BodyChecksum = "other-body" };
+        var bytes = Encoding.UTF8.GetBytes("""
+            {"version":"callable-exemptions-v1","entries":[{
+              "ruleset":"callables-v1","contextId":"ctx","targetFramework":"net10.0",
+              "callableId":"same","bodyChecksum":"body","reasonCode":"coverage.ambiguousCallableOwnership",
+              "justification":"reviewed one body","reviewReference":"review-1","familyIds":["family"]}]}
+            """);
+
+        var error = Assert.Throws<PolicyException>(() => PolicyCheckCommand.ParseExemptions(
+            new Dictionary<string, byte[]> { ["quality/exemptions.json"] = bytes }, EmptyResult([first, second])));
+
+        Assert.Equal("exemption.ambiguityWidened", error.Code);
+    }
+
+    [Fact]
     public async Task FailureOutputNeverOverwritesAnExplicitInputFile()
     {
         using var directory = TestDirectory.Create("crap4csharp-policy-failure-output");
@@ -195,10 +254,10 @@ public sealed class PolicyCheckCommandTests
         [new ManifestRoot("workspace", "workspace", "sensitive")], [context], [], [], [],
         new ManifestEvaluationInputs("scope", "policy", null, null), null);
 
-    private static ResultDocument EmptyResult(IReadOnlyList<CallableResult> callables)
+    private static ResultDocument EmptyResult(IReadOnlyList<CallableResult> callables, string contextId = "ctx")
     {
         var evaluation = new EvaluationSection("check", new PolicyOptions(5, false), new EvaluationScope(".", []),
-            [new EvaluationContext("ctx", "captured", "App/App.csproj", "net10.0", "Release", "source", null)],
+            [new EvaluationContext(contextId, "captured", "App/App.csproj", "net10.0", "Release", "source", null)],
             [], [], [], new CoverageSummary(0, 0, 0, new Dictionary<string, int>()), [],
             new EvaluationDecision(true, "pass", "crap.withinThreshold"))
         { Callables = callables, Families = [], CallableExemptions = [], ExemptionErrors = [] };
