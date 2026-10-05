@@ -138,6 +138,44 @@ public sealed class PolicyCheckIntegrationTests
             .GetProperty("trust").GetString());
         Assert.Equal("verified", result.RootElement.GetProperty("evaluation").GetProperty("provenance")
             .GetProperty("status").GetString());
+
+        var nonGitManifest = manifest with
+        { Revision = new ManifestRevision("none", "none", "workspace", null, null, null) };
+        var nonGitLocator = ArtifactCaptureAdapter.PublishNew(nonGitManifest, bytes,
+            Path.Combine(directory.Path, "non-git-bundle"));
+        var failureOutput = new StringWriter();
+        var failed = await global::App.RunAsync(["check", "--reuse-artifacts", nonGitLocator,
+            "--policy", PolicyLogical, "--base", "HEAD", "--format", "json"], repository,
+            failureOutput, TextWriter.Null, TestContext.Current.CancellationToken);
+        Assert.Equal(1, failed);
+        using var failure = JsonDocument.Parse(failureOutput.ToString());
+        Assert.Equal("provenance.gitRevisionRequired", failure.RootElement.GetProperty("evaluation")
+            .GetProperty("decision").GetProperty("reason").GetString());
+    }
+
+    [Theory]
+    [InlineData("App.csproj")]
+    [InlineData("Directory.Build.props")]
+    [InlineData("Shared/Util.cs")]
+    [InlineData("global.json")]
+    public async Task FailedCheckPreservesExistingConsumerInputsBeforeLoader(string destination)
+    {
+        using var directory = TestDirectory.Create("crap4csharp-failed-check-preservation");
+        var path = Path.Combine(directory.Path, destination);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var original = Encoding.UTF8.GetBytes("consumer input that must never become a result document");
+        await File.WriteAllBytesAsync(path, original, TestContext.Current.CancellationToken);
+        var stamp = File.GetLastWriteTimeUtc(path);
+        var output = new StringWriter();
+        var exit = await global::App.RunAsync(["check", "--reuse-artifacts", "missing-manifest.json",
+            "--policy", "policy.json", "--base", "HEAD", "--output", destination, "--format", "json"],
+            directory.Path, output, TextWriter.Null, TestContext.Current.CancellationToken);
+        Assert.Equal(1, exit);
+        using var result = JsonDocument.Parse(output.ToString());
+        Assert.Equal("artifact.invalid", result.RootElement.GetProperty("evaluation").GetProperty("decision")
+            .GetProperty("reason").GetString());
+        Assert.Equal(original, await File.ReadAllBytesAsync(path, TestContext.Current.CancellationToken));
+        Assert.Equal(stamp, File.GetLastWriteTimeUtc(path));
     }
 
     private static string RepositoryRoot()
