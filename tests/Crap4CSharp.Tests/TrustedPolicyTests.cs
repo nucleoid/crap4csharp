@@ -6,10 +6,13 @@ namespace Crap4CSharp.Tests;
 
 public sealed class TrustedPolicyTests
 {
-    [Fact]
-    public void TrustedResolutionLoadsEveryOverlayFromOneImmutableTree()
+    [Theory]
+    [InlineData("\n")]
+    [InlineData("\r\n")]
+    public void TrustedResolutionLoadsEveryOverlayFromOneImmutableTree(string newline)
     {
-        var strict = PolicyTests.ValidPolicy.Replace("\"incremental\"", "\"strict\"", StringComparison.Ordinal)
+        var input = PolicyTests.ValidPolicy.ReplaceLineEndings(newline);
+        var strict = input.Replace("\"incremental\"", "\"strict\"", StringComparison.Ordinal)
             .Replace(",\n  \"baseline\": \"baseline.json\"", "", StringComparison.Ordinal)
             .Replace("\"exemptionFiles\": []", "\"exemptionFiles\": [\"exceptions.json\"]", StringComparison.Ordinal);
         var commands = new List<string>();
