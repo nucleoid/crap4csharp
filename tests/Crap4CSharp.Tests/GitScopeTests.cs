@@ -11,6 +11,34 @@ public sealed class GitScopeTests : IDisposable
     public void Dispose() => fixture.Dispose();
 
     [Fact]
+    public async Task StagedGitBlobBeyondProtocolLimitRefusesRatherThanRetainingUnboundedResponse()
+    {
+        await Git("init", "--quiet");
+        Write("Oversized.cs", "//" + new string('x', 16777216));
+        await Git("add", "--", "Oversized.cs");
+        var failure = await Assert.ThrowsAsync<ScopeException>(() => GitScopeResolver.CaptureAsync(
+            new GitScopeRequest(ChangeScopeMode.Staged), temporary, TimeSpan.FromSeconds(15),
+            TestContext.Current.CancellationToken));
+        Assert.Equal("scope.gitProtocolLimit", failure.Reason);
+        Assert.Contains("16777216", failure.Message);
+    }
+
+    [Fact]
+    public async Task UnbornStagedGitScopePreservesExactUtf8BytesAndUnusualPath()
+    {
+        await Git("init", "--quiet");
+        string name = OperatingSystem.IsWindows() ? "unicode space é.cs" : "unicode space é\nfile.cs";
+        const string source = "// café 😀\nclass C { string M() => \"é\"; }\n";
+        Write(name, source);
+        await Git("add", "--", name);
+        var scope = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Staged),
+            temporary, TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken);
+        var file = Assert.Single(scope.Files);
+        Assert.Equal(name, file.NewPath);
+        Assert.Equal(source, file.NewSource!.Text);
+    }
+
+    [Fact]
     public async Task BaseHeadCapturesCommittedBytesAndIgnoresDirtyWorktree()
     {
         await Git("init", "--quiet");
