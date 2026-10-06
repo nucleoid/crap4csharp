@@ -10,11 +10,21 @@ internal sealed record ProposedPolicyDifference(string Path, string Status, stri
 internal static class TrustedPolicyLoader
 {
     public static TrustedPolicyResolution LoadFromBase(string baseRef, string policyPath,
-        Func<IReadOnlyList<string>, byte[]>? gitExecutor = null, string? repositoryRoot = null)
+        Func<IReadOnlyList<string>, byte[]>? gitExecutor = null, string? repositoryRoot = null,
+        TimeSpan? timeout = null, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         ArgumentException.ThrowIfNullOrWhiteSpace(baseRef);
         var normalizedPolicy = Normalize(policyPath);
-        var git = gitExecutor ?? (arguments => Git(arguments, repositoryRoot ?? Directory.GetCurrentDirectory(), TimeSpan.FromSeconds(15)));
+        var budget = timeout ?? TimeSpan.FromSeconds(300);
+        byte[] GitBounded(IReadOnlyList<string> arguments)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return gitExecutor is null
+                ? Git(arguments, repositoryRoot ?? Directory.GetCurrentDirectory(), budget, cancellationToken)
+                : gitExecutor(arguments);
+        }
+        var git = (Func<IReadOnlyList<string>, byte[]>)GitBounded;
         var mergeBases = Encoding.UTF8.GetString(git(["merge-base", "--all", "HEAD", baseRef]))
             .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (mergeBases.Length != 1 || mergeBases[0].Length != 40 ||
@@ -129,7 +139,7 @@ internal static class TrustedPolicyLoader
         return current;
     }
 
-    private static byte[] Git(IReadOnlyList<string> arguments, string root, TimeSpan timeout)
+    private static byte[] Git(IReadOnlyList<string> arguments, string root, TimeSpan timeout, CancellationToken cancellationToken)
     {
         var start = new ProcessStartInfo("git")
         {
@@ -145,15 +155,17 @@ internal static class TrustedPolicyLoader
         using var output = new MemoryStream();
         var copy = process.StandardOutput.BaseStream.CopyToAsync(output);
         var errors = process.StandardError.ReadToEndAsync();
-        using var cancellation = new CancellationTokenSource(timeout);
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cancellation.CancelAfter(timeout);
         try
         {
             process.WaitForExitAsync(cancellation.Token).GetAwaiter().GetResult();
-            Task.WhenAll(copy, errors).GetAwaiter().GetResult();
+            Task.WhenAll(copy, errors).WaitAsync(cancellation.Token).GetAwaiter().GetResult();
         }
         catch (OperationCanceledException exception)
         {
             try { process.Kill(true); } catch (InvalidOperationException) { }
+            cancellationToken.ThrowIfCancellationRequested();
             throw new PolicyException("policy.gitTimeout", exception.Message);
         }
         if (process.ExitCode != 0)

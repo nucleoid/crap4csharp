@@ -25,11 +25,39 @@ public sealed class TrustedPolicyTests
             };
         }
 
-        var resolved = TrustedPolicyLoader.LoadFromBase("origin/main", "quality/policy.json", Git);
+        var resolved = TrustedPolicyLoader.LoadFromBase("origin/main", "quality/policy.json", Git,
+            cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal("base-trusted", resolved.Trust);
         Assert.Single(resolved.ExemptionBytes);
         Assert.All(commands.Skip(1), command => Assert.Contains("0123456789012345678901234567890123456789:", command));
+    }
+
+    [Fact]
+    public void CancellationStopsTrustedGitBeforeLaunchAndBetweenOverlayReads()
+    {
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cancellation.Cancel();
+        var calls = 0;
+        byte[] Git(IReadOnlyList<string> arguments)
+        {
+            calls++;
+            cancellation.Cancel();
+            return Encoding.UTF8.GetBytes(new string('a', 40) + "\n");
+        }
+        Assert.Throws<OperationCanceledException>(() => TrustedPolicyLoader.LoadFromBase("HEAD",
+            "policy.json", Git, timeout: TimeSpan.FromSeconds(1), cancellationToken: cancellation.Token));
+        Assert.Equal(0, calls);
+        using var between = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        byte[] Between(IReadOnlyList<string> arguments)
+        {
+            calls++;
+            between.Cancel();
+            return Encoding.UTF8.GetBytes(new string('a', 40) + "\n");
+        }
+        Assert.Throws<OperationCanceledException>(() => TrustedPolicyLoader.LoadFromBase("HEAD",
+            "policy.json", Between, timeout: TimeSpan.FromSeconds(1), cancellationToken: between.Token));
+        Assert.Equal(1, calls);
     }
 
     [Fact]
@@ -71,7 +99,8 @@ public sealed class TrustedPolicyTests
             var command => throw new InvalidOperationException(command)
         };
 
-        var resolved = TrustedPolicyLoader.LoadFromBase("origin/main", "quality/policy.json", Git);
+        var resolved = TrustedPolicyLoader.LoadFromBase("origin/main", "quality/policy.json", Git,
+            cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.NotNull(resolved.Baseline);
         Assert.Equal(boundHash, resolved.Baseline.PolicyHash);

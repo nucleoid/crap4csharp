@@ -12,7 +12,8 @@ internal static class PolicyCheckCommand
         CurrentEvidenceAdapter.ValidateSupportedRecipes(bundle.Manifest);
         if (outputPath is not null) bundle.RejectOutputAlias(outputPath, root);
         ValidateTrustedRevision(bundle.Manifest);
-        var trusted = TrustedPolicyLoader.LoadFromBase(baseRef, policyPath, repositoryRoot: root);
+        var trusted = TrustedPolicyLoader.LoadFromBase(baseRef, policyPath, repositoryRoot: root,
+            timeout: timeout, cancellationToken: cancellationToken);
         var policy = trusted.Policy.Policy;
         var compatibilityHash = TrustedPolicyLoader.BoundCompatibilityHash(trusted.Policy, trusted.ExemptionBytes);
         ValidatePolicyCoverage(bundle.Manifest, policy);
@@ -362,11 +363,12 @@ internal static class PolicyCheckCommand
     }
 
     internal static void RejectFailureOutputAlias(string manifestPath, string policyPath, string baseRef,
-        string outputPath, string root)
+        string outputPath, string root, TimeSpan timeout, CancellationToken cancellationToken)
     {
         var bundle = ArtifactBundle.Load(manifestPath, root);
         ValidateRepositoryPaths(bundle.Manifest);
-        var trusted = TrustedPolicyLoader.LoadFromBase(baseRef, policyPath, repositoryRoot: root);
+        var trusted = TrustedPolicyLoader.LoadFromBase(baseRef, policyPath, repositoryRoot: root,
+            timeout: timeout, cancellationToken: cancellationToken);
         var protectedPaths = bundle.Manifest.Contexts.SelectMany(context => context.Inputs)
             .Where(input => input.Role == "source" && !input.Generated && input.RepositoryPath is not null)
             .Select(input => Path.GetFullPath(input.RepositoryPath!, root))
