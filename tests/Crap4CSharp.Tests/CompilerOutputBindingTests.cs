@@ -72,6 +72,33 @@ public sealed class CompilerOutputBindingTests
         Assert.Equal("compiler.outputsUnproven", error.Reason);
     }
 
+    [Theory]
+    [InlineData("stamp")]
+    [InlineData("age")]
+    public void FullPortableDebugIdentityMustMatchNotOnlyGuid(string defect)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-output-debug-id");
+        var (context, observed) = Valid(fixture);
+        var bytes = File.ReadAllBytes(observed.Assembly!.Path);
+        using (var reader = new System.Reflection.PortableExecutable.PEReader(new MemoryStream(bytes, writable: false)))
+        {
+            var entries = reader.ReadDebugDirectory();
+            var index = Array.FindIndex(entries.ToArray(), entry => entry.Type == System.Reflection.PortableExecutable.DebugDirectoryEntryType.CodeView);
+            Assert.True(index >= 0);
+            if (defect == "stamp")
+            {
+                Assert.True(reader.PEHeaders.TryGetDirectoryOffset(reader.PEHeaders.PEHeader!.DebugTableDirectory, out var offset));
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(offset + index * 28 + 4, 4), entries[index].Stamp ^ 1U);
+            }
+            else
+                System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(entries[index].DataPointer + 20, 4), 2);
+        }
+        File.WriteAllBytes(observed.Assembly.Path, bytes); File.WriteAllBytes(context.EvaluatedTargetPath!, bytes);
+        observed = observed with { Assembly = Capture(observed.Assembly.Path) };
+        Assert.Equal("compiler.outputsUnproven", Assert.Throws<ProjectContextException>(() =>
+            CompilerOutputBinding.Validate(context, observed, TestContext.Current.CancellationToken)).Reason);
+    }
+
     [Fact]
     public void RealPortableArtifactsAndCopiesBindWithoutClaimingCompleteCapability()
     {
