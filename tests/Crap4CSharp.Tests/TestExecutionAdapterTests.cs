@@ -199,6 +199,9 @@ public sealed class TestExecutionAdapterTests
                     [typedObservation, testBinding.Context, compiler, TestContext.Current.CancellationToken])!;
                 var attachment = ReadCoverage();
                 var coveragePath = (string)attachment.GetType().GetProperty("Path")!.GetValue(attachment)!;
+                var declaredDeployment = trx.Descendants(ns + "Deployment").Single().Attribute("runDeploymentRoot")!.Value;
+                var declaredHref = trx.Descendants(ns + "Collector").Single().Descendants(ns + "A").Single().Attribute("href")!.Value;
+                Assert.Equal(Path.GetFullPath(Path.Combine(resultsDirectory, declaredDeployment, "In", declaredHref)), coveragePath);
                 var coverageOriginal = File.ReadAllBytes(coveragePath);
                 var coverageTime = File.GetLastWriteTimeUtc(coveragePath);
                 Assert.Equal("CoverageSession", XDocument.Load(coveragePath).Root!.Name.LocalName);
@@ -245,6 +248,31 @@ public sealed class TestExecutionAdapterTests
                     }
                     finally { File.WriteAllBytes(coveragePath, coverageOriginal); File.SetLastWriteTimeUtc(coveragePath, coverageTime); }
                 }
+                Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(coverageOriginal)).ToLowerInvariant(),
+                    (string)attachment.GetType().GetProperty("Sha256")!.GetValue(attachment)!);
+                Assert.Equal(coverageOriginal,
+                    ((System.Collections.Immutable.ImmutableArray<byte>)attachment.GetType().GetProperty("Bytes")!.GetValue(attachment)!).ToArray());
+                var guidCopy = Directory.GetDirectories(resultsDirectory).Single(p => Guid.TryParse(Path.GetFileName(p), out _));
+                var ignoredCopy = Path.Combine(guidCopy, "coverage.opencover.xml");
+                var ignoredBytes = File.ReadAllBytes(ignoredCopy);
+                File.WriteAllText(ignoredCopy, "not the declared attachment");
+                try { ReadCoverage(); }
+                finally { File.WriteAllBytes(ignoredCopy, ignoredBytes); }
+                using (var oversized = new FileStream(coveragePath, FileMode.Create, FileAccess.Write))
+                    oversized.SetLength(16 * 1024 * 1024 + 1);
+                try
+                {
+                    var error = Assert.Throws<TargetInvocationException>(() => ReadCoverage());
+                    Assert.Equal("coverage.attachmentUnproven", Assert.IsType<ProjectContextException>(error.InnerException).Reason);
+                }
+                finally { File.WriteAllBytes(coveragePath, coverageOriginal); File.SetLastWriteTimeUtc(coveragePath, coverageTime); }
+                File.Delete(coveragePath); Directory.CreateDirectory(coveragePath);
+                try
+                {
+                    var error = Assert.Throws<TargetInvocationException>(() => ReadCoverage());
+                    Assert.Equal("coverage.attachmentUnproven", Assert.IsType<ProjectContextException>(error.InnerException).Reason);
+                }
+                finally { Directory.Delete(coveragePath); File.WriteAllBytes(coveragePath, coverageOriginal); File.SetLastWriteTimeUtc(coveragePath, coverageTime); }
                 File.Delete(coveragePath);
                 try
                 {

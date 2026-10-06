@@ -108,7 +108,7 @@ internal static class TestResultBinding
         { throw Refuse(); }
     }
 
-    private static XDocument Parse(ImmutableArray<byte> bytes)
+    internal static XDocument Parse(ImmutableArray<byte> bytes)
     {
         if (bytes.IsDefaultOrEmpty || bytes.Length > MaximumTrxBytes) throw Refuse();
         using var stream = new MemoryStream(bytes.ToArray(), false);
@@ -116,7 +116,7 @@ internal static class TestResultBinding
         { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null, MaxCharactersInDocument = MaximumTrxBytes });
         return XDocument.Load(reader);
     }
-    private static ImmutableArray<byte> ReadTrx(string path, CancellationToken token)
+    internal static ImmutableArray<byte> ReadTrx(string path, CancellationToken token)
     {
         for (var current = path; current is not null; current = Path.GetDirectoryName(current))
             if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) throw Refuse();
