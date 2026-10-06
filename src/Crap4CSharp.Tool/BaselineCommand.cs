@@ -112,7 +112,14 @@ internal static class BaselineCommand
         }
     }
 
-    internal static string SourceIdentity(RunManifest manifest) => manifest.Revision.WorkspaceIdentity;
+    internal static string SourceIdentity(RunManifest manifest) => CanonicalIdentity.Set("baseline-source-set-v1",
+        manifest.Contexts.Select(context => CanonicalIdentity.Tuple("baseline-source-context-v1",
+            CanonicalIdentity.NormalizeLogicalPath(context.Project), context.TargetFramework,
+            context.Configuration, context.Platform, CanonicalIdentity.Set("baseline-source-inputs-v1",
+                context.Inputs.Where(input => input.Role == "source").Select(input =>
+                    CanonicalIdentity.Tuple("baseline-source-input-v1",
+                        CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input),
+                        input.Sha256, input.Generated ? "generated" : "authored"))))));
 
     internal sealed record OmittedKnownViolation(string Kind, string EntityKey, string Rule, string Path,
         int Complexity, string Reason, string? CoverageReason);
