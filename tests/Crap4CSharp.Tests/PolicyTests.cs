@@ -17,6 +17,16 @@ public sealed class PolicyTests
             "[\"tests\", \"coverage\", \"crap\"]", "[\"shell\"]", StringComparison.Ordinal)), "quality/policy.json"));
     }
 
+    [Theory]
+    [InlineData("1e400")]
+    [InlineData("-1e400")]
+    public void UnrepresentableThresholdIsTypedPolicyFailure(string threshold)
+    {
+        var json = ValidPolicy.Replace("\"threshold\": 5", "\"threshold\": " + threshold, StringComparison.Ordinal);
+        var error = Assert.Throws<PolicyException>(() => RepositoryPolicyParser.Parse(Encoding.UTF8.GetBytes(json), "policy.json"));
+        Assert.Equal("policy.thresholdInvalid", error.Code);
+    }
+
     [Fact]
     public void ParserCanonicalizesPathsAndHashIndependentlyOfFormatting()
     {

@@ -38,6 +38,24 @@ public sealed class CallableCliTests : IDisposable
         Assert.Equal("known", callable.GetProperty("coverageStatus").GetString());
     }
 
+    [Theory]
+    [InlineData("--policy", "strict.json")]
+    [InlineData("--base", "HEAD")]
+    [InlineData("--timeout-seconds", "5")]
+    public async Task SyntaxOnlyRejectsProcessAndTrustedPolicyOptions(string option, string value)
+    {
+        var source = Write("Syntax.cs", "class C { int M() => 1; }");
+        var coverage = WriteCoverage(source, 1);
+        var launches = 0;
+        var result = await Run((_, _, _, _, _) => { launches++; throw new InvalidOperationException("process forbidden"); },
+            "analyze", "--syntax-only", "--format", "json", option, value, "--coverage", coverage, source);
+        Assert.Equal(1, result.ExitCode);
+        using var document = JsonDocument.Parse(result.Output);
+        Assert.Equal("arguments.invalid", document.RootElement.GetProperty("evaluation")
+            .GetProperty("decision").GetProperty("reason").GetString());
+        Assert.Equal(0, launches);
+    }
+
     [Fact]
     public async Task UnsupportedModernInventoryIsExitOneButKnownViolationsRemain()
     {
