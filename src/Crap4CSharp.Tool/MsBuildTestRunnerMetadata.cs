@@ -52,6 +52,12 @@ internal static partial class MsBuildProjectLoader
             throw Unsupported("Install the supported Microsoft.NET.Test.Sdk 18.0.1 before checking; no packages are injected.");
         if (collectorVersion != "6.0.4" || !InstalledImport("coverlet.collector", collectorVersion, "coverlet.collector.targets"))
             throw new ProjectContextException("test.collectorUnsupported", "Install the supported coverlet.collector 6.0.4 before checking; no collector is injected.");
+        var collectorImport = project.Imports.Select(i => i.ImportedProject.FullPath).Single(path =>
+            Path.GetFileName(path) == "coverlet.collector.targets" &&
+            path.Replace('\\', '/').Contains("/coverlet.collector/6.0.4/", StringComparison.OrdinalIgnoreCase));
+        if (!instance.Targets.TryGetValue("SetXPlatDataCollectorPath", out var collectorTarget) ||
+            !PathComparer.Equals(Path.GetFullPath(collectorTarget.Location.File), Path.GetFullPath(collectorImport)))
+            throw new ProjectContextException("test.collectorUnsupported", "The effective XPlat collector hook is absent or overridden.");
         return new(node.Id, node.ProjectPath, node.Configuration, node.Platform, node.TargetFramework, "VSTest", sdkVersion, collectorVersion);
 
         string? PackageVersion(string name)
