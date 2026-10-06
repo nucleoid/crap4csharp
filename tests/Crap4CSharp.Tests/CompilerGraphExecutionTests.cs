@@ -371,6 +371,36 @@ public sealed class CompilerGraphExecutionTests
     }
 
     [Fact]
+    public async Task ActualCustomReferenceDestinationRefusesBeforeCompilerLaunch()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-actual-reference-redirect");
+        var project = fixture.Write("App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework>
+            <TargetRefPath>$(MSBuildProjectDirectory)/outside/App.dll</TargetRefPath></PropertyGroup></Project>
+            """);
+        fixture.Write("Code.cs", "public class Code {}");
+        var originals = Directory.GetFiles(fixture.Path, "*", SearchOption.AllDirectories).ToDictionary(p => p,
+            p => (Bytes: File.ReadAllBytes(p), Mtime: File.GetLastWriteTimeUtc(p)));
+        var request = new ProjectContextLoadRequest(project, "Release", "AnyCPU", [], false, false, TimeSpan.FromMinutes(2));
+        Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken)).ExitCode);
+        var loaded = await ProjectContextLoader.LoadGraphAsync(request, TestContext.Current.CancellationToken);
+        Assert.True(loaded.Success, loaded.FailureReason + ": " + string.Join(" | ", loaded.Diagnostics));
+        Assert.Equal(Path.Combine(fixture.Path, "outside", "App.dll"), Assert.Single(loaded.Contexts).EvaluatedReferenceAssemblyPath);
+        var launches = 0;
+        var error = await Assert.ThrowsAsync<ProjectContextException>(() => CompilerGraphExecution.RunAsync(loaded,
+            (node, _) => { launches++; return Task.FromResult(new CompilerObservation(node.ProjectPath, [])); }, TestContext.Current.CancellationToken));
+        Assert.Equal("compiler.graphOutputUnproven", error.Reason);
+        Assert.Equal(0, launches);
+        Assert.Empty(Directory.GetFiles(fixture.Path, "*.dll", SearchOption.AllDirectories));
+        Assert.Empty(Directory.GetFiles(fixture.Path, "*.pdb", SearchOption.AllDirectories));
+        foreach (var (path, original) in originals)
+        {
+            Assert.Equal(original.Bytes, File.ReadAllBytes(path));
+            Assert.Equal(original.Mtime, File.GetLastWriteTimeUtc(path));
+        }
+    }
+
+    [Fact]
     public void PhysicalProjectPathIsPrivateTransportOnly()
     {
         var context = Context(Path.GetFullPath("private-project.csproj"));
