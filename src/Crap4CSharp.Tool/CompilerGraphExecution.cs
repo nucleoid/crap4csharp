@@ -141,6 +141,15 @@ internal static class CompilerGraphExecution
                 throw Refuse("A graph context is missing, incomplete or mismatched.");
             var target = RequireOutputPath(binding.Context.EvaluatedTargetPath);
             var intermediate = RequireOutputPath(binding.Context.EvaluatedIntermediateDirectory);
+            var reference = RequireOutputPath(binding.Context.EvaluatedReferenceAssemblyPath);
+            // Supported SDK reference copies live strictly beneath this node's intermediate
+            // directory. Refuse redirects before ANY node executes, not after it has written.
+            if (!Contains(intermediate, reference) || pathComparer.Equals(intermediate, reference) ||
+                pathComparer.Equals(target, reference) || Directory.Exists(reference) ||
+                bindings.Any(b => pathComparer.Equals(b.ProjectPath, reference) ||
+                    b.Context.PhaseInputs.Any(input => pathComparer.Equals(input.Path, reference)) ||
+                    b.Context.CompilerDocuments.Any(document => pathComparer.Equals(document.ResolvedPath, reference))))
+                throw OutputRefuse("Reference destinations must be nonalias files strictly beneath their evaluated intermediate directory.");
             foreach (var directory in new[] { Path.GetDirectoryName(target)!, intermediate })
             {
                 if (outputDirectories.Any(previous => previous.Node != node.Id &&
