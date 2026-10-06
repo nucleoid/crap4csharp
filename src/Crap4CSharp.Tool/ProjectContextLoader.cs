@@ -252,7 +252,7 @@ public static class ProjectContextLoader
 
     private static string DotNetHost => Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet";
 
-    private static async Task<ProjectContextSdkResolution> ResolveSdkAsync(string root, TimeSpan timeout, CancellationToken cancellationToken)
+    internal static async Task<ProjectContextSdkResolution> ResolveSdkAsync(string root, TimeSpan timeout, CancellationToken cancellationToken)
     {
         var versionResult = await ProcessRunner.RunAsync(DotNetHost, ["--version"], root, timeout, cancellationToken);
         if (versionResult.ExitCode != 0) throw new ProjectContextException("context.sdkResolutionFailed", versionResult.StandardError);

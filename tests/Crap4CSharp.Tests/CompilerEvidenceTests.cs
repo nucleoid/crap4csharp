@@ -41,6 +41,21 @@ public sealed class CompilerEvidenceTests
             Assert.Contains(sources.Items, p => Path.GetFullPath(p, Path.GetDirectoryName(node.ProjectPath)!) == (node.ProjectPath == root ? added : Path.Combine(fixture.Path, "Dependency", "Code.cs")));
             Assert.Single(observed.Parameters, p => p.Name == "OutputAssembly");
             Assert.Single(observed.Parameters, p => p.Name == "References");
+            Assert.NotNull(observed.Assembly);
+            Assert.NotNull(observed.Pdb);
+            Assert.Equal(ProjectAnalysisContext.ContentHash(File.ReadAllBytes(observed.Assembly.Path)), observed.Assembly.Sha256);
+            Assert.Equal(ProjectAnalysisContext.ContentHash(File.ReadAllBytes(observed.Pdb.Path)), observed.Pdb.Sha256);
+            Assert.Contains(node.ProjectPath == dep ? "Debug" : "Release", observed.Assembly.Path, StringComparison.Ordinal);
+            var mismatch = await Assert.ThrowsAsync<ProjectContextException>(() => CompilerEvidence.ReadAsync(
+                Path.Combine(directory, "compiler.binlog"), node.ProjectPath == root ? dep : root, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken));
+            Assert.Equal("compiler.associationInvalid", mismatch.Reason);
+            var binlog = Path.Combine(directory, "compiler.binlog");
+            var fullBytes = File.ReadAllBytes(binlog);
+            File.WriteAllBytes(binlog, fullBytes[..80]);
+            var truncated = await Assert.ThrowsAsync<ProjectContextException>(() => CompilerEvidence.ReadAsync(binlog,
+                node.ProjectPath, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken));
+            Assert.Equal("compiler.binlogInvalid", truncated.Reason);
+            File.WriteAllBytes(binlog, fullBytes);
             Assert.Equal(pass, File.ReadAllLines(Path.Combine(Path.GetDirectoryName(node.ProjectPath)!, "count.txt")).Length);
         }
         foreach (var (path, saved) in original)
@@ -48,6 +63,22 @@ public sealed class CompilerEvidenceTests
             Assert.Equal(saved.Item1, File.ReadAllBytes(path));
             Assert.Equal(saved.Item2, File.GetLastWriteTimeUtc(path));
         }
+    }
+
+    [Fact]
+    public async Task OversizedBinlogRefusesBeforeWorkerAndPreCancellationDoesNotLaunch()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-compiler-limit");
+        var project = fixture.Write("App.csproj", "<Project />");
+        var log = Path.Combine(fixture.Path, "large.binlog");
+        using (var stream = File.Create(log)) stream.SetLength(CompilerEvidence.MaximumBinlogBytes + 1);
+        var error = await Assert.ThrowsAsync<ProjectContextException>(() => CompilerEvidence.ReadAsync(log, project,
+            TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+        Assert.Equal("compiler.binlogLimit", error.Reason);
+        using var cancelled = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => CompilerEvidence.ReadAsync(log, project,
+            TimeSpan.FromSeconds(30), cancelled.Token));
     }
 
     [Fact]

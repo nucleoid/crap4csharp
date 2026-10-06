@@ -7,6 +7,9 @@ using Crap4CSharp.Core;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 
+if (args.Length == 3 && args[0] == CompilerEvidence.Command)
+    return await CompilerEvidenceBootstrap.RunAsync(args[1], args[2], CancellationToken.None);
+
 if (args.Length == 3 && args[0] == ProjectContextLoader.LoaderCommand)
     return await MsBuildLoaderBootstrap.RunAsync(args[1], args[2], CancellationToken.None);
 
