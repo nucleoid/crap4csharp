@@ -77,6 +77,7 @@ public sealed class CompilerGraphExecutionTests
     [InlineData("shared-intermediate")]
     [InlineData("cross-role-overlap")]
     [InlineData("nested-output")]
+    [InlineData("root-output")]
     public async Task EvaluatedOutputRefusalPrecedesEveryBuild(string defect)
     {
         using var fixture = TestDirectory.Create("crap4csharp-output-preflight");
@@ -91,6 +92,7 @@ public sealed class CompilerGraphExecutionTests
             "shared-target-directory" => root with { EvaluatedTargetPath = Path.Combine(Path.GetDirectoryName(dependency.EvaluatedTargetPath!)!, "Different.dll") },
             "shared-intermediate" => root with { EvaluatedIntermediateDirectory = dependency.EvaluatedIntermediateDirectory },
             "cross-role-overlap" => root with { EvaluatedIntermediateDirectory = Path.GetDirectoryName(dependency.EvaluatedTargetPath!) },
+            "root-output" => root with { EvaluatedIntermediateDirectory = Path.GetPathRoot(fixture.Path) },
             "nested-output" => root with { EvaluatedIntermediateDirectory = Path.Combine(dependency.EvaluatedIntermediateDirectory!, "nested") },
             _ => throw new InvalidOperationException()
         };
