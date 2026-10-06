@@ -12,7 +12,7 @@ public sealed class ProcessTimeoutException(string fileName, TimeSpan timeout)
     public TimeSpan Timeout { get; } = timeout;
 }
 
-public static class ProcessRunner
+public static partial class ProcessRunner
 {
     // Compatibility text capture returns complete output or a typed refusal, never a tail.
     public const int MaximumCapturedCharactersPerStream = 4 * 1024 * 1024;
