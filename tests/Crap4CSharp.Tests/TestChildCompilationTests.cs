@@ -21,7 +21,7 @@ public sealed class TestChildCompilationTests
             <Target Name="CountActualCompileTarget" BeforeTargets="CoreCompile" Condition="'$(DesignTimeBuild)' != 'true'">
             <WriteLinesToFile File="$(MSBuildProjectDirectory)/compile-target-count.txt" Lines="compile-target" Overwrite="false" /></Target>
             <Target Name="RepeatInsideVSTest" BeforeTargets="VSTest" Condition="'$(DesignTimeBuild)' != 'true' and '$(CompileInsideTest)' == 'true'">
-            <PropertyGroup><OriginalSourceClock>$([System.IO.File]::GetLastWriteTimeUtc('$(MSBuildProjectDirectory)/Tests.cs').ToString('O'))</OriginalSourceClock></PropertyGroup>
+            <PropertyGroup><OriginalSourceClock>ORIGINALCLOCK</OriginalSourceClock></PropertyGroup>
             <Touch Files="$(MSBuildProjectDirectory)/Tests.cs" />
             <MSBuild Projects="$(MSBuildProjectFullPath)" Targets="Build" BuildInParallel="false"
                 Properties="BuildProjectReferences=false;UseSharedCompilation=false;VSTestNoBuild=true" />
@@ -30,6 +30,8 @@ public sealed class TestChildCompilationTests
             """.Replace("COMPILE", compileInsideTest ? "true" : "false", StringComparison.Ordinal));
         var source = fixture.Write("Tests.cs", "using Xunit; public class Once { [Fact] public void Pass() { Assert.True(true); } }");
         var originalSource = File.ReadAllBytes(source); var originalClock = File.GetLastWriteTimeUtc(source);
+        File.WriteAllText(project, File.ReadAllText(project).Replace("ORIGINALCLOCK",
+            originalClock.ToString("O", System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal));
         var token = TestContext.Current.CancellationToken;
         var request = new ProjectContextLoadRequest(project, "Debug", "AnyCPU", [], false, false, TimeSpan.FromMinutes(3));
         Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, token)).ExitCode);
@@ -46,7 +48,10 @@ public sealed class TestChildCompilationTests
         var before = File.ReadAllBytes(output);
         var destination = Path.Combine(fixture.Path, "test-run"); Directory.CreateDirectory(destination);
         var run = await TestExecutionAdapter.RunVerifiedAsync(plan, bound, destination, TimeSpan.FromMinutes(3), token);
-        Assert.Single(run); Assert.Equal(0, run[0].Process.ExitCode);
+        Assert.Single(run);
+        Assert.True(run[0].Process.ExitCode == 0,
+            System.Text.Encoding.UTF8.GetString(run[0].Process.StandardOutput.Tail) + "\n" +
+            System.Text.Encoding.UTF8.GetString(run[0].Process.StandardError.Tail));
         Assert.Equal(originalSource, File.ReadAllBytes(source)); Assert.Equal(originalClock, File.GetLastWriteTimeUtc(source));
         Assert.Equal(before, File.ReadAllBytes(output));
         // This target counter is not itself an actual Csc observation. The new private
