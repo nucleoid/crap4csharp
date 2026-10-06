@@ -13,7 +13,7 @@ internal static class WindowsOwnedProcess
     internal static async Task<ProcessResult> RunAsync(string fileName, IEnumerable<string> arguments,
         string workingDirectory, TimeSpan timeout, CancellationToken cancellationToken,
         IReadOnlyDictionary<string, string>? environment,
-        Func<Stream, string, CancellationToken, Task<string>>? bytePump = null)
+        Func<Stream, string, CancellationToken, Task<string>>? bytePump = null, string? standardInputPath = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         using var timeoutSource = new CancellationTokenSource(timeout);
@@ -28,15 +28,20 @@ internal static class WindowsOwnedProcess
         using var stdout = new OwnedPipe();
         using var stderr = new OwnedPipe();
         using var stdin = new OwnedPipe();
+        using var inputFile = standardInputPath is null ? null
+            : File.OpenHandle(standardInputPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        SafeFileHandle consumerInput = inputFile ?? stdin.Read;
+        if (inputFile is not null)
+            Check(SetHandleInformation(inputFile, 1, 1), "Could not mark owned input snapshot inheritable.");
         // stdout/stderr child writes and stdin child reads are the ONLY inherited handles.
         Check(SetHandleInformation(stdout.Read, 1, 0), "Could not protect stdout reader.");
         Check(SetHandleInformation(stderr.Read, 1, 0), "Could not protect stderr reader.");
         Check(SetHandleInformation(stdin.Write, 1, 0), "Could not protect stdin writer.");
-        using var attributes = new HandleList([stdin.Read, stdout.Write, stderr.Write]);
+        using var attributes = new HandleList([consumerInput, stdout.Write, stderr.Write]);
         var startup = new StartupInformationEx();
         startup.Startup.cb = Marshal.SizeOf<StartupInformationEx>();
         startup.Startup.dwFlags = 0x100; // STARTF_USESTDHANDLES
-        startup.Startup.hStdInput = stdin.Read.DangerousGetHandle();
+        startup.Startup.hStdInput = consumerInput.DangerousGetHandle();
         startup.Startup.hStdOutput = stdout.Write.DangerousGetHandle();
         startup.Startup.hStdError = stderr.Write.DangerousGetHandle();
         startup.AttributeList = attributes.Pointer;
@@ -60,7 +65,7 @@ internal static class WindowsOwnedProcess
             stdout.Write.Dispose();
             stderr.Write.Dispose();
             stdin.Read.Dispose();
-            stdin.Write.Dispose(); // No consumer stdin for the compatibility API: explicit EOF.
+            stdin.Write.Dispose(); // Compatibility EOF; protocol input uses a bounded owned read-only file.
             output = ReadAsync(stdout.Read, "stdout", bytePump, linked.Token);
             error = ReadAsync(stderr.Read, "stderr", bytePump, linked.Token);
             linked.Token.ThrowIfCancellationRequested();

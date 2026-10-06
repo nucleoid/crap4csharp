@@ -37,6 +37,41 @@ public sealed class ProcessProtocolTests
         Assert.Equal(Enumerable.Repeat((byte)'D', outputCount), result.StandardError);
     }
 
+    [Fact]
+    public async Task OversizedInputRefusesBeforeAttemptingConsumerLaunch()
+    {
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => ProcessRunner.RunProtocolAsync(
+            "nonexistent-consumer-never-launch", [], AppContext.BaseDirectory, TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken, standardInput: new byte[16777217]));
+    }
+
+    [Fact]
+    public async Task InputSnapshotSetupFaultIsObservedBeforeConsumerLaunchAndOwnedFilesAreRemoved()
+    {
+        string ownedPath;
+        using (var snapshot = new ProcessInputSnapshot())
+        {
+            ownedPath = snapshot.Path;
+            Directory.CreateDirectory(ownedPath); // Positive filesystem setup fault, not a write-task orphan.
+            await Assert.ThrowsAnyAsync<IOException>(() => snapshot.WriteAsync(new byte[1], TestContext.Current.CancellationToken));
+        }
+        Assert.False(Directory.Exists(Path.GetDirectoryName(ownedPath)));
+    }
+
+    [Fact]
+    public async Task ProtocolEnvironmentAndNonzeroExitArePreservedWithInput()
+    {
+        var result = await ProcessRunner.RunProtocolAsync(Host, [Helper, "echo-arguments", "x y", ""],
+            AppContext.BaseDirectory, TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken,
+            standardInput: new byte[] { 0, 128, 255 },
+            environment: new Dictionary<string, string> { ["CRAP4CSHARP_PROCESS_CONTROL"] = "protocol-value" });
+        Assert.Equal(23, result.ExitCode);
+        using var document = System.Text.Json.JsonDocument.Parse(result.StandardOutput);
+        Assert.Equal("protocol-value", document.RootElement.GetProperty("environment").GetString());
+        Assert.Equal("x y", document.RootElement.GetProperty("arguments")[0].GetString());
+        Assert.Equal("", document.RootElement.GetProperty("arguments")[1].GetString());
+    }
+
     [Theory]
     [InlineData(4096, 4096)]
     [InlineData(4097, 4096)]
@@ -89,7 +124,7 @@ public sealed class ProcessProtocolTests
         try
         {
             operation = ProcessRunner.RunProtocolAsync(Host, [Helper, "flood-hold", "1048577", ready], directory,
-                cancelAfterReady ? TimeSpan.FromSeconds(20) : TimeSpan.FromSeconds(3), cancellation.Token, 4096);
+                cancelAfterReady ? TimeSpan.FromSeconds(20) : TimeSpan.FromSeconds(3), cancellation.Token, 4096, new byte[1048594]);
             using var readiness = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
             readiness.CancelAfter(TimeSpan.FromSeconds(10));
             while (!File.Exists(ready))

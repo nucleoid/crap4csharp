@@ -40,17 +40,20 @@ public static partial class ProcessRunner
         TimeSpan timeout,
         CancellationToken cancellationToken,
         IReadOnlyDictionary<string, string>? environment,
-        Func<Stream, string, CancellationToken, Task<string>>? bytePump = null)
+        Func<Stream, string, CancellationToken, Task<string>>? bytePump = null,
+        string? standardInputPath = null)
     {
         if (timeout <= TimeSpan.Zero || timeout == Timeout.InfiniteTimeSpan)
             throw new ArgumentOutOfRangeException(nameof(timeout), "Process timeout must be positive and finite.");
 
         cancellationToken.ThrowIfCancellationRequested();
         if (OperatingSystem.IsWindows())
-            return await WindowsOwnedProcess.RunAsync(fileName, arguments, workingDirectory, timeout, cancellationToken, environment, bytePump);
+            return await WindowsOwnedProcess.RunAsync(fileName, arguments, workingDirectory, timeout, cancellationToken, environment, bytePump, standardInputPath);
         // On Linux a retained session leader owns the group even when the consumer exits.
         // The start handshake prevents the consumer from spawning before ownership is verified.
         bool ownedSession = OperatingSystem.IsLinux();
+        if (!ownedSession && standardInputPath is not null)
+            throw new PlatformNotSupportedException("Consumer protocol input is supported on Linux and Windows only.");
         string consumerExecutable = ownedSession ? ResolveLinuxExecutable(fileName, workingDirectory, environment) : fileName;
         using var sessionStatus = ownedSession ? new SessionStatus() : null;
         var startInfo = new ProcessStartInfo(ownedSession ? "/usr/bin/setsid" : fileName)
@@ -68,9 +71,10 @@ public static partial class ProcessRunner
             startInfo.ArgumentList.Add("--");
             startInfo.ArgumentList.Add("/bin/sh");
             startInfo.ArgumentList.Add("-c");
-            startInfo.ArgumentList.Add("status=$1; shift; read -r start || exit 125; \"$@\" & child=$!; exec >/dev/null 2>&1; wait \"$child\"; result=$?; printf '%s\\n' \"$result\" > \"$status\"; : > \"$status.done\"; read -r release; exit \"$result\"");
+            startInfo.ArgumentList.Add("status=$1; input=$2; shift 2; read -r start || exit 125; \"$@\" < \"$input\" & child=$!; exec >/dev/null 2>&1; wait \"$child\"; result=$?; printf '%s\\n' \"$result\" > \"$status\"; : > \"$status.done\"; read -r release; exit \"$result\"");
             startInfo.ArgumentList.Add("crap4csharp-owned-session");
             startInfo.ArgumentList.Add(sessionStatus!.Path);
+            startInfo.ArgumentList.Add(standardInputPath ?? "/dev/null");
             startInfo.ArgumentList.Add(consumerExecutable);
         }
         foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
