@@ -517,10 +517,11 @@ public sealed class PolicyCheckIntegrationTests
     }
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    public async Task CommittedTrustedExemptionsSurviveEditingAnotherSourceInTheSameProject(bool duplicateAnonymous, bool nestedFamily)
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, true)]
+    public async Task CommittedTrustedExemptionsSurviveEditingAnotherSourceInTheSameProject(bool duplicateAnonymous, bool nestedFamily, bool realProjection)
     {
         using var fixture = TestDirectory.Create("crap4csharp-committed-exemption-context");
         const string projectLogical = "App/App.csproj";
@@ -568,7 +569,7 @@ public sealed class PolicyCheckIntegrationTests
                 TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
             Assert.True(tested.ExitCode == 0, tested.StandardOutput + tested.StandardError);
             var collected = Assert.Single(Directory.EnumerateFiles(results, "coverage.opencover.xml", SearchOption.AllDirectories));
-            if (!duplicateAnonymous) return collected;
+            if (!duplicateAnonymous || realProjection) return collected;
             // Adapter control, NOT a claim that Coverlet emits exclusive parent/lambda coordinates.
             // The real invocation above exercises the fixture. Model a supported exact-point report
             // independently from its lossy collector projection, binding every point to the actual PDB.
@@ -665,6 +666,42 @@ public sealed class PolicyCheckIntegrationTests
         var error = new StringWriter();
         var exit = await global::App.RunAsync(["check", "--reuse-artifacts", locator, "--policy", "policy.json",
             "--base", approvedBase, "--format", "json"], fixture.Path, output, error, TestContext.Current.CancellationToken);
+        if (realProjection)
+        {
+            Assert.True(exit == 1, error + Environment.NewLine + output);
+            using var check = JsonDocument.Parse(output.ToString());
+            Assert.Equal(CoverageReasonCodes.AmbiguousCallableOwnership,
+                check.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("reason").GetString());
+            var candidateOutput = new StringWriter();
+            var candidateError = new StringWriter();
+            var candidateExit = await global::App.RunAsync(["baseline", "create", "--policy", "policy.json",
+                "--reuse-artifacts", locator, "--output", "unresolved-candidate.json", "--format", "json"],
+                fixture.Path, candidateOutput, candidateError, TestContext.Current.CancellationToken);
+            Assert.True(candidateExit == 1, candidateError + Environment.NewLine + candidateOutput);
+            Assert.False(File.Exists(Path.Combine(fixture.Path, "unresolved-candidate.json")));
+            using var failure = JsonDocument.Parse(candidateOutput.ToString());
+            Assert.Contains(failure.RootElement.GetProperty("skippedAmbiguousEntries").EnumerateArray(),
+                item => item.GetProperty("kind").GetString() == "method" &&
+                    item.GetProperty("coverageReason").GetString() == CoverageReasonCodes.AmbiguousCallableOwnership);
+
+            // Known CC debt remains visible even when the same provider cannot resolve ownership.
+            fixture.Write("policy.json", Policy(["exemptions.json"]).Replace("\"threshold\":100", "\"threshold\":0", StringComparison.Ordinal));
+            var (knownLocator, _, _, _, _) = await CreateBundle(fixture.Path, projectLogical, "policy.json", assemblyPath,
+                Path.Combine(fixture.Path, "known-ambiguity-bundle"), coveragePath: Directory.EnumerateFiles(
+                    Path.Combine(fixture.Path, "current-coverage"), "coverage.opencover.xml", SearchOption.AllDirectories).Single());
+            candidateOutput = new StringWriter();
+            candidateExit = await global::App.RunAsync(["baseline", "create", "--policy", "policy.json",
+                "--reuse-artifacts", knownLocator, "--output", "known-candidate.json", "--format", "json"],
+                fixture.Path, candidateOutput, candidateError, TestContext.Current.CancellationToken);
+            Assert.True(candidateExit == 2, candidateError + Environment.NewLine + candidateOutput);
+            using var known = JsonDocument.Parse(candidateOutput.ToString());
+            Assert.Contains(known.RootElement.GetProperty("omittedKnownViolations").EnumerateArray(),
+                item => item.GetProperty("kind").GetString() == "method");
+            var candidate = BaselineDocument.Parse(await File.ReadAllBytesAsync(Path.Combine(fixture.Path,
+                "known-candidate.json"), TestContext.Current.CancellationToken));
+            Assert.Empty(candidate.Entries);
+            return;
+        }
         Assert.True(exit == 0, error + Environment.NewLine + output + Environment.NewLine +
             Encoding.UTF8.GetString(currentBytes["evidence/coverage.xml"].AsSpan()));
         using var result = JsonDocument.Parse(output.ToString());
