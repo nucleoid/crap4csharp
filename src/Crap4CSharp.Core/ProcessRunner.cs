@@ -43,6 +43,8 @@ public static class ProcessRunner
             throw new ArgumentOutOfRangeException(nameof(timeout), "Process timeout must be positive and finite.");
 
         cancellationToken.ThrowIfCancellationRequested();
+        if (OperatingSystem.IsWindows())
+            return await WindowsOwnedProcess.RunAsync(fileName, arguments, workingDirectory, timeout, cancellationToken, environment);
         // On Linux a retained session leader owns the group even when the consumer exits.
         // The start handshake prevents the consumer from spawning before ownership is verified.
         bool ownedSession = OperatingSystem.IsLinux();
