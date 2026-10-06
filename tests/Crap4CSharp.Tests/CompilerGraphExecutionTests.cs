@@ -423,6 +423,56 @@ public sealed class CompilerGraphExecutionTests
         Assert.Equal(2, result.Observations.Count);
     }
 
+    [Fact]
+    public async Task ActualBuildAddingAuthoredSourceIsRejectedByFinalRediscovery()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-final-authored-addition");
+        var project = fixture.Write("App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+            <Target Name="AddAuthoredAfterCompile" AfterTargets="CoreCompile" Condition="'$(DesignTimeBuild)' != 'true'">
+            <WriteLinesToFile File="$(MSBuildProjectDirectory)/Added.cs" Lines="public class Added {}" Overwrite="true" />
+            </Target></Project>
+            """);
+        fixture.Write("Code.cs", "public class Code {}");
+        var request = new ProjectContextLoadRequest(project, "Release", "AnyCPU", [], false, false, TimeSpan.FromMinutes(2));
+        Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken)).ExitCode);
+        var loaded = await ProjectContextLoader.LoadGraphAsync(request, TestContext.Current.CancellationToken);
+        Assert.True(loaded.Success, loaded.FailureReason);
+        Assert.False(File.Exists(Path.Combine(fixture.Path, "Added.cs")));
+        CompilerObservation? actual = null;
+        var launches = 0;
+        var error = await Assert.ThrowsAsync<ProjectContextException>(() => CompilerGraphExecution.RunPhasedAsync(request, loaded,
+            async (node, token) =>
+            {
+                launches++;
+                var directory = Path.Combine(fixture.Path, "private");
+                Directory.CreateDirectory(directory);
+                actual = await CompilerEvidence.BuildAsync(node, directory, TimeSpan.FromMinutes(2), token);
+                return actual;
+            }, TestContext.Current.CancellationToken));
+        Assert.Equal("compiler.inputsMutated", error.Reason);
+        Assert.Equal(1, launches);
+        Assert.True(File.Exists(Path.Combine(fixture.Path, "Added.cs")));
+        Assert.NotNull(actual!.Assembly);
+        Assert.DoesNotContain(Assert.Single(actual.Parameters, p => p.Name == "Sources").Items,
+            p => Path.GetFileName(p) == "Added.cs"); // Final glob membership differs from the actual build.
+    }
+
+    [Fact]
+    public async Task FinalRediscoveryNeverMasksOriginalBuildFailure()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-final-failure-control");
+        var loaded = Valid(fixture.Path);
+        var request = new ProjectContextLoadRequest(loaded.BuildGraph[1].ProjectPath, "Release", "AnyCPU", [], false, false, TimeSpan.FromMinutes(2));
+        var expected = new IOException("original actual build failure");
+        var reloads = 0;
+        var actual = await Assert.ThrowsAsync<IOException>(() => CompilerGraphExecution.RunPhasedAsync(request, loaded,
+            (_, _) => throw expected, TestContext.Current.CancellationToken,
+            (_, _) => { reloads++; throw new InvalidOperationException("must not reload a failed run"); }));
+        Assert.Same(expected, actual);
+        Assert.Equal(0, reloads);
+    }
+
     private static ProjectContextLoadResult Valid(string root)
     {
         var contexts = new[] { Context(Path.Combine(root, "Dependency.csproj")), Context(Path.Combine(root, "Root.csproj")) };
