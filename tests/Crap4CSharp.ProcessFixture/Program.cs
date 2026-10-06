@@ -20,6 +20,7 @@ switch (args[0])
     case "mark":
         await File.WriteAllTextAsync(Path.GetFullPath(args[1]), "consumer-launched");
         return 0;
+    case "flood-hold":
     case "flood":
     {
         int bytes = int.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture);
@@ -27,6 +28,11 @@ switch (args[0])
         byte[] stderrBlock = Encoding.ASCII.GetBytes(new string('E', 4096));
         await Task.WhenAll(WriteBytes(Console.OpenStandardOutput(), stdoutBlock, bytes),
             WriteBytes(Console.OpenStandardError(), stderrBlock, bytes));
+        if (args[0] == "flood-hold")
+        {
+            await File.WriteAllTextAsync(Path.GetFullPath(args[2]), "flood-complete");
+            await Task.Delay(TimeSpan.FromSeconds(60)); // Finite fixture safety guard, not synchronization.
+        }
         return 0;
     }
     case "binary-protocol":

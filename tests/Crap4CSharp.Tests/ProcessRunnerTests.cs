@@ -79,6 +79,45 @@ public sealed class ProcessRunnerTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OverflowDuringTerminatedDrainCannotReplaceTimeoutOrCancellation(bool cancelAfterReady)
+    {
+        string ready = Path.Combine(Path.GetTempPath(), "crap4csharp-flood-" + Guid.NewGuid().ToString("N"));
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        Task<ProcessResult>? operation = null;
+        try
+        {
+            operation = ProcessRunner.RunAsync(Host, [Helper, "flood-hold", "4194305", ready],
+                Path.GetTempPath(), cancelAfterReady ? TimeSpan.FromSeconds(20) : TimeSpan.FromSeconds(3), cancellation.Token);
+            using var readiness = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+            readiness.CancelAfter(TimeSpan.FromSeconds(10));
+            while (!File.Exists(ready))
+            {
+                Assert.False(operation.IsCompleted, "Consumer completed before positively emitting both oversized streams.");
+                await Task.Delay(10, readiness.Token);
+            }
+            if (cancelAfterReady) cancellation.Cancel();
+            if (cancelAfterReady)
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation.WaitAsync(TimeSpan.FromSeconds(12), TestContext.Current.CancellationToken));
+            else
+                await Assert.ThrowsAsync<ProcessTimeoutException>(() => operation.WaitAsync(TimeSpan.FromSeconds(12), TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            cancellation.Cancel();
+            if (operation is not null)
+            {
+                #pragma warning disable xUnit1051 // Independently bounded cleanup observes original task after test cancellation.
+                try { await operation.WaitAsync(TimeSpan.FromSeconds(10)); }
+                catch (Exception) when (operation.IsCompleted) { _ = operation.Exception; }
+                #pragma warning restore xUnit1051
+            }
+            if (File.Exists(ready)) File.Delete(ready);
+        }
+    }
+
     [Fact]
     public async Task OwnershipPreservesArgumentBoundariesEnvironmentAndConsumerExitCode()
     {
