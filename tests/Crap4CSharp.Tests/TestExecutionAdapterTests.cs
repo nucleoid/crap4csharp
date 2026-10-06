@@ -292,6 +292,38 @@ public sealed class TestExecutionAdapterTests
                     finally { File.Delete(coveragePath); File.WriteAllBytes(coveragePath, coverageOriginal); File.SetLastWriteTimeUtc(coveragePath, coverageTime); }
                 }
                 ReadCoverage();
+                // Genuine once-built graph and real collector report, not synthetic compiler evidence.
+                var graphCoverageBinder = typeof(ProjectContextLoader).Assembly.GetType("Crap4CSharp.Core.CoverageGraphBinding")?
+                    .GetMethod("ValidateInvocation", BindingFlags.Static | BindingFlags.NonPublic);
+                Assert.NotNull(graphCoverageBinder);
+                object BindGraphCoverage() => graphCoverageBinder.Invoke(null,
+                    [typedObservation, bound, TestContext.Current.CancellationToken])!;
+                var graphCoverage = BindGraphCoverage();
+                Assert.Contains("Dep", (IReadOnlyList<string>)graphCoverage.GetType().GetProperty("ModuleNames")!.GetValue(graphCoverage)!);
+                foreach (var defect in new[] { "foreign-module", "duplicate-module", "empty", "metadata-token", "point", "file", "missing-file", "outside-closure" })
+                {
+                    var changed = XDocument.Load(coveragePath);
+                    var module = changed.Descendants("Module").First(m => m.Element("ModuleName")!.Value == "Dep");
+                    switch (defect)
+                    {
+                        case "foreign-module": module.Element("ModuleName")!.Value = "Foreign"; break;
+                        case "duplicate-module": module.AddAfterSelf(new XElement(module)); break;
+                        case "empty": changed.Root!.Element("Modules")!.RemoveNodes(); break;
+                        case "metadata-token": module.Descendants("Method").First(m => m.Descendants("SequencePoint").Any()).Element("MetadataToken")!.Value = "100663295"; break;
+                        case "point": module.Descendants("SequencePoint").First().SetAttributeValue("sl", "999999"); break;
+                        case "file": module.Descendants("File").First().SetAttributeValue("fullPath", Path.Combine(fixture.Path, "Foreign.cs")); break;
+                        case "missing-file": module.Descendants("File").First().Remove(); break;
+                        case "outside-closure": module.Element("ModuleName")!.Value = "Root"; break;
+                    }
+                    changed.Save(coveragePath);
+                    try
+                    {
+                        var error = Assert.Throws<TargetInvocationException>(() => BindGraphCoverage());
+                        Assert.Equal("coverage.graphUnproven", Assert.IsType<ProjectContextException>(error.InnerException).Reason);
+                    }
+                    finally { File.WriteAllBytes(coveragePath, coverageOriginal); File.SetLastWriteTimeUtc(coveragePath, coverageTime); }
+                }
+                BindGraphCoverage();
                 // Retain actual attachment/base/membership diagnostics for the next coverage
                 // binder. These observations alone do NOT validate coverage provenance.
                 TestContext.Current.TestOutputHelper!.WriteLine("ACTUAL_TRX_ATTACHMENT_SHAPE " +
