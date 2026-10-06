@@ -14,7 +14,7 @@ public sealed class FreshProjectPreparationTests
         var request = new ProjectContextLoadRequest("App.csproj", "Release", "x64", ["net10.0"], true, false, TimeSpan.FromMinutes(1));
         var result = await FreshProjectPreparation.LoadAsync(request, noRestore, TestContext.Current.CancellationToken,
             (actual, _) => { Assert.Equal(request, actual); calls.Add("discover"); return Task.FromResult(new ProjectContextLoadResult(true, [], [])); },
-            (target, timeout, _) => { Assert.Equal(request.Target, target); Assert.Equal(request.Timeout, timeout); calls.Add("restore"); return Task.FromResult(new ProcessResult(0, "", "")); },
+            (actual, _) => { Assert.Equal(request, actual); calls.Add("restore"); return Task.FromResult(new ProcessResult(0, "", "")); },
             (actual, _) => { Assert.Equal(request, actual); calls.Add("workspace"); return Task.FromResult(new ProjectContextLoadResult(true, [], [])); });
         Assert.True(result.Success);
         Assert.Equal(noRestore ? ["discover", "workspace"] : new[] { "discover", "restore", "workspace" }, calls);
@@ -29,7 +29,7 @@ public sealed class FreshProjectPreparationTests
         var request = new ProjectContextLoadRequest("App.csproj", "Debug", null, [], true, false, TimeSpan.FromMinutes(1));
         var result = await FreshProjectPreparation.LoadAsync(request, false, TestContext.Current.CancellationToken,
             (_, _) => { calls.Add("discover"); return Task.FromResult(new ProjectContextLoadResult(!discoveryFails, [], [], discoveryFails ? "context.targetNotFound" : null)); },
-            (_, _, _) => { calls.Add("restore"); return Task.FromResult(new ProcessResult(23, "", "fixture restore failure")); },
+            (_, _) => { calls.Add("restore"); return Task.FromResult(new ProcessResult(23, "", "fixture restore failure")); },
             (_, _) => { calls.Add("workspace"); return Task.FromResult(new ProjectContextLoadResult(true, [], [])); });
         Assert.False(result.Success);
         Assert.Equal(discoveryFails ? "context.targetNotFound" : "context.restoreFailed", result.FailureReason);
@@ -65,14 +65,12 @@ public sealed class FreshProjectPreparationTests
     public async Task PreparationRestoresSelectedConfigurationAndPlatform()
     {
         using var fixture = TestDirectory.Create("crap4csharp-selected-restore");
-        var project = fixture.Write("Cold.csproj", """
-            <Project Sdk="Microsoft.NET.Sdk">
-              <PropertyGroup>
-                <TargetFramework>net10.0</TargetFramework>
-                <BaseIntermediateOutputPath Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">selected-obj/</BaseIntermediateOutputPath>
-              </PropertyGroup>
-            </Project>
+        fixture.Write("Directory.Build.props", """
+            <Project><PropertyGroup>
+              <BaseIntermediateOutputPath Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">selected-obj/</BaseIntermediateOutputPath>
+            </PropertyGroup></Project>
             """);
+        var project = fixture.Write("Cold.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>");
         fixture.Write("Code.cs", "public class Code { public int M() => 1; }");
         var result = await FreshProjectPreparation.LoadAsync(new(project, "Release", "x64", [], true, false,
             TimeSpan.FromMinutes(2)), false, TestContext.Current.CancellationToken);

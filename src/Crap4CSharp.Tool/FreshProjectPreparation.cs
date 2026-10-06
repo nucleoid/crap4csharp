@@ -12,7 +12,7 @@ internal static class FreshProjectPreparation
     internal static async Task<ProjectContextLoadResult> LoadAsync(ProjectContextLoadRequest request, bool noRestore,
         CancellationToken cancellationToken,
         Func<ProjectContextLoadRequest, CancellationToken, Task<ProjectContextLoadResult>> discover,
-        Func<string, TimeSpan, CancellationToken, Task<ProcessResult>> restore,
+        Func<ProjectContextLoadRequest, CancellationToken, Task<ProcessResult>> restore,
         Func<ProjectContextLoadRequest, CancellationToken, Task<ProjectContextLoadResult>> load)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -24,7 +24,7 @@ internal static class FreshProjectPreparation
             if (!discovery.Success) return discovery;
             if (!noRestore)
             {
-                var restored = await restore(request.Target, request.Timeout, deadline.Token);
+                var restored = await restore(request, deadline.Token);
                 if (restored.ExitCode != 0)
                     return new(false, [], [restored.StandardError, restored.StandardOutput], "context.restoreFailed");
             }

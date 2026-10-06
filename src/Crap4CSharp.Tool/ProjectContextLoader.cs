@@ -298,6 +298,9 @@ public static class ProjectBuildPreparation
     public static Task<ProcessResult> RestoreAsync(string target, TimeSpan timeout, CancellationToken cancellationToken) =>
         RunSerialized(target, ["restore", Path.GetFullPath(target), "--disable-parallel", "-nr:false"], timeout, cancellationToken);
 
+    public static Task<ProcessResult> RestoreAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken) =>
+        RestoreAsync(request.Target, request.Timeout, cancellationToken);
+
     public static Task<ProcessResult> BuildAsync(string target, string configuration, string? framework, string? platform,
         TimeSpan timeout, CancellationToken cancellationToken)
     {
