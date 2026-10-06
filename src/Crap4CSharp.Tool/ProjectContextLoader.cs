@@ -13,6 +13,7 @@ public sealed record ProjectContextLoadRequest(
     bool IncludeGenerated,
     TimeSpan Timeout)
 {
+    public bool MetadataOnly { get; init; }
     public string? SdkPath { get; init; }
     public string? SdkVersion { get; init; }
     public string? MsBuildVersion { get; init; }
@@ -25,7 +26,13 @@ public sealed record ProjectContextLoadResult(
     IReadOnlyList<ProjectAnalysisContext> Contexts,
     IReadOnlyList<string> Diagnostics,
     string? FailureReason = null,
-    IReadOnlyList<ProjectContextProjectExclusion>? ExcludedProjects = null);
+    IReadOnlyList<ProjectContextProjectExclusion>? ExcludedProjects = null)
+{
+    public IReadOnlyList<ProjectDiscoveryMetadata> Metadata { get; init; } = [];
+}
+
+public sealed record ProjectDiscoveryMetadata(string ProjectPath, string Configuration, string Platform,
+    IReadOnlyList<string> Frameworks, string AssetsFile, bool IsTestProject);
 
 public sealed record ProjectContextProjectExclusion(string ProjectPath, string Reason);
 
@@ -95,6 +102,10 @@ public static class ProjectContextLoader
         return new JsonSerializerOptions(JsonSerializerDefaults.Web)
         { TypeInfoResolver = resolver, Converters = { new JsonStringEnumConverter() } };
     }
+
+    // Metadata discovery must precede any restore or Workspace loading.
+    public static Task<ProjectContextLoadResult> DiscoverAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken) =>
+        LoadAsync(request with { MetadataOnly = true }, cancellationToken);
 
     public static Task<ProjectContextLoadResult> LoadAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken) =>
         LoadAsync(request, cancellationToken, ResolveSdkAsync);
