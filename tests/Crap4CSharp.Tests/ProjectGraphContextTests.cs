@@ -31,6 +31,14 @@ public sealed class ProjectGraphContextTests
         var result = await ProjectContextLoader.LoadGraphAsync(request, TestContext.Current.CancellationToken);
         Assert.True(result.Success, result.FailureReason + ": " + string.Join(" | ", result.Diagnostics));
         Assert.Equal(5, result.GraphContexts.Count);
+        var launches = 0;
+        var preflight = await Assert.ThrowsAsync<ProjectContextException>(() => CompilerGraphExecution.RunAsync(result,
+            (node, _) => { launches++; return Task.FromResult(new CompilerObservation(node.ProjectPath, [])); },
+            TestContext.Current.CancellationToken));
+        Assert.Equal("compiler.graphOutputUnproven", preflight.Reason);
+        Assert.Equal(0, launches);
+        Assert.Empty(Directory.GetFiles(fixture.Path, "*.dll", SearchOption.AllDirectories));
+        Assert.Empty(Directory.GetFiles(fixture.Path, "*.pdb", SearchOption.AllDirectories));
         var bindings = result.GraphContexts.Where(b => b.ProjectPath == dependency).ToArray();
         Assert.Equal(2, bindings.Length);
         Assert.NotEqual(bindings[0].GraphId, bindings[1].GraphId);

@@ -94,6 +94,55 @@ public sealed class CompilerGraphExecutionTests
         Assert.Equal(new[] { "dependency" }, launches);
     }
 
+    [Fact]
+    public async Task ActualMappedGraphBuildsDependencyAndRootOnceWithoutImplicitReferenceRebuild()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-actual-graph-execution");
+        fixture.Write("Dependency/Dependency.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+            <Target Name="CountBuild" BeforeTargets="CoreCompile"><WriteLinesToFile File="$(MSBuildProjectDirectory)/count.txt" Lines="build" Overwrite="false" /></Target></Project>
+            """);
+        fixture.Write("Dependency/Code.cs", "public class Dependency {}");
+        var added = fixture.Write("Shared/Added.cs", "public class Added {}");
+        var project = fixture.Write("Root/Root.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+            <ItemGroup><ProjectReference Include="../Dependency/Dependency.csproj" AdditionalProperties="Configuration=Debug" /></ItemGroup>
+            <Target Name="AddSource" BeforeTargets="CoreCompile"><ItemGroup><Compile Include="../Shared/Added.cs" Link="obj/Added.cs" /></ItemGroup>
+            <WriteLinesToFile File="$(MSBuildProjectDirectory)/count.txt" Lines="build" Overwrite="false" /></Target></Project>
+            """);
+        fixture.Write("Root/Code.cs", "public class Root {}");
+        var authored = Directory.GetFiles(fixture.Path, "*", SearchOption.AllDirectories).ToDictionary(p => p,
+            p => (Bytes: File.ReadAllBytes(p), Mtime: File.GetLastWriteTimeUtc(p)));
+        var request = new ProjectContextLoadRequest(project, "Release", "AnyCPU", [], false, false, TimeSpan.FromMinutes(2));
+        Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken)).ExitCode);
+        var loaded = await ProjectContextLoader.LoadGraphAsync(request, TestContext.Current.CancellationToken);
+        Assert.True(loaded.Success, loaded.FailureReason + ": " + string.Join(" | ", loaded.Diagnostics));
+        var results = await CompilerGraphExecution.RunAsync(loaded, (node, token) =>
+        {
+            var directory = Path.Combine(fixture.Path, "private", node.Id);
+            Directory.CreateDirectory(directory);
+            return CompilerEvidence.BuildAsync(node, directory, TimeSpan.FromMinutes(2), token);
+        }, TestContext.Current.CancellationToken);
+        Assert.Equal(2, results.Count);
+        Assert.Contains("Dependency", results[0].ProjectPath, StringComparison.Ordinal);
+        Assert.Equal(project, results[1].ProjectPath);
+        Assert.Contains("Debug", results[0].Assembly!.Path, StringComparison.Ordinal);
+        Assert.Contains("Release", results[1].Assembly!.Path, StringComparison.Ordinal);
+        Assert.Contains(Assert.Single(results[1].Parameters, p => p.Name == "Sources").Items,
+            s => Path.GetFullPath(s, Path.GetDirectoryName(project)!) == added);
+        foreach (var observed in results)
+        {
+            Assert.Single(File.ReadAllLines(Path.Combine(Path.GetDirectoryName(observed.ProjectPath)!, "count.txt")));
+            Assert.Equal(observed.Assembly!.Sha256, ProjectAnalysisContext.ContentHash(File.ReadAllBytes(observed.Assembly.Path)));
+            Assert.Equal(observed.Pdb!.Sha256, ProjectAnalysisContext.ContentHash(File.ReadAllBytes(observed.Pdb.Path)));
+        }
+        foreach (var (path, original) in authored)
+        {
+            Assert.Equal(original.Bytes, File.ReadAllBytes(path));
+            Assert.Equal(original.Mtime, File.GetLastWriteTimeUtc(path));
+        }
+    }
+
     private static ProjectContextLoadResult Valid(string root)
     {
         var contexts = new[] { Context(Path.Combine(root, "Dependency.csproj")), Context(Path.Combine(root, "Root.csproj")) };
