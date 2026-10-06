@@ -16,6 +16,10 @@ public sealed class TestRunnerDiscoveryTests
     [InlineData("custom-console", false, "test.runnerUnsupported")]
     [InlineData("custom-task", false, "test.runnerUnsupported")]
     [InlineData("custom-collector", false, "test.collectorUnsupported")]
+    [InlineData("owned-collector", true, null)]
+    [InlineData("missing-collector", false, "test.collectorUnsupported")]
+    [InlineData("missing-core", false, "test.collectorUnsupported")]
+    [InlineData("missing-dependency", false, "test.collectorUnsupported")]
     public async Task RestoredRunnerDiscoveryNeverBuildsOrTests(string mode, bool success, string? reason)
     {
         using var fixture = TestDirectory.Create("crap4csharp-runner-discovery");
@@ -51,6 +55,31 @@ public sealed class TestRunnerDiscoveryTests
         fixture.Write("Test.cs", "public class Tests { [Xunit.Fact] public void Pass() { } }");
         var request = new ProjectContextLoadRequest(project, "Release", "AnyCPU", [], false, false, TimeSpan.FromMinutes(2));
         Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken)).ExitCode);
+        if (mode is "owned-collector" or "missing-collector" or "missing-core" or "missing-dependency")
+        {
+            // Copy only into this fixture; never alter the shared installed package.
+            using var assets = JsonDocument.Parse(File.ReadAllText(Path.Combine(fixture.Path, "obj", "project.assets.json")));
+            var suffix = "coverlet.collector/6.0.4/build/netstandard2.0";
+            var installed = assets.RootElement.GetProperty("packageFolders").EnumerateObject()
+                .Select(folder => Path.Combine(folder.Name, suffix)).Single(Directory.Exists);
+            var owned = Path.Combine(fixture.Path, "packages", suffix);
+            Directory.CreateDirectory(owned);
+            foreach (var file in Directory.GetFiles(installed)) File.Copy(file, Path.Combine(owned, Path.GetFileName(file)));
+            var generatedTargets = Path.Combine(fixture.Path, "obj", "Tests.csproj.nuget.g.targets");
+            var oldImport = "$(NuGetPackageRoot)" + suffix + "/coverlet.collector.targets";
+            var targets = File.ReadAllText(generatedTargets);
+            Assert.Contains(oldImport, targets);
+            File.WriteAllText(generatedTargets, targets.Replace(oldImport,
+                Path.Combine(owned, "coverlet.collector.targets"), StringComparison.Ordinal));
+            var missing = mode switch
+            {
+                "missing-collector" => "coverlet.collector.dll",
+                "missing-core" => "coverlet.core.dll",
+                "missing-dependency" => "Mono.Cecil.dll",
+                _ => null
+            };
+            if (missing is not null) File.Delete(Path.Combine(owned, missing));
+        }
         var before = Directory.GetFiles(fixture.Path, "*", SearchOption.AllDirectories).ToDictionary(p => p,
             p => (Bytes: File.ReadAllBytes(p), Mtime: File.GetLastWriteTimeUtc(p)));
         var method = typeof(ProjectContextLoader).GetMethod("DiscoverTestRunnersAsync", BindingFlags.Static | BindingFlags.NonPublic);
@@ -78,8 +107,9 @@ public sealed class TestRunnerDiscoveryTests
             Assert.Equal(value.Bytes, File.ReadAllBytes(path));
             Assert.Equal(value.Mtime, File.GetLastWriteTimeUtc(path));
         }
-        Assert.Empty(Directory.GetFiles(fixture.Path, "*.pdb", SearchOption.AllDirectories));
-        Assert.Empty(Directory.GetFiles(fixture.Path, "*.dll", SearchOption.AllDirectories));
+        Assert.Empty(Directory.GetFiles(Path.Combine(fixture.Path, "obj"), "*.pdb", SearchOption.AllDirectories));
+        Assert.Empty(Directory.GetFiles(Path.Combine(fixture.Path, "obj"), "*.dll", SearchOption.AllDirectories));
+        Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bin")));
     }
 
     [Fact]
