@@ -65,6 +65,9 @@ public sealed record ProjectAnalysisContext(
     [JsonIgnore]
     public string? EvaluatedIntermediateDirectory { get; init; }
 
+    [JsonIgnore]
+    public string? EvaluatedReferenceAssemblyPath { get; init; }
+
     // Complete physical Workspace document inventory, independent of public analysis exclusions.
     // Generator-only syntax trees are not physical documents and require separate actual-build proof.
     [JsonIgnore]
