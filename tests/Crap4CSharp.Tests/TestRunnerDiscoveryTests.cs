@@ -13,6 +13,8 @@ public sealed class TestRunnerDiscoveryTests
     [InlineData("mtp-global", false, "test.runnerUnsupported")]
     [InlineData("custom", false, "test.runnerUnsupported")]
     [InlineData("no-collector", false, "test.collectorUnsupported")]
+    [InlineData("custom-console", false, "test.runnerUnsupported")]
+    [InlineData("custom-task", false, "test.runnerUnsupported")]
     public async Task RestoredRunnerDiscoveryNeverBuildsOrTests(string mode, bool success, string? reason)
     {
         using var fixture = TestDirectory.Create("crap4csharp-runner-discovery");
@@ -23,6 +25,8 @@ public sealed class TestRunnerDiscoveryTests
         var project = fixture.Write("Tests.csproj", $$"""
             <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework>
             {{(mode == "mtp-property" ? "<TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport>" : "")}}
+            {{(mode == "custom-console" ? "<VSTestConsolePath>custom.dll</VSTestConsolePath>" : "")}}
+            {{(mode == "custom-task" ? "<VSTestTaskAssemblyFile>custom.dll</VSTestTaskAssemblyFile>" : "")}}
             </PropertyGroup><ItemGroup>
             <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" />
             <PackageReference Include="xunit.v3" Version="3.2.2" />
@@ -73,5 +77,46 @@ public sealed class TestRunnerDiscoveryTests
         }
         Assert.Empty(Directory.GetFiles(fixture.Path, "*.pdb", SearchOption.AllDirectories));
         Assert.Empty(Directory.GetFiles(fixture.Path, "*.dll", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public async Task TestRunnersPreserveMappedDependencyConfigurationWithoutWorkspace()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-mapped-runners");
+        const string packages = "<ItemGroup><PackageReference Include=\"Microsoft.NET.Test.Sdk\" Version=\"18.0.1\" /><PackageReference Include=\"coverlet.collector\" Version=\"6.0.4\" /></ItemGroup>";
+        var dep = fixture.Write("Dep/Dep.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>" + packages + "</Project>");
+        var root = fixture.Write("Root/Root.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>" + packages +
+            "<ItemGroup><ProjectReference Include=\"../Dep/Dep.csproj\" AdditionalProperties=\"Configuration=Debug;Flavor=left\" /></ItemGroup></Project>");
+        var request = new ProjectContextLoadRequest(root, "Release", "AnyCPU", [], false, false, TimeSpan.FromMinutes(2));
+        Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken)).ExitCode);
+        var before = Directory.GetFiles(fixture.Path, "*", SearchOption.AllDirectories).ToDictionary(p => p,
+            p => (Bytes: File.ReadAllBytes(p), Mtime: File.GetLastWriteTimeUtc(p)));
+        var result = await ProjectContextLoader.DiscoverTestRunnersAsync(request, TestContext.Current.CancellationToken);
+        Assert.True(result.Success, result.FailureReason + ": " + string.Join(" | ", result.Diagnostics));
+        Assert.Empty(result.Contexts);
+        Assert.Equal(2, result.TestRunners.Count);
+        var dependency = Assert.Single(result.TestRunners, r => r.ProjectPath == dep);
+        Assert.Equal("Debug", dependency.Configuration);
+        var entry = Assert.Single(result.TestRunners, r => r.ProjectPath == root);
+        Assert.Equal("Release", entry.Configuration);
+        Assert.Equal("left", Assert.Single(result.BuildGraph, n => n.Id == dependency.GraphId).GlobalProperties["Flavor"]);
+        foreach (var (path, value) in before)
+        {
+            Assert.Equal(value.Bytes, File.ReadAllBytes(path));
+            Assert.Equal(value.Mtime, File.GetLastWriteTimeUtc(path));
+        }
+        Assert.Equal(before.Keys.Order(), Directory.GetFiles(fixture.Path, "*", SearchOption.AllDirectories).Order());
+    }
+
+    [Fact]
+    public async Task ColdRunnerPreflightDoesNotRestore()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-cold-runners");
+        var project = fixture.Write("Cold.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework><IsTestProject>true</IsTestProject></PropertyGroup></Project>");
+        var result = await ProjectContextLoader.DiscoverTestRunnersAsync(new(project, "Release", null, [], false, false,
+            TimeSpan.FromMinutes(2)), TestContext.Current.CancellationToken);
+        Assert.False(result.Success);
+        Assert.Equal("context.assetsUnavailable", result.FailureReason);
+        Assert.False(Directory.Exists(Path.Combine(fixture.Path, "obj")));
     }
 }

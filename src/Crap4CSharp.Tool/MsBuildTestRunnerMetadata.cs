@@ -18,8 +18,11 @@ internal static partial class MsBuildProjectLoader
             var path = Path.Combine(directory, "global.json");
             if (!File.Exists(path)) continue;
             using var json = ReadMetadataJson(path);
-            if (json.RootElement.TryGetProperty("test", out var test) && test.TryGetProperty("runner", out var runner) &&
-                (runner.ValueKind != JsonValueKind.String || runner.GetString() != "VSTest"))
+            if (json.RootElement.ValueKind != JsonValueKind.Object)
+                throw new ProjectContextException("test.runnerMetadataInvalid", "global.json must be an object.");
+            if (json.RootElement.TryGetProperty("test", out var test) && (test.ValueKind != JsonValueKind.Object ||
+                (test.TryGetProperty("runner", out var runner) &&
+                (runner.ValueKind != JsonValueKind.String || runner.GetString() != "VSTest"))))
                 throw Unsupported("The applicable global.json selects an unsupported dotnet test runner.");
             break;
         }
@@ -40,7 +43,9 @@ internal static partial class MsBuildProjectLoader
             throw Unsupported("A custom VSTest task assembly is unsupported.");
         var assetsPath = project.GetPropertyValue("ProjectAssetsFile");
         using var assets = ReadMetadataJson(Path.GetFullPath(assetsPath, Path.GetDirectoryName(node.ProjectPath)!));
-        var libraries = assets.RootElement.GetProperty("libraries");
+        if (assets.RootElement.ValueKind != JsonValueKind.Object ||
+            !assets.RootElement.TryGetProperty("libraries", out var libraries) || libraries.ValueKind != JsonValueKind.Object)
+            throw new ProjectContextException("test.runnerMetadataInvalid", "Restore assets lack the evaluated package libraries.");
         var sdkVersion = PackageVersion("Microsoft.NET.Test.Sdk");
         var collectorVersion = PackageVersion("coverlet.collector");
         if (sdkVersion != "18.0.1" || !InstalledImport("microsoft.net.test.sdk", sdkVersion, "Microsoft.NET.Test.Sdk.targets"))
@@ -52,7 +57,7 @@ internal static partial class MsBuildProjectLoader
         string? PackageVersion(string name)
         {
             var matching = libraries.EnumerateObject().Where(p => p.Name.StartsWith(name + "/", StringComparison.OrdinalIgnoreCase) &&
-                p.Value.TryGetProperty("type", out var type) && type.GetString() == "package").ToArray();
+                p.Value.ValueKind == JsonValueKind.Object && p.Value.TryGetProperty("type", out var type) && type.GetString() == "package").ToArray();
             return matching.Length == 1 ? matching[0].Name[(name.Length + 1)..] : null;
         }
         bool InstalledImport(string package, string version, string filename) => project.Imports.Any(import =>
@@ -72,7 +77,16 @@ internal static partial class MsBuildProjectLoader
         try
         {
             using var stream = File.OpenRead(path);
-            return JsonDocument.Parse(stream, new JsonDocumentOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip });
+            using var retained = new MemoryStream();
+            var buffer = new byte[64 * 1024];
+            int count;
+            while ((count = stream.Read(buffer)) != 0)
+            {
+                if (retained.Length + count > 16 * 1024 * 1024)
+                    throw new ProjectContextException("test.runnerMetadataInvalid", "Runner metadata exceeds 16 MiB.");
+                retained.Write(buffer, 0, count);
+            }
+            return JsonDocument.Parse(retained.ToArray(), new JsonDocumentOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip });
         }
         catch (JsonException exception)
         {
