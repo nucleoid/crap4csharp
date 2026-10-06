@@ -105,6 +105,56 @@ public sealed class CompilerGraphExecutionTests
         Assert.Equal(0, launches);
     }
 
+    [Theory]
+    [InlineData("source")]
+    [InlineData("project")]
+    [InlineData("import")]
+    [InlineData("additionalFile")]
+    [InlineData("analyzerConfig")]
+    [InlineData("analyzer")]
+    [InlineData("restoreAssets")]
+    [InlineData("sdkConfiguration")]
+    public async Task AuthoredDriftStopsDependentBuildEvenWithRestoredTimestamp(string role)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-execution-drift");
+        var loaded = Valid(fixture.Path);
+        var path = fixture.Write("bound-input", "before");
+        var context = loaded.Contexts[1] with { PhaseInputs = loaded.Contexts[1].PhaseInputs.Append(new(path, role, false)).ToArray() };
+        loaded = loaded with { Contexts = [loaded.Contexts[0], context], GraphContexts = [loaded.GraphContexts[0], loaded.GraphContexts[1] with { Context = context }] };
+        var launches = new List<string>();
+        var error = await Assert.ThrowsAsync<ProjectContextException>(() => CompilerGraphExecution.RunAsync(loaded,
+            (node, _) =>
+            {
+                launches.Add(node.Id);
+                var time = File.GetLastWriteTimeUtc(path);
+                File.WriteAllText(path, "after!");
+                File.SetLastWriteTimeUtc(path, time);
+                return Task.FromResult(new CompilerObservation(node.ProjectPath, []));
+            }, TestContext.Current.CancellationToken));
+        Assert.Equal("compiler.inputsMutated", error.Reason);
+        Assert.Equal(new[] { "dependency" }, launches);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MissingPreparedInputInventoryRefusesBeforeFirstBuild(bool missingFile)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-execution-missing-input");
+        var loaded = Valid(fixture.Path);
+        if (missingFile) File.Delete(loaded.Contexts[1].ProjectPath);
+        else
+        {
+            var context = loaded.Contexts[1] with { PhaseInputs = [] };
+            loaded = loaded with { Contexts = [loaded.Contexts[0], context], GraphContexts = [loaded.GraphContexts[0], loaded.GraphContexts[1] with { Context = context }] };
+        }
+        var launches = 0;
+        var error = await Assert.ThrowsAsync<ProjectContextException>(() => CompilerGraphExecution.RunAsync(loaded,
+            (node, _) => { launches++; return Task.FromResult(new CompilerObservation(node.ProjectPath, [])); }, TestContext.Current.CancellationToken));
+        Assert.Equal("compiler.inputsMutated", error.Reason);
+        Assert.Equal(0, launches);
+    }
+
     [Fact]
     public async Task ValidGraphBuildsEachMappedContextOnceInDependencyOrder()
     {
@@ -245,6 +295,8 @@ public sealed class CompilerGraphExecutionTests
     private static ProjectContextLoadResult Valid(string root)
     {
         var contexts = new[] { Context(Path.Combine(root, "Dependency.csproj")), Context(Path.Combine(root, "Root.csproj")) };
+        foreach (var context in contexts) File.WriteAllText(context.ProjectPath, "<Project />");
+        contexts = contexts.Select(c => c with { PhaseInputs = [new(c.ProjectPath, "project", false)] }).ToArray();
         var nodes = contexts.Select((c, i) => new ProjectBuildGraphNode(i == 0 ? "dependency" : "root", c.ProjectPath,
             c.Configuration, c.Platform, c.TargetFramework, new Dictionary<string, string> { ["Flavor"] = "LEFT" },
             i == 0 ? [] : ["dependency"])).ToArray();
