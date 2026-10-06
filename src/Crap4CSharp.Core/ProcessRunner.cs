@@ -41,6 +41,7 @@ public static class ProcessRunner
         if (timeout <= TimeSpan.Zero || timeout == Timeout.InfiniteTimeSpan)
             throw new ArgumentOutOfRangeException(nameof(timeout), "Process timeout must be positive and finite.");
 
+        cancellationToken.ThrowIfCancellationRequested();
         var startInfo = new ProcessStartInfo(fileName)
         {
             WorkingDirectory = workingDirectory,
@@ -51,6 +52,7 @@ public static class ProcessRunner
         if (environment is not null)
             foreach (var pair in environment) startInfo.Environment[pair.Key] = pair.Value;
         foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
+        cancellationToken.ThrowIfCancellationRequested();
         using var process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Could not start {fileName}.");
         var output = process.StandardOutput.ReadToEndAsync();
         var error = process.StandardError.ReadToEndAsync();
