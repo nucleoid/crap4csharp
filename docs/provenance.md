@@ -45,6 +45,14 @@ input appeared.
 3. Capture final generated/compiler/module identities and reject authored-input drift. Expected generated outputs
    may appear or replace stale pre-build outputs; they are validated as transitions, not required to preexist.
 
+Current-evidence recapture is stricter than the planned fresh-build transition: it rejects changes to any
+preexisting observed compiler/configuration input during Workspace loading, including generated editorconfig
+files under a custom intermediate directory. The custom-layout integration fixture uses this repository's
+`global.json` SDK selection (10.0.1xx, latest patch). An unpinned consumer selecting SDK 10.0.401 was observed to
+rewrite its existing `App.GeneratedMSBuildEditorConfig.editorconfig` during loading; that layout currently fails
+`context.inputsMutated`, not verified green. SDK feature bands and custom layouts outside the proven fixture
+are not a blanket support claim; do not waive the mutation guard to accept them.
+
 Coverage reports may union only within one context/build and coordinate representation. Different TFMs,
 configuration/platform/RID, source/context identities, DLL/PDB identities, or line-vs-sequence-point formats do not
 optimistically union. A manifest never upgrades unsupported generated-method mapping into known coverage.

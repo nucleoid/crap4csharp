@@ -791,6 +791,11 @@ public sealed class PolicyCheckIntegrationTests
         string physical, string link, bool customIntermediate, int expectedExit)
     {
         using var fixture = TestDirectory.Create("crap4csharp-generated-cli");
+        // Use the repository's supported 10.0.1xx SDK selection, not the host's newest
+        // unpinned feature band. SDK 10.0.401 rewrites an existing generated editorconfig
+        // during Workspace loading; current binding correctly refuses that mutation.
+        fixture.Write("global.json", await File.ReadAllTextAsync(Path.Combine(RepositoryRoot(), "global.json"),
+            TestContext.Current.CancellationToken));
         const string projectLogical = "App.csproj";
         if (customIntermediate)
             fixture.Write("Directory.Build.props", "<Project><PropertyGroup><BaseIntermediateOutputPath>artifacts/intermediate/</BaseIntermediateOutputPath></PropertyGroup></Project>");
@@ -821,7 +826,7 @@ public sealed class PolicyCheckIntegrationTests
         await Git("init", "--quiet");
         await Git("config", "user.email", "fixture@example.invalid");
         await Git("config", "user.name", "Fixture");
-        await Git("add", "-f", "--", projectLogical, physical, "policy.json");
+        await Git("add", "-f", "--", projectLogical, physical, "policy.json", "global.json");
         if (customIntermediate) await Git("add", "--", "Directory.Build.props");
         await Git("commit", "--quiet", "-m", "trusted target-added authored source");
         var before = await File.ReadAllBytesAsync(source, TestContext.Current.CancellationToken);

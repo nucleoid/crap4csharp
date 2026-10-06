@@ -180,6 +180,29 @@ public sealed class ProjectContextTests
     }
 
     [Fact]
+    public async Task ExistingCustomIntermediateEditorConfigMutationStillInvalidatesContext()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-existing-generated-config");
+        var project = fixture.Write("App.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>");
+        var generated = fixture.Write("artifacts/intermediate/Release/net10.0/App.GeneratedMSBuildEditorConfig.editorconfig",
+            "is_global = true\nbuild_property.RootNamespace = App\n");
+        // Deterministic opposing control for the hosted SDK regression. Even a previously
+        // generated file cannot be silently reclassified as an allowed NEW transition.
+        var result = await ProjectContextLoader.LoadAsync(
+            new(project, "Release", null, [], false, true, TimeSpan.FromSeconds(30)),
+            TestContext.Current.CancellationToken,
+            (_, _, _) =>
+            {
+                File.AppendAllText(generated, "build_property.DesignTimeBuild = true\n");
+                return Task.FromException<ProjectContextSdkResolution>(
+                    new ProjectContextException("context.sdkResolutionFailed", "controlled post-snapshot failure"));
+            });
+        Assert.False(result.Success);
+        Assert.Equal("context.inputsMutated", result.FailureReason);
+        Assert.Contains(result.Diagnostics, item => item.Contains("Authored inputs changed", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task OverallTimeoutHasStableReason()
     {
         var selected = Path.GetFullPath("Fixtures/ProjectContexts/ContextSolution.slnx", AppContext.BaseDirectory);
