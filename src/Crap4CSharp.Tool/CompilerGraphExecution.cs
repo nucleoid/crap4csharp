@@ -26,6 +26,9 @@ internal static class CompilerGraphExecution
             token.ThrowIfCancellationRequested();
             snapshot.Validate(frozen, token);
             var observed = await build(node, token); // Preserve the original build failure unchanged.
+            if (string.IsNullOrWhiteSpace(observed.ProjectPath) || !Path.IsPathFullyQualified(observed.ProjectPath) ||
+                observed.ProjectPath != Path.GetFullPath(observed.ProjectPath) || !comparer.Equals(observed.ProjectPath, node.ProjectPath))
+                throw new ProjectContextException("compiler.contextMismatch", "Actual compiler observation belongs to a different or unresolved project.");
             snapshot.Validate(frozen, token); // Stop dependents immediately on authored drift.
             results.Add(observed);
         }
