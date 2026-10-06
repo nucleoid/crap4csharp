@@ -61,3 +61,12 @@ fail `scope.gitProtocolLimit`; they are never silently parsed as a tail or parti
 This intentionally refuses huge individual blobs/diffs/index listings instead of consuming
 unbounded memory. Worktree file reads and the combined captured scope inventory are separate
 from the per-process protocol bound; this is not a whole-scope memory limit.
+
+Internal selected-SDK graph discovery now preserves dependency-first project/global-property
+contexts, including ProjectReference configuration/custom property mappings. Cross-target
+outer nodes are structural: their graph-selected inner contexts are expanded, without a
+nearest-framework/minimal-build claim. All declared dependency inner contexts may therefore
+be scheduled conservatively; each identical mapped context appears once. Graph discovery
+executes no restore/build/Workspace targets. It remains a private orchestration seam, not
+public fresh-check completion or actual compiler evidence. Mapped globals and physical
+paths must stay in private local transport, never exported as raw diagnostic evidence.

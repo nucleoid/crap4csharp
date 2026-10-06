@@ -96,6 +96,24 @@ internal static class MsBuildProjectLoader
         if (nodes.Length > 4096)
             throw new ProjectContextException("context.graphLimit", "The build graph exceeds 4096 evaluated nodes.");
         var identities = nodes.ToDictionary(node => node, node => GraphIdentity(node));
+        bool IsOuter(ProjectGraphNode node) =>
+            node.ProjectInstance.GetPropertyValue("IsCrossTargetingBuild").Equals("true", StringComparison.OrdinalIgnoreCase) &&
+            string.IsNullOrWhiteSpace(node.ProjectInstance.GetPropertyValue("TargetFramework"));
+        IEnumerable<ProjectGraphNode> BuildDependencies(ProjectGraphNode node)
+        {
+            // Cross-target outer nodes orchestrate their declared inner nodes, not Csc invocations.
+            // Preserve every graph-selected inner context; do not guess nearest TFM or flatten root globals.
+            foreach (var dependency in node.ProjectReferences)
+            {
+                if (IsOuter(dependency))
+                {
+                    if (dependency.ProjectReferences.Count == 0)
+                        throw new ProjectContextException("context.graphFrameworkUnresolved", "A cross-target dependency has no inner contexts.");
+                    foreach (var inner in BuildDependencies(dependency)) yield return inner;
+                }
+                else yield return dependency;
+            }
+        }
         var result = new List<ProjectBuildGraphNode>();
         foreach (var node in nodes)
         {
@@ -104,6 +122,7 @@ internal static class MsBuildProjectLoader
             if (!Path.GetExtension(instance.FullPath).Equals(".csproj", StringComparison.OrdinalIgnoreCase))
                 throw new ProjectContextException("context.graphLanguageUnsupported", "A required dependency is not a supported C# project.");
             await EnsureProjectSdkAsync(instance.FullPath, request, cancellationToken);
+            if (IsOuter(node)) continue;
             var framework = instance.GetPropertyValue("TargetFramework");
             if (string.IsNullOrWhiteSpace(framework))
                 throw new ProjectContextException("context.graphFrameworkUnresolved", "A required graph node has no resolved target framework.");
@@ -111,7 +130,7 @@ internal static class MsBuildProjectLoader
                 .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
             result.Add(new(identities[node], Path.GetFullPath(instance.FullPath),
                 instance.GetPropertyValue("Configuration"), instance.GetPropertyValue("Platform"), framework, globals,
-                node.ProjectReferences.Select(dependency => identities[dependency]).Order(StringComparer.Ordinal).ToArray()));
+                BuildDependencies(node).Select(dependency => identities[dependency]).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray()));
         }
         return new(true, [], diagnostics, null, exclusions) { BuildGraph = result };
     }

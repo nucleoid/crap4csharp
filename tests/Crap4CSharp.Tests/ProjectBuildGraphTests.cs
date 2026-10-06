@@ -66,7 +66,10 @@ public sealed class ProjectBuildGraphTests
         var rootNode = Assert.Single(result.BuildGraph, node => node.ProjectPath == root);
         Assert.NotEmpty(rootNode.Dependencies);
         Assert.All(rootNode.Dependencies, id => Assert.Contains(result.BuildGraph,
-            node => node.Id == id && node.ProjectPath == dependency && node.TargetFramework == "net10.0"));
+            node => node.Id == id && node.ProjectPath == dependency));
+        // Static MSBuild graph conservatively supplies all dependency inner contexts, not a nearest-TFM claim.
+        Assert.Equal(new[] { "net10.0", "netstandard2.1" }, result.BuildGraph
+            .Where(node => rootNode.Dependencies.Contains(node.Id)).Select(node => node.TargetFramework).Order());
     }
 
     [Fact]
