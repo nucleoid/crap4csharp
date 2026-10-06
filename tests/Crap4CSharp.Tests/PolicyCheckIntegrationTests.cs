@@ -699,7 +699,9 @@ public sealed class PolicyCheckIntegrationTests
                 item => item.GetProperty("kind").GetString() == "method");
             var candidate = BaselineDocument.Parse(await File.ReadAllBytesAsync(Path.Combine(fixture.Path,
                 "known-candidate.json"), TestContext.Current.CancellationToken));
-            Assert.Empty(candidate.Entries);
+            Assert.All(known.RootElement.GetProperty("omittedKnownViolations").EnumerateArray(),
+                item => Assert.DoesNotContain(candidate.Entries,
+                    entry => entry.EntityKey == item.GetProperty("entityKey").GetString()));
             return;
         }
         Assert.True(exit == 0, error + Environment.NewLine + output + Environment.NewLine +

@@ -14,6 +14,8 @@ internal static class BaselineCommand
     public static async Task<int> RunAsync(string[] args, string workingDirectory, TextWriter output,
         TextWriter error, CancellationToken cancellationToken)
     {
+        IReadOnlyList<SkippedAmbiguousEntry> skippedAmbiguous = [];
+        IReadOnlyList<OmittedKnownViolation> omittedKnown = [];
         try
         {
             var options = Parse(args);
@@ -64,19 +66,22 @@ internal static class BaselineCommand
                 TimeSpan.Zero, cancellationToken, allSources: true);
             var captured = CapturedEvaluationInputs.Read(bundle);
             ValidateCompleteScope(bundle.Manifest, captured.Scope);
-            var observations = Observations(replay, bundle.Manifest)
-                .Where(item => !Excluded(parsedPolicy.Policy, item.Path)).ToArray();
+            var selected = (replay.Evaluation.Callables ?? []).ToDictionary(item => item.ObservationId,
+                _ => true, StringComparer.Ordinal);
+            var observations = PolicyCheckCommand.PolicyObservations(replay, bundle.Manifest,
+                parsedPolicy.Policy, selected).ToArray();
             var exemptionResolution = PolicyCheckCommand.ParseExemptions(exemptionBytes, replay);
-            var ambiguous = observations.Where(item => item.IdentityAmbiguous).ToArray();
-            observations = observations.Where(item => !item.IdentityAmbiguous).ToArray();
+            skippedAmbiguous = SkippedAmbiguousEntries(observations);
+            omittedKnown = OmittedKnownViolations(parsedPolicy.Policy.Threshold, observations);
             var policyResult = PolicyEvaluator.Evaluate(parsedPolicy.Policy, null, observations,
                 exemptionResolution.Active);
             if (policyResult.ExitCode == 1)
-                throw new InvalidDataException(string.Join(", ", policyResult.OperationalReasons));
+                throw new PolicyException(policyResult.OperationalReasons[0],
+                    string.Join(", ", policyResult.OperationalReasons));
             if (options.Verb == "update") ValidateExistingBaseline(root, parsedPolicy, compatibilityHash);
             var candidate = BaselineDocument.Generate(compatibilityHash, parsedPolicy.Policy.Ruleset,
                 SourceIdentity(bundle.Manifest), bundle.Manifest.Revision.Head ?? "none",
-                parsedPolicy.Policy.Threshold, observations);
+                parsedPolicy.Policy.Threshold, observations.Where(item => !item.IdentityAmbiguous));
             var candidateBytes = BaselineDocument.Serialize(candidate);
             await WriteCandidateAsync(outputPath, candidateBytes, options.Overwrite, cancellationToken);
             var summary = new
@@ -88,8 +93,9 @@ internal static class BaselineCommand
                 candidatePath = Path.GetRelativePath(root, outputPath).Replace('\\', '/'),
                 candidateHash = CanonicalIdentity.Sha256(candidateBytes),
                 entries = candidate.Entries.Count,
-                skippedAmbiguousIdentities = ambiguous.Length,
-                omittedKnownViolations = OmittedKnownViolations(parsedPolicy.Policy.Threshold, observations),
+                skippedAmbiguousIdentities = skippedAmbiguous.Count,
+                skippedAmbiguousEntries = skippedAmbiguous,
+                omittedKnownViolations = omittedKnown,
                 approvedUnsupportedExemptions = exemptionResolution.Active.Count,
                 policyHash = parsedPolicy.Hash,
                 policyCompatibilityHash = compatibilityHash,
@@ -105,6 +111,9 @@ internal static class BaselineCommand
             await output.WriteAsync(JsonSerializer.Serialize(new
             {
                 schemaVersion = "baseline-command-result-v1", status = "operationalError", exitCode = 1,
+                skippedAmbiguousIdentities = skippedAmbiguous.Count,
+                skippedAmbiguousEntries = skippedAmbiguous,
+                omittedKnownViolations = omittedKnown,
                 reason = exception is PolicyException policy ? policy.Code : exception is BaselineException baseline
                     ? baseline.Code : exception is OperationCanceledException ? "run.cancelled" : "baseline.generationFailed"
             }, Json) + "\n");
@@ -121,6 +130,16 @@ internal static class BaselineCommand
                     CanonicalIdentity.Tuple("baseline-source-input-v1",
                         CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input),
                         input.Sha256, input.Generated ? "generated" : "authored"))))));
+
+    internal sealed record SkippedAmbiguousEntry(string Kind, string EntityKey, string Rule, string Path,
+        int Complexity, string? CoverageReason);
+
+    internal static IReadOnlyList<SkippedAmbiguousEntry> SkippedAmbiguousEntries(
+        IEnumerable<PolicyObservation> observations) => observations.Where(item => item.IdentityAmbiguous)
+        .OrderBy(item => item.ContextId, StringComparer.Ordinal).ThenBy(item => item.EntityKey, StringComparer.Ordinal)
+        .ThenBy(item => item.Rule, StringComparer.Ordinal)
+        .Select(item => new SkippedAmbiguousEntry(item.Kind, item.EntityKey, item.Rule, item.Path,
+            item.Complexity, item.CoverageReason)).ToArray();
 
     internal sealed record OmittedKnownViolation(string Kind, string EntityKey, string Rule, string Path,
         int Complexity, string Reason, string? CoverageReason);
@@ -170,43 +189,6 @@ internal static class BaselineCommand
         if (policy is null || manifest is null || output is null)
             throw new ArgumentException("--policy, --reuse-artifacts, and --output are required.");
         return new BaselineCommandOptions(args[1], policy, manifest, output, overwrite, timeout);
-    }
-
-    private static IEnumerable<PolicyObservation> Observations(ResultDocument result, RunManifest manifest)
-    {
-        foreach (var callable in result.Evaluation.Callables ?? [])
-            if (callable.Applicability == "applicable")
-            {
-                var path = RepositorySourcePath(manifest, callable.ContextId, callable.Path);
-                yield return new PolicyObservation(callable.Kind is "Lambda" or "AnonymousMethod" ? "anonymous" : "method",
-                    callable.CallableId, "crap.thresholdExceeded", callable.Ruleset, callable.ContextId, path,
-                    callable.BodyChecksum, callable.Complexity ?? 0, callable.Coverage, callable.Crap,
-                    callable.CoverageReason, true, callable.CoverageReason == CoverageReasonCodes.AmbiguousCallableOwnership);
-            }
-        foreach (var family in result.Evaluation.Families ?? [])
-        {
-            var roots = (result.Evaluation.Callables ?? []).Where(item => item.CallableId == family.RootCallableId).ToArray();
-            if (roots.Length != 1)
-                throw new InvalidDataException("A callable family did not resolve to exactly one captured root.");
-            var root = roots[0];
-            var path = RepositorySourcePath(manifest, root.ContextId, root.Path);
-            yield return new PolicyObservation("family", family.FamilyId, CallableFamilyEvaluator.Rule,
-                result.ComplexityRulesetVersion, root.ContextId, path, root.BodyChecksum, family.Complexity,
-                family.Coverage, family.Crap, family.IncompleteReasons.FirstOrDefault(), true,
-                family.IncompleteReasons.Contains(CoverageReasonCodes.AmbiguousCallableOwnership, StringComparer.Ordinal))
-                { RelatedEntityKeys = family.IncompleteCallableIds };
-        }
-    }
-
-    private static bool Excluded(RepositoryPolicy policy, string path) => policy.Exclusions.Any(exclusion =>
-        path == exclusion || path.StartsWith(exclusion.TrimEnd('/') + "/", StringComparison.Ordinal));
-
-    private static string RepositorySourcePath(RunManifest manifest, string contextId, string logicalPath)
-    {
-        var context = manifest.Contexts.Single(item => item.Id == contextId);
-        var input = context.Inputs.Single(item => item.Role == "source" && !item.Generated &&
-            item.LogicalPath == logicalPath);
-        return CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input);
     }
 
     private static void ValidateExistingBaseline(string root, ParsedRepositoryPolicy parsed, string compatibilityHash)

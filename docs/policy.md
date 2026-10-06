@@ -127,3 +127,16 @@ remain forbidden even when their bytes resemble a result/candidate. This refusal
 so an unsuccessful command cannot replace a consumer input with diagnostics.
 
 Candidate `sourceIdentity` hashes repository-relative source paths/content and project/TFM/configuration/platform. It does not depend on an absolute checkout root or diagnostic capture context IDs; the separate recorded revision and evidence hashes still describe the originating capture. Base-scope enforcement also requires the independently resolved scope merge-base to equal the immutable revision used for trusted policy acquisition.
+
+### Ambiguous collector ownership in candidate generation
+
+Baseline creation and trusted strict checking use the same complete observation inventory and family dependencies.
+Unapproved unknown ambiguity refuses generation (exit 1, no candidate); known complexity above the threshold remains
+a violation (exit 2) but cannot receive a numeric allowance. `skippedAmbiguousEntries` lists each ambiguous group
+with its actual kind, entity key, rule, repository path, maximum complexity, and coverage reason, on both success and
+operational failure. `omittedKnownViolations` includes known complexity debt before ambiguous entries are omitted.
+
+Real Coverlet OpenCover can project duplicate identical lambda points into their named parent, leaving that parent
+ambiguous too. An exact anonymous `memberCount` exemption does **not** waive the named parent. Refactor the duplicate
+bodies or provide supported exclusive point evidence; do not approve a named-parent anonymous exemption. The
+exact-point integration control is an adapter test, not proof that Coverlet emits exclusive coordinates.

@@ -124,7 +124,7 @@ internal static class PolicyCheckCommand
             result.Revision);
     }
 
-    private static IEnumerable<PolicyObservation> PolicyObservations(ResultDocument result, RunManifest manifest,
+    internal static IEnumerable<PolicyObservation> PolicyObservations(ResultDocument result, RunManifest manifest,
         RepositoryPolicy policy, IReadOnlyDictionary<string, bool> selected)
     {
         var callables = result.Evaluation.Callables ?? [];
@@ -147,7 +147,8 @@ internal static class PolicyCheckCommand
             var first = values[0];
             var path = RepositorySourcePath(manifest, first.ContextId, first.Path);
             if (Excluded(policy, path)) continue;
-            yield return new PolicyObservation("anonymous", first.CallableId, "crap.thresholdExceeded",
+            yield return new PolicyObservation(values.All(item => item.Kind is "Lambda" or "AnonymousMethod" or "lambda" or "anonymous-method")
+                    ? "anonymous" : "method", first.CallableId, "crap.thresholdExceeded",
                 first.Ruleset, first.ContextId, path, first.BodyChecksum, values.Max(item => item.Complexity ?? 0), null, null,
                 CoverageReasonCodes.AmbiguousCallableOwnership,
                 values.Any(item => selected.GetValueOrDefault(item.ObservationId)), true);
