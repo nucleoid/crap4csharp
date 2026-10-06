@@ -16,6 +16,8 @@ public sealed class CompilerGraphExecutionTests
     [InlineData("extra-binding")]
     [InlineData("extra-context")]
     [InlineData("wrong-project")]
+    [InlineData("missing-physical-project")]
+    [InlineData("wrong-physical-project")]
     [InlineData("wrong-configuration")]
     [InlineData("wrong-framework")]
     [InlineData("wrong-platform")]
@@ -41,6 +43,8 @@ public sealed class CompilerGraphExecutionTests
             "extra-binding" => loaded with { GraphContexts = [.. bindings, bindings[1] with { GraphId = "extra" }] },
             "extra-context" => loaded with { Contexts = [.. loaded.Contexts, Context(Path.Combine(fixture.Path, "Extra.csproj"))] },
             "wrong-project" => loaded with { GraphContexts = [bindings[0], bindings[1] with { ProjectPath = nodes[0].ProjectPath }] },
+            "missing-physical-project" => loaded with { GraphContexts = [bindings[0], bindings[1] with { Context = bindings[1].Context with { ResolvedProjectPath = null } }] },
+            "wrong-physical-project" => loaded with { GraphContexts = [bindings[0], bindings[1] with { Context = bindings[1].Context with { ResolvedProjectPath = nodes[0].ProjectPath } }] },
             "wrong-configuration" => loaded with { GraphContexts = [bindings[0], bindings[1] with { Context = bindings[1].Context with { Configuration = "Debug" } }] },
             "wrong-framework" => loaded with { GraphContexts = [bindings[0], bindings[1] with { Context = bindings[1].Context with { TargetFramework = "net9.0" } }] },
             "wrong-platform" => loaded with { GraphContexts = [bindings[0], bindings[1] with { Context = bindings[1].Context with { Platform = "x64" } }] },
@@ -100,7 +104,7 @@ public sealed class CompilerGraphExecutionTests
         using var fixture = TestDirectory.Create("crap4csharp-actual-graph-execution");
         fixture.Write("Dependency/Dependency.csproj", """
             <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
-            <Target Name="CountBuild" BeforeTargets="CoreCompile"><WriteLinesToFile File="$(MSBuildProjectDirectory)/count.txt" Lines="build" Overwrite="false" /></Target></Project>
+            <Target Name="CountBuild" BeforeTargets="CoreCompile"><WriteLinesToFile File="$(MSBuildProjectDirectory)/count.txt" Lines="build" Overwrite="false" Condition="'$(DesignTimeBuild)' != 'true'" /></Target></Project>
             """);
         fixture.Write("Dependency/Code.cs", "public class Dependency {}");
         var added = fixture.Write("Shared/Added.cs", "public class Added {}");
@@ -108,7 +112,7 @@ public sealed class CompilerGraphExecutionTests
             <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
             <ItemGroup><ProjectReference Include="../Dependency/Dependency.csproj" AdditionalProperties="Configuration=Debug" /></ItemGroup>
             <Target Name="AddSource" BeforeTargets="CoreCompile"><ItemGroup><Compile Include="../Shared/Added.cs" Link="obj/Added.cs" /></ItemGroup>
-            <WriteLinesToFile File="$(MSBuildProjectDirectory)/count.txt" Lines="build" Overwrite="false" /></Target></Project>
+            <WriteLinesToFile File="$(MSBuildProjectDirectory)/count.txt" Lines="build" Overwrite="false" Condition="'$(DesignTimeBuild)' != 'true'" /></Target></Project>
             """);
         fixture.Write("Root/Code.cs", "public class Root {}");
         var authored = Directory.GetFiles(fixture.Path, "*", SearchOption.AllDirectories).ToDictionary(p => p,
@@ -117,6 +121,7 @@ public sealed class CompilerGraphExecutionTests
         Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken)).ExitCode);
         var loaded = await ProjectContextLoader.LoadGraphAsync(request, TestContext.Current.CancellationToken);
         Assert.True(loaded.Success, loaded.FailureReason + ": " + string.Join(" | ", loaded.Diagnostics));
+        Assert.Empty(Directory.GetFiles(fixture.Path, "count.txt", SearchOption.AllDirectories));
         var results = await CompilerGraphExecution.RunAsync(loaded, (node, token) =>
         {
             var directory = Path.Combine(fixture.Path, "private", node.Id);
@@ -143,6 +148,17 @@ public sealed class CompilerGraphExecutionTests
         }
     }
 
+    [Fact]
+    public void PhysicalProjectPathIsPrivateTransportOnly()
+    {
+        var context = Context(Path.GetFullPath("private-project.csproj"));
+        Assert.DoesNotContain("resolvedProjectPath", System.Text.Json.JsonSerializer.Serialize(context,
+            new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)), StringComparison.Ordinal);
+        var transported = System.Text.Json.JsonSerializer.Deserialize<ProjectAnalysisContext>(
+            System.Text.Json.JsonSerializer.Serialize(context, ProjectContextLoader.JsonOptions), ProjectContextLoader.JsonOptions);
+        Assert.Equal(context.ResolvedProjectPath, transported!.ResolvedProjectPath);
+    }
+
     private static ProjectContextLoadResult Valid(string root)
     {
         var contexts = new[] { Context(Path.Combine(root, "Dependency.csproj")), Context(Path.Combine(root, "Root.csproj")) };
@@ -158,5 +174,6 @@ public sealed class CompilerGraphExecutionTests
 
     private static ProjectAnalysisContext Context(string project) => ProjectAnalysisContext.Create(project,
         Path.GetFileNameWithoutExtension(project), "net10.0", "Release", "AnyCPU", LanguageVersion.Latest,
-        ["FLAVOR_LEFT"], SourceCodeKind.Regular, [], [], new(false, false), new("sdk", "msbuild", "roslyn"));
+        ["FLAVOR_LEFT"], SourceCodeKind.Regular, [], [], new(false, false), new("sdk", "msbuild", "roslyn"))
+        with { ResolvedProjectPath = project };
 }

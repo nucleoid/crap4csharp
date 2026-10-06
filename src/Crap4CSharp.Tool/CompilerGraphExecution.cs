@@ -49,7 +49,7 @@ internal static class CompilerGraphExecution
                 throw new ProjectContextException("compiler.graphOutputUnproven", "Multiple contexts of one physical project require independently proven noncolliding output destinations.");
             var binding = bindings.SingleOrDefault(b => b.GraphId == node.Id);
             if (binding is null || !pathComparer.Equals(binding.ProjectPath, node.ProjectPath) ||
-                !pathComparer.Equals(binding.Context.ProjectPath, node.ProjectPath) ||
+                !pathComparer.Equals(binding.Context.ResolvedProjectPath, node.ProjectPath) ||
                 binding.Context.Configuration != node.Configuration || binding.Context.Platform != node.Platform ||
                 binding.Context.TargetFramework != node.TargetFramework || !binding.Context.Capabilities.DesignTimeComplete)
                 throw Refuse("A graph context is missing, incomplete or mismatched.");

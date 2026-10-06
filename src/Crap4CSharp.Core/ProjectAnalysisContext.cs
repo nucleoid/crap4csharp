@@ -55,6 +55,9 @@ public sealed record ProjectAnalysisContext(
     public const string ProtocolVersion = "project-context-v1";
 
     [JsonIgnore]
+    public string? ResolvedProjectPath { get; init; }
+
+    [JsonIgnore]
     public IReadOnlyList<string> ProtectedPaths { get; init; } = [];
 
     [JsonIgnore]

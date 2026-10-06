@@ -298,6 +298,7 @@ internal static class MsBuildProjectLoader
                 .Select(path => ImportIdentity(root, request.SdkPath, path)).Append(RestoreIdentity(metadata.AssetsFile)),
             sources, new ProjectExclusionPolicy(request.IncludeTests, request.IncludeGenerated), adapter, exclusions) with
         {
+            ResolvedProjectPath = Path.GetFullPath(projectPath),
             GeneratedTransitionPaths = project.AnalyzerConfigDocuments.Where(document => document.FilePath is not null)
                 .Select(document => Path.GetFullPath(document.FilePath!))
                 .Where(path => !trackedInputs.Contains(path) && !metadata.AuthoredInputs.Contains(path, PathComparer) &&

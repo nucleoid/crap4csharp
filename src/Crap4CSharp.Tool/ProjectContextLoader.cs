@@ -94,7 +94,7 @@ public static class ProjectContextLoader
         resolver.Modifiers.Add(info =>
         {
             var propertyNames = info.Type == typeof(ProjectSourceIdentity) ? new[] { nameof(ProjectSourceIdentity.ResolvedPath) } :
-                info.Type == typeof(ProjectAnalysisContext) ? new[] { nameof(ProjectAnalysisContext.ProtectedPaths),
+                info.Type == typeof(ProjectAnalysisContext) ? new[] { nameof(ProjectAnalysisContext.ResolvedProjectPath), nameof(ProjectAnalysisContext.ProtectedPaths),
                     nameof(ProjectAnalysisContext.GeneratedTransitionPaths) } : [];
             foreach (var propertyName in propertyNames)
             {
