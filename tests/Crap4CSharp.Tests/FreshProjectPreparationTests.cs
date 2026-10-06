@@ -61,4 +61,27 @@ public sealed class FreshProjectPreparationTests
             Assert.Equal(value.Mtime, File.GetLastWriteTimeUtc(path));
         }
     }
+    [Fact]
+    public async Task PreparationRestoresSelectedConfigurationAndPlatform()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-selected-restore");
+        var project = fixture.Write("Cold.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+                <BaseIntermediateOutputPath Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">selected-obj/</BaseIntermediateOutputPath>
+              </PropertyGroup>
+            </Project>
+            """);
+        fixture.Write("Code.cs", "public class Code { public int M() => 1; }");
+        var result = await FreshProjectPreparation.LoadAsync(new(project, "Release", "x64", [], true, false,
+            TimeSpan.FromMinutes(2)), false, TestContext.Current.CancellationToken);
+        Assert.True(result.Success, result.FailureReason + ": " + string.Join(" | ", result.Diagnostics));
+        var context = Assert.Single(result.Contexts);
+        Assert.Equal("Release", context.Configuration);
+        Assert.Equal("x64", context.Platform);
+        Assert.True(File.Exists(Path.Combine(fixture.Path, "selected-obj", "project.assets.json")));
+        Assert.False(File.Exists(Path.Combine(fixture.Path, "obj", "project.assets.json")));
+    }
+
 }
