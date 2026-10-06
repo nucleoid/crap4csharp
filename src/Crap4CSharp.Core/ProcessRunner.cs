@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace Crap4CSharp.Core;
 
@@ -42,15 +43,28 @@ public static class ProcessRunner
             throw new ArgumentOutOfRangeException(nameof(timeout), "Process timeout must be positive and finite.");
 
         cancellationToken.ThrowIfCancellationRequested();
-        var startInfo = new ProcessStartInfo(fileName)
+        // On Linux a retained session leader owns the group even when the consumer exits.
+        // The start handshake prevents the consumer from spawning before ownership is verified.
+        bool ownedSession = OperatingSystem.IsLinux();
+        var startInfo = new ProcessStartInfo(ownedSession ? "/usr/bin/setsid" : fileName)
         {
             WorkingDirectory = workingDirectory,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            RedirectStandardInput = ownedSession,
             UseShellExecute = false
         };
         if (environment is not null)
             foreach (var pair in environment) startInfo.Environment[pair.Key] = pair.Value;
+        if (ownedSession)
+        {
+            startInfo.ArgumentList.Add("--");
+            startInfo.ArgumentList.Add("/bin/sh");
+            startInfo.ArgumentList.Add("-c");
+            startInfo.ArgumentList.Add("read -r start || exit 125; \"$@\" & child=$!; exec >/dev/null 2>&1; wait \"$child\"; result=$?; read -r release; exit \"$result\"");
+            startInfo.ArgumentList.Add("crap4csharp-owned-session");
+            startInfo.ArgumentList.Add(fileName);
+        }
         foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
         cancellationToken.ThrowIfCancellationRequested();
         using var process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Could not start {fileName}.");
@@ -59,14 +73,36 @@ public static class ProcessRunner
         using var timeoutSource = new CancellationTokenSource(timeout);
         using var linkedSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
 
+        bool sessionVerified = false;
         try
         {
+            if (ownedSession)
+            {
+                while (GetProcessGroup(process.Id) != process.Id)
+                {
+                    if (process.HasExited)
+                        throw new InvalidOperationException("Could not establish invocation-owned Linux session.");
+                    await Task.Delay(1, linkedSource.Token);
+                }
+                sessionVerified = true;
+                await process.StandardInput.WriteLineAsync("start".AsMemory(), linkedSource.Token);
+                await process.StandardInput.FlushAsync(linkedSource.Token);
+                // The supervisor has closed its own output descriptors. EOF now proves that
+                // all inherited consumer pipes completed, not merely that the parent exited.
+                await Task.WhenAll(output, error).WaitAsync(linkedSource.Token);
+                await process.StandardInput.WriteLineAsync("release".AsMemory(), linkedSource.Token);
+                await process.StandardInput.FlushAsync(linkedSource.Token);
+                process.StandardInput.Close();
+            }
             await process.WaitForExitAsync(linkedSource.Token);
+            await Task.WhenAll(output, error).WaitAsync(linkedSource.Token);
             return new ProcessResult(process.ExitCode, await output, await error);
         }
         catch (OperationCanceledException) when (linkedSource.IsCancellationRequested)
         {
+            if (sessionVerified) TerminateSession(process);
             await TerminateAsync(process);
+            if (sessionVerified) await WaitForSessionTerminationAsync(process.Id);
             try
             {
                 await Task.WhenAll(output, error).WaitAsync(TimeSpan.FromSeconds(5));
@@ -78,6 +114,59 @@ public static class ProcessRunner
             if (cancellationToken.IsCancellationRequested)
                 throw new OperationCanceledException("The process was cancelled.", cancellationToken);
             throw new ProcessTimeoutException(fileName, timeout);
+        }
+        catch
+        {
+            // Setup, sink and pipe failures own the same cleanup duty as cancellation.
+            if (sessionVerified && !process.HasExited) TerminateSession(process);
+            await TerminateAsync(process);
+            if (sessionVerified) await WaitForSessionTerminationAsync(process.Id);
+            await Task.WhenAll(output, error).WaitAsync(TimeSpan.FromSeconds(5));
+            throw;
+        }
+    }
+
+    [DllImport("libc", EntryPoint = "getpgid", SetLastError = true)]
+    private static extern int GetProcessGroup(int processId);
+
+    [DllImport("libc", EntryPoint = "kill", SetLastError = true)]
+    private static extern int SendSignal(int processId, int signal);
+
+    private static void TerminateSession(Process supervisor)
+    {
+        // A live retained leader prevents group-ID reuse. Never signal an unrelated group.
+        if (supervisor.HasExited)
+            throw new InvalidOperationException("Invocation-owned session leader exited before containment cleanup.");
+        if (GetProcessGroup(supervisor.Id) != supervisor.Id)
+            throw new InvalidOperationException("Invocation-owned session identity changed before containment cleanup.");
+        if (SendSignal(-supervisor.Id, 9) != 0)
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError(), "Could not terminate invocation-owned session.");
+    }
+
+    private static async Task WaitForSessionTerminationAsync(int groupId)
+    {
+        var deadline = Stopwatch.StartNew();
+        while (true)
+        {
+            bool liveMember = false;
+            foreach (string directory in Directory.EnumerateDirectories("/proc"))
+            {
+                if (!int.TryParse(Path.GetFileName(directory), out _)) continue;
+                string stat;
+                try { stat = File.ReadAllText(Path.Combine(directory, "stat")); }
+                catch (IOException) when (!Directory.Exists(directory)) { continue; }
+                string[] fields = stat[(stat.LastIndexOf(')') + 2)..].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (int.Parse(fields[2], System.Globalization.CultureInfo.InvariantCulture) == groupId &&
+                    fields[0] is not "Z" and not "X")
+                {
+                    liveMember = true;
+                    break;
+                }
+            }
+            if (!liveMember) return;
+            if (deadline.Elapsed >= TimeSpan.FromSeconds(5))
+                throw new InvalidOperationException("Invocation-owned session still has live descendants after termination.");
+            await Task.Delay(10, CancellationToken.None);
         }
     }
 

@@ -10,6 +10,11 @@ switch (args[0])
         Console.Out.Write("control\n");
         Console.Error.Write("diagnostic\n");
         return 0;
+    case "echo-arguments":
+        Console.Out.Write(JsonSerializer.Serialize(new { arguments = args.Skip(1).ToArray(),
+            environment = Environment.GetEnvironmentVariable("CRAP4CSHARP_PROCESS_CONTROL") }));
+        Console.Error.Write("argument-control\n");
+        return 23;
     case "mark":
         await File.WriteAllTextAsync(Path.GetFullPath(args[1]), "consumer-launched");
         return 0;

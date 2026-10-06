@@ -36,6 +36,21 @@ public sealed class ProcessRunnerTests
         Assert.Equal(new string('E', count), result.StandardError);
     }
 
+    [Fact]
+    public async Task OwnershipPreservesArgumentBoundariesEnvironmentAndConsumerExitCode()
+    {
+        string[] values = ["", "space separated", "$(echo injected)", "a;exit 99", "quotes\"'\\", "line\nbreak", "π"];
+        var result = await ProcessRunner.RunWithEnvironmentAsync(Host,
+            new[] { Helper, "echo-arguments" }.Concat(values), Path.GetTempPath(), TimeSpan.FromSeconds(20),
+            TestContext.Current.CancellationToken,
+            new Dictionary<string, string> { ["CRAP4CSHARP_PROCESS_CONTROL"] = "private-control" });
+        Assert.Equal(23, result.ExitCode);
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        Assert.Equal(values, document.RootElement.GetProperty("arguments").EnumerateArray().Select(value => value.GetString()));
+        Assert.Equal("private-control", document.RootElement.GetProperty("environment").GetString());
+        Assert.Equal("argument-control" + "\n", result.StandardError.Replace("\r\n", "\n", StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData("parent-exit")]
     [InlineData("parent-live")]
