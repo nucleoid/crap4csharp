@@ -8,9 +8,10 @@ namespace Crap4CSharp.Tests;
 public sealed class TestExecutionAdapterTests
 {
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task ActualMappedTestsRunOnceWithoutAnyImplicitBuildOrRestore(bool passes)
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public async Task ActualMappedTestsRunOnceWithoutAnyImplicitBuildOrRestore(bool passes, bool opposingNoBuild)
     {
         using var fixture = TestDirectory.Create("crap4csharp-actual-once-tests");
         var dependency = fixture.Write("Dep/Dep.csproj", """
@@ -49,8 +50,8 @@ public sealed class TestExecutionAdapterTests
         // LoadGraph has no extra root-global argument: use an entry root with the mapped test dependency.
         var root = fixture.Write("Root/Root.csproj", """
             <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
-            <ItemGroup><ProjectReference Include="../Tests/Tests.csproj" AdditionalProperties="Configuration=Release;Flavor=left" /></ItemGroup></Project>
-            """);
+            <ItemGroup><ProjectReference Include="../Tests/Tests.csproj" AdditionalProperties="Configuration=Release;Flavor=leftOPPOSING" /></ItemGroup></Project>
+            """.Replace("OPPOSING", opposingNoBuild ? ";VSTestNoBuild=false" : "", StringComparison.Ordinal));
         fixture.Write("Root/Code.cs", "public class Root {}");
         request = request with { Target = root, Configuration = "Debug" };
         Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken)).ExitCode);
