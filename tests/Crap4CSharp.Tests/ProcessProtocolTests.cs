@@ -21,6 +21,23 @@ public sealed class ProcessProtocolTests
     }
 
     [Theory]
+    [InlineData(0)]
+    [InlineData(1048594)]
+    public async Task ConsumerInputPreservesBytesAndEofAfterBothOutputPipesFlood(int inputCount)
+    {
+        const int outputCount = 1048577;
+        byte[] input = Enumerable.Range(0, inputCount).Select(i => (byte)((i * 31) % 256)).ToArray();
+        var result = await ProcessRunner.RunProtocolAsync(Host,
+            [Helper, "duplex-protocol", outputCount.ToString()], AppContext.BaseDirectory,
+            TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken, outputCount + 128, input);
+        string receipt = "\nINPUT:" + inputCount + ":" +
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(input)).ToLowerInvariant() + "\n";
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(Enumerable.Repeat((byte)'D', outputCount).Concat(System.Text.Encoding.ASCII.GetBytes(receipt)), result.StandardOutput);
+        Assert.Equal(Enumerable.Repeat((byte)'D', outputCount), result.StandardError);
+    }
+
+    [Theory]
     [InlineData(4096, 4096)]
     [InlineData(4097, 4096)]
     public async Task CompleteProtocolReturnsBoundaryOrTypedLimitRefusalNeverTail(int count, int limit)

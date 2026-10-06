@@ -7,7 +7,7 @@ public static partial class ProcessRunner
     // Complete binary responses, not diagnostic tails. Overflow is a typed refusal.
     public static async Task<ProcessProtocolResult> RunProtocolAsync(string fileName, IEnumerable<string> arguments,
         string workingDirectory, TimeSpan timeout, CancellationToken cancellationToken,
-        int maximumBytesPerStream = 4194304)
+        int maximumBytesPerStream = 4194304, ReadOnlyMemory<byte>? standardInput = null)
     {
         if (maximumBytesPerStream is < 0 or > 16777216) throw new ArgumentOutOfRangeException(nameof(maximumBytesPerStream));
         byte[]? output = null;
