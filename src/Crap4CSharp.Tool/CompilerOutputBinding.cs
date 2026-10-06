@@ -38,6 +38,7 @@ internal static class CompilerOutputBinding
             // Inspector owns additional finite PE/PDB copies. File/closure limits do not
             // constitute an OS memory limit or hostile-filesystem atomicity guarantee.
             var inspected = ArtifactEvidenceInspector.InspectBuild(peBytes, pdbBytes);
+            ValidatePortableDebugIdentity(peBytes, pdbBytes);
             if (context.SourceKind != SourceCodeKind.Regular || inspected.ModuleIdentity != context.AssemblyName ||
                 !LanguageVersionFacts.TryParse(inspected.LanguageVersion, out var language) ||
                 language != context.ParseOptions.LanguageVersion ||
@@ -57,6 +58,17 @@ internal static class CompilerOutputBinding
         catch (ProjectContextException) { throw; }
         catch (Exception exception) when (exception is InvalidDataException or IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or BadImageFormatException)
         { throw Refuse(); }
+    }
+
+    private static void ValidatePortableDebugIdentity(ImmutableArray<byte> peBytes, ImmutableArray<byte> pdbBytes)
+    {
+        using var pe = new System.Reflection.PortableExecutable.PEReader(peBytes);
+        var entry = pe.ReadDebugDirectory().Single(e => e.Type == System.Reflection.PortableExecutable.DebugDirectoryEntryType.CodeView);
+        var codeView = pe.ReadCodeViewDebugDirectoryData(entry);
+        using var provider = System.Reflection.Metadata.MetadataReaderProvider.FromPortablePdbImage(pdbBytes);
+        var header = provider.GetMetadataReader().DebugMetadataHeader ?? throw Refuse();
+        var id = new System.Reflection.Metadata.BlobContentId(header.Id);
+        if (!entry.IsPortableCodeView || codeView.Age != 1 || codeView.Guid != id.Guid || entry.Stamp != id.Stamp) throw Refuse();
     }
 
     private static void Match(CompilerOutput output, ImmutableArray<byte> bytes)
