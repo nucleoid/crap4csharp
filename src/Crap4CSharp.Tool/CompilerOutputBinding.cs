@@ -10,6 +10,9 @@ internal static class CompilerOutputBinding
 {
     internal static void Validate(ProjectAnalysisContext context, CompilerObservation observation, CancellationToken token)
     {
+        token.ThrowIfCancellationRequested();
+        if (context.GeneratorOnlyTreeCount != 0)
+            throw new ProjectContextException("compiler.generatorBindingUnsupported", "Generator-only syntax trees require actual compiler binding that this adapter does not support.");
         CompilerInputBinding.Validate(context, observation, token);
         try
         {

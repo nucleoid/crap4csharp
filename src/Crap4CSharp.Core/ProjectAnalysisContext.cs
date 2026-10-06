@@ -70,6 +70,10 @@ public sealed record ProjectAnalysisContext(
     [JsonIgnore]
     public IReadOnlyList<ProjectSourceIdentity> CompilerDocuments { get; init; } = [];
 
+    // Private unsupported-binding marker; public inclusion does not waive compiler proof.
+    [JsonIgnore]
+    public int GeneratorOnlyTreeCount { get; init; }
+
     [JsonIgnore]
     public IReadOnlyList<ProjectPhaseInput> PhaseInputs { get; init; } = [];
 

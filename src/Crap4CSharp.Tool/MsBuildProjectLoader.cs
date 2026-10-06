@@ -254,11 +254,12 @@ internal static class MsBuildProjectLoader
             if (generated && !request.IncludeGenerated) exclusions.Add(new(identity.PhysicalPath, identity.LogicalPath, "generated.defaultExcluded", identity.ContentIdentity));
             else sources.Add(identity);
         }
-        if (request.IncludeGenerated)
+        var generatorOnlyTreeCount = 0;
         {
             if (project.AnalyzerReferences.Any(reference => reference is UnresolvedAnalyzerReference))
                 throw new ProjectContextException("context.generatedSourceUnavailable", "An analyzer or generator reference could not be resolved.");
             var analyzerLoadFailures = new List<string>();
+            var generators = new List<ISourceGenerator>();
             try
             {
                 foreach (var reference in project.AnalyzerReferences)
@@ -266,7 +267,7 @@ internal static class MsBuildProjectLoader
                     if (reference is AnalyzerFileReference fileReference)
                         fileReference.AnalyzerLoadFailed += (_, args) => analyzerLoadFailures.Add(args.Message);
                     _ = reference.GetAnalyzers(LanguageNames.CSharp);
-                    _ = reference.GetGenerators(LanguageNames.CSharp);
+                    generators.AddRange(reference.GetGenerators(LanguageNames.CSharp));
                 }
             }
             catch (Exception exception) when (exception is not ProjectContextException)
@@ -276,16 +277,50 @@ internal static class MsBuildProjectLoader
             if (analyzerLoadFailures.Count > 0)
                 throw new ProjectContextException("context.generatedSourceUnavailable", string.Join(Environment.NewLine, analyzerLoadFailures));
             var compilation = await project.GetCompilationAsync(cancellationToken)
-                ?? throw new ProjectContextException("context.generatedSourceUnavailable", "Compilation was unavailable while generated source inclusion was requested.");
+                ?? throw new ProjectContextException("context.generatedSourceUnavailable", "Compilation was unavailable while inspecting generator binding.");
             var generatorFailures = compilation.GetDiagnostics(cancellationToken).Where(diagnostic =>
                 diagnostic.Id is "CS8032" or "CS8034" or "CS8784" or "CS8785" && diagnostic.Severity != DiagnosticSeverity.Hidden).ToArray();
             if (generatorFailures.Length > 0)
                 throw new ProjectContextException("context.generatedSourceUnavailable", string.Join(Environment.NewLine, generatorFailures.Select(value => value.ToString())));
-            foreach (var tree in compilation.SyntaxTrees.Where(tree => string.IsNullOrWhiteSpace(tree.FilePath) || !documentPaths.Contains(Path.GetFullPath(tree.FilePath))))
+            var extraTrees = compilation.SyntaxTrees.Where(tree => string.IsNullOrWhiteSpace(tree.FilePath) ||
+                !documentPaths.Contains(Path.GetFullPath(tree.FilePath))).Take(32769).ToArray();
+            if (extraTrees.Length > 32768)
+                throw new ProjectContextException("context.generatedSourceLimit", "Generator tree inventory exceeds the supported limit.");
+            // Compilation.GetDiagnostics does NOT include generator-driver failures. Run a
+            // diagnostic driver over physical trees with the same options/additional inputs;
+            // do not silently treat a throwing generator as a successful zero-tree generator.
+            if (generators.Count > 0)
             {
-                var text = (await tree.GetTextAsync(cancellationToken)).ToString();
-                var path = string.IsNullOrWhiteSpace(tree.FilePath) ? $"<generated>/{ProjectAnalysisContext.ContentHash(text)}.cs" : Logical(root, tree.FilePath);
-                sources.Add(new ProjectSourceIdentity(path, path, ProjectAnalysisContext.ContentHash(text), true, !IsWithin(root, tree.FilePath)));
+                var additionalTexts = new List<AdditionalText>();
+                foreach (var document in project.AdditionalDocuments)
+                {
+                    if (document.FilePath is null)
+                        throw new ProjectContextException("context.generatedSourceUnavailable", "A generator additional input has no physical path.");
+                    additionalTexts.Add(new PreparedAdditionalText(document.FilePath, await document.GetTextAsync(cancellationToken)));
+                }
+                GeneratorDriver driver = CSharpGeneratorDriver.Create(generators, additionalTexts, parseOptions,
+                    project.AnalyzerOptions.AnalyzerConfigOptionsProvider);
+                var run = driver.RunGenerators(compilation.RemoveSyntaxTrees(extraTrees), cancellationToken).GetRunResult();
+                if (run.Results.Any(result => result.Exception is not null) ||
+                    run.Diagnostics.Any(d => d.Severity == DiagnosticSeverity.Error || d.Id is "CS8784" or "CS8785"))
+                    throw new ProjectContextException("context.generatedSourceUnavailable", "A source generator failed during binding inspection.");
+                if (run.GeneratedTrees.Length != extraTrees.Length)
+                    throw new ProjectContextException("context.generatedSourceUnavailable", "Workspace and diagnostic generator tree inventories disagree.");
+            }
+            generatorOnlyTreeCount = extraTrees.Length;
+            if (request.IncludeGenerated)
+            {
+                long generatedCharacters = 0;
+                foreach (var tree in extraTrees)
+                {
+                    var sourceText = await tree.GetTextAsync(cancellationToken);
+                    generatedCharacters += sourceText.Length;
+                    if (generatedCharacters > 16 * 1024 * 1024)
+                        throw new ProjectContextException("context.generatedSourceLimit", "Included generator text exceeds the private transport limit.");
+                    var text = sourceText.ToString();
+                    var path = string.IsNullOrWhiteSpace(tree.FilePath) ? $"<generated>/{ProjectAnalysisContext.ContentHash(text)}.cs" : Logical(root, tree.FilePath);
+                    sources.Add(new ProjectSourceIdentity(path, path, ProjectAnalysisContext.ContentHash(text), true, !IsWithin(root, tree.FilePath)));
+                }
             }
         }
         // Keep precise input roles separate from output protection and from public analysis exclusions.
@@ -314,6 +349,7 @@ internal static class MsBuildProjectLoader
             sources, new ProjectExclusionPolicy(request.IncludeTests, request.IncludeGenerated), adapter, exclusions) with
         {
             ResolvedProjectPath = Path.GetFullPath(projectPath),
+            GeneratorOnlyTreeCount = generatorOnlyTreeCount,
             CompilerDocuments = compilerDocuments.OrderBy(source => source.ResolvedPath, StringComparer.Ordinal).ToArray(),
             PhaseInputs = phaseInputs.Distinct().OrderBy(p => p.Path, StringComparer.Ordinal).ThenBy(p => p.Role, StringComparer.Ordinal).ToArray(),
             ReferencePaths = project.MetadataReferences.Select(r => r.Display)
@@ -333,6 +369,16 @@ internal static class MsBuildProjectLoader
                 .Concat(sources.Where(source => source.ResolvedPath is not null).Select(source => source.ResolvedPath!))
                 .Select(Path.GetFullPath).Distinct(PathComparer).Order(StringComparer.Ordinal).ToArray()
         };
+    }
+
+    private sealed class PreparedAdditionalText(string path, Microsoft.CodeAnalysis.Text.SourceText text) : AdditionalText
+    {
+        public override string Path => path;
+        public override Microsoft.CodeAnalysis.Text.SourceText GetText(CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return text;
+        }
     }
 
     private static MSBuildWorkspace CreateWorkspace(string configuration, string? platform, string? framework,
