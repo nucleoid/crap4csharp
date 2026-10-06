@@ -166,3 +166,13 @@ The sample under `samples/Fixture` provides an actual Coverlet collector integra
 ## License
 
 The independently authored code in this repository is licensed under the [MIT License](LICENSE). This license statement applies only to this repository's original work, not to the unlicensed behavioral reference described above.
+
+### Complete process-output capture limits
+
+The compatibility process runner captures at most 4,194,304 UTF-16 characters per
+stdout/stderr stream. Each stream is drained concurrently; oversized complete
+text is refused with `InvalidDataException` (stream, limit and observed count),
+never returned as a truncated successful protocol. Overflow is reported after
+EOF; a consumer that continues emitting remains subject to the operation deadline.
+This text route is not a byte-preserving binary-protocol adapter or a complete
+streaming-log API. Large check-command logging is a separate orchestration path.

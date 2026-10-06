@@ -14,6 +14,8 @@ public sealed class ProcessTimeoutException(string fileName, TimeSpan timeout)
 
 public static class ProcessRunner
 {
+    // Compatibility text capture returns complete output or a typed refusal, never a tail.
+    public const int MaximumCapturedCharactersPerStream = 4 * 1024 * 1024;
     public static async Task<ProcessResult> RunAsync(
         string fileName,
         IEnumerable<string> arguments,
@@ -73,8 +75,8 @@ public static class ProcessRunner
         foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
         cancellationToken.ThrowIfCancellationRequested();
         using var process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Could not start {fileName}.");
-        var output = process.StandardOutput.ReadToEndAsync();
-        var error = process.StandardError.ReadToEndAsync();
+        var output = ProcessTextCapture.ReadAsync(process.StandardOutput, "stdout");
+        var error = ProcessTextCapture.ReadAsync(process.StandardError, "stderr");
         using var timeoutSource = new CancellationTokenSource(timeout);
         using var linkedSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
 

@@ -65,7 +65,10 @@ public sealed class ProcessRunnerTests
         {
             // Existing unbounded implementation returns success with the complete flood.
             // No new production API is required to demonstrate this missing refusal.
-            await Assert.ThrowsAnyAsync<InvalidDataException>(() => operation);
+            var failure = await Assert.ThrowsAnyAsync<InvalidDataException>(() => operation);
+            Assert.Contains(failure.Data["stream"], new object[] { "stdout", "stderr" });
+            Assert.Equal(4194304, failure.Data["limitCharacters"]);
+            Assert.Equal((long)count, failure.Data["observedCharacters"]);
         }
         else
         {
@@ -183,6 +186,7 @@ public sealed class ProcessRunnerTests
             if (!identityMatches) throw new InvalidOperationException("PID identity changed; refusing unrelated cleanup.");
             return child;
         }
+        catch (IOException) when (child.HasExited) { return child; }
         catch { child.Dispose(); throw; }
     }
 }

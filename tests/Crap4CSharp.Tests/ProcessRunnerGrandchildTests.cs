@@ -117,6 +117,7 @@ public sealed class ProcessRunnerGrandchildTests
             if (!identityMatches) throw new InvalidOperationException("PID identity changed; refusing unrelated cleanup.");
             return child;
         }
+        catch (IOException) when (child.HasExited) { return child; }
         catch { child.Dispose(); throw; }
     }
 }
