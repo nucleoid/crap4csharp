@@ -54,6 +54,28 @@ public sealed class ProcessRunnerTests
         Assert.Equal(new string('E', count), result.StandardError);
     }
 
+    [Theory]
+    [InlineData(4194304, false)]
+    [InlineData(4194305, true)]
+    public async Task CompatibilityCaptureHasFinitePerStreamLimitAndNeverReturnsTruncatedSuccess(int count, bool exceedsLimit)
+    {
+        var operation = ProcessRunner.RunAsync(Host, [Helper, "flood", count.ToString()],
+            Path.GetTempPath(), TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+        if (exceedsLimit)
+        {
+            // Existing unbounded implementation returns success with the complete flood.
+            // No new production API is required to demonstrate this missing refusal.
+            await Assert.ThrowsAnyAsync<InvalidDataException>(() => operation);
+        }
+        else
+        {
+            var result = await operation;
+            Assert.Equal(0, result.ExitCode);
+            Assert.Equal(new string('O', count), result.StandardOutput);
+            Assert.Equal(new string('E', count), result.StandardError);
+        }
+    }
+
     [Fact]
     public async Task OwnershipPreservesArgumentBoundariesEnvironmentAndConsumerExitCode()
     {
