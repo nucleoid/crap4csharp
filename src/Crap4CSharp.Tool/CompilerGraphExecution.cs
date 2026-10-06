@@ -8,11 +8,26 @@ internal static class CompilerGraphExecution
     {
         token.ThrowIfCancellationRequested();
         var plan = ValidateAndFreeze(loaded); // Validate the ENTIRE plan before executing its first node.
+        // Copy membership before passing control to a consumer build callback. File identities
+        // still come from disk, never from the callback's self-asserted observation.
+        var bindings = loaded.GraphContexts.Select(b => b with
+        {
+            Context = b.Context with { PhaseInputs = b.Context.PhaseInputs.ToArray() }
+        }).ToArray();
+        var frozen = loaded with { GraphContexts = bindings, Contexts = bindings.Select(b => b.Context).ToArray() };
+        var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        if (bindings.Any(b => !b.Context.PhaseInputs.Any(p => p.Role == "project" && !p.ExpectedGenerated &&
+                comparer.Equals(p.Path, b.ProjectPath))))
+            throw new ProjectContextException("compiler.inputsMutated", "Every graph binding requires its immutable prepared project input.");
+        var snapshot = CompilerPhaseSnapshot.Capture(frozen, token); // Entire graph BEFORE first launch.
         var results = new List<CompilerObservation>();
         foreach (var node in plan)
         {
             token.ThrowIfCancellationRequested();
-            results.Add(await build(node, token));
+            snapshot.Validate(frozen, token);
+            var observed = await build(node, token); // Preserve the original build failure unchanged.
+            snapshot.Validate(frozen, token); // Stop dependents immediately on authored drift.
+            results.Add(observed);
         }
         return results;
     }
