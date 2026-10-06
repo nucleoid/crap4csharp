@@ -89,6 +89,8 @@ internal static class CompilerGraphExecution
             }
         }).ToArray();
         var frozen = loaded with { BuildGraph = plan, GraphContexts = bindings, Contexts = bindings.Select(b => b.Context).ToArray() };
+        var frozenRequest = request with { Frameworks = request.Frameworks.ToArray() };
+        var authoredSnapshot = CompilerPhaseSnapshot.Capture(frozen, token);
         var paths = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
         var byId = bindings.ToDictionary(b => b.GraphId, StringComparer.Ordinal);
         var closures = new Dictionary<string, string[]>(StringComparer.Ordinal);
@@ -164,13 +166,54 @@ internal static class CompilerGraphExecution
                 Parameters = [new CompilerParameter("References", finalReferences)]
             }, token);
         }
-        return result; // No public capability or reusable-recipe assertion is invented.
+        var retainedGraph = FreezeGraph(result.FinalGraph);
+        authoredSnapshot.Validate(retainedGraph, token);
+        var documentSnapshot = CompilerDocumentSnapshot.Capture(retainedGraph, token);
+        var proof = new CompilerRetainedProof(frozenRequest, retainedGraph, authoredSnapshot,
+            new Dictionary<string, CompilerReferenceSnapshot>(snapshots, StringComparer.Ordinal),
+            new Dictionary<string, string[]>(closures, StringComparer.Ordinal),
+            new Dictionary<string, CompilerObservation>(completed, StringComparer.Ordinal), documentSnapshot,
+            reload ?? ProjectContextLoader.LoadGraphAsync);
+        proof.ValidateCurrent(token);
+        return result with { FinalGraph = retainedGraph, RetainedProof = proof }; // Still private; no reusable-recipe assertion.
     }
 
     private static ProjectContextException ReferenceRefuse() => new("compiler.referencesUnproven",
         "Graph-produced references are not an authorized independently staged dependency closure.");
 
-    private static void ValidateFinalGraph(ProjectContextLoadResult before, ProjectContextLoadResult after)
+    private static ProjectContextLoadResult FreezeGraph(ProjectContextLoadResult graph)
+    {
+        var nodes = ValidateAndFreeze(graph);
+        var source = graph.GraphContexts.ToDictionary(binding => binding.GraphId, StringComparer.Ordinal);
+        var bindings = nodes.Select(node => source[node.Id] with
+        {
+            Context = source[node.Id].Context with
+            {
+                PreprocessorSymbols = Array.AsReadOnly(source[node.Id].Context.PreprocessorSymbols.ToArray()),
+                Imports = Array.AsReadOnly(source[node.Id].Context.Imports.ToArray()),
+                Sources = Array.AsReadOnly(source[node.Id].Context.Sources.ToArray()),
+                Exclusions = Array.AsReadOnly(source[node.Id].Context.Exclusions.ToArray()),
+                CompilerDocuments = Array.AsReadOnly(source[node.Id].Context.CompilerDocuments.ToArray()),
+                PhaseInputs = Array.AsReadOnly(source[node.Id].Context.PhaseInputs.ToArray()),
+                ReferencePaths = Array.AsReadOnly(source[node.Id].Context.ReferencePaths.ToArray()),
+                ProtectedPaths = Array.AsReadOnly(source[node.Id].Context.ProtectedPaths.ToArray()),
+                GeneratedTransitionPaths = Array.AsReadOnly(source[node.Id].Context.GeneratedTransitionPaths.ToArray())
+            }
+        }).ToArray();
+        return graph with
+        {
+            BuildGraph = nodes,
+            GraphContexts = Array.AsReadOnly(bindings),
+            Contexts = Array.AsReadOnly(bindings.Select(binding => binding.Context).ToArray()),
+            TestRunners = Array.AsReadOnly(graph.TestRunners.Select(runner => runner with { }).ToArray()),
+            Diagnostics = Array.AsReadOnly(graph.Diagnostics.ToArray()),
+            Metadata = Array.AsReadOnly(graph.Metadata.Select(metadata => metadata with
+            { Frameworks = Array.AsReadOnly(metadata.Frameworks.ToArray()) }).ToArray()),
+            ExcludedProjects = graph.ExcludedProjects is null ? null : Array.AsReadOnly(graph.ExcludedProjects.ToArray())
+        };
+    }
+
+    internal static void ValidateFinalGraph(ProjectContextLoadResult before, ProjectContextLoadResult after)
     {
         try { _ = ValidateAndFreeze(after); }
         catch (ProjectContextException)
@@ -302,4 +345,67 @@ internal static class CompilerGraphExecution
     private static ProjectContextException Refuse(string message) => new("compiler.graphInvalid", message);
 }
 
-internal sealed record CompilerGraphPhaseResult(ProjectContextLoadResult FinalGraph, IReadOnlyList<CompilerObservation> Observations);
+internal sealed record CompilerGraphPhaseResult(ProjectContextLoadResult FinalGraph, IReadOnlyList<CompilerObservation> Observations)
+{
+    internal CompilerRetainedProof? RetainedProof { get; init; }
+}
+
+internal sealed class CompilerRetainedProof
+{
+    private readonly ProjectContextLoadRequest request;
+    private readonly ProjectContextLoadResult graph;
+    private readonly CompilerPhaseSnapshot authored;
+    private readonly IReadOnlyDictionary<string, CompilerReferenceSnapshot> references;
+    private readonly IReadOnlyDictionary<string, string[]> closures;
+    private readonly IReadOnlyDictionary<string, CompilerObservation> observations;
+    private readonly CompilerDocumentSnapshot documents;
+    private readonly Func<ProjectContextLoadRequest, CancellationToken, Task<ProjectContextLoadResult>> reload;
+
+    internal CompilerRetainedProof(ProjectContextLoadRequest request, ProjectContextLoadResult graph,
+        CompilerPhaseSnapshot authored, IReadOnlyDictionary<string, CompilerReferenceSnapshot> references,
+        IReadOnlyDictionary<string, string[]> closures, IReadOnlyDictionary<string, CompilerObservation> observations,
+        CompilerDocumentSnapshot documents,
+        Func<ProjectContextLoadRequest, CancellationToken, Task<ProjectContextLoadResult>> reload)
+    {
+        this.request = request; this.graph = graph; this.authored = authored; this.references = references;
+        this.closures = closures; this.observations = observations; this.documents = documents; this.reload = reload;
+    }
+
+    internal void ValidateCurrent(CancellationToken token) => Validate(graph, token);
+
+    internal async Task ValidateFinalAsync(CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var current = await reload(request, token);
+        token.ThrowIfCancellationRequested();
+        CompilerGraphExecution.ValidateFinalGraph(graph, current);
+        Validate(current, token);
+    }
+
+    private void Validate(ProjectContextLoadResult current, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        authored.Validate(current, token);
+        documents.Validate(current, token);
+        var paths = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        foreach (var binding in current.GraphContexts)
+        {
+            token.ThrowIfCancellationRequested();
+            if (!observations.TryGetValue(binding.GraphId, out var observation) ||
+                !references.TryGetValue(binding.GraphId, out var referenceSnapshot) ||
+                !closures.TryGetValue(binding.GraphId, out var closure)) throw Refuse();
+            CompilerOutputBinding.Validate(binding.Context, observation, token);
+            CompilerReferenceOutputBinding.Validate(binding.Context, observation, token);
+            var rediscovered = new HashSet<string>(paths);
+            foreach (var reference in binding.Context.ReferencePaths)
+                if (string.IsNullOrWhiteSpace(reference) || !Path.IsPathFullyQualified(reference) ||
+                    reference != Path.GetFullPath(reference) || !rediscovered.Add(reference)) throw Refuse();
+            var actual = rediscovered.Concat(closure).Distinct(paths).ToArray();
+            referenceSnapshot.Validate(observation with
+            { Parameters = [new CompilerParameter("References", actual)] }, token);
+        }
+    }
+
+    private static ProjectContextException Refuse() => new("compiler.retainedProofInvalid",
+        "Retained compiler graph, source, document, output or reference evidence is incomplete.");
+}

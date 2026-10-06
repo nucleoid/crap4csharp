@@ -9,6 +9,20 @@ internal static class TestExecutionAdapter
 {
     internal static async Task<IReadOnlyList<TestInvocationObservation>> RunAsync(CheckExecutionPlan plan,
         string ownedDirectory, TimeSpan timeout, CancellationToken cancellationToken)
+        => await RunCoreAsync(plan, null, ownedDirectory, timeout, cancellationToken);
+
+    internal static async Task<IReadOnlyList<TestInvocationObservation>> RunVerifiedAsync(CheckExecutionPlan plan,
+        CompilerGraphPhaseResult bound, string ownedDirectory, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var proof = bound.RetainedProof ?? throw Refuse("Bound compiler execution did not retain phase evidence through tests.");
+        try { CompilerGraphExecution.ValidateFinalGraph(plan.PreparedGraph, bound.FinalGraph); }
+        catch (ProjectContextException) { throw Refuse("Bound compiler evidence belongs to a different immutable test plan."); }
+        proof.ValidateCurrent(cancellationToken);
+        return await RunCoreAsync(plan, proof, ownedDirectory, timeout, cancellationToken);
+    }
+
+    private static async Task<IReadOnlyList<TestInvocationObservation>> RunCoreAsync(CheckExecutionPlan plan,
+        CompilerRetainedProof? proof, string ownedDirectory, TimeSpan timeout, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (timeout <= TimeSpan.Zero || timeout == Timeout.InfiniteTimeSpan)
@@ -42,6 +56,7 @@ internal static class TestExecutionAdapter
         foreach (var launch in launches)
         {
             token.ThrowIfCancellationRequested();
+            proof?.ValidateCurrent(token);
             var entry = Path.Combine(directory, launch.Index.ToString("D4", System.Globalization.CultureInfo.InvariantCulture));
             // Caller ownership plus empty-root validation prevents ambient result reuse;
             // this is not an atomic hostile-filesystem publication guarantee.
@@ -56,8 +71,10 @@ internal static class TestExecutionAdapter
             // Preserve nonzero outcomes and complete owned logs. A later evidence gate
             // may inspect partial coverage; this adapter never converts failure to success.
             results.Add(new(launch.Node.Id, launch.Node.ProjectPath, resultDirectory, process));
+            proof?.ValidateCurrent(token);
         }
         token.ThrowIfCancellationRequested();
+        if (proof is not null) await proof.ValidateFinalAsync(token);
         return Array.AsReadOnly(results.ToArray());
     }
 

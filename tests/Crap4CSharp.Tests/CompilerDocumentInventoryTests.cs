@@ -61,6 +61,20 @@ public sealed class CompilerDocumentInventoryTests
         var final = await ProjectContextLoader.LoadGraphAsync(request, TestContext.Current.CancellationToken);
         Assert.True(final.Success, final.FailureReason + ": " + string.Join(" | ", final.Diagnostics));
         Assert.Equal(documents, Assert.Single(final.GraphContexts).Context.CompilerDocuments);
+        var retained = CompilerDocumentSnapshot.Capture(final, TestContext.Current.CancellationToken);
+        var retainedPath = Assert.Single(final.GraphContexts).Context.CompilerDocuments
+            .First(document => document.ResolvedPath is not null).ResolvedPath!;
+        var retainedBytes = File.ReadAllBytes(retainedPath);
+        var retainedTime = File.GetLastWriteTimeUtc(retainedPath);
+        var changedBytes = retainedBytes.ToArray();
+        changedBytes[^1] ^= 1;
+        File.WriteAllBytes(retainedPath, changedBytes);
+        File.SetLastWriteTimeUtc(retainedPath, retainedTime);
+        Assert.Equal("compiler.documentsMutated", Assert.Throws<ProjectContextException>(() =>
+            retained.Validate(final, TestContext.Current.CancellationToken)).Reason);
+        File.WriteAllBytes(retainedPath, retainedBytes);
+        File.SetLastWriteTimeUtc(retainedPath, retainedTime);
+        retained.Validate(final, TestContext.Current.CancellationToken);
         foreach (var (path, saved) in original)
         {
             Assert.Equal(saved.Bytes, File.ReadAllBytes(path));
