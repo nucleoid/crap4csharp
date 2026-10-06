@@ -132,6 +132,39 @@ public sealed class CompilerPhaseSnapshotTests
         Assert.Throws<OperationCanceledException>(() => CompilerPhaseSnapshot.Capture(Loaded(path, "source"), cancelled.Token));
     }
 
+    [Fact]
+    public void MissingProbeCannotAuthorizeMissingRequiredSourceAtSamePath()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-phase-probe-alias");
+        var path = Path.Combine(fixture.Path, "missing");
+        var loaded = Loaded(path, "analyzerConfigProbe");
+        var context = loaded.GraphContexts[0].Context with { PhaseInputs = [new(path, "analyzerConfigProbe", false), new(path, "source", false)] };
+        loaded = loaded with { GraphContexts = [loaded.GraphContexts[0] with { Context = context }], Contexts = [context] };
+        Assert.Equal("compiler.inputsMutated", Assert.Throws<ProjectContextException>(() => CompilerPhaseSnapshot.Capture(loaded, TestContext.Current.CancellationToken)).Reason);
+    }
+
+    [Fact]
+    public void ContradictoryGeneratedClassificationRefuses()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-phase-generated-conflict");
+        var path = fixture.Write("input", "same");
+        var loaded = Loaded(path, "source");
+        var context = loaded.GraphContexts[0].Context with { PhaseInputs = [new(path, "source", false), new(path, "source", true)] };
+        loaded = loaded with { GraphContexts = [loaded.GraphContexts[0] with { Context = context }], Contexts = [context] };
+        Assert.Equal("compiler.inputsMutated", Assert.Throws<ProjectContextException>(() => CompilerPhaseSnapshot.Capture(loaded, TestContext.Current.CancellationToken)).Reason);
+    }
+
+    [Fact]
+    public void MissingProbeCannotTraverseSymlinkAncestor()
+    {
+        if (!OperatingSystem.IsLinux()) return; // Actual symlink execution is Linux-only; Windows runtime remains CI-owned.
+        using var fixture = TestDirectory.Create("crap4csharp-phase-probe-link");
+        Directory.CreateDirectory(Path.Combine(fixture.Path, "actual"));
+        Directory.CreateSymbolicLink(Path.Combine(fixture.Path, "link"), Path.Combine(fixture.Path, "actual"));
+        var path = Path.Combine(fixture.Path, "link", "missing.globalconfig");
+        Assert.Equal("compiler.inputsMutated", Assert.Throws<ProjectContextException>(() => CompilerPhaseSnapshot.Capture(Loaded(path, "analyzerConfigProbe"), TestContext.Current.CancellationToken)).Reason);
+    }
+
     private static ProjectContextLoadResult Loaded(string path, string role)
     {
         var context = ProjectAnalysisContext.Create("App.csproj", "App", "net10.0", "Release", "AnyCPU", LanguageVersion.CSharp14,
