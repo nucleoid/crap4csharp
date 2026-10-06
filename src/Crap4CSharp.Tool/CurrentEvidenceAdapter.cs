@@ -5,6 +5,15 @@ internal static class CurrentEvidenceAdapter
 {
     public const string SupportedRecipeProvider = "sdk-project-context-output-v1";
 
+    internal static void ValidateSupportedRecipes(RunManifest manifest)
+    {
+        if (manifest.Contexts.Count == 0 || manifest.Contexts.Any(context =>
+            !context.ReuseRecipeComplete || context.CurrentRevalidation is null ||
+            context.CurrentRevalidation.Provider != SupportedRecipeProvider))
+            throw new PolicyException("provenance.revalidationRecipeUnsupported",
+                "Current evidence reuse requires a complete supported current-revalidation recipe for every context. Capture new evidence; historical bundles remain available for offline analyze.");
+    }
+
     public static CurrentEvidence Capture(RunManifest manifest, string workspaceRoot,
         Func<string, IReadOnlyList<string>, string>? gitExecutor = null, TimeSpan? gitTimeout = null)
     {
@@ -50,7 +59,8 @@ internal static class CurrentEvidenceAdapter
     public static async Task<CurrentEvidence> CaptureSupportedAsync(RunManifest manifest, string workspaceRoot,
         TimeSpan timeout, CancellationToken cancellationToken)
     {
-        var basic = Capture(manifest, workspaceRoot);
+        ValidateSupportedRecipes(manifest);
+        var basic = Capture(manifest, workspaceRoot, gitTimeout: timeout);
         var root = Path.GetFullPath(workspaceRoot);
         var hashes = new Dictionary<string, string>(StringComparer.Ordinal);
         var verifiedInputs = new Dictionary<string, CurrentInputEvidence>(StringComparer.Ordinal);
@@ -64,9 +74,8 @@ internal static class CurrentEvidenceAdapter
         }
         foreach (var expected in manifest.Contexts.OrderBy(item => item.Id, StringComparer.Ordinal))
         {
-            var recipe = expected.CurrentRevalidation;
-            if (!expected.ReuseRecipeComplete || recipe is null || recipe.Provider != SupportedRecipeProvider)
-                return basic;
+            // Shared preflight has validated every context before any Git/project work.
+            var recipe = expected.CurrentRevalidation!;
             if (!string.Equals(NormalizeRecipePath(recipe.Project), NormalizeRecipePath(expected.Project),
                     StringComparison.Ordinal))
                 throw new InvalidDataException("Current revalidation recipe project differs from its declared production project.");

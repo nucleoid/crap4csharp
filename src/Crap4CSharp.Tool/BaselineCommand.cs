@@ -31,6 +31,7 @@ internal static class BaselineCommand
                 StringComparer.Ordinal);
             var compatibilityHash = TrustedPolicyLoader.BoundCompatibilityHash(parsedPolicy, exemptionBytes);
             var bundle = ArtifactBundle.Load(options.Manifest, root);
+            CurrentEvidenceAdapter.ValidateSupportedRecipes(bundle.Manifest);
             PolicyCheckCommand.ValidateGeneratedInventory(bundle.Manifest);
             bundle.RejectOutputAlias(options.Output, root);
             var outputPath = Path.GetFullPath(options.Output, root);

@@ -75,6 +75,11 @@ against the captured tested build. New imports/sources/generated inputs, authore
 success, or a bare self-asserted `reuseRecipeComplete` flag fail closed. A successful current check may still be
 non-reusable for future replay; reusable and currently verified are separate capabilities.
 
+`check --reuse-artifacts` and `baseline create|update` refuse missing, historical, unknown-provider,
+or incomplete current-revalidation recipes with `provenance.revalidationRecipeUnsupported` before
+Git acquisition or project loading. Such bundles can still be inspected with offline `analyze`;
+recapture supported current evidence instead of upgrading a saved completeness flag.
+
 The current provider supports source-only compiler closures. A captured metadata-reference closure fails closed
 until a provider can independently bind those bytes to the references resolved by the current project loader;
 producer-supplied reference paths are not accepted as proof. Current source-only revalidation does not independently

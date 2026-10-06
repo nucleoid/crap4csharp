@@ -9,6 +9,7 @@ internal static class PolicyCheckCommand
     {
         var root = Path.GetFullPath(workingDirectory);
         var bundle = ArtifactBundle.Load(manifestPath, root);
+        CurrentEvidenceAdapter.ValidateSupportedRecipes(bundle.Manifest);
         if (outputPath is not null) bundle.RejectOutputAlias(outputPath, root);
         ValidateTrustedRevision(bundle.Manifest);
         var trusted = TrustedPolicyLoader.LoadFromBase(baseRef, policyPath, repositoryRoot: root);
