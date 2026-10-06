@@ -104,7 +104,7 @@ internal static class PolicyCheckCommand
     internal static void ValidateScopeRevision(string scope, string trustedRevision, ManifestRevision captured,
         ScopeRevision resolved)
     {
-        if (captured.ScopeHead != resolved.CurrentHead || scope == "base" && captured.Base != resolved.MergeBase)
+        if (captured.ScopeHead != resolved.CurrentHead || scope == "base" && (captured.Base != resolved.MergeBase || trustedRevision != resolved.MergeBase))
             throw new PolicyException("provenance.scopeRevisionMismatch",
                 "Captured scope revision differs from the independently resolved Git scope.");
     }

@@ -120,3 +120,5 @@ Check output refuses an existing destination unless it is a prior result documen
 an existing valid candidate plus `--overwrite`. Explicit source, project, import, artifact and policy input aliases
 remain forbidden even when their bytes resemble a result/candidate. This refusal also runs before loader failures,
 so an unsuccessful command cannot replace a consumer input with diagnostics.
+
+Candidate `sourceIdentity` hashes repository-relative source paths/content and project/TFM/configuration/platform. It does not depend on an absolute checkout root or diagnostic capture context IDs; the separate recorded revision and evidence hashes still describe the originating capture. Base-scope enforcement also requires the independently resolved scope merge-base to equal the immutable revision used for trusted policy acquisition.
