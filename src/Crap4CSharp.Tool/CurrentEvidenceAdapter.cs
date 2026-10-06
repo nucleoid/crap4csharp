@@ -34,7 +34,7 @@ internal static class CurrentEvidenceAdapter
                      .Where(input => !input.Generated && input.Role != "reference")
                      .Select(input => (Input: input, RepositoryPath:
                          CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input))))
-                 .GroupBy(value => value.Input.Role + "\n" + value.Input.LogicalPath, StringComparer.Ordinal)
+                 .GroupBy(value => value.Input.Role + "\n" + value.RepositoryPath, StringComparer.Ordinal)
                  .Select(group => group.First()).OrderBy(value => value.Input.LogicalPath, StringComparer.Ordinal))
         {
             var input = value.Input;
@@ -42,11 +42,12 @@ internal static class CurrentEvidenceAdapter
             var path = ResolveRegularFile(root, value.RepositoryPath);
             if (path is null)
             {
-                inputs.Add(new(input.Role, input.LogicalPath, -1, "missing"));
+                inputs.Add(new(input.Role, input.LogicalPath, -1, "missing") { RepositoryPath = input.RepositoryPath });
                 continue;
             }
             var bytes = ArtifactBundle.ReadBounded(path, ArtifactBundle.MaxArtifactBytes, null, logical);
-            inputs.Add(new(input.Role, input.LogicalPath, bytes.Length, CanonicalIdentity.Sha256(bytes)));
+            inputs.Add(new(input.Role, input.LogicalPath, bytes.Length, CanonicalIdentity.Sha256(bytes))
+                { RepositoryPath = input.RepositoryPath });
         }
 
         // v1 manifests do not yet carry a complete executable membership recipe. Re-reading the saved list
@@ -118,9 +119,9 @@ internal static class CurrentEvidenceAdapter
             {
                 var declaration = expected.Inputs.Single(input => input.Role == "source" && !input.Generated &&
                     input.LogicalPath == source.LogicalPath);
-                verifiedInputs[declaration.Role + "\n" + declaration.LogicalPath] =
+                verifiedInputs[declaration.Role + "\n" + declaration.RepositoryPath] =
                     new CurrentInputEvidence(declaration.Role, declaration.LogicalPath,
-                        declaration.Length, source.ContentIdentity);
+                        declaration.Length, source.ContentIdentity) { RepositoryPath = declaration.RepositoryPath };
             }
             var expectedReferences = expected.Inputs.Where(input => input.Role == "reference" && !input.Generated)
                 .OrderBy(input => input.LogicalPath, StringComparer.Ordinal).ToArray();
@@ -152,7 +153,7 @@ internal static class CurrentEvidenceAdapter
             hashes.Add(expected.Id, expected.ContextHash);
         }
         foreach (var input in basic.Inputs.Where(input => input.Role is not ("source" or "reference")))
-            verifiedInputs[input.Role + "\n" + input.LogicalPath] = input;
+            verifiedInputs[input.Role + "\n" + (input.RepositoryPath ?? input.LogicalPath)] = input;
         return basic with { Inputs = verifiedInputs.Values.OrderBy(input => input.LogicalPath, StringComparer.Ordinal).ToArray(),
             ContextHashes = hashes, MembershipRecipeRevalidated = true,
             ProtectedPaths = protectedPaths.Order(StringComparer.Ordinal).ToArray() };

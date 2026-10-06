@@ -98,7 +98,10 @@ public sealed record ManifestArtifact(string Id, string Kind, string Locator, lo
 public sealed record ManifestEvaluationInputs(string ScopeHash, string PolicyHash, string? BaselineHash,
     string? ExemptionsHash);
 
-public sealed record CurrentInputEvidence(string Role, string LogicalPath, long Length, string Sha256);
+public sealed record CurrentInputEvidence(string Role, string LogicalPath, long Length, string Sha256)
+{
+    public string? RepositoryPath { get; init; }
+}
 internal sealed record CurrentEvidence(string RepositoryIdentity, string WorkspaceIdentity, string? Head,
     IReadOnlyList<CurrentInputEvidence> Inputs, IReadOnlyDictionary<string, string> ContextHashes,
     bool MembershipRecipeRevalidated = false, string? StateHash = null)
@@ -541,8 +544,8 @@ public static class ProvenanceVerifier
         try { return CanonicalIdentity.NormalizeLogicalPath(locator) == locator.Replace('\\', '/'); }
         catch (ArgumentException) { return false; }
     }
-    private static string InputKey(ManifestInput input) => input.Role + "\n" + input.LogicalPath;
-    private static string InputKey(CurrentInputEvidence input) => input.Role + "\n" + input.LogicalPath;
+    private static string InputKey(ManifestInput input) => input.Role + "\n" + (input.RepositoryPath ?? input.LogicalPath);
+    private static string InputKey(CurrentInputEvidence input) => input.Role + "\n" + (input.RepositoryPath ?? input.LogicalPath);
     private static bool IsCurrentWorkspaceInput(ManifestInput input) => !input.Generated;
     private static IReadOnlyDictionary<string, string>? ResolveDocuments(
         IReadOnlyDictionary<string, string> documents, IReadOnlyList<string> logicalPaths,
