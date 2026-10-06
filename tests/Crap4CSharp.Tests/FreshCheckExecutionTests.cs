@@ -9,7 +9,16 @@ public sealed class FreshCheckExecutionTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task ColdPublicFreshCheckRestoresBuildsAndTestsOnceAndRetainsBoundArtifacts(bool failing)
+    public Task ColdPublicFreshCheckRestoresBuildsAndTestsOnceAndRetainsBoundArtifacts(bool failing)
+        => RunCase(failing, false);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task ColdExecutionCoordinatorPreservesActualOnceBuildsAndRawFailedTests(bool failing)
+        => RunCase(failing, true);
+
+    private static async Task RunCase(bool failing, bool coordinatorOnly)
     {
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
         const string counter = """
@@ -42,6 +51,30 @@ public sealed class FreshCheckExecutionTests
             !p.Contains(Path.DirectorySeparatorChar + ".git" + Path.DirectorySeparatorChar, StringComparison.Ordinal))
             .ToDictionary(p => p, File.ReadAllBytes);
         Assert.Empty(Directory.GetDirectories(fixture.Path, "obj", SearchOption.AllDirectories));
+        if (coordinatorOnly)
+        {
+            var request = new FreshCheckRequest("Tests/Tests.csproj", "policy.json", "HEAD", null, null, "worktree", "method",
+                null, "bundle", false, false, null, new PolicyOverrides(), TimeSpan.FromMinutes(3));
+            var preflight = await FreshCheckPreflightLoader.LoadAsync(request, fixture.Path, token);
+            var evidence = await FreshCheckExecution.RunAsync(preflight, token);
+            Assert.Equal(2, evidence.Compiler.Observations.Count);
+            Assert.Single(evidence.Tests); Assert.Single(evidence.Tests.Outcomes);
+            if (failing)
+            {
+                Assert.NotEqual(0, evidence.Tests[0].Process.ExitCode);
+                Assert.Null(evidence.Coverage); Assert.Empty(evidence.SafeChildren);
+            }
+            else
+            {
+                Assert.Equal(0, evidence.Tests[0].Process.ExitCode); Assert.Null(evidence.Tests.Failure);
+                Assert.NotNull(evidence.Coverage); Assert.Single(evidence.SafeChildren);
+            }
+            Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));
+            Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library", "build-count.txt")));
+            Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "build-count.txt")));
+            foreach (var (path, bytes) in original) Assert.Equal(bytes, File.ReadAllBytes(path));
+            return;
+        }
         var output = new StringWriter(); var errors = new StringWriter();
         var exit = await global::App.RunAsync(["check", "--project", "Tests/Tests.csproj", "--policy", "policy.json", "--base", "HEAD",
             "--artifact-output", "bundle", "--format", "json", "--timeout-seconds", "180"], fixture.Path, output, errors, token);
