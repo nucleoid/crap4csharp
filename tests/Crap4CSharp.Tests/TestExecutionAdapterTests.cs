@@ -29,6 +29,9 @@ public sealed class TestExecutionAdapterTests
             <ProjectReference Include="../Dep/Dep.csproj" AdditionalProperties="Configuration=Debug" /></ItemGroup>
             <Target Name="Count" BeforeTargets="CoreCompile" Condition="'$(DesignTimeBuild)' != 'true'">
             <WriteLinesToFile File="$(MSBuildProjectDirectory)/build-count.txt" Lines="build" Overwrite="false" /></Target>
+            <Target Name="ValidateMappedTestLaunch" BeforeTargets="VSTest">
+            <Error Condition="'$(Flavor)' != 'left' Or '$(Configuration)' != 'Release' Or '$(TargetFramework)' != 'net10.0'" Text="Mapped test selectors lost" />
+            <WriteLinesToFile File="$(MSBuildProjectDirectory)/launch-count.txt" Lines="test" Overwrite="false" /></Target>
             </Project>
             """);
         var source = fixture.Write("Tests/Tests.cs", """
@@ -92,10 +95,95 @@ public sealed class TestExecutionAdapterTests
         Assert.True(File.Exists(process.StandardError.Path));
         Assert.Single(File.ReadAllLines(System.IO.Path.Combine(fixture.Path, "Tests/bin/Release/net10.0/test-count.txt")));
         Assert.Single(File.ReadAllLines(System.IO.Path.Combine(fixture.Path, "Tests/build-count.txt")));
+        Assert.Single(File.ReadAllLines(System.IO.Path.Combine(fixture.Path, "Tests/launch-count.txt")));
         Assert.Single(File.ReadAllLines(System.IO.Path.Combine(fixture.Path, "Dep/build-count.txt")));
         Assert.Equal(restores.Bytes, File.ReadAllBytes(assetsPath));
         Assert.Equal(restores.Time, File.GetLastWriteTimeUtc(assetsPath));
         foreach (var (path, saved) in authored) { Assert.Equal(saved.Bytes, File.ReadAllBytes(path)); Assert.Equal(saved.Time, File.GetLastWriteTimeUtc(path)); }
         foreach (var (path, bytes) in outputs) Assert.Equal(bytes, File.ReadAllBytes(path));
     }
+    [Fact]
+    public void ActualTestArgumentsPreserveMappedSelectorsAndEscapeMSBuildDelimiters()
+    {
+        var properties = new Dictionary<string,string> { ["Flavor"] = "left;other=value,%$@'()*?", ["Platform"] = "AnyCPU" };
+        var node = new ProjectBuildGraphNode("test", Path.GetFullPath("Tests.csproj"), "Release", "AnyCPU", "net10.0", properties, []);
+        var arguments = TestExecutionAdapter.CreateArguments(node);
+        Assert.Equal(new[] { "test", node.ProjectPath, "--no-build", "--no-restore", "-m:1", "-nr:false" }, arguments.Take(6));
+        Assert.Contains("-p:Flavor=left%3Bother=value%2C%25%24%40%27%28%29%2A%3F", arguments);
+        Assert.Contains("-p:Configuration=Release", arguments);
+        Assert.Contains("-p:TargetFramework=net10.0", arguments);
+        Assert.Contains("-p:BuildProjectReferences=false", arguments);
+        Assert.True(Assert.IsAssignableFrom<IList<string>>(arguments).IsReadOnly);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("bad-name")]
+    [InlineData("bad;Another")]
+    [InlineData("bad=name")]
+    public void InvalidPropertyNamesRefuseBeforeTransport(string name)
+    {
+        var error = Assert.Throws<ProjectContextException>(() => MappedGlobalArguments.Create(new Dictionary<string,string> { [name] = "x" }));
+        Assert.Equal("compiler.globalPropertyInvalid", error.Reason);
+    }
+
+    [Fact]
+    public void DuplicateCaseInsensitivePropertiesAndNulRefuseBeforeTransport()
+    {
+        Assert.Throws<ProjectContextException>(() => MappedGlobalArguments.Create(new Dictionary<string,string>
+            { ["Flavor"] = "left", ["flavor"] = "right" }));
+        Assert.Throws<ProjectContextException>(() => MappedGlobalArguments.Create(new Dictionary<string,string>
+            { ["Flavor"] = "left\0right" }));
+    }
+
+    [Fact]
+    public async Task PrecancelledAdapterCannotValidateOrCreateResults()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-test-adapter-cancel");
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cancellation.Cancel();
+        await Assert.ThrowsAsync<OperationCanceledException>(() => TestExecutionAdapter.RunAsync(null!, fixture.Path, TimeSpan.FromSeconds(10), cancellation.Token));
+        Assert.Empty(Directory.GetFileSystemEntries(fixture.Path));
+    }
+
+    // Structural prelaunch controls; no fake Csc observation or successful SDK/test claim.
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("nonempty")]
+    [InlineData("intermediate")]
+    [InlineData("target")]
+    [InlineData("input")]
+    public async Task UnsafeResultsRootRefusesBeforeAnySdkOrTestLaunch(string defect)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-test-adapter-destination");
+        var directory = Path.Combine(fixture.Path, defect is "intermediate" ? "obj" : defect is "target" ? "bin" : "results");
+        if (defect != "missing") Directory.CreateDirectory(directory);
+        if (defect == "nonempty") File.WriteAllText(Path.Combine(directory, "owned-by-user.txt"), "preserve");
+        var project = Path.Combine(fixture.Path, "Project.csproj");
+        var context = ProjectAnalysisContext.Create(project, "Project", "net10.0", "Release", "AnyCPU",
+            Microsoft.CodeAnalysis.CSharp.LanguageVersion.Latest, [], Microsoft.CodeAnalysis.SourceCodeKind.Regular,
+            [], [], new(false, false), new("sdk", "msbuild", "roslyn")) with
+        {
+            ResolvedProjectPath = project,
+            EvaluatedTargetPath = Path.Combine(fixture.Path, "bin", "Project.dll"),
+            EvaluatedIntermediateDirectory = Path.Combine(fixture.Path, "obj"),
+            EvaluatedReferenceAssemblyPath = Path.Combine(fixture.Path, "obj", "ref", "Project.dll"),
+            PhaseInputs = new[] { new ProjectPhaseInput(project, "project", false),
+                new ProjectPhaseInput(defect == "input" ? Path.Combine(directory, "immutable.cs") : Path.Combine(fixture.Path, "Code.cs"), "source", false) }
+        };
+        var node = new ProjectBuildGraphNode("test", project, "Release", "AnyCPU", "net10.0", new Dictionary<string,string>(), []);
+        var runner = new ProjectTestRunnerMetadata("test", project, "Release", "AnyCPU", "net10.0", "VSTest", "18.0.1", "6.0.4");
+        var graph = new ProjectContextLoadResult(true, new[] { context }, [])
+        { BuildGraph = new[] { node }, GraphContexts = new[] { new ProjectGraphContextBinding("test", project, context, true) }, TestRunners = new[] { runner } };
+        var plan = CheckExecutionPlan.Create(graph, graph, TestContext.Current.CancellationToken);
+        var before = Directory.GetFiles(fixture.Path, "*", SearchOption.AllDirectories).ToDictionary(p => p,
+            p => (Bytes: File.ReadAllBytes(p), Time: File.GetLastWriteTimeUtc(p)));
+        var membership = Directory.GetFileSystemEntries(fixture.Path, "*", SearchOption.AllDirectories).Order().ToArray();
+        var error = await Assert.ThrowsAsync<ProjectContextException>(() => TestExecutionAdapter.RunAsync(plan, directory,
+            TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
+        Assert.Equal("test.planInvalid", error.Reason);
+        Assert.Equal(membership, Directory.GetFileSystemEntries(fixture.Path, "*", SearchOption.AllDirectories).Order());
+        foreach (var (path, saved) in before) { Assert.Equal(saved.Bytes, File.ReadAllBytes(path)); Assert.Equal(saved.Time, File.GetLastWriteTimeUtc(path)); }
+    }
+
 }

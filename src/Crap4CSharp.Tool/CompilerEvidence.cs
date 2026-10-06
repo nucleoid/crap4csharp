@@ -34,12 +34,7 @@ internal static class CompilerEvidence
             throw new ProjectContextException("compiler.outputPathUnsupported", "Compiler log path contains a logger delimiter.");
         var sdk = await ProjectContextLoader.ResolveSdkAsync(Path.GetDirectoryName(node.ProjectPath)!, timeout, token);
         var arguments = new List<string> { "build", node.ProjectPath, "--no-restore", "--no-incremental", "-m:1", "-nr:false" };
-        foreach (var (key, value) in node.GlobalProperties.OrderBy(p => p.Key, StringComparer.OrdinalIgnoreCase))
-        {
-            if (key.Length == 0 || key.Any(c => !(char.IsAsciiLetterOrDigit(c) || c == '_')))
-                throw new ProjectContextException("compiler.globalPropertyInvalid", "A mapped global property name cannot be transported.");
-            arguments.Add($"-p:{key}={Escape(value)}");
-        }
+        arguments.AddRange(MappedGlobalArguments.Create(node.GlobalProperties));
         arguments.Add("-p:BuildProjectReferences=false");
         arguments.Add("-p:UseSharedCompilation=false");
         arguments.Add("-bl:" + log + ";ProjectImports=None");
@@ -127,10 +122,4 @@ internal static class CompilerEvidence
         { throw new ProjectContextException("compiler.outputMissing", "An actual compiler output could not be captured."); }
     }
 
-    private static string Escape(string value)
-    {
-        foreach (var character in new[] { '%', ';', ',', '$', '@', '\'', '(', ')', '*', '?' })
-            value = value.Replace(character.ToString(), "%" + ((int)character).ToString("X2"), StringComparison.Ordinal);
-        return value;
-    }
 }
