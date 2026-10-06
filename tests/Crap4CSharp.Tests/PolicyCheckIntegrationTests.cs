@@ -181,6 +181,59 @@ public sealed class PolicyCheckIntegrationTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BaselineDuplicateBuildOrMissingGitReturnsStructuredFailure(bool missingGit)
+    {
+        var repository = RepositoryRoot();
+        const string projectLogical = "tests/Crap4CSharp.ProvenanceFixture/Crap4CSharp.ProvenanceFixture.csproj";
+        using var directory = TestDirectory.Create("crap4csharp-baseline-process-failure");
+        var (locator, manifest, _, _, bytes) = await CreateBundle(repository, projectLogical,
+            PolicyLogical, typeof(Crap4CSharp.ProvenanceFixture.CompiledEvidence).Assembly.Location,
+            Path.Combine(directory.Path, "bundle"));
+        if (!missingGit)
+        {
+            // Deliberately malformed externally supplied bundle. The honest publisher
+            // rejects this, so seal its manifest directly without weakening publication.
+            var invalid = ManifestIdentity.Seal(manifest with
+                { Builds = [.. manifest.Builds, manifest.Builds[0] with { Id = "duplicate-build" }], ManifestHash = null });
+            await File.WriteAllTextAsync(locator, JsonSerializer.Serialize(invalid,
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+                TestContext.Current.CancellationToken);
+        }
+        var candidate = Path.Combine(directory.Path, "candidate.json");
+        string document;
+        int exit;
+        if (missingGit)
+        {
+            // Change only the child environment: never mutate the test runner's PATH.
+            var tool = typeof(global::App).Assembly.Location;
+            var host = Path.Combine(System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory(),
+                "..", "..", "..", OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet");
+            var process = await ProcessRunner.RunWithEnvironmentAsync(Path.GetFullPath(host),
+                [tool, "baseline", "create", "--policy", PolicyLogical, "--reuse-artifacts", locator,
+                    "--output", candidate, "--format", "json"], repository, TimeSpan.FromMinutes(2),
+                TestContext.Current.CancellationToken, new Dictionary<string, string> { ["PATH"] = directory.Path });
+            exit = process.ExitCode;
+            document = process.StandardOutput;
+        }
+        else
+        {
+            var output = new StringWriter();
+            exit = await global::App.RunAsync(["baseline", "create", "--policy", PolicyLogical,
+                "--reuse-artifacts", locator, "--output", candidate, "--format", "json"], repository,
+                output, TextWriter.Null, TestContext.Current.CancellationToken);
+            document = output.ToString();
+        }
+        Assert.Equal(1, exit);
+        using var result = JsonDocument.Parse(document);
+        Assert.Equal("baseline-command-result-v1", result.RootElement.GetProperty("schemaVersion").GetString());
+        Assert.Equal("operationalError", result.RootElement.GetProperty("status").GetString());
+        Assert.Equal("baseline.generationFailed", result.RootElement.GetProperty("reason").GetString());
+        Assert.False(File.Exists(candidate));
+    }
+
+    [Theory]
     [InlineData("App.csproj")]
     [InlineData("Directory.Build.props")]
     [InlineData("Shared/Util.cs")]
@@ -404,9 +457,10 @@ public sealed class PolicyCheckIntegrationTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task CommittedTrustedExemptionsSurviveEditingAnotherSourceInTheSameProject(bool duplicateAnonymous)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task CommittedTrustedExemptionsSurviveEditingAnotherSourceInTheSameProject(bool duplicateAnonymous, bool nestedFamily)
     {
         using var fixture = TestDirectory.Create("crap4csharp-committed-exemption-context");
         const string projectLogical = "App/App.csproj";
@@ -422,6 +476,9 @@ public sealed class PolicyCheckIntegrationTests
                 .Replace("return value;", "", StringComparison.Ordinal)
             : original.Replace("public int M()", "public async System.Threading.Tasks.Task<int> M()", StringComparison.Ordinal)
                 .Replace("var value = 1;", "var value = await System.Threading.Tasks.Task.FromResult(1);", StringComparison.Ordinal);
+        if (nestedFamily)
+            code = original.Replace("var value = 1;", "var value = ((System.Func<System.Threading.Tasks.Task<int>>)(async () =>" + newline +
+                "            await System.Threading.Tasks.Task.FromResult(1)))().GetAwaiter().GetResult();", StringComparison.Ordinal);
         fixture.Write("App/CompiledEvidence.cs", code);
         var testProject = fixture.Write("App.Tests/App.Tests.csproj", """
             <Project Sdk="Microsoft.NET.Sdk">
@@ -435,8 +492,8 @@ public sealed class PolicyCheckIntegrationTests
               </ItemGroup>
             </Project>
             """);
-        fixture.Write("App.Tests/GateTests.cs", duplicateAnonymous
-            ? "public class GateTests { [Xunit.Fact] public void M() { Xunit.Assert.Equal(2, new Crap4CSharp.ProvenanceFixture.CompiledEvidence().M()); } }"
+        fixture.Write("App.Tests/GateTests.cs", duplicateAnonymous || nestedFamily
+            ? $"public class GateTests {{ [Xunit.Fact] public void M() {{ Xunit.Assert.Equal({(duplicateAnonymous ? 2 : 1)}, new Crap4CSharp.ProvenanceFixture.CompiledEvidence().M()); }} }}"
             : "public class GateTests { [Xunit.Fact] public async System.Threading.Tasks.Task M() { Xunit.Assert.Equal(1, await new Crap4CSharp.ProvenanceFixture.CompiledEvidence().M()); } }");
         async Task<string> CaptureCoverage(string label)
         {
@@ -515,7 +572,9 @@ public sealed class PolicyCheckIntegrationTests
             (duplicateAnonymous ? CoverageReasonCodes.AmbiguousCallableOwnership : CoverageReasonCodes.UnsupportedGeneratedMapping) &&
                 (!duplicateAnonymous || item.Kind == "Lambda"))
             .GroupBy(item => item.CallableId).ToArray();
-        Assert.Single(unsupported);
+        Assert.Equal(nestedFamily ? 2 : 1, unsupported.Length);
+        if (nestedFamily)
+            Assert.Contains(unsupported, group => group.First().Kind == "Lambda");
         var entries = unsupported.Select(group =>
         {
             var item = group.First();
@@ -551,6 +610,31 @@ public sealed class PolicyCheckIntegrationTests
         using var result = JsonDocument.Parse(output.ToString());
         Assert.Contains(result.RootElement.GetProperty("evaluation").GetProperty("callableExemptions").EnumerateArray(),
             entry => entry.GetProperty("status").GetString() == "exempted-unsupported");
+
+        if (!duplicateAnonymous)
+        {
+            // Unknown coverage still proves CC > threshold, but cannot become numeric debt.
+            fixture.Write("policy.json", Policy(["exemptions.json"]).Replace("\"threshold\":100", "\"threshold\":0", StringComparison.Ordinal));
+            var (candidateLocator, _, _, _, _) = await CreateBundle(fixture.Path, projectLogical, "policy.json",
+                assemblyPath, Path.Combine(fixture.Path, "candidate-bundle"),
+                coveragePath: Directory.EnumerateFiles(Path.Combine(fixture.Path, "current-coverage"),
+                    "coverage.opencover.xml", SearchOption.AllDirectories).Single());
+            var candidateOutput = new StringWriter();
+            var candidateError = new StringWriter();
+            var candidateExit = await global::App.RunAsync(["baseline", "create", "--policy", "policy.json",
+                "--reuse-artifacts", candidateLocator, "--output", "candidate.json", "--format", "json"],
+                fixture.Path, candidateOutput, candidateError, TestContext.Current.CancellationToken);
+            Assert.True(candidateExit == 2, candidateError + Environment.NewLine + candidateOutput);
+            using var summary = JsonDocument.Parse(candidateOutput.ToString());
+            var omitted = summary.RootElement.GetProperty("omittedKnownViolations").EnumerateArray().ToArray();
+            Assert.Contains(omitted, item => item.GetProperty("kind").GetString() == (nestedFamily ? "family" : "method"));
+            Assert.All(omitted, item => Assert.Equal("baseline.unknownCoverageCannotReceiveAllowance",
+                item.GetProperty("reason").GetString()));
+            var candidate = BaselineDocument.Parse(await File.ReadAllBytesAsync(Path.Combine(fixture.Path,
+                "candidate.json"), TestContext.Current.CancellationToken));
+            Assert.All(omitted, item => Assert.DoesNotContain(candidate.Entries,
+                entry => entry.EntityKey == item.GetProperty("entityKey").GetString()));
+        }
     }
 
     [Theory]
