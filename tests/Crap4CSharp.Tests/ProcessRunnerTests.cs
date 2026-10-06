@@ -54,6 +54,7 @@ public sealed class ProcessRunnerTests
     [Theory]
     [InlineData("parent-exit")]
     [InlineData("parent-live")]
+    [InlineData("parent-exit-closed-pipes")]
     public async Task DeadlineCoversInheritedPipesAndTerminatesOwnedDescendant(string mode)
     {
         string directory = Path.Combine(Path.GetTempPath(), "crap4csharp-process-" + Guid.NewGuid().ToString("N"));
@@ -62,6 +63,7 @@ public sealed class ProcessRunnerTests
         string release = Path.Combine(directory, "release");
         Task<ProcessResult>? operation = null;
         Exception? outcome = null;
+        ProcessResult? completed = null;
         bool guardExpired = false;
         bool readyObserved = false;
         bool aliveBeforeFixtureCleanup = false;
@@ -70,7 +72,7 @@ public sealed class ProcessRunnerTests
             operation = ProcessRunner.RunAsync(Host,
                 [Helper, "descendant", Host, Helper, ready, release, mode], directory,
                 TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
-            try { await operation.WaitAsync(TimeSpan.FromSeconds(12), TestContext.Current.CancellationToken); }
+            try { completed = await operation.WaitAsync(TimeSpan.FromSeconds(12), TestContext.Current.CancellationToken); }
             catch (TimeoutException) when (!operation.IsCompleted) { guardExpired = true; }
             catch (Exception exception) { outcome = exception; }
             readyObserved = File.Exists(ready);
@@ -109,7 +111,14 @@ public sealed class ProcessRunnerTests
         }
         Assert.True(readyObserved, "The descendant must positively reach the inherited-pipe scenario.");
         Assert.False(guardExpired, "The product deadline was bypassed by inherited child pipes.");
-        Assert.IsType<ProcessTimeoutException>(outcome);
+        if (mode == "parent-exit-closed-pipes")
+        {
+            Assert.Null(outcome);
+            Assert.NotNull(completed);
+            Assert.Equal(0, completed.ExitCode);
+            Assert.Equal("child-ready\n", completed.StandardOutput.Replace("\r\n", "\n", StringComparison.Ordinal));
+        }
+        else Assert.IsType<ProcessTimeoutException>(outcome);
         Assert.False(aliveBeforeFixtureCleanup, "The product returned while its owned descendant survived.");
     }
 

@@ -123,7 +123,9 @@ switch (args[0])
         string dll = Path.GetFullPath(args[2]);
         string ready = Path.GetFullPath(args[3]);
         string release = Path.GetFullPath(args[4]);
-        var info = new ProcessStartInfo(host) { UseShellExecute = false };
+        var info = new ProcessStartInfo(host) { UseShellExecute = false,
+            RedirectStandardOutput = args.Length > 5 && args[5] == "parent-exit-closed-pipes",
+            RedirectStandardError = args.Length > 5 && args[5] == "parent-exit-closed-pipes" };
         foreach (string value in new[] { dll, "hold", ready, release }) info.ArgumentList.Add(value);
         // Deliberately inherit both redirected pipes, reproducing the actual deadline bypass.
         using var child = Process.Start(info) ?? throw new InvalidOperationException("Child start failed.");
