@@ -143,6 +143,26 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
                 throw new InvalidDataException("Artifact context has an invalid required member shape.");
             Require(context.GetProperty("parseOptions"), "languageVersion", "sourceKind", "preprocessorSymbols", "features");
             Require(context.GetProperty("pathPolicy"), "casePolicy", "reportRootMappings");
+            if (context.TryGetProperty("currentRevalidation", out var revalidation) &&
+                revalidation.ValueKind != JsonValueKind.Null)
+            {
+                Require(revalidation, "provider", "project", "assemblyPath", "pdbPath");
+                if (new[] { "provider", "project", "assemblyPath", "pdbPath" }
+                    .Any(name => revalidation.GetProperty(name).ValueKind != JsonValueKind.String))
+                    throw new InvalidDataException("Artifact current-revalidation recipe must contain string members.");
+                if (revalidation.TryGetProperty("references", out var references))
+                {
+                    if (references.ValueKind != JsonValueKind.Array)
+                        throw new InvalidDataException("Artifact current-reference mappings must be an array.");
+                    foreach (var reference in references.EnumerateArray())
+                    {
+                        Require(reference, "logicalPath", "workspacePath");
+                        if (reference.GetProperty("logicalPath").ValueKind != JsonValueKind.String ||
+                            reference.GetProperty("workspacePath").ValueKind != JsonValueKind.String)
+                            throw new InvalidDataException("Artifact current-reference mappings must contain string paths.");
+                    }
+                }
+            }
             var symbols = context.GetProperty("parseOptions").GetProperty("preprocessorSymbols");
             var features = context.GetProperty("parseOptions").GetProperty("features");
             var mappings = context.GetProperty("pathPolicy").GetProperty("reportRootMappings");
@@ -170,9 +190,13 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
         foreach (var build in root.GetProperty("builds").EnumerateArray())
             Require(build, "id", "contextId", "moduleIdentity", "assemblySha256", "mvid", "pdbSha256", "debugIdentity");
         foreach (var execution in root.GetProperty("executions").EnumerateArray())
+        {
             Require(execution, "id", "contextId", "buildId", "completed", "exitCode", "totalTests", "passedTests",
                 "failedTests", "skippedTests", "testModuleIdentity", "testAssemblySha256", "testMvid",
                 "testPdbSha256", "testDebugIdentity");
+            if (execution.TryGetProperty("testProject", out var testProject) && testProject.ValueKind != JsonValueKind.String)
+                throw new InvalidDataException("Artifact execution testProject must be a string.");
+        }
         foreach (var artifact in root.GetProperty("artifacts").EnumerateArray())
             Require(artifact, "id", "kind", "locator", "length", "sha256");
     }

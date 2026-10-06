@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "repository-policy-v1",
+  "mode": "incremental",
+  "productionProjects": ["samples/Fixture/Fixture/Fixture.csproj"],
+  "testProjects": ["samples/Fixture/Fixture.Tests/Fixture.Tests.csproj"],
+  "configuration": "Release",
+  "targetFrameworks": ["net10.0"],
+  "scope": "base",
+  "threshold": 8,
+  "missingCoverage": "fail",
+  "requiredChecks": ["tests", "coverage", "crap"],
+  "exclusions": [],
+  "ruleset": "callables-v1",
+  "baseline": "crap-baseline.json",
+  "exemptionFiles": []
+}

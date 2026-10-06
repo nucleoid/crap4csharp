@@ -6,10 +6,17 @@ using Microsoft.CodeAnalysis.CSharp;
 internal static class AnalyzeCommand
 {
     public static ResultDocument Replay(string manifestPath, string workingDirectory, string? outputPath,
-        DateTimeOffset startedAt, TimeSpan duration, CancellationToken cancellationToken)
+        DateTimeOffset startedAt, TimeSpan duration, CancellationToken cancellationToken, bool allSources = false)
     {
         var bundle = ArtifactBundle.Load(manifestPath, workingDirectory);
         if (outputPath is not null) bundle.RejectOutputAlias(outputPath, workingDirectory);
+        return Replay(bundle, workingDirectory, startedAt, duration, cancellationToken, allSources);
+    }
+
+    internal static ResultDocument Replay(ArtifactBundle bundle, string workingDirectory,
+        DateTimeOffset startedAt, TimeSpan duration, CancellationToken cancellationToken, bool allSources = false,
+        double? thresholdOverride = null)
+    {
         var manifest = bundle.Manifest;
         var provenance = ProvenanceVerifier.VerifyCaptureCancellable(manifest, bundle.Bytes, null, cancellationToken);
         // Once byte verification has failed, do not parse secondary policy/scope
@@ -17,7 +24,7 @@ internal static class AnalyzeCommand
         (CapturedScope Scope, CapturedPolicy Policy) capturedEvaluation = provenance.Status == ProvenanceStatus.Invalid
             ? (new CapturedScope([]), new CapturedPolicy(8, false))
             : CapturedEvaluationInputs.Read(bundle);
-        var threshold = capturedEvaluation.Policy.Threshold;
+        var threshold = thresholdOverride ?? capturedEvaluation.Policy.Threshold;
         var scopedSources = capturedEvaluation.Scope.Sources.ToHashSet(StringComparer.Ordinal);
         var partitions = new List<ReplayPartition>();
         if (provenance.Status != ProvenanceStatus.Invalid)
@@ -25,7 +32,8 @@ internal static class AnalyzeCommand
             foreach (var context in manifest.Contexts.OrderBy(item => item.Id, StringComparer.Ordinal))
             {
                 var sourceInputs = context.Inputs.Where(input => input.Role == "source" && !input.Generated &&
-                        scopedSources.Contains(input.LogicalPath))
+                        (allSources || scopedSources.Contains(input.RepositoryPath is null ? input.LogicalPath :
+                            CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input))))
                     .OrderBy(input => input.LogicalPath, StringComparer.Ordinal).ToArray();
                 var sources = sourceInputs.Select(input =>
                 {

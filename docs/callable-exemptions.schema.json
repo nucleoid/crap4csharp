@@ -13,7 +13,8 @@
         "required": ["ruleset", "contextId", "targetFramework", "callableId", "bodyChecksum", "reasonCode", "justification", "reviewReference", "familyIds"],
         "properties": {
           "ruleset": { "const": "callables-v1" },
-          "contextId": { "type": "string", "minLength": 1 },
+          "contextId": { "type": "string", "minLength": 1, "description": "Recorded review context; trusted check matches the stable callable identity, not this content-dependent observation ID." },
+          "memberCount": { "type": "integer", "minimum": 1, "description": "Exact reviewed anonymous observation count, required for ambiguity exemptions in trusted check." },
           "targetFramework": { "type": "string", "minLength": 1 },
           "callableId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
           "bodyChecksum": { "type": "string", "pattern": "^[0-9a-f]{64}$" },

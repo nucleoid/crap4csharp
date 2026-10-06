@@ -26,8 +26,9 @@ The option-only command remains the exact **`ordinary-methods-v1` legacy dialect
 `analyze --syntax-only` command uses **`callables-v1`** by default and performs no build, restore,
 test, Git, or other child process. Because syntax-only input has no trusted TFM/configuration
 provenance, its context is labeled `unknown`; distinct coverage documents are rejected instead of
-being optimistically unioned. Repeating the same byte-identical report is harmless. Full
-project-aware `check` orchestration remains deferred.
+being optimistically unioned. Repeating the same byte-identical report is harmless. `check` can enforce an
+immutable-base repository policy against a complete, current-revalidated bundle; producing a fresh bundle and
+running restore/build/test/coverage in one command remains deferred.
 
 ## Usage
 
@@ -74,6 +75,17 @@ crap4csharp analyze --syntax-only --callable-exemptions exemptions.json --covera
 # Bundle production is intentionally pending the project-aware check orchestrator (#10);
 # current releases consume externally prepared compatible bundles but do not create them.
 crap4csharp analyze --reuse-artifacts artifacts/crap-run/manifest.json --format json
+
+# Enforce policy/baseline/exemptions from one immutable merge-base against current-revalidated evidence.
+# The caller (normally CI) owns the base ref; Crap4CSharp never infers or fetches one.
+crap4csharp check --reuse-artifacts artifacts/crap-run/manifest.json \
+  --policy quality/crap-policy.json --base origin/main --format json
+
+# Generate a deterministic, unapproved candidate from current revalidated evidence.
+# Known debt remains exit 2; the candidate is still written for review.
+crap4csharp baseline create --policy samples/policy/strict.json \
+  --reuse-artifacts artifacts/crap-run/manifest.json \
+  --output quality/crap-baseline.candidate.json
 ```
 
 With no `--coverage`, the tool creates a unique directory beneath the OS temporary directory and runs:
@@ -111,7 +123,10 @@ Ruleset details and the measured mapping matrix are documented in
 - C# syntax errors are operational failures; malformed syntax trees are never scored.
 - `--changed` consumes NUL-delimited Git porcelain v1, including spaces, newlines, untracked files, renames/copies, and deletions. Deleted files are ignored and paths escaping the repository root are rejected. This is the legacy whole-file worktree mode; it does not detect already committed changes and is not an alias for the future captured scope selectors.
 
-The repository also contains tested captured Git scope and changed-method selection adapters for future command orchestration. They distinguish exact worktree, index, and commit bytes and preserve resolved ref/object identities. Public project-aware `check` plus `--scope`, `--base`, `--head`, `--source-state`, and `--granularity` orchestration is not implemented by issue #7. See [captured change scopes](docs/change-scopes.md).
+The repository also contains tested captured Git scope and changed-method selection adapters. Trusted reused
+`check` uses policy-owned `all`, `worktree`, or current-worktree `base` scope and an explicit `--base`. Public fresh
+execution plus general `--scope`, `--head`, `--source-state`, and `--granularity` selectors remains deferred. See
+[captured change scopes](docs/change-scopes.md).
 
 Output is ordered by numeric CRAP score descending, followed by unknown (`N/A`) entries. Ties are deterministic by path and line.
 
@@ -125,6 +140,11 @@ Captured replay verifies bundle hashes and reports `captured`; it does not claim
 Current-workspace `verified` evidence requires a separately captured matching revision, concrete worktree, source/context
 closure and successful generating execution. See [artifact provenance](docs/provenance.md) and the
 [run manifest schema](docs/run-manifest-v1.schema.json). Hashes are consistency evidence, not signatures or sandboxing.
+
+Repository policy, immutable-base trust, component-wise debt ceilings, and the explicit candidate review workflow
+are documented in [repository policy and reviewed baselines](docs/policy.md). Baseline generation accepts only a
+supported current-revalidation recipe and never upgrades old captured-only bundles or treats candidate generation as
+approval. Full fresh `check` orchestration remains owned by issue #10.
 
 ## Exit codes
 

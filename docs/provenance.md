@@ -45,6 +45,14 @@ input appeared.
 3. Capture final generated/compiler/module identities and reject authored-input drift. Expected generated outputs
    may appear or replace stale pre-build outputs; they are validated as transitions, not required to preexist.
 
+Current-evidence recapture is stricter than the planned fresh-build transition: it rejects changes to any
+preexisting observed compiler/configuration input during Workspace loading, including generated editorconfig
+files under a custom intermediate directory. The custom-layout integration fixture uses this repository's
+`global.json` SDK selection (10.0.1xx, latest patch). An unpinned consumer selecting SDK 10.0.401 was observed to
+rewrite its existing `App.GeneratedMSBuildEditorConfig.editorconfig` during loading; that layout currently fails
+`context.inputsMutated`, not verified green. SDK feature bands and custom layouts outside the proven fixture
+are not a blanket support claim; do not waive the mutation guard to accept them.
+
 Coverage reports may union only within one context/build and coordinate representation. Different TFMs,
 configuration/platform/RID, source/context identities, DLL/PDB identities, or line-vs-sequence-point formats do not
 optimistically union. A manifest never upgrades unsupported generated-method mapping into known coverage.
@@ -68,9 +76,13 @@ one test must pass and the TRX test storage module must match the module identit
 hash-bound test assembly and portable PDB artifacts. v1 deliberately fails closed for PDB documents that do not
 carry SHA-256 checksums.
 
-The captured scope artifact is JSON `{"version":1,"sources":[...]}`; the captured policy artifact is JSON
-`{"version":1,"threshold":8,"allowMissingCoverage":false}`. Replay applies those values and rejects live overrides.
-Baseline and exemption hashes fail closed until their captured evaluators are supported. A Git revision may also bind
+The captured scope artifact is JSON `{"version":1,"sources":[...]}` using repository-relative source paths; the
+manifest separately retains each project's compiler logical path and a hash-bound `repositoryPath`. Trusted checks
+require that repository path for every authored source so nested projects and linked files intersect Git scope
+without filename or project-directory guesses. Older manifests without it remain capture-replay inputs only. The captured policy artifact is either the
+legacy threshold shape or a versioned repository policy. Replay applies those values and rejects live overrides.
+Captured baseline/exemption artifacts remain hash-bound inputs; trusted `check` obtains approved baseline and
+exemption bytes independently from one immutable Git tree. A Git revision may also bind
 `stateHash`, derived from porcelain status (including untracked files), recursive submodule status, and the staged
 binary diff; current-workspace verification must reproduce it.
 

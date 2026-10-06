@@ -8,6 +8,36 @@ namespace Crap4CSharp.Tests;
 public sealed class AnalyzeCommandTests
 {
     private const string CompiledSource = "tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs";
+    [Theory]
+    [InlineData("--threshold", "999")]
+    [InlineData("--callable-exemptions", "branch.json")]
+    public async Task TrustedCheckRejectsBranchSuppliedPolicyWeakeningInputs(string option, string value)
+    {
+        using var directory = TestDirectory.Create("crap4csharp-check-override");
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var exit = await global::App.RunAsync(["check", "--reuse-artifacts", "manifest.json", "--policy",
+            "policy.json", "--base", "origin/main", option, value, "--format", "json"], directory.Path,
+            output, error, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, exit);
+        Assert.Contains("cannot be combined", error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TrustedCheckRequiresExplicitCiAuthorizedBase()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-check-base");
+        var error = new StringWriter();
+
+        var exit = await global::App.RunAsync(["check", "--reuse-artifacts", "manifest.json", "--policy",
+            "policy.json", "--format", "json"], directory.Path, TextWriter.Null, error,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, exit);
+        Assert.Contains("requires --policy and --base", error.ToString(), StringComparison.Ordinal);
+    }
     [Fact]
     public async Task TruncatedManifestReturnsOneStructuredJsonDocument()
     {
@@ -142,6 +172,24 @@ public sealed class AnalyzeCommandTests
         Assert.Equal(0, document.RootElement.GetProperty("evaluation").GetProperty("policy")
             .GetProperty("threshold").GetDouble());
         Assert.NotEmpty(document.RootElement.GetProperty("evaluation").GetProperty("findings").EnumerateArray());
+    }
+
+    [Fact]
+    public void TrustedReplayThresholdControlsReportsWithoutChangingCapturedAnalyze()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-trusted-report-threshold");
+        var path = CreateBundle(directory.Path);
+        var bundle = ArtifactBundle.Load(path, directory.Path);
+        var trusted = AnalyzeCommand.Replay(bundle, directory.Path, DateTimeOffset.UnixEpoch,
+            TimeSpan.Zero, TestContext.Current.CancellationToken, allSources: true, thresholdOverride: 0);
+        var captured = AnalyzeCommand.Replay(bundle, directory.Path, DateTimeOffset.UnixEpoch,
+            TimeSpan.Zero, TestContext.Current.CancellationToken);
+        Assert.Equal(0, trusted.Evaluation.Policy.Threshold);
+        Assert.NotEmpty(trusted.Evaluation.Findings);
+        Assert.All(trusted.Evaluation.Findings, finding => Assert.Equal(0, finding.Threshold));
+        Assert.Equal(8, captured.Evaluation.Policy.Threshold);
+        Assert.Empty(captured.Evaluation.Findings);
+        Assert.Equal(captured.Evaluation.Metrics, trusted.Evaluation.Metrics);
     }
 
     [Fact]

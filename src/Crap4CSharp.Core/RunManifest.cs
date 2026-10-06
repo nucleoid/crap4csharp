@@ -65,18 +65,28 @@ public sealed record ManifestContext(string Id, string Project, string TargetFra
 {
     public ManifestParseOptions? ParseOptions { get; init; }
     public ManifestPathPolicy? PathPolicy { get; init; }
+    public ManifestCurrentRevalidation? CurrentRevalidation { get; init; }
 }
+public sealed record ManifestCurrentRevalidation(string Provider, string Project, string AssemblyPath, string PdbPath)
+{
+    public IReadOnlyList<ManifestCurrentReference> References { get; init; } = [];
+}
+public sealed record ManifestCurrentReference(string LogicalPath, string WorkspacePath);
 public sealed record ManifestParseOptions(string LanguageVersion, string SourceKind,
     IReadOnlyList<string> PreprocessorSymbols, IReadOnlyDictionary<string, string> Features);
 public sealed record ManifestPathPolicy(string CasePolicy, IReadOnlyList<ManifestReportRootMapping> ReportRootMappings);
 public sealed record ManifestReportRootMapping(string ReportRoot, string LogicalRoot);
 public sealed record ManifestInput(string Role, string LogicalPath, string Locator, long Length, string Sha256,
-    string? Encoding, bool Generated);
+    string? Encoding, bool Generated)
+{
+    public string? RepositoryPath { get; init; }
+}
 public sealed record ManifestBuild(string Id, string ContextId, string ModuleIdentity, string AssemblySha256,
     string Mvid, string PdbSha256, string DebugIdentity);
 public sealed record ManifestExecution(string Id, string ContextId, string BuildId, bool Completed, int ExitCode,
     int TotalTests, int PassedTests, int FailedTests, int SkippedTests)
 {
+    public string TestProject { get; init; } = "";
     public string TestModuleIdentity { get; init; } = "";
     public string TestAssemblySha256 { get; init; } = "";
     public string TestMvid { get; init; } = "";
@@ -88,10 +98,16 @@ public sealed record ManifestArtifact(string Id, string Kind, string Locator, lo
 public sealed record ManifestEvaluationInputs(string ScopeHash, string PolicyHash, string? BaselineHash,
     string? ExemptionsHash);
 
-public sealed record CurrentInputEvidence(string Role, string LogicalPath, long Length, string Sha256);
+public sealed record CurrentInputEvidence(string Role, string LogicalPath, long Length, string Sha256)
+{
+    public string? RepositoryPath { get; init; }
+}
 internal sealed record CurrentEvidence(string RepositoryIdentity, string WorkspaceIdentity, string? Head,
     IReadOnlyList<CurrentInputEvidence> Inputs, IReadOnlyDictionary<string, string> ContextHashes,
-    bool MembershipRecipeRevalidated = false, string? StateHash = null);
+    bool MembershipRecipeRevalidated = false, string? StateHash = null)
+{
+    public IReadOnlyList<string> ProtectedPaths { get; init; } = [];
+}
 
 public sealed record ProvenanceResult(ProvenanceStatus Status, string Basis, bool PostflightVerified,
     bool Reusable, IReadOnlyList<string> Reasons);
@@ -153,18 +169,34 @@ public static class ManifestIdentity
             CanonicalIdentity.Tuple("context", value.Id, value.Project, value.TargetFramework, value.Configuration,
                 value.Platform, value.SourceSetHash, value.ContextHash, value.InputClosureHash,
                 value.ActualCompilerBindingComplete.ToString(), value.ReuseRecipeComplete.ToString())));
+        values.AddRange(manifest.Contexts.Where(value => value.CurrentRevalidation is not null).Select(value =>
+            CanonicalIdentity.Tuple("current-revalidation", value.Id, value.CurrentRevalidation!.Provider,
+                value.CurrentRevalidation.Project, value.CurrentRevalidation.AssemblyPath,
+                value.CurrentRevalidation.PdbPath)));
+        values.AddRange(manifest.Contexts.Where(value => value.CurrentRevalidation is not null)
+            .SelectMany(value => value.CurrentRevalidation!.References.Select(reference =>
+                CanonicalIdentity.Tuple("current-reference", value.Id, reference.LogicalPath,
+                    reference.WorkspacePath))));
         values.AddRange(manifest.Contexts.SelectMany(context => context.Inputs.Select(input =>
             CanonicalIdentity.Tuple("context-input", context.Id, InputIdentity(input)))));
         values.AddRange(manifest.Builds.Select(value =>
             CanonicalIdentity.Tuple("build", value.Id, value.ContextId, value.ModuleIdentity, value.AssemblySha256,
                 value.Mvid, value.PdbSha256, value.DebugIdentity)));
-        values.AddRange(manifest.Executions.Select(value =>
-            CanonicalIdentity.Tuple("execution", value.Id, value.ContextId, value.BuildId, value.Completed.ToString(),
+        values.AddRange(manifest.Executions.Select(value => string.IsNullOrEmpty(value.TestProject)
+            ? CanonicalIdentity.Tuple("execution", value.Id, value.ContextId, value.BuildId, value.Completed.ToString(),
                 value.ExitCode.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 value.TotalTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 value.PassedTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 value.FailedTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 value.SkippedTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                value.TestModuleIdentity, value.TestAssemblySha256, value.TestMvid, value.TestPdbSha256,
+                value.TestDebugIdentity)
+            : CanonicalIdentity.Tuple("execution-with-test-project-v1", value.Id, value.ContextId, value.BuildId,
+                value.Completed.ToString(), value.ExitCode.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                value.TotalTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                value.PassedTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                value.FailedTests.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                value.SkippedTests.ToString(System.Globalization.CultureInfo.InvariantCulture), value.TestProject,
                 value.TestModuleIdentity, value.TestAssemblySha256, value.TestMvid, value.TestPdbSha256,
                 value.TestDebugIdentity)));
         values.AddRange(manifest.Artifacts.Select(value =>
@@ -187,9 +219,13 @@ public static class ManifestIdentity
         return unhashed with { ManifestHash = ManifestHash(unhashed) };
     }
 
-    private static string InputIdentity(ManifestInput input) => CanonicalIdentity.Tuple("input", input.Role,
-        input.LogicalPath, input.Locator, input.Length.ToString(System.Globalization.CultureInfo.InvariantCulture),
-        input.Sha256, input.Encoding, input.Generated.ToString());
+    private static string InputIdentity(ManifestInput input) => input.RepositoryPath is null
+        ? CanonicalIdentity.Tuple("input", input.Role, input.LogicalPath, input.Locator,
+            input.Length.ToString(System.Globalization.CultureInfo.InvariantCulture), input.Sha256,
+            input.Encoding, input.Generated.ToString())
+        : CanonicalIdentity.Tuple("input-repository-path-v1", input.Role, input.LogicalPath, input.RepositoryPath,
+            input.Locator, input.Length.ToString(System.Globalization.CultureInfo.InvariantCulture), input.Sha256,
+            input.Encoding, input.Generated.ToString());
 }
 
 public static class ProvenanceVerifier
@@ -228,8 +264,11 @@ public static class ProvenanceVerifier
         if (!string.Equals(manifest.Revision.StateHash, current.StateHash, StringComparison.Ordinal))
             reasons.Add(ProvenanceReasonCodes.WorkspaceChanged);
 
-        var expectedInputs = manifest.Contexts.SelectMany(context => context.Inputs).Where(input => !input.Generated)
-            .OrderBy(InputKey, StringComparer.Ordinal).ToArray();
+        var expectedGroups = manifest.Contexts.SelectMany(context => context.Inputs).Where(IsCurrentWorkspaceInput)
+            .GroupBy(InputKey, StringComparer.Ordinal).ToArray();
+        if (expectedGroups.Any(group => group.Select(input => (input.Length, input.Sha256)).Distinct().Count() != 1))
+            reasons.Add(ProvenanceReasonCodes.SourceChanged);
+        var expectedInputs = expectedGroups.Select(group => group.First()).OrderBy(InputKey, StringComparer.Ordinal).ToArray();
         var actualInputs = current.Inputs.OrderBy(InputKey, StringComparer.Ordinal).ToArray();
         if (expectedInputs.Length != actualInputs.Length)
             reasons.Add(ProvenanceReasonCodes.SourceChanged);
@@ -505,8 +544,9 @@ public static class ProvenanceVerifier
         try { return CanonicalIdentity.NormalizeLogicalPath(locator) == locator.Replace('\\', '/'); }
         catch (ArgumentException) { return false; }
     }
-    private static string InputKey(ManifestInput input) => input.Role + "\n" + input.LogicalPath;
-    private static string InputKey(CurrentInputEvidence input) => input.Role + "\n" + input.LogicalPath;
+    private static string InputKey(ManifestInput input) => input.Role + "\n" + (input.RepositoryPath ?? input.LogicalPath);
+    private static string InputKey(CurrentInputEvidence input) => input.Role + "\n" + (input.RepositoryPath ?? input.LogicalPath);
+    private static bool IsCurrentWorkspaceInput(ManifestInput input) => !input.Generated;
     private static IReadOnlyDictionary<string, string>? ResolveDocuments(
         IReadOnlyDictionary<string, string> documents, IReadOnlyList<string> logicalPaths,
         CapturedPathPolicy pathPolicy)

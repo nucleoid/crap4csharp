@@ -62,6 +62,179 @@ public sealed class ArtifactCaptureTests
         Assert.Contains(ProvenanceReasonCodes.ContextNotRevalidated, result.Reasons);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CurrentInputsDistinguishProjectRelativeNamesButDeduplicateSharedPhysicalFiles(bool shared)
+    {
+        using var directory = TestDirectory.Create("crap4csharp-current-project-paths");
+        var fixture = CreateFixture();
+        var original = fixture.Manifest.Contexts.Single();
+        var source = original.Inputs.Single();
+        var firstBytes = CompiledSourceBytes();
+        var secondBytes = shared ? firstBytes : Encoding.UTF8.GetBytes("different project source");
+        var firstPath = "Api/Program.cs";
+        var secondPath = shared ? firstPath : "Worker/Program.cs";
+        directory.Write(firstPath, Encoding.UTF8.GetString(firstBytes));
+        directory.Write(secondPath, Encoding.UTF8.GetString(secondBytes));
+        var first = source with { LogicalPath = "Program.cs", RepositoryPath = firstPath,
+            Length = firstBytes.Length, Sha256 = CanonicalIdentity.Sha256(firstBytes) };
+        var second = source with { LogicalPath = "Program.cs", RepositoryPath = secondPath,
+            Length = secondBytes.Length, Sha256 = CanonicalIdentity.Sha256(secondBytes) };
+        var manifest = ManifestIdentity.Seal(fixture.Manifest with
+        {
+            Contexts = [original with { Project = "Api/Api.csproj", Inputs = [first] },
+                original with { Id = "worker", Project = "Worker/Worker.csproj", Inputs = [second] }],
+            ManifestHash = null
+        });
+        var captured = CurrentEvidenceAdapter.Capture(manifest, directory.Path);
+        Assert.Equal(shared ? 1 : 2, captured.Inputs.Count);
+        // This is a workspace-byte consistency control, not a compiler/collector acceptance claim.
+        var current = captured with { RepositoryIdentity = manifest.Revision.RepositoryIdentity,
+            WorkspaceIdentity = manifest.Revision.WorkspaceIdentity,
+            ContextHashes = manifest.Contexts.ToDictionary(context => context.Id, context => context.ContextHash),
+            MembershipRecipeRevalidated = true };
+        Assert.DoesNotContain(ProvenanceReasonCodes.SourceChanged,
+            ProvenanceVerifier.VerifyCurrent(manifest, fixture.Bytes, current, true).Reasons);
+        var drift = current with { Inputs = current.Inputs.Select((input, index) => index == 0
+            ? input with { Sha256 = CanonicalIdentity.Sha256([1, 2, 3]) } : input).ToArray() };
+        Assert.Contains(ProvenanceReasonCodes.SourceChanged,
+            ProvenanceVerifier.VerifyCurrent(manifest, fixture.Bytes, drift, true).Reasons);
+    }
+
+    [Fact]
+    public void CurrentVerificationIncludesDeclaredReferenceBytes()
+    {
+        var fixture = CreateFixture();
+        var context = fixture.Manifest.Contexts.Single();
+        var referenceBytes = fixture.Bytes["artifacts/app.dll"];
+        var reference = new ManifestInput("reference", "refs/app.dll", "artifacts/app.dll",
+            referenceBytes.Length, CanonicalIdentity.Sha256(referenceBytes.AsSpan()), null, false);
+        var manifest = ManifestIdentity.Seal(fixture.Manifest with
+        {
+            Contexts = [context with { Inputs = context.Inputs.Append(reference).ToArray() }],
+            ManifestHash = null
+        });
+        var source = context.Inputs.Single();
+        var current = new CurrentEvidence(manifest.Revision.RepositoryIdentity, manifest.Revision.WorkspaceIdentity,
+            manifest.Revision.Head, [new CurrentInputEvidence(source.Role, source.LogicalPath, source.Length, source.Sha256)],
+            new Dictionary<string, string> { [manifest.Contexts.Single().Id] = manifest.Contexts.Single().ContextHash },
+            true, manifest.Revision.StateHash);
+
+        var result = ProvenanceVerifier.VerifyCurrent(manifest, fixture.Bytes, current, true);
+
+        Assert.Contains(ProvenanceReasonCodes.SourceChanged, result.Reasons);
+    }
+
+    [Fact]
+    public void GitCurrentEvidenceRejectsNonRepositoryRoot()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-wrong-workspace-root");
+        var fixture = CreateFixture();
+        var manifest = fixture.Manifest with
+        { Revision = new ManifestRevision("git", "repo", "worktree", "abc", null, null) };
+        var error = Assert.Throws<InvalidDataException>(() => CurrentEvidenceAdapter.Capture(manifest,
+            directory.Path, (_, arguments) => arguments.SequenceEqual(new[] { "rev-parse", "--show-prefix" })
+                ? "nested/" : directory.Path));
+        Assert.Contains("repository root", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GitCurrentEvidenceAcceptsRootTopologyDespiteDifferentPhysicalSpelling()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-git-root-topology");
+        var manifest = CreateFixture().Manifest with
+        { Revision = new ManifestRevision("git", "repo", "worktree", "abc", null, null) };
+        var current = CurrentEvidenceAdapter.Capture(manifest, directory.Path, (_, arguments) =>
+            string.Join(" ", arguments) switch
+            {
+                "rev-parse --show-prefix" => "\n",
+                "rev-parse --show-toplevel" => Path.Combine(directory.Path, "canonical-long-spelling"),
+                "rev-parse --git-common-dir" or "rev-parse --git-dir" => ".git",
+                "rev-parse HEAD" => "abc",
+                _ => ""
+            });
+        Assert.Equal("abc", current.Head);
+    }
+
+    [Fact]
+    public void GitCurrentEvidenceBoundsArgumentsForTwoThousandDeclaredInputs()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-git-command-bound");
+        var fixture = CreateFixture();
+        var paths = Enumerable.Range(0, 2000).Select(index =>
+            $"src/LongProjectDirectoryName/LongSourceFileName{index:D4}.cs").ToArray();
+        var context = fixture.Manifest.Contexts.Single() with { Inputs = paths.Select(path =>
+            new ManifestInput("source", path, "inputs/unused", 0, new string('a', 64), "utf-8", false)
+            { RepositoryPath = path }).ToArray() };
+        var manifest = fixture.Manifest with { Contexts = [context],
+            Revision = new ManifestRevision("git", "repo", "worktree", "abc", null, null) };
+        var observedPaths = new HashSet<string>(StringComparer.Ordinal);
+        var largest = 0;
+        string Run(string _, IReadOnlyList<string> arguments)
+        {
+            largest = Math.Max(largest, arguments.Sum(argument => argument.Length + 3));
+            Assert.True(largest < 16000, $"Git command grew to {largest} characters.");
+            if (arguments.Contains("status"))
+                foreach (var path in arguments.SkipWhile(argument => argument != "--").Skip(1))
+                    observedPaths.Add(path);
+            return string.Join(" ", arguments) switch
+            {
+                "rev-parse --show-prefix" => "",
+                "rev-parse --show-toplevel" => directory.Path,
+                "rev-parse --git-common-dir" or "rev-parse --git-dir" => ".git",
+                "rev-parse HEAD" => "abc",
+                _ => ""
+            };
+        }
+        var current = CurrentEvidenceAdapter.Capture(manifest, directory.Path, Run);
+        Assert.Equal(paths.Order(StringComparer.Ordinal), observedPaths.Order(StringComparer.Ordinal));
+        Assert.NotNull(current.StateHash);
+    }
+
+    [Fact]
+    public void RealGitBatchedObservationBindsDeclaredStagingButIgnoresBundleOutputs()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-real-git-batches");
+        string Git(params string[] arguments)
+        {
+            var start = new System.Diagnostics.ProcessStartInfo("git")
+            { WorkingDirectory = directory.Path, RedirectStandardOutput = true,
+                RedirectStandardError = true, UseShellExecute = false };
+            foreach (var argument in arguments) start.ArgumentList.Add(argument);
+            using var process = System.Diagnostics.Process.Start(start)!;
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            var stderr = process.StandardError.ReadToEndAsync();
+            Assert.True(process.WaitForExit(15000), "Fixture Git timed out.");
+            Assert.True(process.ExitCode == 0, stderr.GetAwaiter().GetResult());
+            return stdout.GetAwaiter().GetResult();
+        }
+        Git("init");
+        Git("config", "user.name", "Fixture");
+        Git("config", "user.email", "fixture@example.invalid");
+        var paths = Enumerable.Range(0, 2000).Select(index =>
+            $"src/LongProjectDirectoryName/LongSourceFileName{index:D4}.cs").ToArray();
+        foreach (var path in paths) directory.Write(path, "original");
+        Git("add", ".");
+        Git("commit", "-m", "fixture");
+        var fixture = CreateFixture();
+        var context = fixture.Manifest.Contexts.Single() with { Inputs = paths.Select(path =>
+            new ManifestInput("source", path, "inputs/unused", 8, CanonicalIdentity.Sha256(Encoding.UTF8.GetBytes("original")), "utf-8", false)
+            { RepositoryPath = path }).ToArray() };
+        var manifest = fixture.Manifest with { Contexts = [context],
+            Revision = new ManifestRevision("git", "repo", "worktree", "abc", null, null) };
+        var clean = CurrentEvidenceAdapter.Capture(manifest, directory.Path);
+        directory.Write("bundle/manifest.json", "retained diagnostic output");
+        Assert.Equal(clean.StateHash, CurrentEvidenceAdapter.Capture(manifest, directory.Path).StateHash);
+        directory.Write(paths[^1], "changed");
+        var dirty = CurrentEvidenceAdapter.Capture(manifest, directory.Path);
+        Assert.NotEqual(clean.StateHash, dirty.StateHash);
+        Git("add", paths[^1]);
+        var staged = CurrentEvidenceAdapter.Capture(manifest, directory.Path);
+        Assert.NotEqual(dirty.StateHash, staged.StateHash);
+        Assert.Equal(staged.StateHash, CurrentEvidenceAdapter.Capture(manifest, directory.Path).StateHash);
+    }
+
     [Fact]
     public void GitCurrentEvidenceBindsStatusSubmodulesAndStagedDiff()
     {
@@ -72,12 +245,13 @@ public sealed class ArtifactCaptureTests
         string Run(string state, string _, IReadOnlyList<string> arguments) => string.Join(" ", arguments) switch
         {
             "rev-parse --show-toplevel" => directory.Path,
+            "rev-parse --show-prefix" => "",
             "rev-parse --git-common-dir" => Path.Combine(directory.Path, ".git"),
             "rev-parse --git-dir" => Path.Combine(directory.Path, ".git", "worktrees", "fixture"),
             "rev-parse HEAD" => "abc",
-            "status --porcelain=v1 -z --untracked-files=all -- tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs" => state,
+            "--literal-pathspecs status --porcelain=v1 -z --untracked-files=all --no-renames -- tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs" => state,
             "submodule status --recursive" => "",
-            "diff --cached --binary --full-index -- tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs" => "",
+            "--literal-pathspecs diff --cached --binary --full-index --no-renames -- tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs" => "",
             var command => throw new InvalidOperationException(command)
         };
         var manifest = ManifestIdentity.Seal(fixture.Manifest with

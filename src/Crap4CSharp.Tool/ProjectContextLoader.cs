@@ -69,10 +69,32 @@ public static class ProjectTargetSelector
 public static class ProjectContextLoader
 {
     internal const string LoaderCommand = "__crap4csharp-project-context-v1";
-    internal static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    internal static readonly JsonSerializerOptions JsonOptions = CreateTransportOptions();
+
+    private static JsonSerializerOptions CreateTransportOptions()
     {
-        Converters = { new JsonStringEnumConverter() }
-    };
+        // Private subprocess transport retains local physical evidence; ordinary result JSON omits it.
+        var resolver = new System.Text.Json.Serialization.Metadata.DefaultJsonTypeInfoResolver();
+        resolver.Modifiers.Add(info =>
+        {
+            var propertyNames = info.Type == typeof(ProjectSourceIdentity) ? new[] { nameof(ProjectSourceIdentity.ResolvedPath) } :
+                info.Type == typeof(ProjectAnalysisContext) ? new[] { nameof(ProjectAnalysisContext.ProtectedPaths),
+                    nameof(ProjectAnalysisContext.GeneratedTransitionPaths) } : [];
+            foreach (var propertyName in propertyNames)
+            {
+                var member = info.Type.GetProperty(propertyName)!;
+                var name = JsonNamingPolicy.CamelCase.ConvertName(propertyName);
+                var existing = info.Properties.FirstOrDefault(property => property.Name == name);
+                if (existing is not null) info.Properties.Remove(existing);
+                var property = info.CreateJsonPropertyInfo(member.PropertyType, name);
+                property.Get = member.GetValue;
+                property.Set = member.SetValue;
+                info.Properties.Add(property);
+            }
+        });
+        return new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        { TypeInfoResolver = resolver, Converters = { new JsonStringEnumConverter() } };
+    }
 
     public static Task<ProjectContextLoadResult> LoadAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken) =>
         LoadAsync(request, cancellationToken, ResolveSdkAsync);
@@ -147,9 +169,22 @@ public static class ProjectContextLoader
             else
                 loaded = new ProjectContextLoadResult(false, [], SplitDiagnostics(result), "context.loaderFailed");
             var after = SnapshotAuthoredInputs(root);
-            if (!before.OrderBy(pair => pair.Key, StringComparer.Ordinal).SequenceEqual(after.OrderBy(pair => pair.Key, StringComparer.Ordinal)))
+            // Only new, independently classified generated compiler files are expected loader transitions.
+            // Existing input mutation/deletion remains forbidden, including existing generated files.
+            var generatedPaths = loaded.Contexts.SelectMany(context =>
+                context.Sources.Where(source => source.IsGenerated && source.ResolvedPath is not null)
+                    .Select(source => source.ResolvedPath!)
+                    .Concat(context.GeneratedTransitionPaths)
+                    .Concat(context.Exclusions.Where(item => item.Reason == "generated.defaultExcluded" &&
+                        !item.PhysicalPath.StartsWith("<", StringComparison.Ordinal))
+                        .Select(item => Path.GetFullPath(item.PhysicalPath, root))))
+                .Select(path => Path.GetRelativePath(root, path).Replace('\\', '/')).ToHashSet(StringComparer.Ordinal);
+            if (before.Any(pair => !after.TryGetValue(pair.Key, out var value) || value != pair.Value) ||
+                after.Keys.Except(before.Keys, StringComparer.Ordinal).Any(path => !generatedPaths.Contains(path)))
                 return new ProjectContextLoadResult(false, loaded.Contexts,
-                    loaded.Diagnostics.Concat(["Authored project/source inputs changed while project context was loading."]).ToArray(),
+                    loaded.Diagnostics.Concat(["Authored project/source inputs changed while project context was loading: " +
+                        string.Join(", ", before.Keys.Union(after.Keys).Where(path =>
+                            !before.TryGetValue(path, out var oldHash) || !after.TryGetValue(path, out var newHash) || oldHash != newHash))]).ToArray(),
                     "context.inputsMutated");
             return result.ExitCode == 0 || !loaded.Success ? loaded : new ProjectContextLoadResult(false, loaded.Contexts,
                 loaded.Diagnostics.Concat(SplitDiagnostics(result)).ToArray(), "context.loaderFailed", loaded.ExcludedProjects);

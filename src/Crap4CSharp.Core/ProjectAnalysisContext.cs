@@ -12,7 +12,11 @@ public sealed record ProjectSourceIdentity(
     string LogicalPath,
     string ContentIdentity,
     bool IsGenerated,
-    bool IsExternal);
+    bool IsExternal)
+{
+    [JsonIgnore]
+    public string? ResolvedPath { get; init; }
+}
 
 public sealed record ProjectSourceDocument(
     ProjectSourceIdentity Identity,
@@ -49,6 +53,12 @@ public sealed record ProjectAnalysisContext(
     ProjectContextCapabilities Capabilities)
 {
     public const string ProtocolVersion = "project-context-v1";
+
+    [JsonIgnore]
+    public IReadOnlyList<string> ProtectedPaths { get; init; } = [];
+
+    [JsonIgnore]
+    public IReadOnlyList<string> GeneratedTransitionPaths { get; init; } = [];
 
     public static ProjectAnalysisContext Create(
         string projectPath,

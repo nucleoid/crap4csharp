@@ -113,6 +113,8 @@ internal static class MsBuildProjectLoader
             throw new ProjectContextException("context.parseOptionsUnavailable", $"C# parse options were unavailable for {projectPath}.");
         var sources = new List<ProjectSourceIdentity>();
         var exclusions = new List<ProjectSourceExclusion>();
+        var evaluatedCompileInputs = metadata.CompileInputs.ToHashSet(PathComparer);
+        var trackedInputs = await TrackedInputs(projectPath, request.Timeout, cancellationToken);
         var documentPaths = project.Documents.Where(document => document.FilePath is not null)
             .Select(document => Path.GetFullPath(document.FilePath!)).ToHashSet(PathComparer);
         foreach (var document in project.Documents.OrderBy(document => document.FilePath, StringComparer.Ordinal))
@@ -120,12 +122,15 @@ internal static class MsBuildProjectLoader
             if (document.FilePath is null) throw new ProjectContextException("context.sourcePathUnavailable", $"A document in {projectPath} has no physical path.");
             var text = (await document.GetTextAsync(cancellationToken)).ToString();
             var logical = document.Folders.Count > 0 ? string.Join('/', document.Folders.Append(document.Name)) : document.Name;
-            var generated = IsGenerated(document.FilePath, text);
+            var physical = Path.GetFullPath(document.FilePath);
+            var generated = !evaluatedCompileInputs.Contains(physical) && !trackedInputs.Contains(physical) &&
+                metadata.IntermediatePaths.Any(path => IsWithin(path, physical)) && !TraversesReparsePoint(physical);
             var contentIdentity = File.Exists(document.FilePath)
                 ? ProjectAnalysisContext.ContentHash(await File.ReadAllBytesAsync(document.FilePath, cancellationToken))
                 : ProjectAnalysisContext.ContentHash(text);
             var identity = new ProjectSourceIdentity(Logical(root, document.FilePath), logical.Replace('\\', '/'),
-                contentIdentity, generated, !IsWithin(root, document.FilePath));
+                contentIdentity, generated, !IsWithin(root, document.FilePath))
+            { ResolvedPath = Path.GetFullPath(document.FilePath) };
             if (generated && !request.IncludeGenerated) exclusions.Add(new(identity.PhysicalPath, identity.LogicalPath, "generated.defaultExcluded", identity.ContentIdentity));
             else sources.Add(identity);
         }
@@ -173,7 +178,20 @@ internal static class MsBuildProjectLoader
             parseOptions.PreprocessorSymbolNames, parseOptions.Kind,
             metadata.Imports.Where(path => !IsWithin(metadata.ProjectExtensionsPath, path))
                 .Select(path => ImportIdentity(root, request.SdkPath, path)).Append(RestoreIdentity(metadata.AssetsFile)),
-            sources, new ProjectExclusionPolicy(request.IncludeTests, request.IncludeGenerated), adapter, exclusions);
+            sources, new ProjectExclusionPolicy(request.IncludeTests, request.IncludeGenerated), adapter, exclusions) with
+        {
+            GeneratedTransitionPaths = project.AnalyzerConfigDocuments.Where(document => document.FilePath is not null)
+                .Select(document => Path.GetFullPath(document.FilePath!))
+                .Where(path => !trackedInputs.Contains(path) && !metadata.AuthoredInputs.Contains(path, PathComparer) &&
+                    metadata.IntermediatePaths.Any(output => IsWithin(output, path)) && !TraversesReparsePoint(path))
+                .Distinct(PathComparer).Order(StringComparer.Ordinal).ToArray(),
+            ProtectedPaths = metadata.AuthoredInputs.Concat(metadata.Imports)
+                .Append(projectPath).Append(metadata.AssetsFile)
+                .Concat(project.MetadataReferences.Select(reference => reference.Display)
+                    .Where(path => path is not null && File.Exists(path)).Select(path => path!))
+                .Concat(sources.Where(source => source.ResolvedPath is not null).Select(source => source.ResolvedPath!))
+                .Select(Path.GetFullPath).Distinct(PathComparer).Order(StringComparer.Ordinal).ToArray()
+        };
     }
 
     private static MSBuildWorkspace CreateWorkspace(string configuration, string? platform, string? framework,
@@ -211,23 +229,47 @@ internal static class MsBuildProjectLoader
         var projectExtensions = project.GetPropertyValue("MSBuildProjectExtensionsPath");
         if (string.IsNullOrWhiteSpace(projectExtensions)) projectExtensions = Path.Combine(Path.GetDirectoryName(projectPath)!, "obj");
         else if (!Path.IsPathRooted(projectExtensions)) projectExtensions = Path.GetFullPath(projectExtensions, Path.GetDirectoryName(projectPath)!);
+        var compileInputs = project.GetItems("Compile")
+            .Select(item => Path.GetFullPath(item.EvaluatedInclude, Path.GetDirectoryName(projectPath)!))
+            .Where(File.Exists).Distinct(PathComparer).ToArray();
         var authoredInputs = project.Imports.Select(import => import.ImportedProject.FullPath)
             .Append(projectPath)
-            .Concat(project.GetItems("Compile").Select(item => Path.GetFullPath(item.EvaluatedInclude, Path.GetDirectoryName(projectPath)!)))
+            .Concat(compileInputs)
             .Where(File.Exists).Distinct(PathComparer).ToArray();
         return new EvaluatedMetadata(frameworks,
             string.Equals(project.GetPropertyValue("IsTestProject"), "true", StringComparison.OrdinalIgnoreCase),
             project.GetPropertyValue("AssemblyName"),
             project.GetPropertyValue("Configuration") is { Length: > 0 } c ? c : configuration,
             project.GetPropertyValue("Platform") is { Length: > 0 } p ? p : platform ?? "AnyCPU",
-            project.Imports.Select(import => import.ImportedProject.FullPath).ToArray(), assets, projectExtensions, authoredInputs);
+            project.Imports.Select(import => import.ImportedProject.FullPath).ToArray(), assets, projectExtensions,
+            authoredInputs, compileInputs,
+            new[] { "IntermediateOutputPath", "BaseIntermediateOutputPath" }
+                .Select(project.GetPropertyValue).Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => Path.GetFullPath(value, Path.GetDirectoryName(projectPath)!))
+                .Distinct(PathComparer).ToArray());
     }
 
-    private static bool IsGenerated(string path, string text) =>
-        path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) ||
-        Path.GetFileName(path).EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase) ||
-        Path.GetFileName(path).EndsWith(".generated.cs", StringComparison.OrdinalIgnoreCase) ||
-        text.AsSpan(0, Math.Min(text.Length, 512)).Contains("<auto-generated", StringComparison.OrdinalIgnoreCase);
+    private static async Task<HashSet<string>> TrackedInputs(string projectPath, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var directory = new DirectoryInfo(Path.GetDirectoryName(projectPath)!);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, ".git")) &&
+               !Directory.Exists(Path.Combine(directory.FullName, ".git"))) directory = directory.Parent;
+        if (directory is null) return new HashSet<string>(PathComparer);
+        var result = await ProcessRunner.RunAsync("git", ["--no-optional-locks", "ls-files", "--full-name", "-z"],
+            directory.FullName, timeout, cancellationToken);
+        if (result.ExitCode != 0)
+            throw new ProjectContextException("context.gitInventoryUnavailable", "Cannot independently classify Git-tracked compiler sources.");
+        return result.StandardOutput.Split('\0', StringSplitOptions.RemoveEmptyEntries)
+            .Select(path => Path.GetFullPath(path, directory.FullName)).ToHashSet(PathComparer);
+    }
+
+    private static bool TraversesReparsePoint(string path)
+    {
+        for (var current = path; current is not null; current = Path.GetDirectoryName(current))
+            if ((File.Exists(current) || Directory.Exists(current)) &&
+                (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) return true;
+        return false;
+    }
 
     private static string Logical(string root, string path) => IsWithin(root, path)
         ? Path.GetRelativePath(root, path).Replace('\\', '/')
@@ -298,6 +340,7 @@ internal static class MsBuildProjectLoader
     }
 
     private sealed record EvaluatedMetadata(string[] Frameworks, bool IsTestProject, string AssemblyName,
-        string Configuration, string Platform, string[] Imports, string AssetsFile, string ProjectExtensionsPath, string[] AuthoredInputs);
+        string Configuration, string Platform, string[] Imports, string AssetsFile, string ProjectExtensionsPath,
+        string[] AuthoredInputs, string[] CompileInputs, string[] IntermediatePaths);
     private sealed record ProjectSelection(string Path, string Configuration, string? Platform);
 }

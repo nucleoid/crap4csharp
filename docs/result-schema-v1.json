@@ -44,13 +44,15 @@
         "callables": { "type": "array", "items": { "type": "object" } },
         "families": { "type": "array", "items": { "type": "object" } },
         "callableExemptions": { "type": "array", "items": { "type": "object" } },
-        "exemptionErrors": { "type": "array", "items": { "type": "string" } }
+        "exemptionErrors": { "type": "array", "items": { "type": "string" } },
+        "policyTrust": { "$ref": "#/$defs/policyTrust" },
+        "policyDifferences": { "type": "array", "items": { "$ref": "#/$defs/policyDifference" } }
       }, "additionalProperties": true
     },
     "context": {
       "type": "object", "required": ["id", "analysisMode", "project", "targetFramework", "configuration", "sourceSetIdentity", "externalRootIdentity"],
       "properties": {
-        "id": { "type": "string", "minLength": 1 }, "analysisMode": { "enum": ["syntaxOnly", "project"] },
+        "id": { "type": "string", "minLength": 1 }, "analysisMode": { "enum": ["syntaxOnly", "project", "captured"] },
         "project": { "type": ["string", "null"] }, "targetFramework": { "type": ["string", "null"] },
         "configuration": { "type": ["string", "null"] }, "sourceSetIdentity": { "type": ["string", "null"] },
         "externalRootIdentity": { "type": ["string", "null"] }
@@ -62,6 +64,24 @@
         "name": { "type": "string", "minLength": 1 },
         "status": { "enum": ["pass", "fail", "operationalError", "cancelled", "skipped", "notApplicable"] },
         "reason": { "type": "string", "minLength": 1 }, "required": { "type": "boolean" }
+      }, "additionalProperties": true
+    },
+    "policyTrust": {
+      "type": "object",
+      "required": ["trust", "revision", "policyPath", "policyHash", "compatibilityHash"],
+      "properties": {
+        "trust": { "enum": ["base-trusted", "ci-authorized", "local-unreviewed"] },
+        "revision": { "type": "string" }, "policyPath": { "type": "string" },
+        "policyHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "compatibilityHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }, "additionalProperties": true
+    },
+    "policyDifference": {
+      "type": "object", "required": ["path", "status", "trustedHash", "proposedHash"],
+      "properties": {
+        "path": { "type": "string" }, "status": { "enum": ["unchanged", "changed", "deleted"] },
+        "trustedHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "proposedHash": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
       }, "additionalProperties": true
     },
     "span": {
