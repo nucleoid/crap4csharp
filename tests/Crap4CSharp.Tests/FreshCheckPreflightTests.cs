@@ -14,6 +14,11 @@ public sealed class FreshCheckPreflightTests
     [InlineData("exemption", "policy.exemptionOverrideForbidden")]
     [InlineData("output", "output.aliasesPolicyInput")]
     [InlineData("artifact", "output.aliasesPolicyInput")]
+    [InlineData("framework", "policy.frameworkOverrideForbidden")]
+    [InlineData("prior-missing", "arguments.invalid")]
+    [InlineData("prior-orphan", "arguments.invalid")]
+    [InlineData("unsafe-output-new", "scope.executionSnapshotUnsupported")]
+    [InlineData("noncurrent", "scope.nonCurrentHeadWorktree")]
     public async Task PublicFreshCheckRejectsUnsafePreflightBeforeAnyConsumerEvaluation(string attack, string expected)
     {
         using var fixture = TestDirectory.Create("crap4csharp-fresh-preflight");
@@ -31,9 +36,17 @@ public sealed class FreshCheckPreflightTests
         async Task Git(params string[] args) => Assert.Equal(0, (await ProcessRunner.RunAsync("git", args, fixture.Path, TimeSpan.FromSeconds(30), token)).ExitCode);
         await Git("init", "-q"); await Git("config", "user.email", "fixture@example.invalid");
         await Git("config", "user.name", "Fixture"); await Git("add", "."); await Git("commit", "-qm", "trusted policy");
+        await Git("commit", "--allow-empty", "-qm", "current head");
         // Branch policy cannot approve a weaker override.
         File.WriteAllText(policy, File.ReadAllText(policy).Replace("\"threshold\":8", "\"threshold\":99", StringComparison.Ordinal));
         var beforePolicy = File.ReadAllBytes(policy); var beforeProject = File.ReadAllBytes(project);
+        var valid = new FreshCheckRequest("App/App.csproj", "policy.json", "HEAD", null, null, "worktree", "method",
+            "result.json", "new-bundle", false, false, null, new PolicyOverrides(Threshold: 7), TimeSpan.FromSeconds(30));
+        var preflight = await FreshCheckPreflightLoader.LoadAsync(valid, fixture.Path, token);
+        Assert.Equal(8, preflight.Trusted.Policy.Policy.Threshold); Assert.Equal(7, preflight.Policy.Threshold);
+        Assert.Equal(preflight.Trusted.Revision, preflight.Scope!.Revision.MergeBase);
+        Assert.False(Directory.Exists(Path.Combine(fixture.Path, "new-bundle")));
+        Assert.False(File.Exists(Path.Combine(fixture.Path, "result.json")));
         var arguments = new List<string> { "check", "--project", "App/App.csproj", "--policy", "policy.json", "--base", "HEAD", "--format", "json" };
         arguments.AddRange(attack switch
         {
@@ -41,6 +54,10 @@ public sealed class FreshCheckPreflightTests
             "threshold" => ["--threshold", "9"], "configuration" => ["--configuration", "Release"],
             "exemption" => ["--callable-exemptions", "branch-waiver.json"],
             "output" => ["--output", "App/App.csproj"], "artifact" => ["--artifact-output", "App"],
+            "framework" => ["--framework", "net9.0"], "prior-missing" => ["--no-build"],
+            "prior-orphan" => ["--build-artifacts", "warm-manifest.json"],
+            "unsafe-output-new" => ["--scope", "staged", "--output", "App/Generated.cs"],
+            "noncurrent" => ["--head", "HEAD~1"],
             _ => throw new InvalidOperationException()
         });
         var output = new StringWriter(); var errors = new StringWriter();
@@ -51,5 +68,6 @@ public sealed class FreshCheckPreflightTests
         Assert.Empty(Directory.GetDirectories(fixture.Path, "obj", SearchOption.AllDirectories));
         Assert.Empty(Directory.GetDirectories(fixture.Path, "bin", SearchOption.AllDirectories));
         Assert.DoesNotContain("CONSUMER_MUST_NOT_LOAD", errors.ToString(), StringComparison.Ordinal);
+        Assert.False(File.Exists(Path.Combine(fixture.Path, "App/Generated.cs")));
     }
 }

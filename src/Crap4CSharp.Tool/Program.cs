@@ -201,7 +201,17 @@ internal static class App
             if (options.Command == "check" && options.Ruleset == ComplexityRules.OrdinaryMethodsV1)
                 throw new ArgumentException("check requires callables-v1; ordinary-methods-v1 is available through the legacy option-only invocation.");
             if (options.Command == "check" && options.ReuseArtifacts is null)
-                throw new ArgumentException("check callables-v1 currently requires --reuse-artifacts, --policy, and --base.");
+            {
+                var request = new FreshCheckRequest(options.Project, options.Policy!, options.Base!, options.Scope,
+                    options.Head, options.SourceState, options.Granularity, options.Output, options.ArtifactOutput,
+                    options.NoRestore, options.NoBuild, options.BuildArtifacts,
+                    new PolicyOverrides(Threshold: options.ThresholdExplicit ? options.Threshold : null,
+                        Frameworks: options.Frameworks.Count == 0 ? null : options.Frameworks,
+                        Configuration: options.Configuration, ExemptionFile: options.Exemptions,
+                        IncludeTests: options.IncludeTests, IncludeGenerated: options.IncludeGenerated), options.Timeout);
+                _ = await FreshCheckPreflightLoader.LoadAsync(request, workingDirectory, cancellationToken);
+                throw new PolicyException("check.freshExecutionIncomplete", "Fresh trust/scope/output preflight completed; execution/export integration is not yet available. No restore/build/test was launched.");
+            }
             cancellationToken.ThrowIfCancellationRequested();
             if (options.Command == "check" && options.Output is not null)
                 OutputDestinationSafety.RejectExistingConsumerFile(options.Output, workingDirectory);
@@ -237,6 +247,8 @@ internal static class App
         catch (Exception exception) when (IsHandled(exception))
         {
             var reason = exception is PolicyException policyException ? policyException.Code :
+                exception is ScopeException scopeException ? scopeException.Reason :
+                exception is ProjectContextException contextException ? contextException.Reason :
                 exception is BaselineException baselineException ? baselineException.Code :
                 exception is DecoderFallbackException && options?.ReuseArtifacts is not null ? "artifact.invalid" :
                 exception is ArgumentException ? "arguments.invalid" :
@@ -281,6 +293,10 @@ internal static class App
                 }
                 else mayWrite = IsAbsentOutputDestination(destination, workingDirectory);
             }
+            // Fresh preflight failures have not established complete evaluated source/
+            // import/output alias safety. Keep the terminal document on stdout only.
+            if (args[0] == "check" && (options?.ReuseArtifacts is null) && !args.Contains("--reuse-artifacts", StringComparer.Ordinal))
+                mayWrite = false;
             if (destination is not null && !mayWrite)
                 result = result with
                 {
@@ -325,6 +341,40 @@ internal static class App
             }
             switch (arg)
             {
+                case "--scope":
+                    if (!seen.Add(arg)) throw new ArgumentException("--scope may be specified only once.");
+                    options.Scope = Value(); break;
+                case "--head":
+                    if (!seen.Add(arg)) throw new ArgumentException("--head may be specified only once.");
+                    options.Head = Value(); break;
+                case "--source-state":
+                    if (!seen.Add(arg)) throw new ArgumentException("--source-state may be specified only once.");
+                    options.SourceState = Value(); break;
+                case "--granularity":
+                    if (!seen.Add(arg)) throw new ArgumentException("--granularity may be specified only once.");
+                    options.Granularity = Value(); break;
+                case "--configuration":
+                    if (!seen.Add(arg)) throw new ArgumentException("--configuration may be specified only once.");
+                    options.Configuration = Value(); break;
+                case "--framework": options.Frameworks.Add(Value()); break;
+                case "--include-tests":
+                    if (!seen.Add(arg)) throw new ArgumentException("--include-tests may be specified only once.");
+                    options.IncludeTests = true; break;
+                case "--include-generated":
+                    if (!seen.Add(arg)) throw new ArgumentException("--include-generated may be specified only once.");
+                    options.IncludeGenerated = true; break;
+                case "--artifact-output":
+                    if (!seen.Add(arg)) throw new ArgumentException("--artifact-output may be specified only once.");
+                    options.ArtifactOutput = Value(); break;
+                case "--build-artifacts":
+                    if (!seen.Add(arg)) throw new ArgumentException("--build-artifacts may be specified only once.");
+                    options.BuildArtifacts = Value(); break;
+                case "--no-restore":
+                    if (!seen.Add(arg)) throw new ArgumentException("--no-restore may be specified only once.");
+                    options.NoRestore = true; break;
+                case "--no-build":
+                    if (!seen.Add(arg)) throw new ArgumentException("--no-build may be specified only once.");
+                    options.NoBuild = true; break;
                 case "--syntax-only": options.SyntaxOnly = true; break;
                 case "--reuse-artifacts":
                     if (!seen.Add(arg)) throw new ArgumentException("--reuse-artifacts may be specified only once.");
@@ -379,6 +429,7 @@ internal static class App
                         !double.IsFinite(threshold) || threshold < 0)
                         throw new ArgumentException("Threshold must be a finite non-negative number.");
                     options.Threshold = threshold;
+                    options.ThresholdExplicit = true;
                     break;
                 case "--allow-missing-coverage": options.AllowMissingCoverage = true; break;
                 case "--format":
@@ -400,6 +451,17 @@ internal static class App
             throw new ArgumentException($"Unknown ruleset '{options.Ruleset}'.");
         if (options.Ruleset == ComplexityRules.CallablesV1 && options.AllowMissingCoverage)
             throw new ArgumentException("--allow-missing-coverage is only available with ordinary-methods-v1.");
+        var freshSelectors = new[] { "--scope", "--head", "--source-state", "--granularity", "--configuration", "--framework",
+            "--include-tests", "--include-generated", "--artifact-output", "--build-artifacts", "--no-restore", "--no-build" };
+        if ((options.Command != "check" || options.ReuseArtifacts is not null) && args.Any(freshSelectors.Contains))
+            throw new ArgumentException("Fresh execution selectors cannot be combined with analyze or --reuse-artifacts.");
+        if (options.Command == "check" && options.ReuseArtifacts is null)
+        {
+            if (options.Policy is null || options.Base is null) throw new ArgumentException("Base-trusted fresh check requires --policy and --base.");
+            if (options.SyntaxOnly || options.Inputs.Count != 0 || options.Coverage.Count != 0 || options.AllowMissingCoverage ||
+                options.CoveragePathMappings.Count != 0 || seen.Contains("--coverage-path-case"))
+                throw new ArgumentException("Fresh check does not accept supplied source/coverage/syntax inputs or unsupported path mappings.");
+        }
         if (options.ReuseArtifacts is not null)
         {
             if (options.SyntaxOnly || options.Inputs.Count > 0 || options.Coverage.Count > 0 ||
@@ -1243,6 +1305,19 @@ internal static class App
         public string? Project { get; set; }
         public string? Policy { get; set; }
         public string? Base { get; set; }
+        public string? Scope { get; set; }
+        public string? Head { get; set; }
+        public string SourceState { get; set; } = "worktree";
+        public string Granularity { get; set; } = "method";
+        public string? Configuration { get; set; }
+        public List<string> Frameworks { get; } = [];
+        public bool? IncludeTests { get; set; }
+        public bool? IncludeGenerated { get; set; }
+        public string? ArtifactOutput { get; set; }
+        public string? BuildArtifacts { get; set; }
+        public bool NoRestore { get; set; }
+        public bool NoBuild { get; set; }
+        public bool ThresholdExplicit { get; set; }
         public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(300);
         public double Threshold { get; set; } = 8;
         public bool AllowMissingCoverage { get; set; }
