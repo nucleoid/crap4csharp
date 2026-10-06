@@ -63,6 +63,11 @@ public sealed record ProjectAnalysisContext(
     [JsonIgnore]
     public string? EvaluatedIntermediateDirectory { get; init; }
 
+    // Complete physical Workspace document inventory, independent of public analysis exclusions.
+    // Generator-only syntax trees are not physical documents and require separate actual-build proof.
+    [JsonIgnore]
+    public IReadOnlyList<ProjectSourceIdentity> CompilerDocuments { get; init; } = [];
+
     [JsonIgnore]
     public IReadOnlyList<string> ProtectedPaths { get; init; } = [];
 

@@ -26,8 +26,7 @@ public sealed class CompilerDocumentInventoryTests
         var loaded = await ProjectContextLoader.LoadGraphAsync(request, TestContext.Current.CancellationToken);
         Assert.True(loaded.Success, loaded.FailureReason + ": " + string.Join(" | ", loaded.Diagnostics));
         var context = Assert.Single(loaded.GraphContexts).Context;
-        // Proposed private seam falls back to the current public source inventory on RED.
-        var documents = Inventory(context);
+        var documents = context.CompilerDocuments;
         var sdkAssemblyInfo = Assert.Single(documents, d => d.ResolvedPath is not null && d.ResolvedPath.EndsWith("App.AssemblyInfo.cs", StringComparison.Ordinal));
         Assert.True(sdkAssemblyInfo.IsGenerated);
         Assert.Contains(documents, d => d.ResolvedPath is not null && d.ResolvedPath.EndsWith("AssemblyAttributes.cs", StringComparison.Ordinal));
@@ -48,7 +47,7 @@ public sealed class CompilerDocumentInventoryTests
             Assert.Contains(context.Exclusions, e => e.ContentIdentity == sdkAssemblyInfo.ContentIdentity && e.Reason == "generated.defaultExcluded");
         }
         var transported = JsonSerializer.Deserialize<ProjectAnalysisContext>(JsonSerializer.Serialize(context, ProjectContextLoader.JsonOptions), ProjectContextLoader.JsonOptions)!;
-        Assert.Equal(documents, Inventory(transported));
+        Assert.Equal(documents, transported.CompilerDocuments);
         var publicJson = JsonSerializer.Serialize(context, new JsonSerializerOptions(JsonSerializerDefaults.Web));
         Assert.DoesNotContain("compilerDocuments", publicJson, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(fixture.Path, publicJson, StringComparison.Ordinal);
@@ -59,6 +58,9 @@ public sealed class CompilerDocumentInventoryTests
         var actualSources = Assert.Single(observed.Parameters, p => p.Name == "Sources").Items
             .Select(p => Path.GetFullPath(p, Path.GetDirectoryName(project)!)).Order(StringComparer.Ordinal).ToArray();
         Assert.Equal(actualSources, documents.Select(d => d.ResolvedPath!).Order(StringComparer.Ordinal));
+        var final = await ProjectContextLoader.LoadGraphAsync(request, TestContext.Current.CancellationToken);
+        Assert.True(final.Success, final.FailureReason + ": " + string.Join(" | ", final.Diagnostics));
+        Assert.Equal(documents, Assert.Single(final.GraphContexts).Context.CompilerDocuments);
         foreach (var (path, saved) in original)
         {
             Assert.Equal(saved.Bytes, File.ReadAllBytes(path));
@@ -66,6 +68,23 @@ public sealed class CompilerDocumentInventoryTests
         }
     }
 
-    private static IReadOnlyList<ProjectSourceIdentity> Inventory(ProjectAnalysisContext context) =>
-        typeof(ProjectAnalysisContext).GetProperty("CompilerDocuments")?.GetValue(context) as IReadOnlyList<ProjectSourceIdentity> ?? context.Sources;
+    [Fact]
+    public void PrivateCompilerInventoryDoesNotChangePublicIdentityOrCapabilities()
+    {
+        var context = ProjectAnalysisContext.Create("App.csproj", "App", "net10.0", "Release", "AnyCPU",
+            Microsoft.CodeAnalysis.CSharp.LanguageVersion.CSharp14, [], Microsoft.CodeAnalysis.SourceCodeKind.Regular,
+            [], [], new(false, false), new("sdk", "msbuild", "roslyn"));
+        var privatePath = Path.Combine(Path.GetTempPath(), "private-inventory.cs");
+        var changed = context with { CompilerDocuments = [new("obj/a.cs", "a.cs", "sha", true, false) { ResolvedPath = privatePath }] };
+        Assert.Equal(context.ContextId, changed.ContextId);
+        Assert.Equal(context.SourceSetIdentity, changed.SourceSetIdentity);
+        Assert.Equal(context.Capabilities, changed.Capabilities);
+        Assert.False(changed.Capabilities.CompiledInputBindingComplete);
+        Assert.False(changed.Capabilities.ReuseRecipeComplete);
+        Assert.Equal(JsonSerializer.Serialize(context), JsonSerializer.Serialize(changed));
+        Assert.Empty(context.CompilerDocuments);
+        var copy = JsonSerializer.Deserialize<ProjectAnalysisContext>(JsonSerializer.Serialize(changed, ProjectContextLoader.JsonOptions), ProjectContextLoader.JsonOptions)!;
+        Assert.Equal(changed.CompilerDocuments, copy.CompilerDocuments);
+        Assert.Equal(privatePath, Assert.Single(copy.CompilerDocuments).ResolvedPath);
+    }
 }

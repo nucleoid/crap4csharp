@@ -230,6 +230,7 @@ internal static class MsBuildProjectLoader
         if (project.ParseOptions is not CSharpParseOptions parseOptions)
             throw new ProjectContextException("context.parseOptionsUnavailable", $"C# parse options were unavailable for {projectPath}.");
         var sources = new List<ProjectSourceIdentity>();
+        var compilerDocuments = new List<ProjectSourceIdentity>();
         var exclusions = new List<ProjectSourceExclusion>();
         var evaluatedCompileInputs = metadata.CompileInputs.ToHashSet(PathComparer);
         var trackedInputs = await TrackedInputs(projectPath, request.Timeout, cancellationToken);
@@ -249,6 +250,7 @@ internal static class MsBuildProjectLoader
             var identity = new ProjectSourceIdentity(Logical(root, document.FilePath), logical.Replace('\\', '/'),
                 contentIdentity, generated, !IsWithin(root, document.FilePath))
             { ResolvedPath = Path.GetFullPath(document.FilePath) };
+            compilerDocuments.Add(identity);
             if (generated && !request.IncludeGenerated) exclusions.Add(new(identity.PhysicalPath, identity.LogicalPath, "generated.defaultExcluded", identity.ContentIdentity));
             else sources.Add(identity);
         }
@@ -299,6 +301,7 @@ internal static class MsBuildProjectLoader
             sources, new ProjectExclusionPolicy(request.IncludeTests, request.IncludeGenerated), adapter, exclusions) with
         {
             ResolvedProjectPath = Path.GetFullPath(projectPath),
+            CompilerDocuments = compilerDocuments.OrderBy(source => source.ResolvedPath, StringComparer.Ordinal).ToArray(),
             EvaluatedTargetPath = metadata.TargetPath,
             EvaluatedIntermediateDirectory = metadata.IntermediateDirectory,
             GeneratedTransitionPaths = project.AnalyzerConfigDocuments.Where(document => document.FilePath is not null)
