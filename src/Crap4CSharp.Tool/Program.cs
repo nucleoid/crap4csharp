@@ -37,7 +37,7 @@ internal static class App
         Usage:
           crap4csharp [options] [file-or-directory ...]
           crap4csharp analyze --syntax-only [options] [file-or-directory ...]
-          crap4csharp check --ruleset callables-v1 [options]
+          crap4csharp check --reuse-artifacts <manifest> --policy <path> --base <ref> [options]
           crap4csharp baseline create|update --policy <path> --reuse-artifacts <manifest> --output <candidate>
 
         Options:
@@ -208,6 +208,10 @@ internal static class App
                 : options.Ruleset == ComplexityRules.OrdinaryMethodsV1
                 ? await AnalyzeLegacyCapturedInputsAsync(options, workingDirectory, startedAt, stopwatch, cancellationToken)
                 : AnalyzeCapturedInputs(options, workingDirectory, startedAt, stopwatch);
+            // Capture terminal timing after replay/current revalidation, not before awaiting it.
+            var duration = stopwatch.Elapsed;
+            result = result with { Run = result.Run with
+                { FinishedAt = startedAt + duration, DurationMilliseconds = duration.TotalMilliseconds } };
             var json = ResultWriter.Serialize(result);
             if (options.Output is not null)
             {
