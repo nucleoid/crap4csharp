@@ -11,6 +11,7 @@ public sealed class TestExecutionAdapterTests
     [InlineData(true, false)]
     [InlineData(false, false)]
     [InlineData(true, true)]
+    [InlineData(false, true)]
     public async Task ActualMappedTestsRunOnceWithoutAnyImplicitBuildOrRestore(bool passes, bool opposingNoBuild)
     {
         using var fixture = TestDirectory.Create("crap4csharp-actual-once-tests");
@@ -51,7 +52,7 @@ public sealed class TestExecutionAdapterTests
         var root = fixture.Write("Root/Root.csproj", """
             <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
             <ItemGroup><ProjectReference Include="../Tests/Tests.csproj" AdditionalProperties="Configuration=Release;Flavor=leftOPPOSING" /></ItemGroup></Project>
-            """.Replace("OPPOSING", opposingNoBuild ? ";VSTestNoBuild=false" : "", StringComparison.Ordinal));
+            """.Replace("OPPOSING", opposingNoBuild ? ";vstestnobuild=false" : "", StringComparison.Ordinal));
         fixture.Write("Root/Code.cs", "public class Root {}");
         request = request with { Target = root, Configuration = "Debug" };
         Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken)).ExitCode);
@@ -68,6 +69,8 @@ public sealed class TestExecutionAdapterTests
             catch (ProjectContextException failure) { throw new InvalidOperationException(failure.Message + "\n" + File.ReadAllText(System.IO.Path.Combine(owned, "stdout.log")) + "\n" + File.ReadAllText(System.IO.Path.Combine(owned, "stderr.log")), failure); }
         }, TestContext.Current.CancellationToken);
         Assert.Equal(3, bound.Observations.Count);
+        Assert.Single(File.ReadAllLines(System.IO.Path.Combine(fixture.Path, "Tests/build-count.txt")));
+        Assert.Single(File.ReadAllLines(System.IO.Path.Combine(fixture.Path, "Dep/build-count.txt")));
         var authored = new[] { project, dependency, root, source }.ToDictionary(p => p,
             p => (Bytes: File.ReadAllBytes(p), Time: File.GetLastWriteTimeUtc(p)));
         var outputs = bound.FinalGraph.Contexts.SelectMany(c => new[] { c.EvaluatedTargetPath!, System.IO.Path.ChangeExtension(c.EvaluatedTargetPath!, ".pdb") })
@@ -95,6 +98,7 @@ public sealed class TestExecutionAdapterTests
         Assert.NotEmpty(File.ReadAllBytes(process.StandardOutput.Path));
         Assert.True(File.Exists(process.StandardError.Path));
         Assert.Single(File.ReadAllLines(System.IO.Path.Combine(fixture.Path, "Tests/bin/Release/net10.0/test-count.txt")));
+        // Check the actual target counter before and after VSTest, not just argv.
         Assert.Single(File.ReadAllLines(System.IO.Path.Combine(fixture.Path, "Tests/build-count.txt")));
         Assert.Single(File.ReadAllLines(System.IO.Path.Combine(fixture.Path, "Tests/launch-count.txt")));
         Assert.Single(File.ReadAllLines(System.IO.Path.Combine(fixture.Path, "Dep/build-count.txt")));
