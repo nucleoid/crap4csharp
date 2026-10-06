@@ -966,7 +966,7 @@ public sealed class PolicyCheckIntegrationTests
         var request = new ProjectContextLoadRequest(project, BuildConfiguration, "AnyCPU", [targetFramework], true, true,
             TimeSpan.FromMinutes(2));
         var loaded = await ProjectContextLoader.LoadAsync(request, TestContext.Current.CancellationToken);
-        Assert.True(loaded.Success, loaded.FailureReason ?? string.Join(Environment.NewLine, loaded.Diagnostics));
+        Assert.True(loaded.Success, loaded.FailureReason + Environment.NewLine + string.Join(Environment.NewLine, loaded.Diagnostics));
         var context = Assert.Single(loaded.Contexts);
         var pdbPath = Path.ChangeExtension(assemblyPath, ".pdb");
         var assembly = ImmutableArray.Create(await File.ReadAllBytesAsync(assemblyPath, TestContext.Current.CancellationToken));
