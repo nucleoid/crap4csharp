@@ -73,6 +73,24 @@ public sealed class RuntimeDependencyCopyTests
         else
         {
             Assert.Null(run.Failure); Assert.Equal(original, File.ReadAllBytes(destination));
+            var safe = TestChildEvidenceExport.Capture(run[0], run.Outcomes[0], token);
+            using (var document = System.Text.Json.JsonDocument.Parse(safe.ToArray()))
+            {
+                Assert.Equal(0, document.RootElement.GetProperty("compilerTasks").GetInt32());
+                Assert.False(document.RootElement.GetProperty("runtimeLoadingAttested").GetBoolean());
+                Assert.False(document.RootElement.GetProperty("reusableRecipe").GetBoolean());
+            }
+            Assert.DoesNotContain(fixture.Path, System.Text.Encoding.UTF8.GetString(safe.AsSpan()), StringComparison.Ordinal);
+            var log = Path.Combine(run.Outcomes[0].LogDirectory!, "test-child.binlog");
+            var originalLog = File.ReadAllBytes(log); var logClock = File.GetLastWriteTimeUtc(log);
+            try
+            {
+                File.WriteAllBytes(log, [..originalLog, 0]); File.SetLastWriteTimeUtc(log, logClock);
+                Assert.Equal("test.childExportUnproven", Assert.Throws<ProjectContextException>(() =>
+                    TestChildEvidenceExport.Capture(run[0], run.Outcomes[0], token)).Reason);
+            }
+            finally { File.WriteAllBytes(log, originalLog); File.SetLastWriteTimeUtc(log, logClock); }
+            Assert.Equal(safe, TestChildEvidenceExport.Capture(run[0], run.Outcomes[0], token));
             var observations = bound.FinalGraph.GraphContexts.ToDictionary(b => b.GraphId,
                 b => Assert.Single(bound.Observations, o => o.ProjectPath == b.ProjectPath), StringComparer.Ordinal);
             foreach (var bad in new[]
