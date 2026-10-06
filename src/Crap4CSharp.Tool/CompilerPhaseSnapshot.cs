@@ -32,6 +32,7 @@ internal sealed class CompilerPhaseSnapshot
         var cache = new Dictionary<string, FileIdentity>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
         long totalBytes = 0;
         var count = 0;
+        var classifications = new Dictionary<InputKey, bool>();
         foreach (var binding in loaded.GraphContexts)
         {
             foreach (var input in binding.Context.PhaseInputs.ToArray())
@@ -41,6 +42,10 @@ internal sealed class CompilerPhaseSnapshot
                 if (string.IsNullOrWhiteSpace(binding.GraphId) || !Path.IsPathFullyQualified(input.Path) || input.Path != Path.GetFullPath(input.Path) ||
                     input.Role is not ("source" or "project" or "import" or "additionalFile" or "analyzerConfig" or "analyzer" or "restoreAssets" or "sdkConfiguration" or "analyzerConfigProbe"))
                     throw Refuse("Input paths and roles must be explicit and canonical.");
+                var key = new InputKey(binding.GraphId, OperatingSystem.IsWindows() ? input.Path.ToUpperInvariant() : input.Path, input.Role);
+                if (classifications.TryGetValue(key, out var generated) && generated != input.ExpectedGenerated)
+                    throw Refuse("One input cannot have contradictory generated classifications.");
+                classifications[key] = input.ExpectedGenerated;
                 if (input.ExpectedGenerated)
                 {
                     if (input.Role is not ("source" or "analyzerConfig")) throw Refuse("Immutable input roles cannot become generated transitions.");
@@ -53,7 +58,8 @@ internal sealed class CompilerPhaseSnapshot
                     if (totalBytes > MaximumClosureBytes) throw Limit();
                     cache.Add(input.Path, identity);
                 }
-                var key = new InputKey(binding.GraphId, OperatingSystem.IsWindows() ? input.Path.ToUpperInvariant() : input.Path, input.Role);
+                if (identity.Sha256 == "absent" && input.Role != "analyzerConfigProbe")
+                    throw Refuse("An absent discovery probe cannot authorize a missing required file.");
                 result.TryAdd(key, identity); // One physical file may legitimately have several roles/contexts.
             }
         }
@@ -64,16 +70,23 @@ internal sealed class CompilerPhaseSnapshot
     {
         try
         {
+            for (var current = path; current is not null; current = Path.GetDirectoryName(current))
+            {
+                try
+                {
+                    if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                        throw Refuse("Phase inputs cannot traverse reparse points.");
+                }
+                catch (FileNotFoundException) { }
+                catch (DirectoryNotFoundException) { }
+            }
             if (absenceProbe && !File.Exists(path) && !Directory.Exists(path))
             {
-                // GetAttributes distinguishes true absence from a broken symlink or inaccessible path.
+                // True absence is bound; inaccessible/broken-link/special paths are never absence.
                 try { _ = File.GetAttributes(path); }
                 catch (FileNotFoundException) { return new("absent", 0, 0); }
                 catch (DirectoryNotFoundException) { return new("absent", 0, 0); }
             }
-            for (var current = path; current is not null; current = Path.GetDirectoryName(current))
-                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
-                    throw Refuse("Phase inputs cannot traverse reparse points.");
             if (!ArtifactBundle.IsRegularInput(path)) throw Refuse("Phase inputs must be regular files.");
             var time = File.GetLastWriteTimeUtc(path).Ticks;
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan);
