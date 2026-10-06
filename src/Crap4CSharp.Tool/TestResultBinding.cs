@@ -35,15 +35,15 @@ internal static class TestResultBinding
             var trxs = Directory.EnumerateFiles(directory, "*.trx").Take(2).ToArray();
             if (trxs.Length != 1 || !Paths.Equals(trxs[0], path)) throw Refuse();
             var bytes = ReadTrx(path, token);
-            ValidateDocument(bytes, Canonical(context.EvaluatedTargetPath), token);
-            return new(invocation.GraphId, CountTests(bytes), Hash(bytes), compiler.Assembly!.Sha256, compiler.Pdb!.Sha256);
+            var count = ValidateDocument(bytes, Canonical(context.EvaluatedTargetPath), token);
+            return new(invocation.GraphId, count, Hash(bytes), compiler.Assembly!.Sha256, compiler.Pdb!.Sha256);
         }
         catch (ProjectContextException error) when (error.Reason != "test.resultsUnproven") { throw Refuse(); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or XmlException or OverflowException)
         { throw Refuse(); }
     }
 
-    internal static void ValidateDocument(ImmutableArray<byte> bytes, string target, CancellationToken token)
+    internal static int ValidateDocument(ImmutableArray<byte> bytes, string target, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         try
@@ -57,6 +57,10 @@ internal static class TestResultBinding
             if (results.Length == 0 || results.Length > MaximumTests || results.Length != definitions.Length || results.Length != entries.Length ||
                 results.Any(e => e.Name != Ns + "UnitTestResult") || definitions.Any(e => e.Name != Ns + "UnitTest") ||
                 entries.Any(e => e.Name != Ns + "TestEntry")) throw Refuse();
+            // All individually named evidence must be in its supported direct container.
+            // Hidden nested/foreign result trees cannot evade the passing/counter gate.
+            foreach (var (name, expected) in new[] { ("UnitTestResult", results.Length), ("UnitTest", definitions.Length), ("TestEntry", entries.Length) })
+                if (root.Descendants().Count(e => e.Name.LocalName == name) != expected) throw Refuse();
             var summary = Single(root, "ResultSummary");
             if (Value(summary, "outcome") is not ("Completed" or "Passed") ||
                 root.Descendants().Any(e => e.Name.LocalName is "ErrorInfo" or "RunInfo")) throw Refuse();
@@ -98,6 +102,7 @@ internal static class TestResultBinding
                     Id(result, "testListId") != Id(entry, "testListId") || !lists.Contains(Id(result, "testListId"))) throw Refuse();
             }
             token.ThrowIfCancellationRequested();
+            return results.Length;
         }
         catch (Exception error) when (error is XmlException or ArgumentException or InvalidOperationException or OverflowException)
         { throw Refuse(); }
@@ -111,7 +116,6 @@ internal static class TestResultBinding
         { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null, MaxCharactersInDocument = MaximumTrxBytes });
         return XDocument.Load(reader);
     }
-    private static int CountTests(ImmutableArray<byte> bytes) => Single(Parse(bytes).Root!, "Results").Elements().Count();
     private static ImmutableArray<byte> ReadTrx(string path, CancellationToken token)
     {
         for (var current = path; current is not null; current = Path.GetDirectoryName(current))
