@@ -140,6 +140,50 @@ public sealed class PolicyCheckIntegrationTests
         Assert.Contains("recipe project", stderr.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
+    [Theory]
+    [InlineData("historical")]
+    [InlineData("missing")]
+    [InlineData("provider")]
+    [InlineData("incomplete")]
+    public async Task UnsupportedCurrentRecipeHasExplicitCliReasonBeforeGitOrProjectLoad(string shape)
+    {
+        var repository = RepositoryRoot();
+        const string projectLogical = "tests/Crap4CSharp.ProvenanceFixture/Crap4CSharp.ProvenanceFixture.csproj";
+        using var directory = TestDirectory.Create("crap4csharp-unsupported-recipe");
+        var (_, manifest, context, _, bytes) = await CreateBundle(repository, projectLogical,
+            PolicyLogical, typeof(Crap4CSharp.ProvenanceFixture.CompiledEvidence).Assembly.Location,
+            Path.Combine(directory.Path, "bundle"));
+        var unsupported = shape switch
+        {
+            "historical" => context with { CurrentRevalidation = null, ReuseRecipeComplete = false },
+            "missing" => context with { CurrentRevalidation = null },
+            "provider" => context with { CurrentRevalidation = context.CurrentRevalidation! with { Provider = "unknown-v99" } },
+            _ => context with { ReuseRecipeComplete = false }
+        };
+        var altered = manifest with { Contexts = [unsupported] };
+        var locator = ArtifactCaptureAdapter.PublishNew(altered, bytes, Path.Combine(directory.Path, "unsupported"));
+        // The empty root has no Git metadata and no project. A recipe refusal must
+        // take precedence over both Git acquisition and a real loader invocation.
+        var root = Path.Combine(directory.Path, "empty-root");
+        Directory.CreateDirectory(root);
+        File.Copy(Path.Combine(repository, PolicyLogical), Path.Combine(root, "policy.json"));
+        foreach (var command in new[] { "check", "baseline" })
+        {
+            var output = new StringWriter();
+            var args = command == "check"
+                ? new[] { "check", "--reuse-artifacts", locator, "--policy", "policy.json", "--base", "not-a-real-ref", "--format", "json" }
+                : new[] { "baseline", "create", "--reuse-artifacts", locator, "--policy", "policy.json", "--output", "candidate.json", "--format", "json" };
+            var exit = await global::App.RunAsync(args, root, output, TextWriter.Null, TestContext.Current.CancellationToken);
+            Assert.Equal(1, exit);
+            using var result = JsonDocument.Parse(output.ToString());
+            var reason = command == "check"
+                ? result.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("reason").GetString()
+                : result.RootElement.GetProperty("reason").GetString();
+            Assert.Equal("provenance.revalidationRecipeUnsupported", reason);
+            Assert.False(File.Exists(Path.Combine(root, "candidate.json")));
+        }
+    }
+
     [Fact]
     public async Task BaselineNumericExemptionVersionProducesOneStructuredFailureAndNoCandidate()
     {
