@@ -30,3 +30,12 @@ The protocol uses task-owned request/response files so loader logs cannot corrup
 Captured `analyze` and trusted reused `check` consume this context through a hash-bound manifest. The supported
 current-revalidation recipe reloads the declared project/TFM/configuration and inspects current PE/PDB outputs; it
 does not itself restore, build, or test. Fresh execution and bundle production remain later orchestration work.
+
+## Required graph Workspace preparation (internal)
+
+`LoadGraphAsync` loads each dependency-first mapped graph node in its own Workspace using all of its global
+properties, including custom `AdditionalProperties`, not only root configuration/TFM. Its private association
+retains graph ID, physical project path, design-time context and evaluated test-project classification.
+Required test contexts remain present even when production inventory excludes tests. Loading requires existing
+restore assets and never implicitly restores or compiles. These associations do not establish actual Csc inputs,
+test execution, final output binding, reusable evidence or a completed public fresh-check workflow.
