@@ -140,3 +140,22 @@ Real Coverlet OpenCover can project duplicate identical lambda points into their
 ambiguous too. An exact anonymous `memberCount` exemption does **not** waive the named parent. Refactor the duplicate
 bodies or provide supported exclusive point evidence; do not approve a named-parent anonymous exemption. The
 exact-point integration control is an adapter test, not proof that Coverlet emits exclusive coordinates.
+
+## Required evidence and conservative path support
+
+Version 1 always enforces successful declared tests, compatible provenance, complete required coverage (or exact
+approved unsupported exemptions), and numeric policy ceilings. `requiredChecks` records required-check presentation
+flags and participates in baseline compatibility; removing a name is not an opt-out and never disables enforcement.
+Trusted `check` and candidate generation require all declared tests passed, with no failures or skips, even for empty
+method scope. Incomplete execution reports `provenance.testExecutionIncomplete` and cannot produce a trusted green.
+
+Current generated-input classification and existing-output checks conservatively reject reparse points anywhere
+in the physical ancestor chain. Use a regular physical checkout/output path; ancestor-symlink layouts (including
+macOS `/var/folders` aliases and symlinked home directories) are not currently verified supported. These guards
+have not been relaxed to make an unverified platform green. Linux and Windows exact-head CI remain merge gates.
+
+Trusted check recalculates replay report thresholds, including `families[].isViolation`, using the approved policy,
+not the threshold captured by a branch. Family findings carry aggregate complexity/coverage/CRAP and the root
+callable's source span. Offline `analyze` continues to report the captured policy without live trust acquisition.
+Trusted Git acquisition and current revalidation use the invocation's `--timeout-seconds` budget per command;
+cancellation terminates acquisition, and timed-out Git output draining cannot wait indefinitely on inherited pipes.

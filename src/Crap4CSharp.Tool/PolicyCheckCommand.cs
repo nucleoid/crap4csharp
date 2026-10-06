@@ -291,6 +291,11 @@ internal static class PolicyCheckCommand
 
     private static void ValidatePolicyCoverage(RunManifest manifest, RepositoryPolicy policy)
     {
+        if (manifest.Executions.Count == 0 || manifest.Executions.Any(execution =>
+                !execution.Completed || execution.ExitCode != 0 || execution.FailedTests != 0 ||
+                execution.SkippedTests != 0 || execution.TotalTests <= 0 || execution.PassedTests != execution.TotalTests))
+            throw new PolicyException(ProvenanceReasonCodes.TestExecutionIncomplete,
+                "Trusted check requires every declared test execution to complete with all tests passed and none skipped.");
         var contexts = manifest.Contexts.Select(item => (CanonicalIdentity.NormalizeLogicalPath(item.Project),
             item.TargetFramework, item.Configuration)).OrderBy(item => item.Item1, StringComparer.Ordinal)
             .ThenBy(item => item.TargetFramework, StringComparer.Ordinal).ToArray();
