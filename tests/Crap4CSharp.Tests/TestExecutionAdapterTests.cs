@@ -293,6 +293,7 @@ public sealed class TestExecutionAdapterTests
                 }
                 ReadCoverage();
                 // Genuine once-built graph and real collector report, not synthetic compiler evidence.
+                TestContext.Current.TestOutputHelper!.WriteLine("ACTUAL_GRAPH_OPENCOVER " + System.Text.Encoding.UTF8.GetString(coverageOriginal));
                 var graphCoverageBinder = typeof(ProjectContextLoader).Assembly.GetType("Crap4CSharp.Core.CoverageGraphBinding")?
                     .GetMethod("ValidateInvocation", BindingFlags.Static | BindingFlags.NonPublic);
                 Assert.NotNull(graphCoverageBinder);
@@ -300,7 +301,7 @@ public sealed class TestExecutionAdapterTests
                     [typedObservation, bound, TestContext.Current.CancellationToken])!;
                 var graphCoverage = BindGraphCoverage();
                 Assert.Contains("Dep", (IReadOnlyList<string>)graphCoverage.GetType().GetProperty("ModuleNames")!.GetValue(graphCoverage)!);
-                foreach (var defect in new[] { "foreign-module", "duplicate-module", "empty", "metadata-token", "point", "file", "missing-file", "outside-closure" })
+                foreach (var defect in new[] { "foreign-module", "duplicate-module", "empty", "metadata-token", "point", "file", "missing-file", "outside-closure", "namespace", "fileid", "filteredpoint", "token-attribute", "method-name", "columns", "hidden-module", "duplicate-method", "negative-visits", "hidden-method" })
                 {
                     var changed = XDocument.Load(coveragePath);
                     var module = changed.Descendants("Module").First(m => m.Element("ModuleName")!.Value == "Dep");
@@ -314,6 +315,16 @@ public sealed class TestExecutionAdapterTests
                         case "file": module.Descendants("File").First().SetAttributeValue("fullPath", Path.Combine(fixture.Path, "Foreign.cs")); break;
                         case "missing-file": module.Descendants("File").First().Remove(); break;
                         case "outside-closure": module.Element("ModuleName")!.Value = "Root"; break;
+                        case "namespace": module.Name = XName.Get("Module", "urn:foreign"); break;
+                        case "fileid": module.Descendants("SequencePoint").First().SetAttributeValue("fileid", "9999"); break;
+                        case "filteredpoint": module.Descendants("SequencePoint").First().SetAttributeValue("vc", "invalid"); break;
+                        case "token-attribute": module.Descendants("Method").First().SetAttributeValue("metadataToken", "06000001"); break;
+                        case "method-name": module.Descendants("Method").First().Element("Name")!.Value = "System.Int32 Dependency::Foreign()"; break;
+                        case "columns": module.Descendants("SequencePoint").First().SetAttributeValue("sc", "999"); break;
+                        case "hidden-module": changed.Root!.Add(new XElement(module)); break;
+                        case "duplicate-method": var methodCopy = module.Descendants("Method").First(); methodCopy.AddAfterSelf(new XElement(methodCopy)); break;
+                        case "negative-visits": module.Descendants("SequencePoint").First().SetAttributeValue("vc", "-1"); break;
+                        case "hidden-method": changed.Root!.Add(new XElement(module.Descendants("Method").First())); break;
                     }
                     changed.Save(coveragePath);
                     try
@@ -322,6 +333,20 @@ public sealed class TestExecutionAdapterTests
                         Assert.Equal("coverage.graphUnproven", Assert.IsType<ProjectContextException>(error.InnerException).Reason);
                     }
                     finally { File.WriteAllBytes(coveragePath, coverageOriginal); File.SetLastWriteTimeUtc(coveragePath, coverageTime); }
+                }
+                BindGraphCoverage();
+                var dependencyContext = Assert.Single(bound.FinalGraph.Contexts, c => c.AssemblyName == "Dep");
+                foreach (var modulePath in new[] { dependencyContext.EvaluatedTargetPath!, Path.ChangeExtension(dependencyContext.EvaluatedTargetPath!, ".pdb") })
+                {
+                    var saved = File.ReadAllBytes(modulePath); var time = File.GetLastWriteTimeUtc(modulePath);
+                    var changed = saved.ToArray(); changed[^1] ^= 1;
+                    File.WriteAllBytes(modulePath, changed); File.SetLastWriteTimeUtc(modulePath, time);
+                    try
+                    {
+                        var error = Assert.Throws<TargetInvocationException>(() => BindGraphCoverage());
+                        Assert.Equal("coverage.graphUnproven", Assert.IsType<ProjectContextException>(error.InnerException).Reason);
+                    }
+                    finally { File.WriteAllBytes(modulePath, saved); File.SetLastWriteTimeUtc(modulePath, time); }
                 }
                 BindGraphCoverage();
                 // Retain actual attachment/base/membership diagnostics for the next coverage
