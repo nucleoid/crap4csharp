@@ -20,6 +20,10 @@ public sealed class TestRunnerDiscoveryTests
     [InlineData("missing-collector", false, "test.collectorUnsupported")]
     [InlineData("missing-core", false, "test.collectorUnsupported")]
     [InlineData("missing-dependency", false, "test.collectorUnsupported")]
+    [InlineData("empty-dependency", false, "test.collectorUnsupported")]
+    [InlineData("directory-dependency", false, "test.collectorUnsupported")]
+    [InlineData("malformed-deps", false, "test.collectorUnsupported")]
+    [InlineData("missing-runtime-inventory", false, "test.collectorUnsupported")]
     public async Task RestoredRunnerDiscoveryNeverBuildsOrTests(string mode, bool success, string? reason)
     {
         using var fixture = TestDirectory.Create("crap4csharp-runner-discovery");
@@ -55,7 +59,8 @@ public sealed class TestRunnerDiscoveryTests
         fixture.Write("Test.cs", "public class Tests { [Xunit.Fact] public void Pass() { } }");
         var request = new ProjectContextLoadRequest(project, "Release", "AnyCPU", [], false, false, TimeSpan.FromMinutes(2));
         Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken)).ExitCode);
-        if (mode is "owned-collector" or "missing-collector" or "missing-core" or "missing-dependency")
+        if (mode is "owned-collector" or "missing-collector" or "missing-core" or "missing-dependency" or
+            "empty-dependency" or "directory-dependency" or "malformed-deps" or "missing-runtime-inventory")
         {
             // Copy only into this fixture; never alter the shared installed package.
             using var assets = JsonDocument.Parse(File.ReadAllText(Path.Combine(fixture.Path, "obj", "project.assets.json")));
@@ -79,6 +84,14 @@ public sealed class TestRunnerDiscoveryTests
                 _ => null
             };
             if (missing is not null) File.Delete(Path.Combine(owned, missing));
+            if (mode == "empty-dependency") File.WriteAllBytes(Path.Combine(owned, "Mono.Cecil.dll"), []);
+            if (mode == "directory-dependency")
+            {
+                File.Delete(Path.Combine(owned, "Mono.Cecil.dll"));
+                Directory.CreateDirectory(Path.Combine(owned, "Mono.Cecil.dll"));
+            }
+            if (mode == "malformed-deps") File.WriteAllText(Path.Combine(owned, "coverlet.collector.deps.json"), "{");
+            if (mode == "missing-runtime-inventory") File.WriteAllText(Path.Combine(owned, "coverlet.collector.deps.json"), "{}");
         }
         var before = Directory.GetFiles(fixture.Path, "*", SearchOption.AllDirectories).ToDictionary(p => p,
             p => (Bytes: File.ReadAllBytes(p), Mtime: File.GetLastWriteTimeUtc(p)));
