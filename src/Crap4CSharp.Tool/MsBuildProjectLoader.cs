@@ -1,4 +1,5 @@
 using Microsoft.Build.Evaluation;
+using Microsoft.Build.Graph;
 using Microsoft.Build.Construction;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -18,6 +19,8 @@ internal static class MsBuildProjectLoader
         var root = Path.GetDirectoryName(request.Target)!;
         var excludedProjects = new List<ProjectContextProjectExclusion>();
         var projects = await DiscoverProjects(request.Target, request.Configuration, request.Platform, diagnostics, excludedProjects, cancellationToken);
+        if (request.GraphOnly)
+            return await DiscoverGraph(request, projects, diagnostics, excludedProjects, cancellationToken);
         if (request.MetadataOnly)
         {
             // Evaluation only: no target invocation, assets check, Workspace, or runner inference.
@@ -61,6 +64,67 @@ internal static class MsBuildProjectLoader
             return new ProjectContextLoadResult(false, contexts, diagnostics.Concat(["Requested framework was not found: " + string.Join(", ", unmatched)]).ToArray(), "context.frameworkNotFound", excludedProjects);
         return new ProjectContextLoadResult(true, contexts.OrderBy(context => context.ProjectPath, StringComparer.Ordinal)
             .ThenBy(context => context.TargetFramework, StringComparer.Ordinal).ToArray(), diagnostics, null, excludedProjects);
+    }
+
+    private static async Task<ProjectContextLoadResult> DiscoverGraph(ProjectContextLoadRequest request,
+        ProjectSelection[] selections, List<string> diagnostics, List<ProjectContextProjectExclusion> exclusions,
+        CancellationToken cancellationToken)
+    {
+        var entries = new List<ProjectGraphEntryPoint>();
+        var matched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var selection in selections)
+        {
+            await EnsureProjectSdkAsync(selection.Path, request, cancellationToken);
+            var metadata = Evaluate(selection.Path, selection.Configuration, selection.Platform, null);
+            foreach (var framework in metadata.Frameworks)
+            {
+                if (request.Frameworks.Count > 0 && !request.Frameworks.Contains(framework, StringComparer.OrdinalIgnoreCase)) continue;
+                matched.Add(framework);
+                var properties = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                { ["Configuration"] = selection.Configuration, ["TargetFramework"] = framework };
+                if (selection.Platform is not null) properties["Platform"] = selection.Platform;
+                entries.Add(new(selection.Path, properties));
+            }
+        }
+        if (request.Frameworks.Any(framework => !matched.Contains(framework)))
+            throw new ProjectContextException("context.frameworkNotFound", "A requested entry framework was not found.");
+        using var collection = new ProjectCollection();
+        // MSBuild owns ProjectReference mappings and framework negotiation; execute no targets here.
+        // Serial construction plus the owning subprocess deadline also bounds evaluation cancellation.
+        var graph = new ProjectGraph(entries, collection, null, 1, cancellationToken);
+        var nodes = graph.ProjectNodesTopologicallySorted.ToArray();
+        if (nodes.Length > 4096)
+            throw new ProjectContextException("context.graphLimit", "The build graph exceeds 4096 evaluated nodes.");
+        var identities = nodes.ToDictionary(node => node, node => GraphIdentity(node));
+        var result = new List<ProjectBuildGraphNode>();
+        foreach (var node in nodes)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var instance = node.ProjectInstance;
+            if (!Path.GetExtension(instance.FullPath).Equals(".csproj", StringComparison.OrdinalIgnoreCase))
+                throw new ProjectContextException("context.graphLanguageUnsupported", "A required dependency is not a supported C# project.");
+            await EnsureProjectSdkAsync(instance.FullPath, request, cancellationToken);
+            var framework = instance.GetPropertyValue("TargetFramework");
+            if (string.IsNullOrWhiteSpace(framework))
+                throw new ProjectContextException("context.graphFrameworkUnresolved", "A required graph node has no resolved target framework.");
+            var globals = instance.GlobalProperties.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+            result.Add(new(identities[node], Path.GetFullPath(instance.FullPath),
+                instance.GetPropertyValue("Configuration"), instance.GetPropertyValue("Platform"), framework, globals,
+                node.ProjectReferences.Select(dependency => identities[dependency]).Order(StringComparer.Ordinal).ToArray()));
+        }
+        return new(true, [], diagnostics, null, exclusions) { BuildGraph = result };
+    }
+
+    private static string GraphIdentity(ProjectGraphNode node)
+    {
+        // All mapped globals distinguish contexts, including custom AdditionalProperties.
+        // JSON framing avoids delimiter collisions; physical identities remain private transport only.
+        var globals = node.ProjectInstance.GlobalProperties.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(pair => new[] { pair.Key.ToUpperInvariant(), pair.Value }).ToArray();
+        var path = Path.GetFullPath(node.ProjectInstance.FullPath);
+        if (OperatingSystem.IsWindows()) path = path.ToUpperInvariant();
+        return ProjectAnalysisContext.ContentHash(JsonSerializer.Serialize(new { path, globals }));
     }
 
     private static async Task<ProjectSelection[]> DiscoverProjects(string target, string configuration, string? platform,

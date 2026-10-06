@@ -113,7 +113,7 @@ public static class ProjectContextLoader
         LoadAsync(request with { MetadataOnly = true }, cancellationToken);
 
     public static Task<ProjectContextLoadResult> DiscoverGraphAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken) =>
-        DiscoverAsync(request, cancellationToken); // RED: existing root-only metadata cannot supply mapped graph contexts.
+        LoadAsync(request with { GraphOnly = true, MetadataOnly = false }, cancellationToken);
 
     public static Task<ProjectContextLoadResult> LoadAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken) =>
         LoadAsync(request, cancellationToken, ResolveSdkAsync);
