@@ -370,6 +370,7 @@ public sealed class PolicyCheckIntegrationTests
     [InlineData("new", 2)]
     [InlineData("deletion", 2)]
     [InlineData("untouched", 0)]
+    [InlineData("within", 0)]
     [InlineData("relaxed", 2)]
     public async Task IncrementalCommittedBaseScopeEnforcesSelectedDebtUnderTrustedPolicy(string scenario, int expectedExit)
     {
@@ -430,6 +431,8 @@ public sealed class PolicyCheckIntegrationTests
         var baseRevision = await Git("rev-parse", "HEAD");
         if (scenario == "deletion")
             fixture.Write("App/CompiledEvidence.cs", baseSource.Replace("        System.GC.KeepAlive(1);" + newline, "", StringComparison.Ordinal));
+        else if (scenario == "within")
+            fixture.Write("App/CompiledEvidence.cs", baseSource.Replace("var value = 1;", "var value = 2;", StringComparison.Ordinal));
         else if (scenario != "untouched")
             fixture.Write("App/CompiledEvidence.cs", baseSource.Replace("    public int M()", "    public int NewDebt() => 42;" + newline + newline + "    public int M()", StringComparison.Ordinal));
         else fixture.Write("README.md", "unrelated documentation-only commit");
@@ -470,6 +473,19 @@ public sealed class PolicyCheckIntegrationTests
         var findings = evaluation.GetProperty("findings").EnumerateArray().ToArray();
         if (scenario == "deletion") Assert.Contains(findings, item => item.GetProperty("code").GetString() == "baseline.coverageWorsened");
         else if (scenario == "untouched") Assert.Empty(findings);
+        else if (scenario == "within")
+        {
+            var changed = Assert.Single(findings, item => item.GetProperty("code").GetString() == "baseline.bodyFingerprintChanged");
+            Assert.Equal("observation", changed.GetProperty("decision").GetString());
+            var key = changed.GetProperty("entityKey").GetString();
+            var allowance = Assert.Single(baseline.Entries, item => item.EntityKey == key);
+            var current = Assert.Single(evaluation.GetProperty("callables").EnumerateArray(),
+                item => item.GetProperty("callableId").GetString() == key);
+            Assert.Equal(allowance.Complexity, current.GetProperty("complexity").GetInt32());
+            Assert.Equal(allowance.Coverage, current.GetProperty("coverage").GetDouble());
+            Assert.Equal(allowance.Crap, current.GetProperty("crap").GetDouble());
+            Assert.DoesNotContain(findings, item => item.GetProperty("decision").GetString() == "fail");
+        }
         else Assert.Contains(findings, item => item.GetProperty("code").GetString() == "crap.thresholdExceeded");
         if (scenario == "relaxed") Assert.Contains(evaluation.GetProperty("policyDifferences").EnumerateArray(),
             item => item.GetProperty("path").GetString() == "policy.json" && item.GetProperty("status").GetString() == "changed");
