@@ -159,3 +159,5 @@ not the threshold captured by a branch. Family findings carry aggregate complexi
 callable's source span. Offline `analyze` continues to report the captured policy without live trust acquisition.
 Trusted Git acquisition and current revalidation use the invocation's `--timeout-seconds` budget per command;
 cancellation terminates acquisition, and timed-out Git output draining cannot wait indefinitely on inherited pipes.
+
+Git-scope source matching uses exact repository spelling. A case-only mismatch between a current physical Compile path and a changed Git path (including changed-source exclusions) fails `policy.sourcePathCaseMismatch`, rather than silently omitting that callable. Align explicit Compile paths with Git spelling. Case-colliding changed sources are conservatively refused even on a case-sensitive filesystem; no fuzzy identity transfer is performed.

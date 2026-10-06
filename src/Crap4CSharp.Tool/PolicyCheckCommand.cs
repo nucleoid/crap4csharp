@@ -40,6 +40,9 @@ internal static class PolicyCheckCommand
                 .Where(input => input.Role == "source" && !input.Generated)
                 .Select(input => CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input)))
             .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        if (scope is { } observedScope)
+            ValidateScopeSourceCase(allSources, observedScope.Files.Select(file => file.NewPath)
+                .Where(path => path is not null).Select(path => path!).Concat(observedScope.ProductionExcludedPaths));
         var expectedScopedSources = policy.Scope == "all" || scope!.Value.Widened ? allSources : scope.Value.Files
             .Select(file => file.NewPath).Where(path => path is not null).Select(path => path!)
             .Concat(scope.Value.ProductionExcludedPaths).Where(path => allSources.Contains(path, StringComparer.Ordinal))
@@ -312,12 +315,29 @@ internal static class PolicyCheckCommand
 
     internal static bool IsSelected(string scope, bool widened, IReadOnlyList<ChangedFile> files,
         CallableResult callable, string repositoryPath,
-        IReadOnlyList<string>? productionExcludedPaths = null) => scope == "all" || widened ||
-        (productionExcludedPaths ?? []).Contains(repositoryPath, StringComparer.Ordinal) ||
-        files.Where(file => file.NewPath == repositoryPath)
-        .Any(file => file.Kind is ScopeChangeKind.Added or ScopeChangeKind.Copied ||
-            file.DeletedRanges.Count > 0 ||
-            file.AddedRanges.Any(range => range.Intersects(callable.Span.StartLine, callable.Span.EndLine)));
+        IReadOnlyList<string>? productionExcludedPaths = null)
+    {
+        if (scope == "all" || widened) return true;
+        ValidateScopeSourceCase([repositoryPath], files.Select(file => file.NewPath)
+            .Where(path => path is not null).Select(path => path!).Concat(productionExcludedPaths ?? []));
+        return (productionExcludedPaths ?? []).Contains(repositoryPath, StringComparer.Ordinal) ||
+            files.Where(file => file.NewPath == repositoryPath)
+                .Any(file => file.Kind is ScopeChangeKind.Added or ScopeChangeKind.Copied ||
+                    file.DeletedRanges.Count > 0 ||
+                    file.AddedRanges.Any(range => range.Intersects(callable.Span.StartLine, callable.Span.EndLine)));
+    }
+
+    internal static void ValidateScopeSourceCase(IEnumerable<string> sources, IEnumerable<string> scopePaths)
+    {
+        // Git spelling is ordinal, even when the workspace resolves Compile paths without case.
+        // Refuse ambiguous correspondence rather than silently selecting no code or guessing a path.
+        var observed = scopePaths.Distinct(StringComparer.Ordinal)
+            .ToLookup(path => path, StringComparer.OrdinalIgnoreCase);
+        foreach (var source in sources)
+            if (observed[source].Any(path => !string.Equals(path, source, StringComparison.Ordinal)))
+                throw new PolicyException("policy.sourcePathCaseMismatch",
+                    "Current source and Git scope paths differ only by case; align Compile paths with Git spelling.");
+    }
 
     internal static void ValidateTrustedRevision(RunManifest manifest)
     {

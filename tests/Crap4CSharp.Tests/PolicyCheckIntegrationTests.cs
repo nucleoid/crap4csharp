@@ -330,12 +330,21 @@ public sealed class PolicyCheckIntegrationTests
         Assert.Equal(stamp, File.GetLastWriteTimeUtc(path));
     }
 
-    [Fact]
-    public async Task CommittedBaseScopeSubdirectoryProjectSelectsDebtAndRejectsForgedRepositoryPaths()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CommittedBaseScopeSubdirectoryProjectSelectsDebtAndRejectsForgedRepositoryPaths(bool miscasedCompile)
     {
+        // The miscased Include resolves only on Windows. The exact spelling control runs everywhere.
+        // This is real compiled PE/PDB with synthetic coverage/TRX adapter controls, not collector acceptance.
+        if (miscasedCompile && !OperatingSystem.IsWindows()) return;
         using var fixture = TestDirectory.Create("crap4csharp-committed-base-scope");
         const string projectLogical = "App/App.csproj";
         var project = fixture.Write(projectLogical, "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework><AssemblyName>Crap4CSharp.ProvenanceFixture</AssemblyName><LangVersion>latest</LangVersion><DebugType>portable</DebugType></PropertyGroup></Project>");
+        if (miscasedCompile)
+            await File.WriteAllTextAsync(project, File.ReadAllText(project).Replace("</Project>",
+                "<ItemGroup><Compile Remove=\"CompiledEvidence.cs\" /><Compile Include=\"compiledEvidence.cs\" /></ItemGroup></Project>",
+                StringComparison.Ordinal), TestContext.Current.CancellationToken);
         var originalSource = await File.ReadAllTextAsync(Path.Combine(RepositoryRoot(),
             "tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs"), TestContext.Current.CancellationToken);
         var source = fixture.Write("App/CompiledEvidence.cs", originalSource);
@@ -374,6 +383,16 @@ public sealed class PolicyCheckIntegrationTests
         var error = new StringWriter();
         var exit = await global::App.RunAsync(["check", "--reuse-artifacts", locator, "--policy", "policy.json",
             "--base", baseRevision, "--format", "json"], fixture.Path, output, error, TestContext.Current.CancellationToken);
+        if (miscasedCompile)
+        {
+            Assert.True(exit == 1, error + Environment.NewLine + output);
+            using var failure = JsonDocument.Parse(output.ToString());
+            Assert.Equal("policy.sourcePathCaseMismatch", failure.RootElement.GetProperty("evaluation")
+                .GetProperty("decision").GetProperty("reason").GetString());
+            Assert.Equal(before, await File.ReadAllBytesAsync(source, TestContext.Current.CancellationToken));
+            Assert.Equal(stamp, File.GetLastWriteTimeUtc(source));
+            return;
+        }
         Assert.True(exit == 2, error + Environment.NewLine + output);
         using var result = JsonDocument.Parse(output.ToString());
         Assert.Equal("base-trusted", result.RootElement.GetProperty("evaluation").GetProperty("policyTrust").GetProperty("trust").GetString());
@@ -974,7 +993,7 @@ public sealed class PolicyCheckIntegrationTests
             : ImmutableArray.Create(Encoding.UTF8.GetBytes(
             "<coverage><packages><package name=\"Crap4CSharp.ProvenanceFixture\"><classes><class name=\"Crap4CSharp.ProvenanceFixture.CompiledEvidence\" filename=\"CompiledEvidence.cs\"><methods><method name=\".ctor\" signature=\"()\"><lines><line number=\"5\" hits=\"1\" /></lines></method><method name=\"M\" signature=\"()\"><lines><line number=\"9\" hits=\"1\" /><line number=\"10\" hits=\"1\" /></lines></method></methods></class></classes></package></packages></coverage>".Replace("filename=\"CompiledEvidence.cs\"",
                 "filename=\"" + context.Sources.Single(source => !source.IsGenerated &&
-                    source.LogicalPath.EndsWith("CompiledEvidence.cs", StringComparison.Ordinal)).LogicalPath + "\"",
+                    source.LogicalPath.EndsWith("CompiledEvidence.cs", StringComparison.OrdinalIgnoreCase)).LogicalPath + "\"",
                 StringComparison.Ordinal)));
         var trx = ImmutableArray.Create(Encoding.UTF8.GetBytes($$"""
             <TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
