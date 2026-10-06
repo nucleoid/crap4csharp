@@ -6,6 +6,8 @@ using System.Text.Json;
 if (args.Length == 0) return 64;
 switch (args[0])
 {
+    case "exit-code":
+        return int.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture);
     case "control":
         Console.Out.Write("control\n");
         Console.Error.Write("diagnostic\n");

@@ -26,6 +26,24 @@ public sealed class ProcessRunnerTests
     }
 
     [Fact]
+    public async Task MissingConsumerRetainsTypedLaunchFailureInsteadOfPretendingConsumerExited127()
+    {
+        await Assert.ThrowsAsync<System.ComponentModel.Win32Exception>(() => ProcessRunner.RunAsync(
+            Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "absent-consumer"),
+            [], Path.GetTempPath(), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+    }
+
+    [Theory]
+    [InlineData(126)]
+    [InlineData(127)]
+    public async Task GenuineConsumerShellReservedExitCodesRemainActualExitCodes(int exitCode)
+    {
+        var result = await ProcessRunner.RunAsync(Host, [Helper, "exit-code", exitCode.ToString()],
+            Path.GetTempPath(), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Equal(exitCode, result.ExitCode);
+    }
+
+    [Fact]
     public async Task NormalExitCapturesIndependentConcurrentOutputStreams()
     {
         const int count = 1048577;
