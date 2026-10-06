@@ -52,7 +52,9 @@ public sealed class FreshProjectPreparationTests
         Assert.True(result.Success, result.FailureReason + ": " + string.Join(" | ", result.Diagnostics));
         Assert.Single(result.Contexts);
         Assert.True(File.Exists(Path.Combine(fixture.Path, "obj", "project.assets.json")));
-        Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bin"))); // no declared build at this stage
+        // Workspace design-time targets may create empty output directories, not compiled outputs.
+        Assert.Empty(Directory.GetFiles(fixture.Path, "*.dll", SearchOption.AllDirectories));
+        Assert.Empty(Directory.GetFiles(fixture.Path, "*.pdb", SearchOption.AllDirectories));
         foreach (var (path, value) in before)
         {
             Assert.Equal(value.Bytes, File.ReadAllBytes(path));
