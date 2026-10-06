@@ -19,6 +19,24 @@ internal static class MsBuildProjectLoader
         var root = Path.GetDirectoryName(request.Target)!;
         var excludedProjects = new List<ProjectContextProjectExclusion>();
         var projects = await DiscoverProjects(request.Target, request.Configuration, request.Platform, diagnostics, excludedProjects, cancellationToken);
+        if (request.LoadGraphContexts)
+        {
+            var graph = await DiscoverGraph(request, projects, diagnostics, excludedProjects, cancellationToken);
+            var bindings = new List<ProjectGraphContextBinding>();
+            foreach (var node in graph.BuildGraph)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var selected = request with { Configuration = node.Configuration, Platform = node.Platform };
+                var metadata = Evaluate(node.ProjectPath, node.Configuration, node.Platform, node.TargetFramework, node.GlobalProperties);
+                EnsurePreparedAssets(metadata, node.ProjectPath);
+                // Required execution contexts are independent of production inventory filtering.
+                var context = await LoadContext(root, node.ProjectPath, node.TargetFramework, selected, diagnostics,
+                    cancellationToken, node.GlobalProperties);
+                bindings.Add(new(node.Id, node.ProjectPath, context, metadata.IsTestProject));
+            }
+            return new(true, bindings.Select(binding => binding.Context).ToArray(), diagnostics, null, excludedProjects)
+            { BuildGraph = graph.BuildGraph, GraphContexts = bindings };
+        }
         if (request.GraphOnly)
             return await DiscoverGraph(request, projects, diagnostics, excludedProjects, cancellationToken);
         if (request.MetadataOnly)
@@ -200,12 +218,13 @@ internal static class MsBuildProjectLoader
     }
 
     private static async Task<ProjectAnalysisContext> LoadContext(string root, string projectPath, string framework,
-        ProjectContextLoadRequest request, List<string> diagnostics, CancellationToken cancellationToken)
+        ProjectContextLoadRequest request, List<string> diagnostics, CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, string>? globalProperties = null)
     {
-        var metadata = Evaluate(projectPath, request.Configuration, request.Platform, framework);
+        var metadata = Evaluate(projectPath, request.Configuration, request.Platform, framework, globalProperties);
         EnsurePreparedAssets(metadata, projectPath);
         var beforeInputs = SnapshotInputs(metadata.AuthoredInputs);
-        using var workspace = CreateWorkspace(request.Configuration, request.Platform, framework, diagnostics, out var workspaceDiagnostics);
+        using var workspace = CreateWorkspace(request.Configuration, request.Platform, framework, diagnostics, out var workspaceDiagnostics, globalProperties);
         var project = await workspace.OpenProjectAsync(projectPath, cancellationToken: cancellationToken);
         ThrowOnWorkspaceFailure(workspaceDiagnostics, projectPath);
         if (project.ParseOptions is not CSharpParseOptions parseOptions)
@@ -294,9 +313,12 @@ internal static class MsBuildProjectLoader
     }
 
     private static MSBuildWorkspace CreateWorkspace(string configuration, string? platform, string? framework,
-        List<string> diagnostics, out List<WorkspaceDiagnostic> workspaceDiagnostics)
+        List<string> diagnostics, out List<WorkspaceDiagnostic> workspaceDiagnostics,
+        IReadOnlyDictionary<string, string>? globalProperties = null)
     {
-        var properties = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["Configuration"] = configuration };
+        var properties = globalProperties is null
+            ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["Configuration"] = configuration }
+            : new Dictionary<string, string>(globalProperties, StringComparer.OrdinalIgnoreCase);
         if (platform is not null) properties["Platform"] = platform;
         if (framework is not null) properties["TargetFramework"] = framework;
         var workspace = MSBuildWorkspace.Create(properties);
@@ -312,9 +334,12 @@ internal static class MsBuildProjectLoader
         return workspace;
     }
 
-    private static EvaluatedMetadata Evaluate(string projectPath, string configuration, string? platform, string? framework)
+    private static EvaluatedMetadata Evaluate(string projectPath, string configuration, string? platform, string? framework,
+        IReadOnlyDictionary<string, string>? globalProperties = null)
     {
-        var properties = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["Configuration"] = configuration };
+        var properties = globalProperties is null
+            ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["Configuration"] = configuration }
+            : new Dictionary<string, string>(globalProperties, StringComparer.OrdinalIgnoreCase);
         if (platform is not null) properties["Platform"] = platform;
         if (framework is not null) properties["TargetFramework"] = framework;
         using var collection = new ProjectCollection(properties);
