@@ -69,7 +69,7 @@ public sealed class CompilerBoundExecutionTests
         {
             var result = await operation;
             Assert.Equal(2, result.Observations.Count);
-            Assert.False(result.FinalGraph.Contexts.Any(c => c.Capabilities.CompiledInputBindingComplete));
+            Assert.DoesNotContain(result.FinalGraph.Contexts, c => c.Capabilities.CompiledInputBindingComplete);
         }
         Assert.Equal(new[] { dependency, root }, launched);
         Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Dependency", "count.txt")));
