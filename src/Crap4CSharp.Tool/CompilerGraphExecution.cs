@@ -41,9 +41,65 @@ internal static class CompilerGraphExecution
         CancellationToken token,
         Func<ProjectContextLoadRequest, CancellationToken, Task<ProjectContextLoadResult>>? reload = null)
     {
-        var observations = await RunAsync(loaded, build, token);
-        return new(loaded, observations); // RED seam: final rediscovery/reconciliation not implemented yet.
+        token.ThrowIfCancellationRequested();
+        var frozenRequest = request with { Frameworks = request.Frameworks.ToArray() };
+        var plan = ValidateAndFreeze(loaded);
+        var bindings = loaded.GraphContexts.Select(b => b with
+        {
+            Context = b.Context with
+            {
+                PhaseInputs = b.Context.PhaseInputs.ToArray(),
+                PreprocessorSymbols = b.Context.PreprocessorSymbols.ToArray()
+            }
+        }).ToArray();
+        var frozen = loaded with { BuildGraph = plan, GraphContexts = bindings, Contexts = bindings.Select(b => b.Context).ToArray() };
+        var snapshot = CompilerPhaseSnapshot.Capture(frozen, token);
+        var observations = await RunAsync(frozen, build, token);
+        token.ThrowIfCancellationRequested();
+        var final = await (reload ?? ProjectContextLoader.LoadGraphAsync)(frozenRequest, token);
+        token.ThrowIfCancellationRequested();
+        ValidateFinalGraph(frozen, final);
+        snapshot.Validate(final, token); // Rediscovered membership, not the old file list.
+        return new(final, observations);
     }
+
+    private static void ValidateFinalGraph(ProjectContextLoadResult before, ProjectContextLoadResult after)
+    {
+        try { _ = ValidateAndFreeze(after); }
+        catch (ProjectContextException)
+        { throw GraphChanged(); }
+        if (before.BuildGraph.Count != after.BuildGraph.Count) throw GraphChanged();
+        var paths = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        foreach (var node in before.BuildGraph)
+        {
+            var current = after.BuildGraph.SingleOrDefault(n => n.Id == node.Id);
+            if (current is null || !paths.Equals(node.ProjectPath, current.ProjectPath) ||
+                node.Configuration != current.Configuration || node.Platform != current.Platform ||
+                node.TargetFramework != current.TargetFramework ||
+                !node.Dependencies.Order(StringComparer.Ordinal).SequenceEqual(current.Dependencies.Order(StringComparer.Ordinal)) ||
+                node.GlobalProperties.Count != current.GlobalProperties.Count ||
+                node.GlobalProperties.Any(p => !current.GlobalProperties.Any(q =>
+                    StringComparer.OrdinalIgnoreCase.Equals(p.Key, q.Key) && p.Value == q.Value)))
+                throw GraphChanged();
+            var oldBinding = before.GraphContexts.Single(b => b.GraphId == node.Id);
+            var newBinding = after.GraphContexts.Single(b => b.GraphId == node.Id);
+            var oldContext = oldBinding.Context;
+            var newContext = newBinding.Context;
+            if (oldBinding.IsTestProject != newBinding.IsTestProject ||
+                oldContext.ProjectPath != newContext.ProjectPath || oldContext.AssemblyName != newContext.AssemblyName ||
+                oldContext.AnalysisMode != newContext.AnalysisMode || oldContext.LanguageVersion != newContext.LanguageVersion ||
+                oldContext.SourceKind != newContext.SourceKind || oldContext.ExclusionPolicy != newContext.ExclusionPolicy ||
+                oldContext.Adapter != newContext.Adapter ||
+                !oldContext.PreprocessorSymbols.Order(StringComparer.Ordinal).SequenceEqual(newContext.PreprocessorSymbols.Order(StringComparer.Ordinal)) ||
+                !paths.Equals(oldContext.EvaluatedTargetPath, newContext.EvaluatedTargetPath) ||
+                !paths.Equals(oldContext.EvaluatedIntermediateDirectory, newContext.EvaluatedIntermediateDirectory))
+                throw GraphChanged();
+            // Content ContextId/SourceSetIdentity may legitimately change with generated transitions.
+            // This is NOT actual compiler binding; the caller still owes source/options/output evidence.
+        }
+    }
+
+    private static ProjectContextException GraphChanged() => new("compiler.graphChanged", "Final rediscovery changed the selected graph, mapped globals or execution context selectors.");
 
     private static IReadOnlyList<ProjectBuildGraphNode> ValidateAndFreeze(ProjectContextLoadResult loaded)
     {

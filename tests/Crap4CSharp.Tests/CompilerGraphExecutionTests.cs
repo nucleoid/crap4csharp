@@ -267,12 +267,15 @@ public sealed class CompilerGraphExecutionTests
         var loaded = await ProjectContextLoader.LoadGraphAsync(request, TestContext.Current.CancellationToken);
         Assert.True(loaded.Success, loaded.FailureReason + ": " + string.Join(" | ", loaded.Diagnostics));
         Assert.Empty(Directory.GetFiles(fixture.Path, "count.txt", SearchOption.AllDirectories));
-        var results = await CompilerGraphExecution.RunAsync(loaded, (node, token) =>
+        var phased = await CompilerGraphExecution.RunPhasedAsync(request, loaded, (node, token) =>
         {
             var directory = Path.Combine(fixture.Path, "private", node.Id);
             Directory.CreateDirectory(directory);
             return CompilerEvidence.BuildAsync(node, directory, TimeSpan.FromMinutes(2), token);
         }, TestContext.Current.CancellationToken);
+        var results = phased.Observations;
+        Assert.True(phased.FinalGraph.Success);
+        Assert.Equal(loaded.BuildGraph.Select(n => n.Id), phased.FinalGraph.BuildGraph.Select(n => n.Id));
         Assert.Equal(2, results.Count);
         Assert.Contains("Dependency", results[0].ProjectPath, StringComparison.Ordinal);
         Assert.Equal(project, results[1].ProjectPath);
@@ -385,7 +388,8 @@ public sealed class CompilerGraphExecutionTests
             (node, _) => { launches.Add(node.Id); return Task.FromResult(new CompilerObservation(node.ProjectPath, [])); },
             TestContext.Current.CancellationToken, (actualRequest, _) =>
             {
-                Assert.Equal(request, actualRequest);
+                Assert.Equal(request, actualRequest with { Frameworks = request.Frameworks });
+                Assert.Equal(request.Frameworks, actualRequest.Frameworks);
                 reloads++;
                 return Task.FromResult(final);
             }));
