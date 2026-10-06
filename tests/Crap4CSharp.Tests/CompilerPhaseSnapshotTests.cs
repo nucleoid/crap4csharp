@@ -94,6 +94,8 @@ public sealed class CompilerPhaseSnapshotTests
         {
             var loaded = await ProjectContextLoader.LoadGraphAsync(request, TestContext.Current.CancellationToken);
             Assert.True(loaded.Success, loaded.FailureReason + ": " + string.Join(" | ", loaded.Diagnostics));
+            Assert.All(loaded.GraphContexts.SelectMany(b => b.Context.PhaseInputs).Where(p => !p.ExpectedGenerated && p.Role != "analyzerConfigProbe"),
+                p => Assert.True(File.Exists(p.Path), p.Role + ": " + p.Path));
             var snapshot = CompilerPhaseSnapshot.Capture(loaded, TestContext.Current.CancellationToken);
             if (pass == 1) fixture.Write("mutate", "yes");
             var owned = Path.Combine(fixture.Path, "private" + pass);
@@ -104,6 +106,30 @@ public sealed class CompilerPhaseSnapshotTests
             if (pass == 0) snapshot.Validate(final, TestContext.Current.CancellationToken);
             else Assert.Equal("compiler.inputsMutated", Assert.Throws<ProjectContextException>(() => snapshot.Validate(final, TestContext.Current.CancellationToken)).Reason);
         }
+    }
+
+    [Fact]
+    public void AbsentAnalyzerConfigProbeIsBoundAndCreationWithoutRecaptureRefuses()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-config-probe");
+        var path = Path.Combine(fixture.Path, ".globalconfig");
+        var loaded = Loaded(path, "analyzerConfigProbe");
+        var snapshot = CompilerPhaseSnapshot.Capture(loaded, TestContext.Current.CancellationToken);
+        snapshot.Validate(loaded, TestContext.Current.CancellationToken);
+        File.WriteAllText(path, "is_global = true");
+        Assert.Equal("compiler.inputsMutated", Assert.Throws<ProjectContextException>(() => snapshot.Validate(loaded, TestContext.Current.CancellationToken)).Reason);
+    }
+
+    [Fact]
+    public void OversizedAndPrecancelledCaptureRefuse()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-phase-limits");
+        var path = fixture.Write("large", "");
+        using (var stream = File.OpenWrite(path)) stream.SetLength(CompilerPhaseSnapshot.MaximumFileBytes + 1);
+        Assert.Equal("compiler.inputLimit", Assert.Throws<ProjectContextException>(() => CompilerPhaseSnapshot.Capture(Loaded(path, "source"), TestContext.Current.CancellationToken)).Reason);
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        Assert.Throws<OperationCanceledException>(() => CompilerPhaseSnapshot.Capture(Loaded(path, "source"), cancelled.Token));
     }
 
     private static ProjectContextLoadResult Loaded(string path, string role)

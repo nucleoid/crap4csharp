@@ -295,7 +295,7 @@ internal static class MsBuildProjectLoader
         phaseInputs.AddRange(project.AdditionalDocuments.Where(d => d.FilePath is not null)
             .Select(d => new ProjectPhaseInput(Path.GetFullPath(d.FilePath!), "additionalFile", false)));
         phaseInputs.AddRange(project.AnalyzerConfigDocuments.Where(d => d.FilePath is not null)
-            .Select(d => new ProjectPhaseInput(Path.GetFullPath(d.FilePath!), "analyzerConfig",
+            .Select(d => new ProjectPhaseInput(Path.GetFullPath(d.FilePath!), File.Exists(d.FilePath) ? "analyzerConfig" : "analyzerConfigProbe",
                 !trackedInputs.Contains(Path.GetFullPath(d.FilePath!)) &&
                 !metadata.PhaseInputs.Any(p => PathComparer.Equals(p.Path, Path.GetFullPath(d.FilePath!))) &&
                 metadata.IntermediatePaths.Any(output => IsWithin(output, d.FilePath!)) && !TraversesReparsePoint(d.FilePath!))));
@@ -389,7 +389,8 @@ internal static class MsBuildProjectLoader
         foreach (var (itemName, role) in new[] { ("AdditionalFiles", "additionalFile"), ("EditorConfigFiles", "analyzerConfig"),
             ("GlobalAnalyzerConfigFiles", "analyzerConfig"), ("Analyzer", "analyzer") })
             phaseInputs.AddRange(project.GetItems(itemName).Select(i => new ProjectPhaseInput(
-                Path.GetFullPath(i.EvaluatedInclude, Path.GetDirectoryName(projectPath)!), role, false)));
+                Path.GetFullPath(i.EvaluatedInclude, Path.GetDirectoryName(projectPath)!),
+                role == "analyzerConfig" && !File.Exists(Path.GetFullPath(i.EvaluatedInclude, Path.GetDirectoryName(projectPath)!)) ? "analyzerConfigProbe" : role, false)));
         for (var directory = Path.GetDirectoryName(projectPath); directory is not null; directory = Path.GetDirectoryName(directory))
         {
             var sdkConfiguration = Path.Combine(directory, "global.json");

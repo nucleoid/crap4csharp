@@ -255,6 +255,10 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
         return current;
     }
 
+    internal static bool IsRegularInput(string path) => OperatingSystem.IsLinux()
+        ? LinuxFileKind(path) == UnixFileKind.Regular
+        : File.Exists(path) && (File.GetAttributes(path) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == 0;
+
     private static UnixFileKind LinuxFileKind(string path)
     {
         if (Statx(AtCurrentWorkingDirectory, path, AtSymlinkNoFollow, StatxType, out var status) == 0)
