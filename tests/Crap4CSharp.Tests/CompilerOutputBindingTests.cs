@@ -95,7 +95,7 @@ public sealed class CompilerOutputBindingTests
         using var fixture = TestDirectory.Create("crap4csharp-output-limits");
         var (context, observed) = Valid(fixture);
         if (defect == "oversized")
-        { using var stream = File.Create(observed.Assembly!.Path); stream.SetLength(CompilerPhaseSnapshot.MaximumFileBytes + 1); }
+        { using (var stream = File.Create(observed.Assembly!.Path)) stream.SetLength(CompilerPhaseSnapshot.MaximumFileBytes + 1); }
         else
         {
             if (OperatingSystem.IsWindows()) return; // Additional symlink privileges are not assumed.
