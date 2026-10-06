@@ -22,10 +22,14 @@ internal static class CoverageGraphBinding
         var stage = "graph";
         try
         {
+            if (invocation.ChildBuild is null) throw Refuse();
+            TestChildEvidence.Validate(invocation.ChildBuild, invocation.Process);
+            var childPaths = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+            if (!childPaths.Equals(invocation.ChildBuild.ProjectPath, invocation.ProjectPath)) throw Refuse();
             var nodes = CompilerGraphExecution.ValidateAndFreeze(bound.FinalGraph);
             var bindings = bound.FinalGraph.GraphContexts.ToDictionary(b => b.GraphId, StringComparer.Ordinal);
             var test = bindings[invocation.GraphId];
-            if (!test.IsTestProject || bound.Observations.Count != nodes.Count ||
+            if (!test.IsTestProject || !childPaths.Equals(invocation.ProjectPath, test.ProjectPath) || bound.Observations.Count != nodes.Count ||
                 bindings.Values.Select(b => b.Context.AssemblyName).Distinct(StringComparer.Ordinal).Count() != nodes.Count) throw Refuse();
             var paths = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
             var observations = bound.Observations.ToDictionary(o => o.ProjectPath, paths);

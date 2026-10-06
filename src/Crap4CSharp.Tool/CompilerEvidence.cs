@@ -5,8 +5,10 @@ namespace Crap4CSharp.Core;
 // Physical paths and raw property values are private execution transport, not exported evidence.
 internal sealed record CompilerParameter(string Name, IReadOnlyList<string> Items);
 internal sealed record CompilerOutput(string Path, string Sha256, long Length);
+internal sealed record CompilerCopy(string Source, string Destination);
 internal sealed record CompilerObservation(string ProjectPath, IReadOnlyList<CompilerParameter> Parameters)
 {
+    public IReadOnlyList<CompilerCopy> RuntimeCopies { get; init; } = [];
     internal CompilerOutput? Assembly { get; init; }
     internal CompilerOutput? Pdb { get; init; }
     internal CompilerOutput? ReferenceAssembly { get; init; }

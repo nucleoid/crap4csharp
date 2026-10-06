@@ -140,7 +140,8 @@ internal static class CompilerGraphExecution
             // independent actual Csc/reference PE/copy gate; no implementation fallback.
             var returned = await build(node, cancellation);
             var observation = returned with { Parameters = returned.Parameters.Select(p =>
-                p with { Items = p.Items.ToArray() }).ToArray() };
+                p with { Items = p.Items.ToArray() }).ToArray(),
+                RuntimeCopies = Array.AsReadOnly(returned.RuntimeCopies.Select(c => c with { }).ToArray()) };
             CompilerReferenceOutputBinding.Validate(byId[node.Id].Context, observation, cancellation);
             closure.Validate(observation, cancellation);
             snapshots[node.Id] = closure;
@@ -166,6 +167,7 @@ internal static class CompilerGraphExecution
                 Parameters = [new CompilerParameter("References", finalReferences)]
             }, token);
         }
+        RuntimeCopyBinding.Validate(result.FinalGraph, completed, token);
         var retainedGraph = FreezeGraph(result.FinalGraph);
         authoredSnapshot.Validate(retainedGraph, token);
         var documentSnapshot = CompilerDocumentSnapshot.Capture(retainedGraph, token);
@@ -404,6 +406,7 @@ internal sealed class CompilerRetainedProof
             referenceSnapshot.Validate(observation with
             { Parameters = [new CompilerParameter("References", actual)] }, token);
         }
+        RuntimeCopyBinding.Validate(current, observations, token);
     }
 
     private static ProjectContextException Refuse() => new("compiler.retainedProofInvalid",

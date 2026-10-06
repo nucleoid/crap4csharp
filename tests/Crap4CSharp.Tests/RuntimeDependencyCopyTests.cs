@@ -41,6 +41,9 @@ public sealed class RuntimeDependencyCopyTests
         var selected = Assert.Single(bound.FinalGraph.GraphContexts, b => b.IsTestProject);
         var library = Assert.Single(bound.FinalGraph.GraphContexts, b => !b.IsTestProject);
         var destination = Path.Combine(Path.GetDirectoryName(selected.Context.EvaluatedTargetPath!)!, "Library.dll");
+        var copyObservation = Assert.Single(bound.Observations, o => o.ProjectPath == selected.ProjectPath);
+        var actualPair = Assert.Single(copyObservation.RuntimeCopies, c => c.Source == library.Context.EvaluatedTargetPath);
+        Assert.Equal(destination, actualPair.Destination); // Actual SDK event destination, not an inferred validation path.
         var original = File.ReadAllBytes(destination);
         Assert.Equal(File.ReadAllBytes(library.Context.EvaluatedTargetPath!), original);
         var clock = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -67,6 +70,36 @@ public sealed class RuntimeDependencyCopyTests
             Assert.Equal("compiler.runtimeCopiesUnproven", Assert.IsType<ProjectContextException>(run.Failure).Reason);
             Assert.True(File.Exists(Path.Combine(run.Outcomes[0].LogDirectory!, "stdout.log")));
         }
-        else { Assert.Null(run.Failure); Assert.Equal(original, File.ReadAllBytes(destination)); }
+        else
+        {
+            Assert.Null(run.Failure); Assert.Equal(original, File.ReadAllBytes(destination));
+            var observations = bound.FinalGraph.GraphContexts.ToDictionary(b => b.GraphId,
+                b => Assert.Single(bound.Observations, o => o.ProjectPath == b.ProjectPath), StringComparer.Ordinal);
+            foreach (var bad in new[]
+            {
+                copyObservation with { RuntimeCopies = [] },
+                copyObservation with { RuntimeCopies = [actualPair, actualPair] },
+                copyObservation with { RuntimeCopies = [actualPair, actualPair with { Source = library.Context.EvaluatedReferenceAssemblyPath! }] },
+                copyObservation with { RuntimeCopies = [actualPair with { Destination = library.Context.EvaluatedTargetPath! }] },
+                copyObservation with { RuntimeCopies = [actualPair with { Source = library.Context.EvaluatedReferenceAssemblyPath! }] }
+            })
+            {
+                observations[selected.GraphId] = bad;
+                Assert.Equal("compiler.runtimeCopiesUnproven", Assert.Throws<ProjectContextException>(() =>
+                    RuntimeCopyBinding.Validate(bound.FinalGraph, observations, token)).Reason);
+            }
+            observations[selected.GraphId] = copyObservation;
+            RuntimeCopyBinding.Validate(bound.FinalGraph, observations, token);
+            Assert.IsType<BoundGraphCoverage>(CoverageGraphBinding.ValidateAggregate(run, bound, token));
+            var missing = new TestExecutionRun([run[0] with { ChildBuild = null }], run.Outcomes, null);
+            Assert.Equal("coverage.aggregateUnproven", Assert.Throws<ProjectContextException>(() =>
+                CoverageGraphBinding.ValidateAggregate(missing, bound, token)).Reason);
+            var wrongProject = new TestExecutionRun([run[0] with { ChildBuild = run[0].ChildBuild! with { ProjectPath = library.ProjectPath } }], run.Outcomes, null);
+            Assert.Equal("coverage.aggregateUnproven", Assert.Throws<ProjectContextException>(() =>
+                CoverageGraphBinding.ValidateAggregate(wrongProject, bound, token)).Reason);
+            var repeated = new TestExecutionRun([run[0] with { ChildBuild = run[0].ChildBuild! with { CompilerTasks = 1 } }], run.Outcomes, null);
+            Assert.Equal("coverage.aggregateUnproven", Assert.Throws<ProjectContextException>(() =>
+                CoverageGraphBinding.ValidateAggregate(repeated, bound, token)).Reason);
+        }
     }
 }

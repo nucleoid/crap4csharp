@@ -12,6 +12,12 @@ internal static class CompilerBinlogReader
             throw new ProjectContextException("compiler.binlogLimit", "Private compiler log limit exceeded.");
         var events = new BinaryLogReplayEventSource();
         var tasks = new Dictionary<string, Observation>();
+        var copies = new Dictionary<string, Observation>();
+        var targets = new Dictionary<string, string>();
+        static string TargetKey(BuildEventContext? context) => context is null ? "null" :
+            $"{context.SubmissionId}:{context.NodeId}:{context.ProjectContextId}:{context.TargetId}";
+        events.TargetStarted += (_, value) => targets[TargetKey(value.BuildEventContext)] = value.TargetName;
+        events.TargetFinished += (_, value) => targets.Remove(TargetKey(value.BuildEventContext));
         int eventCount = 0, itemCount = 0;
         long characters = 0;
         bool buildCompleted = false;
@@ -20,6 +26,16 @@ internal static class CompilerBinlogReader
         events.BuildFinished += (_, value) => buildCompleted = value.Succeeded;
         events.TaskStarted += (_, value) =>
         {
+            if (value.TaskName == "Copy" && targets.GetValueOrDefault(TargetKey(value.BuildEventContext)) == "_CopyFilesMarkedCopyLocal")
+            {
+                var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+                if (string.IsNullOrWhiteSpace(value.ProjectFile) || !Path.GetFullPath(value.ProjectFile).Equals(request.ProjectPath, comparison))
+                    throw new ProjectContextException("compiler.associationInvalid", "Actual copy task belongs to a different compiler project.");
+                if (copies.Count >= 4096 || string.IsNullOrWhiteSpace(value.TaskFile) ||
+                    !Path.GetFullPath(value.TaskFile).Equals(Path.Combine(request.SdkPath, "Microsoft.Common.CurrentVersion.targets"), comparison) ||
+                    !copies.TryAdd(Key(value.BuildEventContext), new Observation(value.ProjectFile)))
+                    throw new ProjectContextException("compiler.runtimeCopiesUnproven", "Unexpected selected-SDK copy task association.");
+            }
             if (value.TaskName != "Csc") return;
             if (tasks.Count >= 16 || !tasks.TryAdd(Key(value.BuildEventContext), new Observation(value.ProjectFile)))
                 throw new ProjectContextException("compiler.associationInvalid", "Unexpected compiler task association.");
@@ -27,13 +43,20 @@ internal static class CompilerBinlogReader
         events.TaskFinished += (_, value) =>
         {
             if (tasks.TryGetValue(Key(value.BuildEventContext), out var observed)) observed.Succeeded = value.Succeeded;
+            if (copies.TryGetValue(Key(value.BuildEventContext), out var copied)) copied.Succeeded = value.Succeeded;
         };
         events.AnyEventRaised += (_, value) =>
         {
             token.ThrowIfCancellationRequested();
             if (++eventCount > 200000) throw new ProjectContextException("compiler.evidenceLimit", "Compiler event limit exceeded.");
-            if (value is not TaskParameterEventArgs parameter || parameter.Kind != TaskParameterMessageKind.TaskInput ||
-                !tasks.TryGetValue(Key(parameter.BuildEventContext), out var observed) ||
+            if (value is not TaskParameterEventArgs parameter || parameter.Kind != TaskParameterMessageKind.TaskInput) return;
+            Observation? observed;
+            if (copies.TryGetValue(Key(parameter.BuildEventContext), out var copy))
+            {
+                if (parameter.ParameterName is not ("SourceFiles" or "DestinationFiles")) return;
+                observed = copy;
+            }
+            else if (!tasks.TryGetValue(Key(parameter.BuildEventContext), out observed) ||
                 parameter.ParameterName is not ("Sources" or "References" or "OutputAssembly" or "OutputRefAssembly" or "Analyzers" or "AdditionalFiles" or "AnalyzerConfigFiles")) return;
             if (observed.Parameters.Any(p => p.Name == parameter.ParameterName))
                 throw new ProjectContextException("compiler.associationInvalid", "Duplicate compiler input parameter.");
@@ -58,7 +81,18 @@ internal static class CompilerBinlogReader
                 !task.Parameters.Any(p => p.Name == name && p.Items.Count > 0)) ||
             task.Parameters.Single(p => p.Name == "OutputAssembly").Items.Count != 1)
             throw new ProjectContextException("compiler.associationInvalid", "Actual Csc project, completion or required inputs were not established.");
-        return new(request.ProjectPath, task.Parameters);
+        var runtime = new List<CompilerCopy>();
+        foreach (var copy in copies.Values)
+        {
+            var source = copy.Parameters.SingleOrDefault(p => p.Name == "SourceFiles")?.Items;
+            var destination = copy.Parameters.SingleOrDefault(p => p.Name == "DestinationFiles")?.Items;
+            if (copy.Succeeded != true || source is null || destination is null || source.Count != destination.Count)
+                throw new ProjectContextException("compiler.runtimeCopiesUnproven", "Actual copy source/destination membership is incomplete.");
+            for (var i = 0; i < source.Count; i++)
+                runtime.Add(new(Path.GetFullPath(source[i], Path.GetDirectoryName(request.ProjectPath)!),
+                    Path.GetFullPath(destination[i], Path.GetDirectoryName(request.ProjectPath)!)));
+        }
+        return new(request.ProjectPath, task.Parameters) { RuntimeCopies = runtime };
     }
 
     private sealed class Observation(string? project)
