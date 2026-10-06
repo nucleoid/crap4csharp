@@ -94,6 +94,59 @@ public sealed class TestExecutionAdapterTests
         Assert.Equal(passes ? "1" : "0", counters.Attribute("passed")!.Value);
         Assert.Equal(passes ? "0" : "1", counters.Attribute("failed")!.Value);
         Assert.Equal(passes ? "Passed" : "Failed", Assert.Single(trx.Descendants(), e => e.Name.LocalName == "UnitTestResult").Attribute("outcome")!.Value);
+        if (!opposingNoBuild)
+        {
+            // Real RunBoundAsync outputs followed by actual VSTest, not fabricated Csc.
+            var typedObservation = Assert.IsType<TestInvocationObservation>(observation);
+            var testBinding = Assert.Single(bound.FinalGraph.GraphContexts, b => b.IsTestProject);
+            var compiler = Assert.Single(bound.Observations, o => o.ProjectPath == project);
+            var binder = typeof(ProjectContextLoader).Assembly.GetType("Crap4CSharp.Core.TestResultBinding")?
+                .GetMethod("ValidateSuccessfulTrx", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.NotNull(binder);
+            void Validate() => binder.Invoke(null, [typedObservation, testBinding.Context, compiler, TestContext.Current.CancellationToken]);
+            if (!passes)
+            {
+                var error = Assert.Throws<TargetInvocationException>(Validate);
+                Assert.Equal("test.resultsUnproven", Assert.IsType<ProjectContextException>(error.InnerException).Reason);
+            }
+            else
+            {
+                Validate();
+                var path = Path.Combine(resultsDirectory, "tests.trx");
+                var original = File.ReadAllBytes(path);
+                XNamespace ns = "http://microsoft.com/schemas/VisualStudio/TeamTest/2010";
+                foreach (var defect in new[] { "individual", "duplicate-result", "entry", "definition", "execution", "storage", "codebase", "namespace", "zero", "warning", "counter", "summary" })
+                {
+                    var changed = XDocument.Load(path);
+                    var result = changed.Descendants(ns + "UnitTestResult").Single();
+                    var definition = changed.Descendants(ns + "UnitTest").Single();
+                    var counts = changed.Descendants(ns + "Counters").Single();
+                    switch (defect)
+                    {
+                        case "individual": result.SetAttributeValue("outcome", "Failed"); break;
+                        case "duplicate-result": result.AddAfterSelf(new XElement(result)); break;
+                        case "entry": changed.Descendants(ns + "TestEntry").Single().Remove(); break;
+                        case "definition": definition.Remove(); break;
+                        case "execution": definition.Element(ns + "Execution")!.SetAttributeValue("id", Guid.NewGuid()); break;
+                        case "storage": definition.SetAttributeValue("storage", Path.Combine(fixture.Path, "unowned", "Tests.dll").ToLowerInvariant()); break;
+                        case "codebase": definition.Element(ns + "TestMethod")!.SetAttributeValue("codeBase", Path.Combine(fixture.Path, "unowned", "Tests.dll")); break;
+                        case "namespace": result.Name = XName.Get("UnitTestResult", "urn:foreign"); break;
+                        case "zero": counts.SetAttributeValue("total", "0"); break;
+                        case "warning": counts.SetAttributeValue("warning", "1"); break;
+                        case "counter": counts.SetAttributeValue("executed", "2"); break;
+                        case "summary": changed.Descendants(ns + "ResultSummary").Single().SetAttributeValue("outcome", "Failed"); break;
+                    }
+                    changed.Save(path);
+                    try
+                    {
+                        var error = Assert.Throws<TargetInvocationException>(Validate);
+                        Assert.Equal("test.resultsUnproven", Assert.IsType<ProjectContextException>(error.InnerException).Reason);
+                    }
+                    finally { File.WriteAllBytes(path, original); }
+                }
+                Validate();
+            }
+        }
         Assert.NotEmpty(Directory.GetFiles(resultsDirectory, "coverage.opencover.xml", SearchOption.AllDirectories));
         Assert.NotEmpty(File.ReadAllBytes(process.StandardOutput.Path));
         Assert.True(File.Exists(process.StandardError.Path));
