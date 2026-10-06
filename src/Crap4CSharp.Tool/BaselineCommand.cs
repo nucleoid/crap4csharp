@@ -74,7 +74,7 @@ internal static class BaselineCommand
                 throw new InvalidDataException(string.Join(", ", policyResult.OperationalReasons));
             if (options.Verb == "update") ValidateExistingBaseline(root, parsedPolicy, compatibilityHash);
             var candidate = BaselineDocument.Generate(compatibilityHash, parsedPolicy.Policy.Ruleset,
-                bundle.Manifest.Revision.WorkspaceIdentity, bundle.Manifest.Revision.Head ?? "none",
+                SourceIdentity(bundle.Manifest), bundle.Manifest.Revision.Head ?? "none",
                 parsedPolicy.Policy.Threshold, observations);
             var candidateBytes = BaselineDocument.Serialize(candidate);
             await WriteCandidateAsync(outputPath, candidateBytes, options.Overwrite, cancellationToken);
@@ -111,6 +111,8 @@ internal static class BaselineCommand
             return 1;
         }
     }
+
+    internal static string SourceIdentity(RunManifest manifest) => manifest.Revision.WorkspaceIdentity;
 
     internal sealed record OmittedKnownViolation(string Kind, string EntityKey, string Rule, string Path,
         int Complexity, string Reason, string? CoverageReason);

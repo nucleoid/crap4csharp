@@ -119,6 +119,26 @@ public sealed class BaselineCommandTests
         Assert.Equal("numeric", Assert.Single(candidate.Entries).EntityKey);
     }
 
+    [Fact]
+    public void CandidateSourceIdentityIsPortableAndBindsLogicalSourceContentAndContext()
+    {
+        var input = new ManifestInput("source", "Gate.cs", "inputs/gate", 1, new string('a', 64), "utf-8", false)
+            { RepositoryPath = "App/Gate.cs" };
+        var context = new ManifestContext("observed-a", "App/App.csproj", "net10.0", "Release", "AnyCPU",
+            "sources", "context", "closure", true, true, [input]);
+        var manifest = EmptyManifest(context);
+        var relocated = manifest with { Revision = manifest.Revision with { WorkspaceIdentity = "different-machine-root" },
+            Contexts = [context with { Id = "observed-b", PathPolicy = new ManifestPathPolicy("sensitive",
+                [new ManifestReportRootMapping("/different/absolute/root", "")]) }] };
+        Assert.Equal(BaselineCommand.SourceIdentity(manifest), BaselineCommand.SourceIdentity(relocated));
+        Assert.NotEqual(BaselineCommand.SourceIdentity(manifest), BaselineCommand.SourceIdentity(manifest with
+            { Contexts = [context with { Inputs = [input with { Sha256 = new string('b', 64) }] }] }));
+        Assert.NotEqual(BaselineCommand.SourceIdentity(manifest), BaselineCommand.SourceIdentity(manifest with
+            { Contexts = [context with { TargetFramework = "net11.0" }] }));
+        Assert.NotEqual(BaselineCommand.SourceIdentity(manifest), BaselineCommand.SourceIdentity(manifest with
+            { Contexts = [context with { Inputs = [input with { RepositoryPath = "App/Other.cs" }] }] }));
+    }
+
     private static RunManifest EmptyManifest(ManifestContext context) => new(ManifestIdentity.SchemaVersion,
         CanonicalIdentity.Algorithm, new ManifestProducer("crap4csharp", "0.1.0", ComplexityRules.CallablesV1,
             ProjectAnalysisContext.ProtocolVersion, ManifestIdentity.CoverageProtocol, ManifestIdentity.PathProtocol),
