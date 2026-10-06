@@ -184,6 +184,65 @@ public sealed class CompilerGraphExecutionTests
         Assert.Equal(new[] { "dependency" }, launches);
     }
 
+    [Theory]
+    [InlineData("wrong")]
+    [InlineData("relative")]
+    [InlineData("noncanonical")]
+    public async Task CompilerObservationCannotClaimAnotherProject(string defect)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-observation-project");
+        var launches = new List<string>();
+        var loaded = Valid(fixture.Path);
+        var error = await Assert.ThrowsAsync<ProjectContextException>(() => CompilerGraphExecution.RunAsync(loaded,
+            (node, _) =>
+            {
+                launches.Add(node.Id);
+                var observed = defect == "wrong" ? loaded.BuildGraph[1].ProjectPath : defect == "relative" ? Path.GetFileName(node.ProjectPath) : Path.Combine(fixture.Path, ".", Path.GetFileName(node.ProjectPath));
+                return Task.FromResult(new CompilerObservation(observed, []));
+            }, TestContext.Current.CancellationToken));
+        Assert.Equal("compiler.contextMismatch", error.Reason);
+        Assert.Equal(new[] { "dependency" }, launches);
+    }
+
+    [Fact]
+    public async Task RealDependencyBuildMutationStopsRootBeforeItsCompilerLaunch()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-actual-dependent-drift");
+        fixture.Write("Dependency/Dependency.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+            <Target Name="MutateRoot" BeforeTargets="CoreCompile" Condition="'$(DesignTimeBuild)' != 'true'">
+            <WriteLinesToFile File="$(MSBuildProjectDirectory)/../Root/Rules.txt" Lines="changed" Overwrite="true" /></Target></Project>
+            """);
+        fixture.Write("Dependency/Code.cs", "public class Dependency {}");
+        var project = fixture.Write("Root/Root.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+            <ItemGroup><ProjectReference Include="../Dependency/Dependency.csproj" /><AdditionalFiles Include="Rules.txt" /></ItemGroup></Project>
+            """);
+        fixture.Write("Root/Code.cs", "public class Root {}");
+        var rules = fixture.Write("Root/Rules.txt", "before");
+        var request = new ProjectContextLoadRequest(project, "Release", "AnyCPU", [], false, false, TimeSpan.FromMinutes(2));
+        Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken)).ExitCode);
+        var loaded = await ProjectContextLoader.LoadGraphAsync(request, TestContext.Current.CancellationToken);
+        Assert.True(loaded.Success, loaded.FailureReason + ": " + string.Join(" | ", loaded.Diagnostics));
+        Assert.Equal("before", File.ReadAllText(rules)); // Design-time loading must not mutate it.
+        var launches = new List<string>();
+        var error = await Assert.ThrowsAsync<ProjectContextException>(() => CompilerGraphExecution.RunAsync(loaded,
+            (node, token) =>
+            {
+                launches.Add(node.ProjectPath);
+                var directory = Path.Combine(fixture.Path, "private", node.Id);
+                Directory.CreateDirectory(directory);
+                return CompilerEvidence.BuildAsync(node, directory, TimeSpan.FromMinutes(2), token);
+            }, TestContext.Current.CancellationToken));
+        Assert.Equal("compiler.inputsMutated", error.Reason);
+        Assert.Single(launches);
+        Assert.Contains("Dependency", launches[0], StringComparison.Ordinal);
+        Assert.Equal("changed", File.ReadAllText(rules).Trim());
+        Assert.NotEmpty(Directory.GetFiles(Path.Combine(fixture.Path, "Dependency"), "*.dll", SearchOption.AllDirectories));
+        Assert.Empty(Directory.GetFiles(Path.Combine(fixture.Path, "Root"), "*.dll", SearchOption.AllDirectories));
+        Assert.Empty(Directory.GetFiles(Path.Combine(fixture.Path, "Root"), "*.pdb", SearchOption.AllDirectories));
+    }
+
     [Fact]
     public async Task ActualMappedGraphBuildsDependencyAndRootOnceWithoutImplicitReferenceRebuild()
     {
