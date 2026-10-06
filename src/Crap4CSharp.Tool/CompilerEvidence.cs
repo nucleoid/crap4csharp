@@ -9,6 +9,7 @@ internal sealed record CompilerObservation(string ProjectPath, IReadOnlyList<Com
 {
     internal CompilerOutput? Assembly { get; init; }
     internal CompilerOutput? Pdb { get; init; }
+    internal CompilerOutput? ReferenceAssembly { get; init; }
 }
 internal sealed record CompilerReadRequest(string SdkPath, string Binlog, string ProjectPath);
 internal sealed record CompilerReadResponse(CompilerObservation? Observation, string? FailureReason);
@@ -49,8 +50,13 @@ internal static class CompilerEvidence
         var observation = await ReadAsync(log, node.ProjectPath, timeout, token);
         var output = observation.Parameters.Single(p => p.Name == "OutputAssembly").Items.Single();
         var assembly = Path.GetFullPath(output, Path.GetDirectoryName(node.ProjectPath)!);
+        var referenceParameters = observation.Parameters.Where(p => p.Name == "OutputRefAssembly").ToArray();
+        if (referenceParameters.Length > 1 || referenceParameters.Any(p => p.Items.Count != 1 || string.IsNullOrWhiteSpace(p.Items[0])))
+            throw new ProjectContextException("compiler.referenceOutputUnproven", "Actual reference output association is unsupported.");
+        var reference = referenceParameters.Length == 0 ? null :
+            await HashOutput(Path.GetFullPath(referenceParameters[0].Items[0], Path.GetDirectoryName(node.ProjectPath)!), token);
         return observation with { Assembly = await HashOutput(assembly, token),
-            Pdb = await HashOutput(Path.ChangeExtension(assembly, ".pdb"), token) };
+            Pdb = await HashOutput(Path.ChangeExtension(assembly, ".pdb"), token), ReferenceAssembly = reference };
     }
 
     internal static async Task<CompilerObservation> ReadAsync(string binlog, string project, TimeSpan timeout,
@@ -89,12 +95,36 @@ internal static class CompilerEvidence
 
     private static async Task<CompilerOutput> HashOutput(string path, CancellationToken token)
     {
-        if (!File.Exists(path)) throw new ProjectContextException("compiler.outputMissing", "The actual compiler PE or portable PDB is missing.");
-        await using var stream = File.OpenRead(path);
-        var length = stream.Length;
-        var hash = await System.Security.Cryptography.SHA256.HashDataAsync(stream, token);
-        if (stream.Length != length) throw new ProjectContextException("compiler.outputMutated", "A compiler output changed during capture.");
-        return new(path, Convert.ToHexString(hash).ToLowerInvariant(), length);
+        token.ThrowIfCancellationRequested();
+        try
+        {
+            for (var current = path; current is not null; current = Path.GetDirectoryName(current))
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                    throw new ProjectContextException("compiler.outputUnproven", "Reparse-point compiler outputs are unsupported.");
+            if (!ArtifactBundle.IsRegularInput(path))
+                throw new ProjectContextException("compiler.outputMissing", "An actual compiler output is not a regular file.");
+            var time = File.GetLastWriteTimeUtc(path).Ticks;
+            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            var length = stream.Length;
+            if (!stream.CanSeek || length > CompilerPhaseSnapshot.MaximumFileBytes)
+                throw new ProjectContextException("compiler.outputLimit", "Compiler output capture exceeded its finite file byte limit.");
+            using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+            var buffer = new byte[65536];
+            long total = 0;
+            while (true)
+            {
+                var read = await stream.ReadAsync(buffer, token);
+                if (read == 0) break;
+                total += read;
+                if (total > length) throw new ProjectContextException("compiler.outputMutated", "A compiler output changed during capture.");
+                hash.AppendData(buffer, 0, read);
+            }
+            if (total != length || stream.Length != length || File.GetLastWriteTimeUtc(path).Ticks != time)
+                throw new ProjectContextException("compiler.outputMutated", "A compiler output changed during capture.");
+            return new(path, Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant(), length);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        { throw new ProjectContextException("compiler.outputMissing", "An actual compiler output could not be captured."); }
     }
 
     private static string Escape(string value)

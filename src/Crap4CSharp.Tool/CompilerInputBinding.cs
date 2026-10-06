@@ -17,7 +17,7 @@ internal static class CompilerInputBinding
         foreach (var parameter in observation.Parameters)
         {
             token.ThrowIfCancellationRequested();
-            if (parameter.Name is not ("Sources" or "References" or "OutputAssembly" or "AdditionalFiles" or "AnalyzerConfigFiles" or "Analyzers") ||
+            if (parameter.Name is not ("Sources" or "References" or "OutputAssembly" or "OutputRefAssembly" or "AdditionalFiles" or "AnalyzerConfigFiles" or "Analyzers") ||
                 !parameters.TryAdd(parameter.Name, parameter.Items)) throw Refuse();
         }
         if (!parameters.ContainsKey("Sources") || !parameters.TryGetValue("OutputAssembly", out var output) || output.Count != 1)

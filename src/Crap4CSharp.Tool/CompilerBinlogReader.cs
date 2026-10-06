@@ -34,7 +34,7 @@ internal static class CompilerBinlogReader
             if (++eventCount > 200000) throw new ProjectContextException("compiler.evidenceLimit", "Compiler event limit exceeded.");
             if (value is not TaskParameterEventArgs parameter || parameter.Kind != TaskParameterMessageKind.TaskInput ||
                 !tasks.TryGetValue(Key(parameter.BuildEventContext), out var observed) ||
-                parameter.ParameterName is not ("Sources" or "References" or "OutputAssembly" or "Analyzers" or "AdditionalFiles" or "AnalyzerConfigFiles")) return;
+                parameter.ParameterName is not ("Sources" or "References" or "OutputAssembly" or "OutputRefAssembly" or "Analyzers" or "AdditionalFiles" or "AnalyzerConfigFiles")) return;
             if (observed.Parameters.Any(p => p.Name == parameter.ParameterName))
                 throw new ProjectContextException("compiler.associationInvalid", "Duplicate compiler input parameter.");
             var items = new List<string>();
