@@ -8,6 +8,21 @@ namespace Crap4CSharp.Tests;
 public sealed class PolicyCheckCommandTests
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CaseOnlyGitScopeMismatchCannotSilentlyOmitCurrentCallable(bool excluded)
+    {
+        var callable = Callable("gate", "observation", "Gate.cs", 10, 20);
+        var files = new[] { ChangedFile.Modified("App/Gate.cs", "old", "new",
+            [new LineRange(10, 10)], []) };
+        var failure = Assert.Throws<PolicyException>(() => PolicyCheckCommand.IsSelected("base", false,
+            excluded ? [] : files, callable, "App/gate.cs", excluded ? ["App/Gate.cs"] : []));
+        Assert.Equal("policy.sourcePathCaseMismatch", failure.Code);
+        Assert.True(PolicyCheckCommand.IsSelected("base", false, files, callable, "App/Gate.cs"));
+        Assert.False(PolicyCheckCommand.IsSelected("base", false, files, callable, "App/Other.cs"));
+    }
+
+    [Theory]
     [InlineData("src/Gate.g.cs")]
     [InlineData("obj/Release/Gate.g.cs")]
     [InlineData("artifacts/intermediate/Release/Gate.g.cs")]
