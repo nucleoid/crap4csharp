@@ -111,6 +111,23 @@ public sealed class TestExecutionAdapterTests
             }
             else
             {
+                var verified = Assert.IsType<BoundTestResult>(binder.Invoke(null,
+                    [typedObservation, testBinding.Context, compiler, TestContext.Current.CancellationToken]));
+                Assert.Equal(1, verified.Passed);
+                Assert.Equal(compiler.Assembly!.Sha256, verified.AssemblySha256);
+                Assert.Equal(compiler.Pdb!.Sha256, verified.PdbSha256);
+                foreach (var modulePath in new[] { testBinding.Context.EvaluatedTargetPath!, Path.ChangeExtension(testBinding.Context.EvaluatedTargetPath!, ".pdb") })
+                {
+                    var saved = File.ReadAllBytes(modulePath); var time = File.GetLastWriteTimeUtc(modulePath);
+                    var changed = saved.ToArray(); changed[^1] ^= 1;
+                    File.WriteAllBytes(modulePath, changed); File.SetLastWriteTimeUtc(modulePath, time);
+                    try
+                    {
+                        var error = Assert.Throws<TargetInvocationException>(Validate);
+                        Assert.Equal("test.resultsUnproven", Assert.IsType<ProjectContextException>(error.InnerException).Reason);
+                    }
+                    finally { File.WriteAllBytes(modulePath, saved); File.SetLastWriteTimeUtc(modulePath, time); }
+                }
                 Validate();
                 var path = Path.Combine(resultsDirectory, "tests.trx");
                 var original = File.ReadAllBytes(path);
@@ -144,7 +161,41 @@ public sealed class TestExecutionAdapterTests
                     }
                     finally { File.WriteAllBytes(path, original); }
                 }
+                // Owned file-reader controls use this actual TRX and independently built module.
+                using (var oversized = new FileStream(path, FileMode.Create, FileAccess.Write))
+                    oversized.SetLength(TestResultBinding.MaximumTrxBytes + 1);
+                try
+                {
+                    var error = Assert.Throws<TargetInvocationException>(Validate);
+                    Assert.Equal("test.resultsUnproven", Assert.IsType<ProjectContextException>(error.InnerException).Reason);
+                }
+                finally { File.WriteAllBytes(path, original); }
+                var duplicate = Path.Combine(resultsDirectory, "duplicate.trx");
+                File.WriteAllBytes(duplicate, original);
+                try
+                {
+                    var error = Assert.Throws<TargetInvocationException>(Validate);
+                    Assert.Equal("test.resultsUnproven", Assert.IsType<ProjectContextException>(error.InnerException).Reason);
+                }
+                finally { File.Delete(duplicate); }
+                if (!OperatingSystem.IsWindows())
+                {
+                    File.WriteAllBytes(duplicate, original); File.Delete(path);
+                    File.CreateSymbolicLink(path, duplicate);
+                    try
+                    {
+                        var error = Assert.Throws<TargetInvocationException>(Validate);
+                        Assert.Equal("test.resultsUnproven", Assert.IsType<ProjectContextException>(error.InnerException).Reason);
+                    }
+                    finally { File.Delete(path); File.Delete(duplicate); File.WriteAllBytes(path, original); }
+                }
                 Validate();
+                // Retain actual attachment/base/membership diagnostics for the next coverage
+                // binder. These observations alone do NOT validate coverage provenance.
+                TestContext.Current.TestOutputHelper!.WriteLine("ACTUAL_TRX_ATTACHMENT_SHAPE " +
+                    string.Join(" | ", trx.Descendants().Where(e => e.Name.LocalName is "Deployment" or "Collector" or "A").Select(e => e.ToString(SaveOptions.DisableFormatting))));
+                TestContext.Current.TestOutputHelper!.WriteLine("ACTUAL_RESULTS_MEMBERSHIP " +
+                    string.Join(" | ", Directory.GetFiles(resultsDirectory, "*", SearchOption.AllDirectories).Select(p => Path.GetRelativePath(resultsDirectory, p))));
             }
         }
         Assert.NotEmpty(Directory.GetFiles(resultsDirectory, "coverage.opencover.xml", SearchOption.AllDirectories));
