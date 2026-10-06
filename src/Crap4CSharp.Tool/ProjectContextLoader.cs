@@ -14,6 +14,7 @@ public sealed record ProjectContextLoadRequest(
     TimeSpan Timeout)
 {
     public bool MetadataOnly { get; init; }
+    public bool GraphOnly { get; init; }
     public string? SdkPath { get; init; }
     public string? SdkVersion { get; init; }
     public string? MsBuildVersion { get; init; }
@@ -29,10 +30,14 @@ public sealed record ProjectContextLoadResult(
     IReadOnlyList<ProjectContextProjectExclusion>? ExcludedProjects = null)
 {
     public IReadOnlyList<ProjectDiscoveryMetadata> Metadata { get; init; } = [];
+    public IReadOnlyList<ProjectBuildGraphNode> BuildGraph { get; init; } = [];
 }
 
 public sealed record ProjectDiscoveryMetadata(string ProjectPath, string Configuration, string Platform,
     IReadOnlyList<string> Frameworks, string AssetsFile, bool IsTestProject);
+
+public sealed record ProjectBuildGraphNode(string Id, string ProjectPath, string Configuration, string Platform,
+    string TargetFramework, IReadOnlyDictionary<string, string> GlobalProperties, IReadOnlyList<string> Dependencies);
 
 public sealed record ProjectContextProjectExclusion(string ProjectPath, string Reason);
 
@@ -106,6 +111,9 @@ public static class ProjectContextLoader
     // Metadata discovery must precede any restore or Workspace loading.
     public static Task<ProjectContextLoadResult> DiscoverAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken) =>
         LoadAsync(request with { MetadataOnly = true }, cancellationToken);
+
+    public static Task<ProjectContextLoadResult> DiscoverGraphAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken) =>
+        DiscoverAsync(request, cancellationToken); // RED: existing root-only metadata cannot supply mapped graph contexts.
 
     public static Task<ProjectContextLoadResult> LoadAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken) =>
         LoadAsync(request, cancellationToken, ResolveSdkAsync);
