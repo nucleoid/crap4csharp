@@ -14,7 +14,8 @@ internal static class AnalyzeCommand
     }
 
     internal static ResultDocument Replay(ArtifactBundle bundle, string workingDirectory,
-        DateTimeOffset startedAt, TimeSpan duration, CancellationToken cancellationToken, bool allSources = false)
+        DateTimeOffset startedAt, TimeSpan duration, CancellationToken cancellationToken, bool allSources = false,
+        double? thresholdOverride = null)
     {
         var manifest = bundle.Manifest;
         var provenance = ProvenanceVerifier.VerifyCaptureCancellable(manifest, bundle.Bytes, null, cancellationToken);
@@ -23,7 +24,7 @@ internal static class AnalyzeCommand
         (CapturedScope Scope, CapturedPolicy Policy) capturedEvaluation = provenance.Status == ProvenanceStatus.Invalid
             ? (new CapturedScope([]), new CapturedPolicy(8, false))
             : CapturedEvaluationInputs.Read(bundle);
-        var threshold = capturedEvaluation.Policy.Threshold;
+        var threshold = thresholdOverride ?? capturedEvaluation.Policy.Threshold;
         var scopedSources = capturedEvaluation.Scope.Sources.ToHashSet(StringComparer.Ordinal);
         var partitions = new List<ReplayPartition>();
         if (provenance.Status != ProvenanceStatus.Invalid)

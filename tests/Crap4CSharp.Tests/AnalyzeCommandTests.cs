@@ -175,6 +175,24 @@ public sealed class AnalyzeCommandTests
     }
 
     [Fact]
+    public void TrustedReplayThresholdControlsReportsWithoutChangingCapturedAnalyze()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-trusted-report-threshold");
+        var path = CreateBundle(directory.Path);
+        var bundle = ArtifactBundle.Load(path, directory.Path);
+        var trusted = AnalyzeCommand.Replay(bundle, directory.Path, DateTimeOffset.UnixEpoch,
+            TimeSpan.Zero, TestContext.Current.CancellationToken, allSources: true, thresholdOverride: 0);
+        var captured = AnalyzeCommand.Replay(bundle, directory.Path, DateTimeOffset.UnixEpoch,
+            TimeSpan.Zero, TestContext.Current.CancellationToken);
+        Assert.Equal(0, trusted.Evaluation.Policy.Threshold);
+        Assert.NotEmpty(trusted.Evaluation.Findings);
+        Assert.All(trusted.Evaluation.Findings, finding => Assert.Equal(0, finding.Threshold));
+        Assert.Equal(8, captured.Evaluation.Policy.Threshold);
+        Assert.Empty(captured.Evaluation.Findings);
+        Assert.Equal(captured.Evaluation.Metrics, trusted.Evaluation.Metrics);
+    }
+
+    [Fact]
     public async Task CapturedScopeFiltersSourcesRatherThanUsingTheLiveDefault()
     {
         using var directory = TestDirectory.Create("crap4csharp-captured-scope");

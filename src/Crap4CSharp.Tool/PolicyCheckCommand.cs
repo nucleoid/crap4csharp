@@ -31,7 +31,7 @@ internal static class PolicyCheckCommand
             throw new InvalidDataException(string.Join(", ", provenance.Reasons));
 
         var captured = CapturedEvaluationInputs.Read(bundle);
-        var replay = AnalyzeCommand.Replay(bundle, root, startedAt, duration, cancellationToken, allSources: true);
+        var replay = AnalyzeCommand.Replay(bundle, root, startedAt, duration, cancellationToken, allSources: true, thresholdOverride: policy.Threshold);
         var scope = await ResolveScopeAsync(policy, baseRef, root, timeout, cancellationToken);
         if (scope is { } resolved)
             ValidateScopeRevision(policy.Scope, trusted.Revision, bundle.Manifest.Revision, resolved.Revision);
@@ -274,12 +274,17 @@ internal static class PolicyCheckCommand
 
     private static FindingResult ToFinding(PolicyFinding finding, ResultDocument result, double threshold)
     {
-        var callable = (result.Evaluation.Callables ?? []).FirstOrDefault(item => item.CallableId == finding.EntityKey);
+        var family = (result.Evaluation.Families ?? []).FirstOrDefault(item => item.FamilyId == finding.EntityKey);
+        var callable = (result.Evaluation.Callables ?? []).FirstOrDefault(item =>
+            item.ContextId == finding.ContextId && item.CallableId == (family?.RootCallableId ?? finding.EntityKey));
         var span = callable is null ? new SourceSpan(1, 1) : new SourceSpan(callable.Span.StartLine, callable.Span.EndLine);
         return new FindingResult(FindingIdentity.Create(finding.ContextId, finding.Path, finding.EntityKey, span, finding.Code),
             finding.EntityKey, finding.Code, finding.Decision == "fail" ? "error" : "info", "policy",
             finding.ContextId, finding.Path, finding.EntityKey, callable?.SemanticSignature, span,
-            callable?.Complexity ?? 0, callable?.Coverage, callable?.Crap, callable?.CoverageReason, threshold,
+            family?.Complexity ?? callable?.Complexity ?? 0,
+            family is null ? callable?.Coverage : family.Coverage,
+            family is null ? callable?.Crap : family.Crap,
+            family is null ? callable?.CoverageReason : family.IncompleteReasons.FirstOrDefault(), threshold,
             "gt", finding.Decision, finding.Reasons);
     }
 
