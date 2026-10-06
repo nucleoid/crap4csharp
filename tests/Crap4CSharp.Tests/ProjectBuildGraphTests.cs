@@ -86,6 +86,24 @@ public sealed class ProjectBuildGraphTests
         Assert.Single(result.BuildGraph, node => node.ProjectPath == dependency);
     }
 
+    [Fact]
+    public async Task EntryFrameworkFilterDoesNotFlattenDependencyFramework()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-graph-entry-filter");
+        var dependency = fixture.Write("Dependency/Dependency.csproj", Project().Replace("net10.0", "netstandard2.1"));
+        var root = fixture.Write("Root/Root.csproj", Project("<ItemGroup><ProjectReference Include=\"../Dependency/Dependency.csproj\" /></ItemGroup>").Replace(
+            "<TargetFramework>net10.0</TargetFramework>", "<TargetFrameworks>net10.0;netstandard2.1</TargetFrameworks>"));
+        var result = await ProjectContextLoader.DiscoverGraphAsync(new(root, "Release", "AnyCPU", ["net10.0"], true,
+            false, TimeSpan.FromMinutes(2)), TestContext.Current.CancellationToken);
+        Assert.True(result.Success, result.FailureReason + ": " + string.Join(" | ", result.Diagnostics));
+        Assert.Equal("net10.0", Assert.Single(result.BuildGraph, node => node.ProjectPath == root).TargetFramework);
+        Assert.Equal("netstandard2.1", Assert.Single(result.BuildGraph, node => node.ProjectPath == dependency).TargetFramework);
+        var missing = await ProjectContextLoader.DiscoverGraphAsync(new(root, "Release", "AnyCPU", ["missing-tfm"], true,
+            false, TimeSpan.FromMinutes(2)), TestContext.Current.CancellationToken);
+        Assert.False(missing.Success);
+        Assert.Equal("context.frameworkNotFound", missing.FailureReason);
+    }
+
     private static Task<ProjectContextLoadResult> Discover(string root) => ProjectContextLoader.DiscoverGraphAsync(
         new(root, "Release", "AnyCPU", [], true, false, TimeSpan.FromMinutes(2)), TestContext.Current.CancellationToken);
 
