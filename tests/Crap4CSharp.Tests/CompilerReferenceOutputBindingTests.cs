@@ -1,4 +1,3 @@
-using System.Reflection;
 using Crap4CSharp.Core;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -66,16 +65,8 @@ public sealed class CompilerReferenceOutputBindingTests
         Assert.ThrowsAny<OperationCanceledException>(() => Validate(context, observation, cancelled.Token));
     }
 
-    private static void Validate(ProjectAnalysisContext context, CompilerObservation observation, CancellationToken token)
-    {
-        // Proposed private gate; the prior implementation has no gate. Missing seam behaves
-        // as the prior acceptance path so the material refusal tests execute genuine RED.
-        var type = typeof(CompilerEvidence).Assembly.GetType("Crap4CSharp.Core.CompilerReferenceOutputBinding");
-        if (type is null) return;
-        try { type.GetMethod("Validate", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [context, observation, token]); }
-        catch (TargetInvocationException error) when (error.InnerException is not null)
-        { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); }
-    }
+    private static void Validate(ProjectAnalysisContext context, CompilerObservation observation, CancellationToken token) =>
+        CompilerReferenceOutputBinding.Validate(context, observation, token);
 
     private static (ProjectAnalysisContext, CompilerObservation, CompilerOutput) Valid(TestDirectory fixture)
     {

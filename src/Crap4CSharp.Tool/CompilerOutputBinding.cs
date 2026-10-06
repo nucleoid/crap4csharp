@@ -74,7 +74,7 @@ internal static class CompilerOutputBinding
         if (!entry.IsPortableCodeView || codeView.Age != 1 || codeView.Guid != id.Guid || entry.Stamp != id.Stamp) throw Refuse();
     }
 
-    private static void Match(CompilerOutput output, ImmutableArray<byte> bytes)
+    internal static void Match(CompilerOutput output, ImmutableArray<byte> bytes)
     {
         if (output.Length != bytes.Length || output.Sha256 != Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes.AsSpan())).ToLowerInvariant()) throw Refuse();
     }
@@ -85,7 +85,7 @@ internal static class CompilerOutputBinding
         return path;
     }
 
-    private static ImmutableArray<byte> Read(string path, ref long total, CancellationToken token)
+    internal static ImmutableArray<byte> Read(string path, ref long total, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         for (var current = path; current is not null; current = Path.GetDirectoryName(current))

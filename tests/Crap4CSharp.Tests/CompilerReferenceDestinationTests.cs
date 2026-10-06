@@ -55,6 +55,22 @@ public sealed class CompilerReferenceDestinationTests
                 ? prepared[node.Id].Extend([dep.EvaluatedReferenceAssemblyPath!], TestContext.Current.CancellationToken)
                 : prepared[node.Id];
             var observation = await CompilerEvidence.BuildAsync(node, directory, TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+            var boundContext = Assert.Single(loaded.GraphContexts, b => b.GraphId == node.Id).Context;
+            // Independently actual Csc OutputRefAssembly and parent-owned immediate hash,
+            // then bounded PE/reference identity and evaluated copy BEFORE dependency staging.
+            CompilerReferenceOutputBinding.Validate(boundContext, observation, TestContext.Current.CancellationToken);
+            Assert.NotNull(observation.ReferenceAssembly);
+            var actualReference = observation.ReferenceAssembly;
+            Assert.NotEqual(actualReference.Path, boundContext.EvaluatedReferenceAssemblyPath);
+            var copiedReference = boundContext.EvaluatedReferenceAssemblyPath!;
+            var savedCopy = File.ReadAllBytes(copiedReference);
+            var savedCopyTime = File.GetLastWriteTimeUtc(copiedReference);
+            var changedCopy = savedCopy.ToArray(); changedCopy[^1] ^= 1;
+            File.WriteAllBytes(copiedReference, changedCopy); File.SetLastWriteTimeUtc(copiedReference, savedCopyTime);
+            Assert.Equal("compiler.referenceOutputUnproven", Assert.Throws<ProjectContextException>(() =>
+                CompilerReferenceOutputBinding.Validate(boundContext, observation, TestContext.Current.CancellationToken)).Reason);
+            File.WriteAllBytes(copiedReference, savedCopy); File.SetLastWriteTimeUtc(copiedReference, savedCopyTime);
+            CompilerReferenceOutputBinding.Validate(boundContext, observation, TestContext.Current.CancellationToken);
             if (node.ProjectPath == dependency)
                 prepared[node.Id].Validate(observation, TestContext.Current.CancellationToken);
             if (node.ProjectPath == root)
