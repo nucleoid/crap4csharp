@@ -53,17 +53,27 @@ public sealed class GeneratorBindingTests
             Assert.True(loaded.Success, loaded.FailureReason + ": " + string.Join(" | ", loaded.Diagnostics));
             var context = Assert.Single(loaded.GraphContexts).Context;
             // Proposed private protocol marker: public exclusion cannot hide binding obligations.
-            var property = typeof(ProjectAnalysisContext).GetProperty("GeneratorOnlyTreeCount");
-            Assert.Equal(behavior == "emit" ? 1 : 0, property?.GetValue(context) ?? 0);
+            Assert.Equal(behavior == "emit" ? 1 : 0, context.GeneratorOnlyTreeCount);
             Assert.Equal(behavior == "emit" && includeGenerated,
                 context.Sources.Any(s => s.IsGenerated && s.LogicalPath.EndsWith("Hidden.cs", StringComparison.Ordinal)));
             var copy = JsonSerializer.Deserialize<ProjectAnalysisContext>(JsonSerializer.Serialize(context, ProjectContextLoader.JsonOptions), ProjectContextLoader.JsonOptions)!;
-            Assert.Equal(property?.GetValue(context) ?? 0, property?.GetValue(copy) ?? 0);
+            Assert.Equal(context.GeneratorOnlyTreeCount, copy.GeneratorOnlyTreeCount);
             Assert.DoesNotContain("generatorOnlyTreeCount", JsonSerializer.Serialize(context, new JsonSerializerOptions(JsonSerializerDefaults.Web)), StringComparison.OrdinalIgnoreCase);
             if (behavior == "emit")
             {
-                var exception = Assert.Throws<ProjectContextException>(() => CompilerOutputBinding.Validate(context,
-                    new CompilerObservation(project, []), TestContext.Current.CancellationToken));
+                var privateDirectory = Path.Combine(fixture.Path, "private");
+                Directory.CreateDirectory(privateDirectory);
+                var observed = await CompilerEvidence.BuildAsync(Assert.Single(loaded.BuildGraph), privateDirectory,
+                    request.Timeout, TestContext.Current.CancellationToken);
+                Assert.NotNull(observed.Assembly);
+                var final = await ProjectContextLoader.LoadGraphAsync(request, TestContext.Current.CancellationToken);
+                Assert.True(final.Success, final.FailureReason + ": " + string.Join(" | ", final.Diagnostics));
+                var finalContext = Assert.Single(final.GraphContexts).Context;
+                Assert.Equal(1, finalContext.GeneratorOnlyTreeCount);
+                // Real successful Csc produced a PE/PDB, yet generator source binding
+                // remains unsupported even when public generated analysis is disabled.
+                var exception = Assert.Throws<ProjectContextException>(() => CompilerOutputBinding.Validate(finalContext,
+                    observed, TestContext.Current.CancellationToken));
                 Assert.Equal("compiler.generatorBindingUnsupported", exception.Reason);
             }
         }
