@@ -95,7 +95,7 @@ public static class ProjectContextLoader
         {
             var propertyNames = info.Type == typeof(ProjectSourceIdentity) ? new[] { nameof(ProjectSourceIdentity.ResolvedPath) } :
                 info.Type == typeof(ProjectAnalysisContext) ? new[] { nameof(ProjectAnalysisContext.ResolvedProjectPath), nameof(ProjectAnalysisContext.ProtectedPaths),
-                    nameof(ProjectAnalysisContext.CompilerDocuments), nameof(ProjectAnalysisContext.GeneratedTransitionPaths), nameof(ProjectAnalysisContext.EvaluatedTargetPath),
+                    nameof(ProjectAnalysisContext.CompilerDocuments), nameof(ProjectAnalysisContext.PhaseInputs), nameof(ProjectAnalysisContext.ReferencePaths), nameof(ProjectAnalysisContext.GeneratedTransitionPaths), nameof(ProjectAnalysisContext.EvaluatedTargetPath),
                     nameof(ProjectAnalysisContext.EvaluatedIntermediateDirectory) } : [];
             foreach (var propertyName in propertyNames)
             {

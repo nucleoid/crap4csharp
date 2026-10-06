@@ -288,6 +288,19 @@ internal static class MsBuildProjectLoader
                 sources.Add(new ProjectSourceIdentity(path, path, ProjectAnalysisContext.ContentHash(text), true, !IsWithin(root, tree.FilePath)));
             }
         }
+        // Keep precise input roles separate from output protection and from public analysis exclusions.
+        // Restore imports/assets and analyzer binaries are immutable prepared inputs, not transitions.
+        var phaseInputs = new List<ProjectPhaseInput>(metadata.PhaseInputs);
+        phaseInputs.AddRange(compilerDocuments.Select(d => new ProjectPhaseInput(d.ResolvedPath!, "source", d.IsGenerated)));
+        phaseInputs.AddRange(project.AdditionalDocuments.Where(d => d.FilePath is not null)
+            .Select(d => new ProjectPhaseInput(Path.GetFullPath(d.FilePath!), "additionalFile", false)));
+        phaseInputs.AddRange(project.AnalyzerConfigDocuments.Where(d => d.FilePath is not null)
+            .Select(d => new ProjectPhaseInput(Path.GetFullPath(d.FilePath!), "analyzerConfig",
+                !trackedInputs.Contains(Path.GetFullPath(d.FilePath!)) &&
+                !metadata.PhaseInputs.Any(p => PathComparer.Equals(p.Path, Path.GetFullPath(d.FilePath!))) &&
+                metadata.IntermediatePaths.Any(output => IsWithin(output, d.FilePath!)) && !TraversesReparsePoint(d.FilePath!))));
+        phaseInputs.AddRange(project.AnalyzerReferences.OfType<AnalyzerFileReference>()
+            .Select(a => new ProjectPhaseInput(Path.GetFullPath(a.FullPath), "analyzer", false)));
         var adapter = new ProjectAdapterIdentity(request.SdkVersion ?? "unknown", request.MsBuildVersion ?? "unknown",
             typeof(CSharpCompilation).Assembly.GetName().Version?.ToString() ?? "unknown");
         var afterInputs = SnapshotInputs(metadata.AuthoredInputs);
@@ -302,6 +315,10 @@ internal static class MsBuildProjectLoader
         {
             ResolvedProjectPath = Path.GetFullPath(projectPath),
             CompilerDocuments = compilerDocuments.OrderBy(source => source.ResolvedPath, StringComparer.Ordinal).ToArray(),
+            PhaseInputs = phaseInputs.Distinct().OrderBy(p => p.Path, StringComparer.Ordinal).ThenBy(p => p.Role, StringComparer.Ordinal).ToArray(),
+            ReferencePaths = project.MetadataReferences.Select(r => r.Display)
+                .Where(p => !string.IsNullOrWhiteSpace(p)).Select(p => Path.GetFullPath(p!))
+                .Distinct(PathComparer).Order(StringComparer.Ordinal).ToArray(),
             EvaluatedTargetPath = metadata.TargetPath,
             EvaluatedIntermediateDirectory = metadata.IntermediateDirectory,
             GeneratedTransitionPaths = project.AnalyzerConfigDocuments.Where(document => document.FilePath is not null)
@@ -366,6 +383,18 @@ internal static class MsBuildProjectLoader
             .Append(projectPath)
             .Concat(compileInputs)
             .Where(File.Exists).Distinct(PathComparer).ToArray();
+        var phaseInputs = new List<ProjectPhaseInput>
+        { new(Path.GetFullPath(projectPath), "project", false), new(Path.GetFullPath(assets), "restoreAssets", false) };
+        phaseInputs.AddRange(project.Imports.Select(i => new ProjectPhaseInput(Path.GetFullPath(i.ImportedProject.FullPath), "import", false)));
+        foreach (var (itemName, role) in new[] { ("AdditionalFiles", "additionalFile"), ("EditorConfigFiles", "analyzerConfig"),
+            ("GlobalAnalyzerConfigFiles", "analyzerConfig"), ("Analyzer", "analyzer") })
+            phaseInputs.AddRange(project.GetItems(itemName).Select(i => new ProjectPhaseInput(
+                Path.GetFullPath(i.EvaluatedInclude, Path.GetDirectoryName(projectPath)!), role, false)));
+        for (var directory = Path.GetDirectoryName(projectPath); directory is not null; directory = Path.GetDirectoryName(directory))
+        {
+            var sdkConfiguration = Path.Combine(directory, "global.json");
+            if (File.Exists(sdkConfiguration)) { phaseInputs.Add(new(sdkConfiguration, "sdkConfiguration", false)); break; }
+        }
         return new EvaluatedMetadata(frameworks,
             string.Equals(project.GetPropertyValue("IsTestProject"), "true", StringComparison.OrdinalIgnoreCase),
             project.GetPropertyValue("AssemblyName"),
@@ -377,7 +406,7 @@ internal static class MsBuildProjectLoader
                 .Select(project.GetPropertyValue).Where(value => !string.IsNullOrWhiteSpace(value))
                 .Select(value => Path.GetFullPath(value, Path.GetDirectoryName(projectPath)!))
                 .Distinct(PathComparer).ToArray(),
-            EvaluatedPath("TargetPath"), EvaluatedPath("IntermediateOutputPath"));
+            EvaluatedPath("TargetPath"), EvaluatedPath("IntermediateOutputPath"), phaseInputs.ToArray());
 
         string? EvaluatedPath(string name)
         {
@@ -479,6 +508,6 @@ internal static class MsBuildProjectLoader
 
     private sealed record EvaluatedMetadata(string[] Frameworks, bool IsTestProject, string AssemblyName,
         string Configuration, string Platform, string[] Imports, string AssetsFile, string ProjectExtensionsPath,
-        string[] AuthoredInputs, string[] CompileInputs, string[] IntermediatePaths, string? TargetPath, string? IntermediateDirectory);
+        string[] AuthoredInputs, string[] CompileInputs, string[] IntermediatePaths, string? TargetPath, string? IntermediateDirectory, ProjectPhaseInput[] PhaseInputs);
     private sealed record ProjectSelection(string Path, string Configuration, string? Platform);
 }
