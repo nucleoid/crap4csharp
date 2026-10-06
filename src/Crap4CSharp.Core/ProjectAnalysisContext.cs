@@ -58,6 +58,12 @@ public sealed record ProjectAnalysisContext(
     public string? ResolvedProjectPath { get; init; }
 
     [JsonIgnore]
+    public string? EvaluatedTargetPath { get; init; }
+
+    [JsonIgnore]
+    public string? EvaluatedIntermediateDirectory { get; init; }
+
+    [JsonIgnore]
     public IReadOnlyList<string> ProtectedPaths { get; init; } = [];
 
     [JsonIgnore]

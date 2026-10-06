@@ -69,6 +69,40 @@ public sealed class CompilerGraphExecutionTests
         Assert.Empty(launches); // A valid first node must not execute before an invalid later node is examined.
     }
 
+    [Theory]
+    [InlineData("missing-target")]
+    [InlineData("missing-intermediate")]
+    [InlineData("relative-target")]
+    [InlineData("shared-target-directory")]
+    [InlineData("shared-intermediate")]
+    [InlineData("cross-role-overlap")]
+    [InlineData("nested-output")]
+    public async Task EvaluatedOutputRefusalPrecedesEveryBuild(string defect)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-output-preflight");
+        var loaded = Valid(fixture.Path);
+        var dependency = loaded.Contexts[0];
+        var root = loaded.Contexts[1];
+        root = defect switch
+        {
+            "missing-target" => root with { EvaluatedTargetPath = null },
+            "missing-intermediate" => root with { EvaluatedIntermediateDirectory = null },
+            "relative-target" => root with { EvaluatedTargetPath = "bin/Root.dll" },
+            "shared-target-directory" => root with { EvaluatedTargetPath = Path.Combine(Path.GetDirectoryName(dependency.EvaluatedTargetPath!)!, "Different.dll") },
+            "shared-intermediate" => root with { EvaluatedIntermediateDirectory = dependency.EvaluatedIntermediateDirectory },
+            "cross-role-overlap" => root with { EvaluatedIntermediateDirectory = Path.GetDirectoryName(dependency.EvaluatedTargetPath!) },
+            "nested-output" => root with { EvaluatedIntermediateDirectory = Path.Combine(dependency.EvaluatedIntermediateDirectory!, "nested") },
+            _ => throw new InvalidOperationException()
+        };
+        loaded = loaded with { Contexts = [dependency, root], GraphContexts = [loaded.GraphContexts[0], loaded.GraphContexts[1] with { Context = root }] };
+        var launches = 0;
+        var error = await Assert.ThrowsAsync<ProjectContextException>(() => CompilerGraphExecution.RunAsync(loaded,
+            (node, _) => { launches++; return Task.FromResult(new CompilerObservation(node.ProjectPath, [])); },
+            TestContext.Current.CancellationToken));
+        Assert.Equal("compiler.graphOutputUnproven", error.Reason);
+        Assert.Equal(0, launches);
+    }
+
     [Fact]
     public async Task ValidGraphBuildsEachMappedContextOnceInDependencyOrder()
     {
@@ -175,5 +209,7 @@ public sealed class CompilerGraphExecutionTests
     private static ProjectAnalysisContext Context(string project) => ProjectAnalysisContext.Create(project,
         Path.GetFileNameWithoutExtension(project), "net10.0", "Release", "AnyCPU", LanguageVersion.Latest,
         ["FLAVOR_LEFT"], SourceCodeKind.Regular, [], [], new(false, false), new("sdk", "msbuild", "roslyn"))
-        with { ResolvedProjectPath = project };
+        with { ResolvedProjectPath = project,
+            EvaluatedTargetPath = Path.Combine(Path.GetDirectoryName(project)!, Path.GetFileNameWithoutExtension(project), "bin", "Release", "net10.0", "app.dll"),
+            EvaluatedIntermediateDirectory = Path.Combine(Path.GetDirectoryName(project)!, Path.GetFileNameWithoutExtension(project), "obj", "Release", "net10.0") };
 }
