@@ -367,22 +367,32 @@ internal static class PolicyCheckCommand
                 "Output path aliases a source or trusted policy overlay.");
     }
 
-    internal static void RejectFailureOutputAlias(string manifestPath, string policyPath, string baseRef,
-        string outputPath, string root, TimeSpan timeout, CancellationToken cancellationToken)
+    internal static void RejectFailureOutputAlias(string manifestPath, string outputPath, string root)
     {
-        var bundle = ArtifactBundle.Load(manifestPath, root);
-        ValidateRepositoryPaths(bundle.Manifest);
-        var trusted = TrustedPolicyLoader.LoadFromBase(baseRef, policyPath, repositoryRoot: root,
-            timeout: timeout, cancellationToken: cancellationToken);
-        var protectedPaths = bundle.Manifest.Contexts.SelectMany(context => context.Inputs)
-            .Where(input => input.Role == "source" && !input.Generated && input.RepositoryPath is not null)
-            .Select(input => Path.GetFullPath(input.RepositoryPath!, root))
-            .Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
-            .ToArray();
-        var current = new CurrentEvidence("failure-output-alias-check", "failure-output-alias-check", null, [],
-            new Dictionary<string, string>(StringComparer.Ordinal))
-        { ProtectedPaths = protectedPaths };
-        RejectOutputAlias(outputPath, root, trusted, current);
+        ArtifactBundle.RejectOutputAliasForLocator(manifestPath, outputPath, root);
+        ArtifactBundle bundle;
+        try { bundle = ArtifactBundle.Load(manifestPath, root); }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or
+            UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            // No consumer file is overwritten when a broken/missing bundle prevents inventory
+            // recovery. The CLI has already checked explicit inputs and the bundle boundary.
+            var candidate = Path.GetFullPath(outputPath, root);
+            if (!File.Exists(candidate) && !Directory.Exists(candidate)) return;
+            throw;
+        }
+        var protectedPaths = bundle.Manifest.Contexts.SelectMany(context =>
+            context.Inputs.Where(input => !input.Generated)
+                .Select(input => CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input))
+                .Append(context.Project)
+                .Concat(context.CurrentRevalidation is { } recipe
+                    ? new[] { recipe.Project, recipe.AssemblyPath, recipe.PdbPath }
+                        .Concat(recipe.References.Select(reference => reference.WorkspacePath)) : []))
+            .Select(path => Path.GetFullPath(path, root));
+        var output = Path.GetFullPath(outputPath, root);
+        if (protectedPaths.Any(path => PathIdentityPolicy.Current.Comparer.Equals(path, output)))
+            throw new PolicyException("output.aliasesPolicyInput",
+                "Output path aliases a declared consumer input or compiled output.");
     }
 
     private readonly record struct ResolvedPolicyScope(IReadOnlyList<ChangedFile> Files, bool Widened,

@@ -265,9 +265,9 @@ internal static class App
                             mayWrite = false;
                             ArtifactBundle.RejectOutputAliasForLocator(options.ReuseArtifacts, destination,
                                 workingDirectory);
-                            if (options.Command == "check" && options.Policy is not null && options.Base is not null)
-                                PolicyCheckCommand.RejectFailureOutputAlias(options.ReuseArtifacts, options.Policy,
-                                    options.Base, destination, workingDirectory, options.Timeout, cancellationToken);
+                            if (options.Command == "check")
+                                PolicyCheckCommand.RejectFailureOutputAlias(options.ReuseArtifacts,
+                                    destination, workingDirectory);
                             mayWrite = true;
                         }
                     }
