@@ -42,13 +42,36 @@ public sealed class CompilerReferenceDestinationTests
             Assert.DoesNotContain("evaluatedReferenceAssemblyPath", JsonSerializer.Serialize(context), StringComparison.OrdinalIgnoreCase);
             Assert.False(context.Capabilities.CompiledInputBindingComplete);
         }
+        // Independent prepared metadata references are frozen BEFORE any build. The mapped
+        // dependency reference PE is added ONLY after its once build and BEFORE the consumer.
+        var prepared = loaded.GraphContexts.ToDictionary(b => b.GraphId,
+            b => CompilerReferenceSnapshot.Capture(b.Context.ReferencePaths, TestContext.Current.CancellationToken));
         CompilerObservation? consumer = null;
         foreach (var node in loaded.BuildGraph)
         {
             var directory = Path.Combine(fixture.Path, "private", node.Id);
             Directory.CreateDirectory(directory);
+            var closure = node.ProjectPath == root
+                ? prepared[node.Id].Extend([dep.EvaluatedReferenceAssemblyPath!], TestContext.Current.CancellationToken)
+                : prepared[node.Id];
             var observation = await CompilerEvidence.BuildAsync(node, directory, TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
-            if (node.ProjectPath == root) consumer = observation;
+            if (node.ProjectPath == dependency)
+                prepared[node.Id].Validate(observation, TestContext.Current.CancellationToken);
+            if (node.ProjectPath == root)
+            {
+                closure.Validate(observation, TestContext.Current.CancellationToken);
+                var referencePath = dep.EvaluatedReferenceAssemblyPath!;
+                var savedReference = File.ReadAllBytes(referencePath);
+                var savedTime = File.GetLastWriteTimeUtc(referencePath);
+                var mutatedReference = savedReference.ToArray(); mutatedReference[^1] ^= 1;
+                File.WriteAllBytes(referencePath, mutatedReference);
+                File.SetLastWriteTimeUtc(referencePath, savedTime);
+                var drift = Assert.Throws<ProjectContextException>(() => closure.VerifyUnchanged(TestContext.Current.CancellationToken));
+                Assert.Equal("compiler.referencesUnproven", drift.Reason);
+                File.WriteAllBytes(referencePath, savedReference); File.SetLastWriteTimeUtc(referencePath, savedTime);
+                closure.VerifyUnchanged(TestContext.Current.CancellationToken);
+                consumer = observation;
+            }
         }
         Assert.NotNull(consumer);
         Assert.Contains(Assert.Single(consumer.Parameters, p => p.Name == "References").Items,

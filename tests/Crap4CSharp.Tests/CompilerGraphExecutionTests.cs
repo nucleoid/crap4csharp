@@ -363,6 +363,7 @@ public sealed class CompilerGraphExecutionTests
     [InlineData("language")]
     [InlineData("symbols")]
     [InlineData("target")]
+    [InlineData("reference-destination")]
     [InlineData("authored-membership")]
     public async Task FinalReloadCannotChangeFrozenGraphOrAuthoredMembership(string defect)
     {
@@ -380,6 +381,7 @@ public sealed class CompilerGraphExecutionTests
         if (defect == "language") context = context with { LanguageVersion = LanguageVersion.CSharp12 };
         if (defect == "symbols") context = context with { PreprocessorSymbols = ["OTHER"] };
         if (defect == "target") context = context with { EvaluatedTargetPath = Path.Combine(fixture.Path, "redirect", "Root.dll") };
+        if (defect == "reference-destination") context = context with { EvaluatedReferenceAssemblyPath = Path.Combine(fixture.Path, "redirect", "ref", "Root.dll") };
         if (defect == "authored-membership") context = context with { PhaseInputs = [.. context.PhaseInputs, new(fixture.Write("added.cs", "class Added {}"), "source", false)] };
         if (context != loaded.Contexts[1]) final = loaded with { Contexts = [loaded.Contexts[0], context], GraphContexts = [loaded.GraphContexts[0], loaded.GraphContexts[1] with { Context = context }] };
         var launches = new List<string>();

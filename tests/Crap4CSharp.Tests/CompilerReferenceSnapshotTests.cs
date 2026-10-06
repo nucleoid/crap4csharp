@@ -92,6 +92,30 @@ public sealed class CompilerReferenceSnapshotTests
     }
 
     [Fact]
+    public void SharedStagedPathKeepsOriginalIdentityAndDuplicateSuppliedPathsRefuse()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-reference-overlap");
+        var path = fixture.Write("Reference.dll", "reference");
+        var snapshot = CompilerReferenceSnapshot.Capture([path], TestContext.Current.CancellationToken);
+        snapshot.Extend([path], TestContext.Current.CancellationToken).VerifyUnchanged(TestContext.Current.CancellationToken);
+        var error = Assert.Throws<ProjectContextException>(() => snapshot.Extend([path, path], TestContext.Current.CancellationToken));
+        Assert.Equal("compiler.referencesUnproven", error.Reason);
+    }
+
+    [Fact]
+    public void SymlinkReferenceRefusesWithoutFollowingItsTarget()
+    {
+        if (OperatingSystem.IsWindows()) return; // Windows reparse execution remains hosted-CI owned.
+        using var fixture = TestDirectory.Create("crap4csharp-reference-symlink");
+        var target = fixture.Write("Target.dll", "reference");
+        var link = Path.Combine(fixture.Path, "Link.dll");
+        File.CreateSymbolicLink(link, target);
+        var error = Assert.Throws<ProjectContextException>(() => CompilerReferenceSnapshot.Capture([link], TestContext.Current.CancellationToken));
+        Assert.Equal("compiler.referencesUnproven", error.Reason);
+        Assert.Equal("reference", File.ReadAllText(target));
+    }
+
+    [Fact]
     public void EmptyClosureControl()
     {
         using var fixture = TestDirectory.Create("crap4csharp-reference-empty");
