@@ -176,7 +176,8 @@ internal static class PolicyCheckCommand
             { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = 32 });
             var root = document.RootElement;
             RequireKeys(root, ["version", "entries"]);
-            if (root.GetProperty("version").GetString() != CallableExemptions.Version ||
+            if (root.GetProperty("version").ValueKind != JsonValueKind.String ||
+                root.GetProperty("version").GetString() != CallableExemptions.Version ||
                 root.GetProperty("entries").ValueKind != JsonValueKind.Array)
                 throw new PolicyException("exemption.malformed", $"Trusted exemption file is malformed: {file.Key}");
             foreach (var entry in root.GetProperty("entries").EnumerateArray())

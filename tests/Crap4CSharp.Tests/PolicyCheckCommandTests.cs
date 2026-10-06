@@ -94,6 +94,18 @@ public sealed class PolicyCheckCommandTests
         Assert.Equal(0, evaluated.ExitCode);
     }
 
+    [Theory]
+    [InlineData("1")]
+    [InlineData("null")]
+    [InlineData("{}")]
+    public void NonStringExemptionVersionReturnsStableMalformedReason(string version)
+    {
+        var exception = Assert.Throws<PolicyException>(() => PolicyCheckCommand.ParseExemptions(
+            new Dictionary<string, byte[]> { ["exemptions.json"] = Encoding.UTF8.GetBytes(
+                "{\"version\":" + version + ",\"entries\":[]}") }, EmptyResult([])));
+        Assert.Equal("exemption.malformed", exception.Code);
+    }
+
     [Fact]
     public void TrustedExemptionSurvivesCurrentContextContentChange()
     {

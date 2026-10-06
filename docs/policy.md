@@ -49,7 +49,11 @@ crap4csharp baseline create \
 
 The command writes only the explicit candidate destination. Existing destinations require `--overwrite`; normal
 analysis/checking never creates, trims, transfers, or rewrites a baseline. Known above-threshold metrics are eligible
-candidate debt and retain exit `2`. Failed/skipped tests, unknown coverage, stale source/context/build output,
+candidate debt and retain exit `2`. Known complexity violations with unknown coverage cannot receive a numeric
+allowance: the summary's `omittedKnownViolations` lists each such entity and reason. An approved unsupported mapping
+can permit a candidate without fabricated coverage, but never excuses complexity above threshold; touching that
+entity in incremental mode still fails until refactored or supported coverage is available.
+Failed/skipped tests, unexempted unknown coverage, stale source/context/build output,
 unsupported revalidation recipes, incompatible policy/ruleset/schema, or tampered bundle bytes fail `1` and write no
 candidate. Candidate metadata is deterministic and contains no timestamp. Generation is not approval: review the
 candidate, move it to the policy's baseline path, and commit both before enabling incremental CI.
@@ -73,7 +77,10 @@ non-reusable for future replay; reusable and currently verified are separate cap
 
 The current provider supports source-only compiler closures. A captured metadata-reference closure fails closed
 until a provider can independently bind those bytes to the references resolved by the current project loader;
-producer-supplied reference paths are not accepted as proof.
+producer-supplied reference paths are not accepted as proof. Current source-only revalidation does not independently
+reload test-project sources or resolve a producer's `TestProject` string to its actual test DLL/PDB. CI must produce
+its own bundle from the declared successful test run; do not accept a branch-supplied bundle as signed test evidence.
+The fresh orchestration producer must bind the declared test targets; hashes establish consistency, not approval.
 
 Stable named allowance identity is project + TFM + configuration/platform + canonical Roslyn callable + rule +
 ruleset. Paths, line numbers, source hashes, and body fingerprints are observations, not named identity. Same-symbol
@@ -87,6 +94,22 @@ Reviewed exemptions match stable callable identity, current target framework, bo
 unsupported reason; captured content-context IDs are diagnostic, not stable approval keys. Duplicate anonymous
 bodies additionally require the reviewed `memberCount` and every member's matching body/family acknowledgement.
 Named collisions cannot use an anonymous exemption. Exemptions never waive a known complexity above threshold.
+
+### Approving a new or edited unsupported callable
+
+Version 1 has no CI-authorized external approval-source option. A branch cannot approve its own new exemption:
+base-trusted checks use only merge-base bytes. A changed body checksum makes the old exemption stale and an
+unsupported selected callable exits `1` (unless complexity already proves a violation, which exits `2`).
+Use two reviewed phases: first approve the exact future stable callable/body/reason and family acknowledgements
+in the base tree, regenerating a candidate with `baseline create` under the changed exemption binding and reviewing
+its numeric entries; then rebase the implementation onto that approved commit and capture fresh evidence.
+`baseline update` cannot migrate an old incompatible exemption binding. Do not use `--base HEAD` to make a branch
+approve itself. If approving a future body separately is unsuitable, keep the gate failing and refactor or obtain
+supported coverage instead.
+
+Git-tracked generated-looking files (including `Resources.Designer.cs`) remain authored. A collector's
+`GeneratedCode` exclusion can therefore leave required coverage unknown. Record reviewed policy exclusions or
+use a policy-authorized generated-source selector; an `obj/` name or attribute alone cannot exempt authored code.
 
 Generated compiler documents are classified using their physical evaluated `IntermediateOutputPath` or
 `BaseIntermediateOutputPath`, never `Link` or an `obj/` spelling. Git-tracked compiler files and target-added sources

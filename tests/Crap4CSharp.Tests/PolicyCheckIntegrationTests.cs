@@ -133,6 +133,46 @@ public sealed class PolicyCheckIntegrationTests
         Assert.Contains("recipe project", stderr.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task BaselineNumericExemptionVersionProducesOneStructuredFailureAndNoCandidate()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-baseline-malformed-exemption");
+        const string projectLogical = "App/App.csproj";
+        var project = fixture.Write(projectLogical, "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework><AssemblyName>Crap4CSharp.ProvenanceFixture</AssemblyName><DebugType>portable</DebugType></PropertyGroup></Project>");
+        fixture.Write("App/CompiledEvidence.cs", await File.ReadAllTextAsync(Path.Combine(RepositoryRoot(),
+            "tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs"), TestContext.Current.CancellationToken));
+        fixture.Write("policy.json", JsonSerializer.Serialize(new
+        {
+            schemaVersion = RepositoryPolicy.Version, mode = "strict", productionProjects = new[] { projectLogical },
+            testProjects = new[] { projectLogical }, configuration = BuildConfiguration, targetFrameworks = new[] { "net10.0" },
+            scope = "all", threshold = 100, missingCoverage = "fail", requiredChecks = new[] { "tests", "coverage", "crap" },
+            exclusions = Array.Empty<string>(), ruleset = ComplexityRules.CallablesV1, exemptionFiles = new[] { "exemptions.json" }
+        }));
+        fixture.Write("exemptions.json", "{\"version\":1,\"entries\":[]}");
+        foreach (var args in new[] { new[] { "init", "--quiet" }, new[] { "config", "user.email", "fixture@example.invalid" },
+            new[] { "config", "user.name", "Fixture" }, new[] { "add", "." }, new[] { "commit", "--quiet", "-m", "fixture" } })
+        {
+            var git = await ProcessRunner.RunAsync("git", args, fixture.Path, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            Assert.True(git.ExitCode == 0, git.StandardError);
+        }
+        var restored = await ProjectBuildPreparation.RestoreAsync(project, TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+        Assert.True(restored.ExitCode == 0, restored.StandardError);
+        var built = await ProjectBuildPreparation.BuildAsync(project, BuildConfiguration, "net10.0", "AnyCPU", TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+        Assert.True(built.ExitCode == 0, built.StandardError);
+        var (locator, _, _, _, _) = await CreateBundle(fixture.Path, projectLogical, "policy.json",
+            Path.Combine(fixture.Path, "App", "bin", BuildConfiguration, "net10.0", "Crap4CSharp.ProvenanceFixture.dll"),
+            Path.Combine(fixture.Path, "bundle"));
+        var output = new StringWriter();
+        var exit = await global::App.RunAsync(["baseline", "create", "--policy", "policy.json",
+            "--reuse-artifacts", locator, "--output", "candidate.json", "--format", "json"], fixture.Path,
+            output, TextWriter.Null, TestContext.Current.CancellationToken);
+        Assert.Equal(1, exit);
+        using var result = JsonDocument.Parse(output.ToString());
+        Assert.Equal("baseline-command-result-v1", result.RootElement.GetProperty("schemaVersion").GetString());
+        Assert.Equal("exemption.malformed", result.RootElement.GetProperty("reason").GetString());
+        Assert.False(File.Exists(Path.Combine(fixture.Path, "candidate.json")));
+    }
+
     [Theory]
     [InlineData("App.csproj")]
     [InlineData("Directory.Build.props")]

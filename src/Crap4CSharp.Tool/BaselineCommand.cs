@@ -88,6 +88,7 @@ internal static class BaselineCommand
                 candidateHash = CanonicalIdentity.Sha256(candidateBytes),
                 entries = candidate.Entries.Count,
                 skippedAmbiguousIdentities = ambiguous.Length,
+                omittedKnownViolations = OmittedKnownViolations(parsedPolicy.Policy.Threshold, observations),
                 approvedUnsupportedExemptions = exemptionResolution.Active.Count,
                 policyHash = parsedPolicy.Hash,
                 policyCompatibilityHash = compatibilityHash,
@@ -98,8 +99,7 @@ internal static class BaselineCommand
             await output.WriteAsync(JsonSerializer.Serialize(summary, Json) + "\n");
             return policyResult.ExitCode;
         }
-        catch (Exception exception) when (exception is ArgumentException or IOException or InvalidDataException or UnauthorizedAccessException or
-            PolicyException or BaselineException or JsonException or OperationCanceledException or TimeoutException)
+        catch (Exception exception) when (global::App.IsHandled(exception))
         {
             await output.WriteAsync(JsonSerializer.Serialize(new
             {
@@ -111,6 +111,16 @@ internal static class BaselineCommand
             return 1;
         }
     }
+
+    internal sealed record OmittedKnownViolation(string Kind, string EntityKey, string Rule, string Path,
+        int Complexity, string Reason, string? CoverageReason);
+
+    internal static IReadOnlyList<OmittedKnownViolation> OmittedKnownViolations(double threshold,
+        IEnumerable<PolicyObservation> observations) => observations
+        .Where(item => item.Complexity > threshold && (item.Coverage is null || item.Crap is null))
+        .OrderBy(item => item.EntityKey, StringComparer.Ordinal).ThenBy(item => item.Rule, StringComparer.Ordinal)
+        .Select(item => new OmittedKnownViolation(item.Kind, item.EntityKey, item.Rule, item.Path,
+            item.Complexity, "baseline.unknownCoverageCannotReceiveAllowance", item.CoverageReason)).ToArray();
 
     internal static BaselineCommandOptions Parse(string[] args)
     {

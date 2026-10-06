@@ -101,6 +101,24 @@ public sealed class BaselineCommandTests
         Assert.Equal("baseline.scopeIncomplete", error.Code);
     }
 
+    [Fact]
+    public void CandidateSummaryReportsKnownUnknownCoverageDebtWithoutInventingAllowance()
+    {
+        var family = new PolicyObservation("family", "family", CallableFamilyEvaluator.Rule,
+            ComplexityRules.CallablesV1, "ctx", "App/Gate.cs", "body", 9, null, null,
+            CoverageReasonCodes.UnsupportedGeneratedMapping, true, false);
+        var numeric = family with { EntityKey = "numeric", Coverage = .5, Crap = 19.125 };
+        var below = family with { EntityKey = "below", Complexity = 1 };
+        var omitted = Assert.Single(BaselineCommand.OmittedKnownViolations(8, [numeric, family, below]));
+        Assert.Equal("family", omitted.EntityKey);
+        Assert.Equal(9, omitted.Complexity);
+        Assert.Equal("baseline.unknownCoverageCannotReceiveAllowance", omitted.Reason);
+        Assert.Equal(CoverageReasonCodes.UnsupportedGeneratedMapping, omitted.CoverageReason);
+        var candidate = BaselineDocument.Generate("hash", ComplexityRules.CallablesV1, "source", "revision",
+            8, [numeric, family, below]);
+        Assert.Equal("numeric", Assert.Single(candidate.Entries).EntityKey);
+    }
+
     private static RunManifest EmptyManifest(ManifestContext context) => new(ManifestIdentity.SchemaVersion,
         CanonicalIdentity.Algorithm, new ManifestProducer("crap4csharp", "0.1.0", ComplexityRules.CallablesV1,
             ProjectAnalysisContext.ProtocolVersion, ManifestIdentity.CoverageProtocol, ManifestIdentity.PathProtocol),
