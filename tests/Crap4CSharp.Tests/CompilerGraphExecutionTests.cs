@@ -106,6 +106,39 @@ public sealed class CompilerGraphExecutionTests
     }
 
     [Theory]
+    [InlineData("missing")]
+    [InlineData("relative")]
+    [InlineData("outside")]
+    [InlineData("directory")]
+    [InlineData("project-alias")]
+    [InlineData("source-alias")]
+    [InlineData("generated-alias")]
+    public async Task ReferenceDestinationRefusesBeforeAnyBuild(string defect)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-reference-preflight");
+        var loaded = Valid(fixture.Path);
+        var context = loaded.Contexts[1];
+        var source = fixture.Write("Root/obj/Release/net10.0/Authored.cs", "class Authored {}");
+        context = context with { PhaseInputs = [.. context.PhaseInputs, new(source, "source", defect == "generated-alias")] };
+        context = context with { EvaluatedReferenceAssemblyPath = defect switch
+        {
+            "missing" => null,
+            "relative" => "obj/ref/Root.dll",
+            "outside" => Path.Combine(fixture.Path, "outside", "Root.dll"),
+            "directory" => context.EvaluatedIntermediateDirectory,
+            "project-alias" => context.ProjectPath,
+            "source-alias" or "generated-alias" => source,
+            _ => throw new InvalidOperationException()
+        } };
+        loaded = loaded with { Contexts = [loaded.Contexts[0], context], GraphContexts = [loaded.GraphContexts[0], loaded.GraphContexts[1] with { Context = context }] };
+        var launches = 0;
+        var error = await Assert.ThrowsAsync<ProjectContextException>(() => CompilerGraphExecution.RunAsync(loaded,
+            (node, _) => { launches++; return Task.FromResult(new CompilerObservation(node.ProjectPath, [])); }, TestContext.Current.CancellationToken));
+        Assert.Equal("compiler.graphOutputUnproven", error.Reason);
+        Assert.Equal(0, launches);
+    }
+
+    [Theory]
     [InlineData("source")]
     [InlineData("project")]
     [InlineData("import")]
@@ -495,5 +528,6 @@ public sealed class CompilerGraphExecutionTests
         ["FLAVOR_LEFT"], SourceCodeKind.Regular, [], [], new(false, false), new("sdk", "msbuild", "roslyn"))
         with { ResolvedProjectPath = project,
             EvaluatedTargetPath = Path.Combine(Path.GetDirectoryName(project)!, Path.GetFileNameWithoutExtension(project), "bin", "Release", "net10.0", "app.dll"),
+            EvaluatedReferenceAssemblyPath = Path.Combine(Path.GetDirectoryName(project)!, Path.GetFileNameWithoutExtension(project), "obj", "Release", "net10.0", "ref", "app.dll"),
             EvaluatedIntermediateDirectory = Path.Combine(Path.GetDirectoryName(project)!, Path.GetFileNameWithoutExtension(project), "obj", "Release", "net10.0") };
 }
