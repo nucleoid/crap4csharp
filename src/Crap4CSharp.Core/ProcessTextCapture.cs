@@ -4,6 +4,19 @@ namespace Crap4CSharp.Core;
 
 internal static class ProcessTextCapture
 {
+    internal static async Task ObserveTerminatedPumpsAsync(Task output, Task error)
+    {
+        Task all = Task.WhenAll(output, error);
+        try { await all.WaitAsync(TimeSpan.FromSeconds(5)); }
+        catch (Exception) when (all.IsCompleted)
+        {
+            // The owner has already terminated its invocation. Observe both failures
+            // without replacing the original timeout, cancellation or execution fault.
+            // A still-running drain is different: the independent cleanup timeout escapes.
+            _ = all.Exception;
+        }
+    }
+
     internal static async Task<string> ReadAsync(TextReader reader, string streamName)
     {
         const int limit = ProcessRunner.MaximumCapturedCharactersPerStream;

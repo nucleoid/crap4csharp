@@ -88,7 +88,7 @@ internal static class WindowsOwnedProcess
             stdin.Read.Dispose();
             stdin.Write.Dispose();
             if (output is not null && error is not null)
-                await Task.WhenAll(output, error).WaitAsync(TimeSpan.FromSeconds(5));
+                await ProcessTextCapture.ObserveTerminatedPumpsAsync(output, error);
             if (exception is OperationCanceledException && linked.IsCancellationRequested)
             {
                 if (cancellationToken.IsCancellationRequested)

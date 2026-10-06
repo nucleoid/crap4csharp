@@ -175,4 +175,5 @@ text is refused with `InvalidDataException` (stream, limit and observed count),
 never returned as a truncated successful protocol. Overflow is reported after
 EOF; a consumer that continues emitting remains subject to the operation deadline.
 This text route is not a byte-preserving binary-protocol adapter or a complete
-streaming-log API. Large check-command logging is a separate orchestration path.
+streaming-log API. Large check-command logging requires a separate bounded streaming-log API; this
+compatibility runner does not provide one.

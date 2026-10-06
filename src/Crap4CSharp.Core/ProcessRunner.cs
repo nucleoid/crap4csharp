@@ -116,7 +116,7 @@ public static class ProcessRunner
             if (sessionVerified) await WaitForSessionTerminationAsync(process.Id);
             try
             {
-                await Task.WhenAll(output, error).WaitAsync(TimeSpan.FromSeconds(5));
+                await ProcessTextCapture.ObserveTerminatedPumpsAsync(output, error);
             }
             catch (TimeoutException exception)
             {
@@ -132,7 +132,7 @@ public static class ProcessRunner
             if (sessionVerified && !process.HasExited) TerminateSession(process);
             await TerminateAsync(process);
             if (sessionVerified) await WaitForSessionTerminationAsync(process.Id);
-            await Task.WhenAll(output, error).WaitAsync(TimeSpan.FromSeconds(5));
+            await ProcessTextCapture.ObserveTerminatedPumpsAsync(output, error);
             throw;
         }
     }
