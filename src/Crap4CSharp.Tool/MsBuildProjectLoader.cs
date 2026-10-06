@@ -11,7 +11,7 @@ using System.Text.Json;
 
 namespace Crap4CSharp.Core;
 
-internal static class MsBuildProjectLoader
+internal static partial class MsBuildProjectLoader
 {
     public static async Task<ProjectContextLoadResult> LoadAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken)
     {
@@ -19,6 +19,19 @@ internal static class MsBuildProjectLoader
         var root = Path.GetDirectoryName(request.Target)!;
         var excludedProjects = new List<ProjectContextProjectExclusion>();
         var projects = await DiscoverProjects(request.Target, request.Configuration, request.Platform, diagnostics, excludedProjects, cancellationToken);
+        if (request.TestRunnersOnly)
+        {
+            var graph = await DiscoverGraph(request, projects, diagnostics, excludedProjects, cancellationToken);
+            var runners = new List<ProjectTestRunnerMetadata>();
+            foreach (var node in graph.BuildGraph)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var metadata = Evaluate(node.ProjectPath, node.Configuration, node.Platform, node.TargetFramework, node.GlobalProperties);
+                EnsurePreparedAssets(metadata, node.ProjectPath);
+                if (metadata.IsTestProject) runners.Add(EvaluateTestRunner(node, request.SdkPath!));
+            }
+            return new(true, [], diagnostics, null, excludedProjects) { BuildGraph = graph.BuildGraph, TestRunners = runners.ToArray() };
+        }
         if (request.LoadGraphContexts)
         {
             var graph = await DiscoverGraph(request, projects, diagnostics, excludedProjects, cancellationToken);

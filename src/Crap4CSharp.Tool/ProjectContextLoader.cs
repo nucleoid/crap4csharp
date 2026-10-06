@@ -13,6 +13,7 @@ public sealed record ProjectContextLoadRequest(
     bool IncludeGenerated,
     TimeSpan Timeout)
 {
+    public bool TestRunnersOnly { get; init; }
     public bool MetadataOnly { get; init; }
     public bool GraphOnly { get; init; }
     public bool LoadGraphContexts { get; init; }
@@ -30,10 +31,15 @@ public sealed record ProjectContextLoadResult(
     string? FailureReason = null,
     IReadOnlyList<ProjectContextProjectExclusion>? ExcludedProjects = null)
 {
+    [JsonIgnore]
+    public IReadOnlyList<ProjectTestRunnerMetadata> TestRunners { get; init; } = [];
     public IReadOnlyList<ProjectDiscoveryMetadata> Metadata { get; init; } = [];
     public IReadOnlyList<ProjectBuildGraphNode> BuildGraph { get; init; } = [];
     public IReadOnlyList<ProjectGraphContextBinding> GraphContexts { get; init; } = [];
 }
+
+public sealed record ProjectTestRunnerMetadata(string GraphId, string ProjectPath, string Configuration, string Platform,
+    string TargetFramework, string Runner, string TestSdkVersion, string CollectorVersion);
 
 public sealed record ProjectDiscoveryMetadata(string ProjectPath, string Configuration, string Platform,
     IReadOnlyList<string> Frameworks, string AssetsFile, bool IsTestProject);
@@ -96,7 +102,8 @@ public static class ProjectContextLoader
             var propertyNames = info.Type == typeof(ProjectSourceIdentity) ? new[] { nameof(ProjectSourceIdentity.ResolvedPath) } :
                 info.Type == typeof(ProjectAnalysisContext) ? new[] { nameof(ProjectAnalysisContext.ResolvedProjectPath), nameof(ProjectAnalysisContext.ProtectedPaths),
                     nameof(ProjectAnalysisContext.CompilerDocuments), nameof(ProjectAnalysisContext.GeneratorOnlyTreeCount), nameof(ProjectAnalysisContext.PhaseInputs), nameof(ProjectAnalysisContext.ReferencePaths), nameof(ProjectAnalysisContext.GeneratedTransitionPaths), nameof(ProjectAnalysisContext.EvaluatedTargetPath),
-                    nameof(ProjectAnalysisContext.EvaluatedIntermediateDirectory), nameof(ProjectAnalysisContext.EvaluatedReferenceAssemblyPath) } : [];
+                    nameof(ProjectAnalysisContext.EvaluatedIntermediateDirectory), nameof(ProjectAnalysisContext.EvaluatedReferenceAssemblyPath) } :
+                info.Type == typeof(ProjectContextLoadResult) ? new[] { nameof(ProjectContextLoadResult.TestRunners) } : [];
             foreach (var propertyName in propertyNames)
             {
                 var member = info.Type.GetProperty(propertyName)!;
@@ -112,6 +119,9 @@ public static class ProjectContextLoader
         return new JsonSerializerOptions(JsonSerializerDefaults.Web)
         { TypeInfoResolver = resolver, Converters = { new JsonStringEnumConverter() } };
     }
+
+    internal static Task<ProjectContextLoadResult> DiscoverTestRunnersAsync(ProjectContextLoadRequest request, CancellationToken token) =>
+        LoadAsync(request with { TestRunnersOnly = true, LoadGraphContexts = false, GraphOnly = false, MetadataOnly = false }, token);
 
     // Metadata discovery must precede any restore or Workspace loading.
     public static Task<ProjectContextLoadResult> DiscoverAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken) =>

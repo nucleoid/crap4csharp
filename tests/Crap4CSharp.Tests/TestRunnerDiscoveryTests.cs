@@ -33,6 +33,14 @@ public sealed class TestRunnerDiscoveryTests
             {{(mode == "custom" ? "<Target Name=\"VSTest\"><Error Text=\"Custom runner\" /></Target>" : "")}}
             </Project>
             """);
+        if (mode == "custom")
+        {
+            // Implicit SDK targets overwrite inline VSTest; a real late override must follow Sdk.targets.
+            var text = File.ReadAllText(project).Replace("<Project Sdk=\"Microsoft.NET.Sdk\">",
+                "<Project><Import Project=\"Sdk.props\" Sdk=\"Microsoft.NET.Sdk\" />", StringComparison.Ordinal)
+                .Replace("<Target Name=\"VSTest\">", "<Import Project=\"Sdk.targets\" Sdk=\"Microsoft.NET.Sdk\" /><Target Name=\"VSTest\">", StringComparison.Ordinal);
+            File.WriteAllText(project, text);
+        }
         fixture.Write("Test.cs", "public class Tests { [Xunit.Fact] public void Pass() { } }");
         var request = new ProjectContextLoadRequest(project, "Release", "AnyCPU", [], false, false, TimeSpan.FromMinutes(2));
         Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken)).ExitCode);
