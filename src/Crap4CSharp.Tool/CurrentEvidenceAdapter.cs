@@ -163,14 +163,40 @@ internal static class CurrentEvidenceAdapter
         string Run(params string[] arguments) => git(root, arguments);
         static string Line(string value) => value.TrimEnd('\r', '\n');
         var repositoryRoot = Line(Run("rev-parse", "--show-toplevel"));
-        if (!PathIdentityPolicy.Current.Comparer.Equals(Path.GetFullPath(repositoryRoot), root))
+        if (Line(Run("rev-parse", "--show-prefix")).Length != 0)
             throw new InvalidDataException("Current workspace must equal the Git repository root.");
         var commonDirectory = Path.GetFullPath(Line(Run("rev-parse", "--git-common-dir")), root);
         var worktreeDirectory = Path.GetFullPath(Line(Run("rev-parse", "--git-dir")), root);
         var head = Line(Run("rev-parse", "HEAD"));
-        var status = git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", .. inputPaths]);
+        // Bounded literal pathspec batches preserve declared-input-only observation without
+        // Windows' command-line ceiling. Disable rename pairing so batch boundaries cannot
+        // change the representation of a staged rename between declared inputs.
+        string ObservePaths(params string[] command)
+        {
+            var result = new System.Text.StringBuilder();
+            var batch = new List<string>();
+            var size = 0;
+            void Flush()
+            {
+                if (batch.Count == 0) return;
+                result.Append(git(root, ["--literal-pathspecs", .. command, "--", .. batch]));
+                batch.Clear();
+                size = 0;
+            }
+            foreach (var path in inputPaths)
+            {
+                var cost = path.Length * 2 + 3; // conservative Windows quoting allowance
+                if (cost > 8000) throw new InvalidDataException("Declared Git input path exceeds the command budget.");
+                if (size + cost > 8000) Flush();
+                batch.Add(path);
+                size += cost;
+            }
+            Flush();
+            return result.ToString();
+        }
+        var status = ObservePaths("status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames");
         var submodules = Run("submodule", "status", "--recursive");
-        var staged = git(root, ["diff", "--cached", "--binary", "--full-index", "--", .. inputPaths]);
+        var staged = ObservePaths("diff", "--cached", "--binary", "--full-index", "--no-renames");
         var stateHash = CanonicalIdentity.Set("git-workspace-state-v1",
             [CanonicalIdentity.Tuple("status", status),
              CanonicalIdentity.Tuple("submodules", submodules),

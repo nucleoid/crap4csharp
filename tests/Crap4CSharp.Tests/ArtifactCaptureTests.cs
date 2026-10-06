@@ -94,8 +94,8 @@ public sealed class ArtifactCaptureTests
         var manifest = fixture.Manifest with
         { Revision = new ManifestRevision("git", "repo", "worktree", "abc", null, null) };
         var error = Assert.Throws<InvalidDataException>(() => CurrentEvidenceAdapter.Capture(manifest,
-            directory.Path, (_, arguments) => arguments.SequenceEqual(new[] { "rev-parse", "--show-toplevel" })
-                ? Path.GetDirectoryName(directory.Path)! : ""));
+            directory.Path, (_, arguments) => arguments.SequenceEqual(new[] { "rev-parse", "--show-prefix" })
+                ? "nested/" : directory.Path));
         Assert.Contains("repository root", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -135,7 +135,7 @@ public sealed class ArtifactCaptureTests
         {
             largest = Math.Max(largest, arguments.Sum(argument => argument.Length + 3));
             Assert.True(largest < 16000, $"Git command grew to {largest} characters.");
-            if (arguments[0] == "status")
+            if (arguments.Contains("status"))
                 foreach (var path in arguments.SkipWhile(argument => argument != "--").Skip(1))
                     observedPaths.Add(path);
             return string.Join(" ", arguments) switch
@@ -153,6 +153,49 @@ public sealed class ArtifactCaptureTests
     }
 
     [Fact]
+    public void RealGitBatchedObservationBindsDeclaredStagingButIgnoresBundleOutputs()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-real-git-batches");
+        string Git(params string[] arguments)
+        {
+            var start = new System.Diagnostics.ProcessStartInfo("git")
+            { WorkingDirectory = directory.Path, RedirectStandardOutput = true,
+                RedirectStandardError = true, UseShellExecute = false };
+            foreach (var argument in arguments) start.ArgumentList.Add(argument);
+            using var process = System.Diagnostics.Process.Start(start)!;
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            var stderr = process.StandardError.ReadToEndAsync();
+            Assert.True(process.WaitForExit(15000), "Fixture Git timed out.");
+            Assert.True(process.ExitCode == 0, stderr.GetAwaiter().GetResult());
+            return stdout.GetAwaiter().GetResult();
+        }
+        Git("init");
+        Git("config", "user.name", "Fixture");
+        Git("config", "user.email", "fixture@example.invalid");
+        var paths = Enumerable.Range(0, 2000).Select(index =>
+            $"src/LongProjectDirectoryName/LongSourceFileName{index:D4}.cs").ToArray();
+        foreach (var path in paths) directory.Write(path, "original");
+        Git("add", ".");
+        Git("commit", "-m", "fixture");
+        var fixture = CreateFixture();
+        var context = fixture.Manifest.Contexts.Single() with { Inputs = paths.Select(path =>
+            new ManifestInput("source", path, "inputs/unused", 8, CanonicalIdentity.Sha256(Encoding.UTF8.GetBytes("original")), "utf-8", false)
+            { RepositoryPath = path }).ToArray() };
+        var manifest = fixture.Manifest with { Contexts = [context],
+            Revision = new ManifestRevision("git", "repo", "worktree", "abc", null, null) };
+        var clean = CurrentEvidenceAdapter.Capture(manifest, directory.Path);
+        directory.Write("bundle/manifest.json", "retained diagnostic output");
+        Assert.Equal(clean.StateHash, CurrentEvidenceAdapter.Capture(manifest, directory.Path).StateHash);
+        directory.Write(paths[^1], "changed");
+        var dirty = CurrentEvidenceAdapter.Capture(manifest, directory.Path);
+        Assert.NotEqual(clean.StateHash, dirty.StateHash);
+        Git("add", paths[^1]);
+        var staged = CurrentEvidenceAdapter.Capture(manifest, directory.Path);
+        Assert.NotEqual(dirty.StateHash, staged.StateHash);
+        Assert.Equal(staged.StateHash, CurrentEvidenceAdapter.Capture(manifest, directory.Path).StateHash);
+    }
+
+    [Fact]
     public void GitCurrentEvidenceBindsStatusSubmodulesAndStagedDiff()
     {
         using var directory = TestDirectory.Create("crap4csharp-git-state");
@@ -162,12 +205,13 @@ public sealed class ArtifactCaptureTests
         string Run(string state, string _, IReadOnlyList<string> arguments) => string.Join(" ", arguments) switch
         {
             "rev-parse --show-toplevel" => directory.Path,
+            "rev-parse --show-prefix" => "",
             "rev-parse --git-common-dir" => Path.Combine(directory.Path, ".git"),
             "rev-parse --git-dir" => Path.Combine(directory.Path, ".git", "worktrees", "fixture"),
             "rev-parse HEAD" => "abc",
-            "status --porcelain=v1 -z --untracked-files=all -- tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs" => state,
+            "--literal-pathspecs status --porcelain=v1 -z --untracked-files=all --no-renames -- tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs" => state,
             "submodule status --recursive" => "",
-            "diff --cached --binary --full-index -- tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs" => "",
+            "--literal-pathspecs diff --cached --binary --full-index --no-renames -- tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs" => "",
             var command => throw new InvalidOperationException(command)
         };
         var manifest = ManifestIdentity.Seal(fixture.Manifest with

@@ -102,7 +102,7 @@ public sealed class PolicyCheckIntegrationTests
         var repository = RepositoryRoot();
         const string projectLogical = "tests/Crap4CSharp.ProvenanceFixture/Crap4CSharp.ProvenanceFixture.csproj";
         using var directory = TestDirectory.Create("crap4csharp-project-recipe-binding");
-        var (_, manifest, context, _, _) = await CreateBundle(repository, projectLogical,
+        var (_, manifest, context, _, bytes) = await CreateBundle(repository, projectLogical,
             PolicyLogical, typeof(Crap4CSharp.ProvenanceFixture.CompiledEvidence).Assembly.Location,
             Path.Combine(directory.Path, "bundle"));
         // Keep the genuine current recipe, source paths and PE/PDB, but assert that
@@ -113,6 +113,24 @@ public sealed class PolicyCheckIntegrationTests
             CurrentEvidenceAdapter.CaptureSupportedAsync(forged, repository,
                 TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken));
         Assert.Contains("project", error.Message, StringComparison.OrdinalIgnoreCase);
+
+        // Keep the approved policy's declaration, but point the independent recipe at
+        // a sibling project. Publication seals the forged bundle so the CLI must
+        // reject its semantics rather than merely failing an integrity hash.
+        var forgedRecipe = manifest with { Contexts = [context with
+        { CurrentRevalidation = context.CurrentRevalidation! with
+            { Project = "Shadow/Crap4CSharp.ProvenanceFixture.csproj" } }] };
+        var locator = ArtifactCaptureAdapter.PublishNew(forgedRecipe, bytes,
+            Path.Combine(directory.Path, "forged-recipe"));
+        var output = new StringWriter();
+        var stderr = new StringWriter();
+        var exit = await global::App.RunAsync(["check", "--reuse-artifacts", locator,
+            "--policy", PolicyLogical, "--base", "HEAD", "--format", "json"], repository,
+            output, stderr, TestContext.Current.CancellationToken);
+        Assert.Equal(1, exit);
+        using var result = JsonDocument.Parse(output.ToString());
+        Assert.Equal(1, result.RootElement.GetProperty("run").GetProperty("exitCode").GetInt32());
+        Assert.Contains("recipe project", stderr.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]
