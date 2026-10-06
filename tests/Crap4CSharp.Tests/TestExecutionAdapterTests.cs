@@ -106,14 +106,16 @@ public sealed class TestExecutionAdapterTests
     [Fact]
     public void ActualTestArgumentsPreserveMappedSelectorsAndEscapeMSBuildDelimiters()
     {
-        var properties = new Dictionary<string,string> { ["Flavor"] = "left;other=value,%$@'()*?", ["Platform"] = "AnyCPU" };
+        var properties = new Dictionary<string,string> { ["Flavor"] = "left;other=value,%$@'()*?", ["Platform"] = "AnyCPU", ["vstestnobuild"] = "false" };
         var node = new ProjectBuildGraphNode("test", Path.GetFullPath("Tests.csproj"), "Release", "AnyCPU", "net10.0", properties, []);
         var arguments = TestExecutionAdapter.CreateArguments(node);
         Assert.Equal(new[] { "test", node.ProjectPath, "--no-build", "--no-restore", "-m:1", "-nr:false" }, arguments.Take(6));
         Assert.Contains("-p:Flavor=left%3Bother=value%2C%25%24%40%27%28%29%2A%3F", arguments);
         Assert.Contains("-p:Configuration=Release", arguments);
         Assert.Contains("-p:TargetFramework=net10.0", arguments);
-        Assert.Contains("-p:BuildProjectReferences=false", arguments);
+        Assert.Contains("-p:vstestnobuild=false", arguments);
+        Assert.Equal("-p:VSTestNoBuild=true", arguments[^2]);
+        Assert.Equal("-p:BuildProjectReferences=false", arguments[^1]);
         Assert.True(Assert.IsAssignableFrom<IList<string>>(arguments).IsReadOnly);
     }
 

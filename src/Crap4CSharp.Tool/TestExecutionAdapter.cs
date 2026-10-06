@@ -67,6 +67,9 @@ internal static class TestExecutionAdapter
         arguments.AddRange(MappedGlobalArguments.Create(node.GlobalProperties));
         arguments.AddRange(MappedGlobalArguments.Create(new Dictionary<string,string>
             { ["Configuration"] = node.Configuration, ["Platform"] = node.Platform, ["TargetFramework"] = node.TargetFramework }));
+        // Mapped globals follow CLI switches and can override --no-build. Force the
+        // effective supported VSTest property AFTER every mapped value and selector.
+        arguments.Add("-p:VSTestNoBuild=true");
         arguments.Add("-p:BuildProjectReferences=false");
         return Array.AsReadOnly(arguments.ToArray());
     }
