@@ -46,7 +46,7 @@ public sealed class PolicyTests
         var incremental = RepositoryPolicyParser.Parse(Encoding.UTF8.GetBytes(ValidPolicy), "quality/policy.json");
         var strictText = ValidPolicy.Replace("\"incremental\"", "\"strict\"", StringComparison.Ordinal)
             .Replace("\"scope\": \"base\"", "\"scope\": \"all\"", StringComparison.Ordinal)
-            .Replace(",\n  \"baseline\": \"baseline.json\"", "", StringComparison.Ordinal);
+            .WithoutBaseline();
         var strict = RepositoryPolicyParser.Parse(Encoding.UTF8.GetBytes(strictText), "quality/policy.json");
 
         Assert.NotEqual(strict.Hash, incremental.Hash);
@@ -105,4 +105,14 @@ public sealed class PolicyTests
           "exemptionFiles": []
         }
         """;
+}
+
+internal static class RepositoryPolicyFixtureExtensions
+{
+    internal static string WithoutBaseline(this string json)
+    {
+        var policy = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+        Assert.True(policy.Remove("baseline"));
+        return policy.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+    }
 }

@@ -49,7 +49,7 @@ public sealed class BaselineCommandTests
         await File.WriteAllTextAsync(Path.Combine(directory.Path, "policy.json"), PolicyTests.ValidPolicy
             .Replace("\"incremental\"", "\"strict\"", StringComparison.Ordinal)
             .Replace("\"scope\": \"base\"", "\"scope\": \"all\"", StringComparison.Ordinal)
-            .Replace(",\n  \"baseline\": \"baseline.json\"", "", StringComparison.Ordinal),
+            .WithoutBaseline(),
             TestContext.Current.CancellationToken);
         using var output = new StringWriter();
         using var error = new StringWriter();

@@ -13,8 +13,9 @@ public sealed class TrustedPolicyTests
     {
         var input = PolicyTests.ValidPolicy.ReplaceLineEndings(newline);
         var strict = input.Replace("\"incremental\"", "\"strict\"", StringComparison.Ordinal)
-            .Replace(",\n  \"baseline\": \"baseline.json\"", "", StringComparison.Ordinal)
+            .WithoutBaseline()
             .Replace("\"exemptionFiles\": []", "\"exemptionFiles\": [\"exceptions.json\"]", StringComparison.Ordinal);
+        Assert.Null(RepositoryPolicyParser.Parse(Encoding.UTF8.GetBytes(strict), "quality/policy.json").Policy.BaselinePath);
         var commands = new List<string>();
         byte[] Git(IReadOnlyList<string> arguments)
         {
@@ -87,7 +88,7 @@ public sealed class TrustedPolicyTests
             "quality/policy.json");
         var strictText = PolicyTests.ValidPolicy.Replace("\"incremental\"", "\"strict\"", StringComparison.Ordinal)
             .Replace("\"scope\": \"base\"", "\"scope\": \"all\"", StringComparison.Ordinal)
-            .Replace(",\n  \"baseline\": \"baseline.json\"", "", StringComparison.Ordinal);
+            .WithoutBaseline();
         var strict = RepositoryPolicyParser.Parse(Encoding.UTF8.GetBytes(strictText), "quality/policy.json");
         var boundHash = RepositoryPolicyParser.BindExemptions(strict.CompatibilityHash,
             Array.Empty<KeyValuePair<string, ReadOnlyMemory<byte>>>());
