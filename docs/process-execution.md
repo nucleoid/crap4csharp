@@ -24,6 +24,16 @@ assigns a non-breakaway kill-on-close job before resuming, and terminates/positi
 the job on completion or failure. Windows runtime acceptance remains pending; Linux tests
 and compilation are not Windows proof. Cleanup has a separate finite five-second bound.
 
-Consumer stdin/bounded binary protocol support and fresh `check` orchestration are still
-unfinished. The Linux supervisor's stdin is a private start/status ownership handshake,
+`RunProtocolAsync` captures complete stdout/stderr bytes without UTF-8 transcoding.
+Each stream has an independent configurable limit, default 4 MiB and maximum 16 MiB;
+zero accepts only an empty stream. Exceeding either limit drains without additional
+retention, then throws `InvalidDataException` at EOF with stream, limit and observed-byte
+metadata. It never returns a tail as a complete response. The operation deadline still
+bounds an ongoing over-limit producer, and timeout/cancellation takes precedence.
+Each pump retains at most its bounded MemoryStream capacity (at most max(256 bytes, twice the limit)),
+one 8 KiB buffer and, on success, the complete result array. This is an algorithmic bound,
+not a measured whole-process memory benchmark. Protocol responses are distinct from
+complete disk logs; callers needing large diagnostic output use `RunLoggedAsync`.
+
+Consumer stdin support and fresh `check` orchestration are still unfinished. The Linux supervisor's stdin is a private start/status ownership handshake,
 not a consumer input channel. This document does not claim that fresh check is implemented.
