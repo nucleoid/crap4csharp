@@ -180,13 +180,13 @@ public sealed class TestExecutionPlanTests
     private static ProjectContextLoadResult Discovery(ProjectContextLoadResult loaded) => new(true, [], [])
     {
         BuildGraph = loaded.BuildGraph.Select(n => n with { Dependencies = n.Dependencies.ToArray(), GlobalProperties = new Dictionary<string,string>(n.GlobalProperties) }).ToArray(),
-        TestRunners = [new("dep", loaded.BuildGraph[0].ProjectPath, "Debug", "AnyCPU", "net10.0", "VSTest", "18.0.1", "6.0.4")]
+        TestRunners = new[] { new ProjectTestRunnerMetadata("dep", loaded.BuildGraph[0].ProjectPath, "Debug", "AnyCPU", "net10.0", "VSTest", "18.0.1", "6.0.4") }
     };
     private static ProjectContextLoadResult Valid(string root)
     {
         var contexts = new[] { Context(Path.Combine(root, "Dep.csproj"), "Debug"), Context(Path.Combine(root, "Root.csproj"), "Release") };
         var nodes = contexts.Select((c,i) => new ProjectBuildGraphNode(i == 0 ? "dep" : "root", c.ProjectPath, c.Configuration,
-            c.Platform, c.TargetFramework, new Dictionary<string,string> { ["Flavor"] = "left" }, i == 0 ? [] : ["dep"])).ToArray();
+            c.Platform, c.TargetFramework, new Dictionary<string,string> { ["Flavor"] = "left" }, i == 0 ? Array.Empty<string>() : new[] { "dep" })).ToArray();
         return new(true, contexts, []) { BuildGraph = nodes, GraphContexts = nodes.Select((n,i) => new ProjectGraphContextBinding(n.Id, n.ProjectPath, contexts[i], i == 0)).ToArray() };
     }
     private static ProjectAnalysisContext Context(string project, string configuration) => ProjectAnalysisContext.Create(project,
@@ -197,6 +197,6 @@ public sealed class TestExecutionPlanTests
         EvaluatedTargetPath = Path.Combine(Path.GetDirectoryName(project)!, Path.GetFileNameWithoutExtension(project), "bin", "app.dll"),
         EvaluatedIntermediateDirectory = Path.Combine(Path.GetDirectoryName(project)!, Path.GetFileNameWithoutExtension(project), "obj"),
         EvaluatedReferenceAssemblyPath = Path.Combine(Path.GetDirectoryName(project)!, Path.GetFileNameWithoutExtension(project), "obj", "ref", "app.dll"),
-        PhaseInputs = [new(project, "project", false)]
+        PhaseInputs = new[] { new ProjectPhaseInput(project, "project", false) }
     };
 }

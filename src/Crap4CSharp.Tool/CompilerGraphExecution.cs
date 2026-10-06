@@ -209,13 +209,13 @@ internal static class CompilerGraphExecution
 
     private static ProjectContextException GraphChanged() => new("compiler.graphChanged", "Final rediscovery changed the selected graph, mapped globals or execution context selectors.");
 
-    private static IReadOnlyList<ProjectBuildGraphNode> ValidateAndFreeze(ProjectContextLoadResult loaded)
+    internal static IReadOnlyList<ProjectBuildGraphNode> ValidateAndFreeze(ProjectContextLoadResult loaded)
     {
         if (!loaded.Success || loaded.BuildGraph.Count == 0 || loaded.BuildGraph.Count > 4096)
             throw Refuse("Invalid or incomplete loaded build graph.");
         var nodes = loaded.BuildGraph.Select(n => n with
         {
-            Dependencies = n.Dependencies.ToArray(),
+            Dependencies = Array.AsReadOnly(n.Dependencies.ToArray()),
             GlobalProperties = new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(
                 new Dictionary<string, string>(n.GlobalProperties, StringComparer.OrdinalIgnoreCase))
         }).ToArray();
@@ -275,7 +275,7 @@ internal static class CompilerGraphExecution
                 throw Refuse("Dependencies must exist and precede dependents; cycles, self edges and duplicate edges are unsupported.");
             completed.Add(node.Id);
         }
-        return nodes;
+        return Array.AsReadOnly(nodes);
     }
 
     private static string RequireOutputPath(string? path)
