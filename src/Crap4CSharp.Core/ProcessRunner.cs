@@ -39,14 +39,15 @@ public static partial class ProcessRunner
         string workingDirectory,
         TimeSpan timeout,
         CancellationToken cancellationToken,
-        IReadOnlyDictionary<string, string>? environment)
+        IReadOnlyDictionary<string, string>? environment,
+        Func<Stream, string, CancellationToken, Task<string>>? bytePump = null)
     {
         if (timeout <= TimeSpan.Zero || timeout == Timeout.InfiniteTimeSpan)
             throw new ArgumentOutOfRangeException(nameof(timeout), "Process timeout must be positive and finite.");
 
         cancellationToken.ThrowIfCancellationRequested();
         if (OperatingSystem.IsWindows())
-            return await WindowsOwnedProcess.RunAsync(fileName, arguments, workingDirectory, timeout, cancellationToken, environment);
+            return await WindowsOwnedProcess.RunAsync(fileName, arguments, workingDirectory, timeout, cancellationToken, environment, bytePump);
         // On Linux a retained session leader owns the group even when the consumer exits.
         // The start handshake prevents the consumer from spawning before ownership is verified.
         bool ownedSession = OperatingSystem.IsLinux();
@@ -75,10 +76,13 @@ public static partial class ProcessRunner
         foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
         cancellationToken.ThrowIfCancellationRequested();
         using var process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Could not start {fileName}.");
-        var output = ProcessTextCapture.ReadAsync(process.StandardOutput, "stdout");
-        var error = ProcessTextCapture.ReadAsync(process.StandardError, "stderr");
         using var timeoutSource = new CancellationTokenSource(timeout);
         using var linkedSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
+
+        var output = bytePump is null ? ProcessTextCapture.ReadAsync(process.StandardOutput, "stdout")
+            : bytePump(process.StandardOutput.BaseStream, "stdout", linkedSource.Token);
+        var error = bytePump is null ? ProcessTextCapture.ReadAsync(process.StandardError, "stderr")
+            : bytePump(process.StandardError.BaseStream, "stderr", linkedSource.Token);
 
         bool sessionVerified = false;
         try
@@ -96,7 +100,7 @@ public static partial class ProcessRunner
                 await process.StandardInput.FlushAsync(linkedSource.Token);
                 // The supervisor has closed its own output descriptors. EOF now proves that
                 // all inherited consumer pipes completed, not merely that the parent exited.
-                await Task.WhenAll(output, error).WaitAsync(linkedSource.Token);
+                await ProcessTextCapture.WaitForCompletionAsync(Task.WhenAll(output, error), output, error, linkedSource.Token);
                 int consumerExitCode = await sessionStatus!.ReadAsync(process, linkedSource.Token);
                 // EOF alone does not prove descendant exit: children can close or redirect
                 // both pipes and remain alive. Retain the group leader until cleanup ends.
@@ -105,8 +109,7 @@ public static partial class ProcessRunner
                 await WaitForSessionTerminationAsync(process.Id);
                 return new ProcessResult(consumerExitCode, await output, await error);
             }
-            await process.WaitForExitAsync(linkedSource.Token);
-            await Task.WhenAll(output, error).WaitAsync(linkedSource.Token);
+            await ProcessTextCapture.WaitForCompletionAsync(Task.WhenAll(process.WaitForExitAsync(linkedSource.Token), output, error), output, error, linkedSource.Token);
             return new ProcessResult(process.ExitCode, await output, await error);
         }
         catch (OperationCanceledException) when (linkedSource.IsCancellationRequested)

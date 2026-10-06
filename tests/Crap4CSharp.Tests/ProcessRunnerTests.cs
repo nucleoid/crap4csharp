@@ -204,7 +204,7 @@ public sealed class ProcessRunnerTests
         Assert.False(aliveBeforeFixtureCleanup, "The product returned while its owned descendant survived.");
     }
 
-    private static Process? OwnedChild(string receipt)
+    internal static Process? OwnedChild(string receipt)
     {
         using var json = JsonDocument.Parse(File.ReadAllText(receipt));
         int pid = json.RootElement.GetProperty("pid").GetInt32();

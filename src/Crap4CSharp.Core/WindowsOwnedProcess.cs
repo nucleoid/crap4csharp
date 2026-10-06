@@ -12,7 +12,8 @@ internal static class WindowsOwnedProcess
 {
     internal static async Task<ProcessResult> RunAsync(string fileName, IEnumerable<string> arguments,
         string workingDirectory, TimeSpan timeout, CancellationToken cancellationToken,
-        IReadOnlyDictionary<string, string>? environment)
+        IReadOnlyDictionary<string, string>? environment,
+        Func<Stream, string, CancellationToken, Task<string>>? bytePump = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         using var timeoutSource = new CancellationTokenSource(timeout);
@@ -60,12 +61,12 @@ internal static class WindowsOwnedProcess
             stderr.Write.Dispose();
             stdin.Read.Dispose();
             stdin.Write.Dispose(); // No consumer stdin for the compatibility API: explicit EOF.
-            output = ReadAsync(stdout.Read, "stdout");
-            error = ReadAsync(stderr.Read, "stderr");
+            output = ReadAsync(stdout.Read, "stdout", bytePump, linked.Token);
+            error = ReadAsync(stderr.Read, "stderr", bytePump, linked.Token);
             linked.Token.ThrowIfCancellationRequested();
             using var process = Process.GetProcessById(information.ProcessId);
             Check(ResumeThread(nativeThread) != uint.MaxValue, "Could not resume invocation-owned consumer.");
-            await process.WaitForExitAsync(linked.Token);
+            await ProcessTextCapture.WaitForCompletionAsync(Task.WhenAll(process.WaitForExitAsync(linked.Token), output, error), output, error, linked.Token);
             int exitCode = process.ExitCode;
             // Parent exit is not EOF, and EOF is not descendant exit. Both are bounded by
             // the operation deadline; job termination follows even on successful exit.
@@ -99,11 +100,13 @@ internal static class WindowsOwnedProcess
         }
     }
 
-    private static Task<string> ReadAsync(SafeFileHandle handle, string streamName) => Task.Run(async () =>
+    private static Task<string> ReadAsync(SafeFileHandle handle, string streamName,
+        Func<Stream, string, CancellationToken, Task<string>>? bytePump, CancellationToken cancellationToken) => Task.Run(async () =>
     {
         // Anonymous pipe handles are synchronous; separate concurrent reader tasks avoid
         // pretending that CreatePipe supplied overlapped handles.
         using var stream = new FileStream(handle, FileAccess.Read, 4096, isAsync: false);
+        if (bytePump is not null) return await bytePump(stream, streamName, cancellationToken);
         using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
         return await ProcessTextCapture.ReadAsync(reader, streamName);
     });
