@@ -18,6 +18,8 @@ public sealed record ProjectSourceIdentity(
     public string? ResolvedPath { get; init; }
 }
 
+public sealed record ProjectPhaseInput(string Path, string Role, bool ExpectedGenerated);
+
 public sealed record ProjectSourceDocument(
     ProjectSourceIdentity Identity,
     string Text,
@@ -67,6 +69,12 @@ public sealed record ProjectAnalysisContext(
     // Generator-only syntax trees are not physical documents and require separate actual-build proof.
     [JsonIgnore]
     public IReadOnlyList<ProjectSourceIdentity> CompilerDocuments { get; init; } = [];
+
+    [JsonIgnore]
+    public IReadOnlyList<ProjectPhaseInput> PhaseInputs { get; init; } = [];
+
+    [JsonIgnore]
+    public IReadOnlyList<string> ReferencePaths { get; init; } = [];
 
     [JsonIgnore]
     public IReadOnlyList<string> ProtectedPaths { get; init; } = [];
