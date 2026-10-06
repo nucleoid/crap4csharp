@@ -43,6 +43,26 @@ public sealed class PolicyCheckCommandTests
         Assert.Equal("family", finding.EntityKey);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void SkippedTestsCannotBecomeTrustedSuccessfulExecution(bool testsMarkedRequired)
+    {
+        var policy = Policy(RepositoryPolicyMode.Strict) with
+        { RequiredChecks = testsMarkedRequired ? ["tests", "coverage", "crap"] : ["crap"] };
+        var execution = new ManifestExecution("test", "ctx", "build", true, 0, 2, 1, 0, 1)
+        { TestProject = "App.Tests/App.Tests.csproj" };
+        var manifest = Manifest(Context([])) with { Executions = [execution] };
+        var method = typeof(PolicyCheckCommand).GetMethod("ValidatePolicyCoverage",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        var failure = Assert.Throws<System.Reflection.TargetInvocationException>(() =>
+            method.Invoke(null, [manifest, policy]));
+        Assert.Equal(ProvenanceReasonCodes.TestExecutionIncomplete,
+            Assert.IsType<PolicyException>(failure.InnerException).Code);
+        // Success remains accepted regardless of requiredChecks presentation flags.
+        method.Invoke(null, [manifest with { Executions = [execution with { PassedTests = 2, SkippedTests = 0 }] }, policy]);
+    }
+
     [Fact]
     public void BaseScopeCannotUseAnotherMergeBaseThanTrustedPolicy()
     {
