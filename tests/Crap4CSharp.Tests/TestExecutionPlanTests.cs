@@ -157,13 +157,37 @@ public sealed class TestExecutionPlanTests
         Assert.Empty(Directory.GetFiles(directory.Path, "*.pdb", SearchOption.AllDirectories));
     }
 
-    private static object Freeze(ProjectContextLoadResult discovery, ProjectContextLoadResult loaded)
+    [Fact]
+    public void EveryRequiredTestIsScheduledOnceInDependencyOrder()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-two-test-plan");
+        var loaded = Valid(directory.Path);
+        loaded = loaded with { GraphContexts = loaded.GraphContexts.Select(b => b with { IsTestProject = true }).ToArray() };
+        var discovery = Discovery(loaded);
+        discovery = discovery with { TestRunners = new[] { discovery.TestRunners[0] with
+            { GraphId = "root", ProjectPath = loaded.BuildGraph[1].ProjectPath, Configuration = "Release" }, discovery.TestRunners[0] } };
+        var plan = Freeze(discovery, loaded);
+        Assert.Equal(new[] { "dep", "root" }, Tests(plan).Select(t => t.GraphId));
+        Assert.Equal(2, Tests(plan).Select(t => t.GraphId).Distinct().Count());
+        Assert.Equal(new[] { "Debug", "Release" }, Tests(plan).Select(t => t.Configuration));
+    }
+
+    [Fact]
+    public void PrecancelledPlanCannotPerformValidationOrLaunchAnything()
+    {
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cancellation.Cancel();
+        // Invalid/empty inputs intentionally would produce a different exception if validation ran.
+        Assert.Throws<OperationCanceledException>(() => Freeze(new(false, [], []), new(false, [], []), cancellation.Token));
+    }
+
+    private static object Freeze(ProjectContextLoadResult discovery, ProjectContextLoadResult loaded, CancellationToken? token = null)
     {
         var type = typeof(ProjectContextLoader).Assembly.GetType("Crap4CSharp.Core.CheckExecutionPlan");
         Assert.True(type is not null, "Missing independent metadata/Workspace immutable test-plan entrypoint.");
         var method = type.GetMethod("Create", BindingFlags.Static | BindingFlags.NonPublic);
         Assert.NotNull(method);
-        try { return method.Invoke(null, [discovery, loaded, TestContext.Current.CancellationToken])!; }
+        try { return method.Invoke(null, [discovery, loaded, token ?? TestContext.Current.CancellationToken])!; }
         catch (TargetInvocationException error) when (error.InnerException is not null)
         { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw; }
     }
