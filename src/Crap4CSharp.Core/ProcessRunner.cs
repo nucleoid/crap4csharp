@@ -48,6 +48,7 @@ public static class ProcessRunner
         // On Linux a retained session leader owns the group even when the consumer exits.
         // The start handshake prevents the consumer from spawning before ownership is verified.
         bool ownedSession = OperatingSystem.IsLinux();
+        string consumerExecutable = ownedSession ? ResolveLinuxExecutable(fileName, workingDirectory, environment) : fileName;
         using var sessionStatus = ownedSession ? new SessionStatus() : null;
         var startInfo = new ProcessStartInfo(ownedSession ? "/usr/bin/setsid" : fileName)
         {
@@ -67,7 +68,7 @@ public static class ProcessRunner
             startInfo.ArgumentList.Add("status=$1; shift; read -r start || exit 125; \"$@\" & child=$!; exec >/dev/null 2>&1; wait \"$child\"; result=$?; printf '%s\\n' \"$result\" > \"$status\"; : > \"$status.done\"; read -r release; exit \"$result\"");
             startInfo.ArgumentList.Add("crap4csharp-owned-session");
             startInfo.ArgumentList.Add(sessionStatus!.Path);
-            startInfo.ArgumentList.Add(fileName);
+            startInfo.ArgumentList.Add(consumerExecutable);
         }
         foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
         cancellationToken.ThrowIfCancellationRequested();
@@ -133,6 +134,37 @@ public static class ProcessRunner
             throw;
         }
     }
+
+    private static string ResolveLinuxExecutable(string fileName, string workingDirectory,
+        IReadOnlyDictionary<string, string>? environment)
+    {
+        // Resolve an external executable, not a shell builtin, and preserve ordinary OS
+        // launch diagnostics for missing/non-executable consumers. This is a preflight,
+        // not an atomic exec attestation: later removal still yields a nonzero shell exit.
+        if (string.IsNullOrEmpty(fileName) || fileName.Contains('\0'))
+            throw new ArgumentException("Executable name must be nonempty and contain no NUL.", nameof(fileName));
+        IEnumerable<string> candidates;
+        if (fileName.Contains('/')) candidates = [Path.GetFullPath(fileName, workingDirectory)];
+        else
+        {
+            string? path = environment is not null && environment.TryGetValue("PATH", out string? overridePath)
+                ? overridePath : Environment.GetEnvironmentVariable("PATH");
+            candidates = (path ?? "/bin:/usr/bin").Split(':').Select(directory =>
+                Path.GetFullPath(Path.Combine(directory.Length == 0 ? workingDirectory : directory, fileName), workingDirectory));
+        }
+        bool denied = false;
+        foreach (string candidate in candidates)
+        {
+            if (Directory.Exists(candidate)) { denied = true; continue; }
+            if (!File.Exists(candidate)) continue;
+            if (CheckExecutableAccess(candidate, 1) == 0) return candidate;
+            denied = true;
+        }
+        throw new System.ComponentModel.Win32Exception(denied ? 13 : 2, $"Could not start {fileName}: executable is {(denied ? "not executable" : "missing")}.");
+    }
+
+    [DllImport("libc", EntryPoint = "access", SetLastError = true)]
+    private static extern int CheckExecutableAccess(string path, int mode);
 
     private sealed class SessionStatus : IDisposable
     {
