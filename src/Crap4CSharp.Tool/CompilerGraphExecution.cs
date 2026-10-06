@@ -92,8 +92,8 @@ internal static class CompilerGraphExecution
     private static bool Contains(string parent, string child)
     {
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-        return string.Equals(parent, child, comparison) || child.StartsWith(
-            Path.TrimEndingDirectorySeparator(parent) + Path.DirectorySeparatorChar, comparison);
+        var prefix = Path.EndsInDirectorySeparator(parent) ? parent : parent + Path.DirectorySeparatorChar;
+        return string.Equals(parent, child, comparison) || child.StartsWith(prefix, comparison);
     }
 
     private static ProjectContextException OutputRefuse(string message) => new("compiler.graphOutputUnproven", message);
