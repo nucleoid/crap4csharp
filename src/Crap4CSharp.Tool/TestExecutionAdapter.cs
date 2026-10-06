@@ -5,13 +5,29 @@ namespace Crap4CSharp.Core;
 internal sealed record TestInvocationObservation(string GraphId, string ProjectPath,
     string ResultsDirectory, LoggedProcessResult Process);
 
+// Raw process outcomes remain distinct from evidence failures. Passing tests followed
+// by drift are completed observations, never an accepted verification result.
+internal sealed record TestContextOutcome(string GraphId, string State, string? ResultsDirectory,
+    string? LogDirectory, LoggedProcessResult? Process);
+
+internal sealed class TestExecutionRun(IReadOnlyList<TestInvocationObservation> invocations,
+    IReadOnlyList<TestContextOutcome> outcomes, Exception? failure) : IReadOnlyList<TestInvocationObservation>
+{
+    public IReadOnlyList<TestContextOutcome> Outcomes { get; } = outcomes;
+    public Exception? Failure { get; } = failure;
+    public int Count => invocations.Count;
+    public TestInvocationObservation this[int index] => invocations[index];
+    public IEnumerator<TestInvocationObservation> GetEnumerator() => invocations.GetEnumerator();
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+}
+
 internal static class TestExecutionAdapter
 {
-    internal static async Task<IReadOnlyList<TestInvocationObservation>> RunAsync(CheckExecutionPlan plan,
+    internal static async Task<TestExecutionRun> RunAsync(CheckExecutionPlan plan,
         string ownedDirectory, TimeSpan timeout, CancellationToken cancellationToken)
         => await RunCoreAsync(plan, null, ownedDirectory, timeout, cancellationToken);
 
-    internal static async Task<IReadOnlyList<TestInvocationObservation>> RunVerifiedAsync(CheckExecutionPlan plan,
+    internal static async Task<TestExecutionRun> RunVerifiedAsync(CheckExecutionPlan plan,
         CompilerGraphPhaseResult bound, string ownedDirectory, TimeSpan timeout, CancellationToken cancellationToken)
     {
         var proof = bound.RetainedProof ?? throw Refuse("Bound compiler execution did not retain phase evidence through tests.");
@@ -21,7 +37,7 @@ internal static class TestExecutionAdapter
         return await RunCoreAsync(plan, proof, ownedDirectory, timeout, cancellationToken);
     }
 
-    private static async Task<IReadOnlyList<TestInvocationObservation>> RunCoreAsync(CheckExecutionPlan plan,
+    private static async Task<TestExecutionRun> RunCoreAsync(CheckExecutionPlan plan,
         CompilerRetainedProof? proof, string ownedDirectory, TimeSpan timeout, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -53,29 +69,46 @@ internal static class TestExecutionAdapter
         }
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         var results = new List<TestInvocationObservation>();
+        var outcomes = launches.Select(l => new TestContextOutcome(l.Node.Id, "not-run", null, null, null)).ToArray();
+        Exception? failure = null;
         foreach (var launch in launches)
         {
-            token.ThrowIfCancellationRequested();
-            proof?.ValidateCurrent(token);
-            var entry = Path.Combine(directory, launch.Index.ToString("D4", System.Globalization.CultureInfo.InvariantCulture));
-            // Caller ownership plus empty-root validation prevents ambient result reuse;
-            // this is not an atomic hostile-filesystem publication guarantee.
-            Directory.CreateDirectory(entry);
-            var resultDirectory = Path.Combine(entry, "results");
-            var logs = Path.Combine(entry, "logs");
-            Directory.CreateDirectory(resultDirectory); Directory.CreateDirectory(logs);
-            var sdk = await ProjectContextLoader.ResolveSdkAsync(Path.GetDirectoryName(launch.Node.ProjectPath)!, timeout, token);
-            var arguments = launch.Arguments.Concat(new[] { "--logger", "trx;LogFileName=tests.trx", "--results-directory", resultDirectory,
-                "--collect", "XPlat Code Coverage", "--", "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover" }).ToArray();
-            var process = await ProcessRunner.RunLoggedAsync(sdk.HostPath, arguments, Path.GetDirectoryName(launch.Node.ProjectPath)!, timeout, token, logs);
-            // Preserve nonzero outcomes and complete owned logs. A later evidence gate
-            // may inspect partial coverage; this adapter never converts failure to success.
-            results.Add(new(launch.Node.Id, launch.Node.ProjectPath, resultDirectory, process));
-            proof?.ValidateCurrent(token);
+            try
+            {
+                token.ThrowIfCancellationRequested();
+                proof?.ValidateCurrent(token);
+                var entry = Path.Combine(directory, launch.Index.ToString("D4", System.Globalization.CultureInfo.InvariantCulture));
+                // Empty owned root prevents ambient reuse; not hostile-filesystem attestation.
+                Directory.CreateDirectory(entry);
+                var resultDirectory = Path.Combine(entry, "results");
+                var logs = Path.Combine(entry, "logs");
+                Directory.CreateDirectory(resultDirectory); Directory.CreateDirectory(logs);
+                var sdk = await ProjectContextLoader.ResolveSdkAsync(Path.GetDirectoryName(launch.Node.ProjectPath)!, timeout, token);
+                var arguments = launch.Arguments.Concat(new[] { "--logger", "trx;LogFileName=tests.trx", "--results-directory", resultDirectory,
+                    "--collect", "XPlat Code Coverage", "--", "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover" }).ToArray();
+                // Preserve interrupted launch diagnostics without manufacturing an exit code.
+                outcomes[launch.Index] = new(launch.Node.Id, "failed", resultDirectory, logs, null);
+                var process = await ProcessRunner.RunLoggedAsync(sdk.HostPath, arguments, Path.GetDirectoryName(launch.Node.ProjectPath)!, timeout, token, logs);
+                results.Add(new(launch.Node.Id, launch.Node.ProjectPath, resultDirectory, process));
+                outcomes[launch.Index] = new(launch.Node.Id, process.ExitCode == 0 ? "completed" : "failed", resultDirectory, logs, process);
+                proof?.ValidateCurrent(token);
+            }
+            catch (Exception error) when (IsOperational(error))
+            {
+                failure = error;
+                break; // Invalidated evidence stops all remaining launches.
+            }
         }
-        token.ThrowIfCancellationRequested();
-        if (proof is not null) await proof.ValidateFinalAsync(token);
-        return Array.AsReadOnly(results.ToArray());
+        if (failure is null)
+        {
+            try
+            {
+                token.ThrowIfCancellationRequested();
+                if (proof is not null) await proof.ValidateFinalAsync(token);
+            }
+            catch (Exception error) when (IsOperational(error)) { failure = error; }
+        }
+        return new(Array.AsReadOnly(results.ToArray()), Array.AsReadOnly(outcomes), failure);
     }
 
     internal static IReadOnlyList<string> CreateArguments(ProjectBuildGraphNode node)
@@ -90,6 +123,9 @@ internal static class TestExecutionAdapter
         arguments.Add("-p:BuildProjectReferences=false");
         return Array.AsReadOnly(arguments.ToArray());
     }
+    private static bool IsOperational(Exception error) => error is InvalidOperationException or IOException or
+        UnauthorizedAccessException or OperationCanceledException or ProcessTimeoutException or System.ComponentModel.Win32Exception;
+
     private static bool Contains(string parent, string child)
     {
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;

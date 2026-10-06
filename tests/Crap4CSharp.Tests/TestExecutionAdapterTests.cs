@@ -86,7 +86,12 @@ public sealed class TestExecutionAdapterTests
         Directory.CreateDirectory(ownedResults);
         var operation = (Task)method.Invoke(null, [plan, bound, ownedResults, TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken])!;
         await operation;
-        var results = Assert.IsAssignableFrom<System.Collections.IEnumerable>(operation.GetType().GetProperty("Result")!.GetValue(operation));
+        var run = Assert.IsType<TestExecutionRun>(operation.GetType().GetProperty("Result")!.GetValue(operation));
+        Assert.Null(run.Failure);
+        var outcome = Assert.Single(run.Outcomes);
+        Assert.Equal(passes ? "completed" : "failed", outcome.State);
+        Assert.Equal(passes ? 0 : 1, outcome.Process!.ExitCode);
+        var results = Assert.IsAssignableFrom<System.Collections.IEnumerable>(run);
         var observation = Assert.Single(results.Cast<object>());
         var process = (LoggedProcessResult)observation.GetType().GetProperty("Process")!.GetValue(observation)!;
         Assert.Equal(passes ? 0 : 1, process.ExitCode);
