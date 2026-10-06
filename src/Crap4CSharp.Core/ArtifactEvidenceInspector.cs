@@ -186,15 +186,23 @@ public static class ArtifactEvidenceInspector
 
     public static bool CoverageMatchesBuildCancellable(ImmutableArray<byte> bytes, string logicalPath,
         InspectedBuildEvidence build, IReadOnlyList<string> logicalSourcePaths, CapturedPathPolicy pathPolicy,
+        CancellationToken cancellationToken) =>
+        MatchedMethodTokens(bytes, logicalPath, build, logicalSourcePaths, pathPolicy, cancellationToken) is not null;
+
+    // Derived associations to independently inspected PE tokens, not assertions that
+    // the coverage writer observed those tokens. Share exactly the existing PDB matcher.
+    internal static IReadOnlyList<int>? MatchedMethodTokens(ImmutableArray<byte> bytes, string logicalPath,
+        InspectedBuildEvidence build, IReadOnlyList<string> logicalSourcePaths, CapturedPathPolicy pathPolicy,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         // A Coverlet document may contain every instrumented project in the test graph.
         // This artifact is bound to one manifest build, so foreign modules are neither
         // evidence for nor evidence against that build.
         var methods = CoverageReader.Read(bytes.AsSpan(), logicalPath)
             .Where(method => string.Equals(method.ModuleIdentity, build.ModuleIdentity, StringComparison.Ordinal))
             .ToArray();
-        if (methods.Length == 0) return false;
+        if (methods.Length == 0) return null;
         var pathIndex = new CapturedLogicalPathIndex(logicalSourcePaths, pathPolicy);
         var methodIndex = build.Methods.GroupBy(MethodKey, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
@@ -212,23 +220,23 @@ public static class ArtifactEvidenceInspector
                 counts[line] = counts.GetValueOrDefault(line) + 1;
         }
 
-        if (InspectCoverage(bytes).Format != "cobertura")
-            return methods.All(reported => MatchingMethodCount(reported, methodIndex, pathIndex,
-                reportedLineCounts, cancellationToken) == 1);
-
-        // Cobertura expands one relative filename against each captured <source> root.
-        // Those paths are alternatives for one observation, not independent methods.
-        // Exactly one alternative must resolve to exactly one PDB method.
-        foreach (var alternatives in methods.GroupBy(CoverageObservationKey, StringComparer.Ordinal))
+        var tokens = new HashSet<int>();
+        var groups = InspectCoverage(bytes).Format == "cobertura"
+            ? methods.GroupBy(CoverageObservationKey, StringComparer.Ordinal).Select(group => group.AsEnumerable())
+            : methods.Select(method => new[] { method }.AsEnumerable());
+        // Cobertura roots are alternatives for one observation. Other formats require
+        // one unique association per reported method. Never transfer ambiguous coverage.
+        foreach (var alternatives in groups)
         {
-            if (alternatives.Sum(reported =>
-                    MatchingMethodCount(reported, methodIndex, pathIndex, reportedLineCounts,
-                        cancellationToken)) != 1) return false;
+            var matches = alternatives.SelectMany(reported => MatchingMethods(reported, methodIndex,
+                pathIndex, reportedLineCounts, cancellationToken)).ToArray();
+            if (matches.Length != 1) return null;
+            tokens.Add(matches[0].MetadataToken);
         }
-        return true;
+        return Array.AsReadOnly(tokens.Order().ToArray());
     }
 
-    private static int MatchingMethodCount(CoverageMethod reported,
+    private static InspectedMethodEvidence[] MatchingMethods(CoverageMethod reported,
         IReadOnlyDictionary<string, InspectedMethodEvidence[]> methodIndex, CapturedLogicalPathIndex pathIndex,
         IReadOnlyDictionary<string, Dictionary<int, int>> reportedLineCounts, CancellationToken cancellationToken)
     {
@@ -240,8 +248,8 @@ public static class ArtifactEvidenceInspector
                 System.Globalization.NumberStyles.HexNumber,
                 System.Globalization.CultureInfo.InvariantCulture, out var token))
             candidates = candidates.Where(method => method.MetadataToken == token).ToArray();
-        return candidates.Count(method => PointsMatch(reported, method, pathIndex, reportedLineCounts,
-            cancellationToken));
+        return candidates.Where(method => PointsMatch(reported, method, pathIndex, reportedLineCounts,
+            cancellationToken)).ToArray();
     }
 
     private static string MethodKey(InspectedMethodEvidence method) => MethodKey(method.TypeName, method.MethodName);

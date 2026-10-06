@@ -51,7 +51,8 @@ internal static class TestExecutionAdapter
         var required = nodes.Where(n => plan.PreparedGraph.GraphContexts.Single(b => b.GraphId == n.Id).IsTestProject).ToArray();
         if (required.Length == 0 || !required.Select(n => n.Id).SequenceEqual(plan.Tests.Select(t => t.GraphId)))
             throw Refuse("Required test schedule differs from the complete immutable plan.");
-        var launches = required.Select((node, index) => (Node: node, Arguments: CreateArguments(node), Index: index)).ToArray();
+        var launches = required.Select((node, index) => (Node: node, Arguments: CreateArguments(node), Index: index,
+            IncludeTests: plan.PreparedGraph.GraphContexts.Single(b => b.GraphId == node.Id).Context.ExclusionPolicy.IncludeTests)).ToArray();
         var directory = Path.GetFullPath(ownedDirectory);
         if (!Directory.Exists(directory) || Directory.EnumerateFileSystemEntries(directory).Any())
             throw Refuse("Test execution requires an existing empty invocation-owned directory.");
@@ -85,7 +86,9 @@ internal static class TestExecutionAdapter
                 Directory.CreateDirectory(resultDirectory); Directory.CreateDirectory(logs);
                 var sdk = await ProjectContextLoader.ResolveSdkAsync(Path.GetDirectoryName(launch.Node.ProjectPath)!, timeout, token);
                 var arguments = launch.Arguments.Concat(new[] { "--logger", "trx;LogFileName=tests.trx", "--results-directory", resultDirectory,
-                    "--collect", "XPlat Code Coverage", "--", "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover" }).ToArray();
+                    "--collect", "XPlat Code Coverage", "--", "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover",
+                    "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.IncludeTestAssembly=" +
+                        (launch.IncludeTests ? "true" : "false") }).ToArray();
                 // Preserve interrupted launch diagnostics without manufacturing an exit code.
                 outcomes[launch.Index] = new(launch.Node.Id, "failed", resultDirectory, logs, null);
                 var process = await ProcessRunner.RunLoggedAsync(sdk.HostPath, arguments, Path.GetDirectoryName(launch.Node.ProjectPath)!, timeout, token, logs);
