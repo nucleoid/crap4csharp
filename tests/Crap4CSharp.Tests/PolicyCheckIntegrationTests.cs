@@ -103,6 +103,34 @@ public sealed class PolicyCheckIntegrationTests
             .GetProperty("decision").GetProperty("reason").GetString());
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TrustedAcquisitionFailureWritesFreshOutputWithoutRepeatingTrust(bool missingManifest)
+    {
+        var repository = RepositoryRoot();
+        const string projectLogical = "tests/Crap4CSharp.ProvenanceFixture/Crap4CSharp.ProvenanceFixture.csproj";
+        using var directory = TestDirectory.Create("crap4csharp-trust-failure-output");
+        var (locator, _, _, _, _) = await CreateBundle(repository, projectLogical,
+            PolicyLogical, typeof(Crap4CSharp.ProvenanceFixture.CompiledEvidence).Assembly.Location,
+            Path.Combine(directory.Path, "bundle"));
+        if (missingManifest) locator = Path.Combine(directory.Path, "missing-bundle", "manifest.json");
+        var destination = Path.Combine(directory.Path, "failure.json");
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var exit = await global::App.RunAsync(["check", "--reuse-artifacts", locator, "--policy", PolicyLogical,
+            "--base", "missing-reviewed-base-6c421", "--format", "json", "--output", destination],
+            repository, output, error, TestContext.Current.CancellationToken);
+        Assert.Equal(1, exit);
+        Assert.True(File.Exists(destination), error + Environment.NewLine + output);
+        using var stdout = JsonDocument.Parse(output.ToString());
+        using var written = JsonDocument.Parse(await File.ReadAllTextAsync(destination, TestContext.Current.CancellationToken));
+        Assert.Equal(stdout.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("reason").GetString(),
+            written.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("reason").GetString());
+        Assert.DoesNotContain(written.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
+            check => check.GetProperty("reason").GetString() == "output.notWritten");
+    }
+
     [Fact]
     public async Task CurrentRevalidationRejectsRecipeForAnotherDeclaredProductionProject()
     {
