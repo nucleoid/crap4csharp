@@ -190,6 +190,80 @@ public sealed class TestExecutionAdapterTests
                     finally { File.Delete(path); File.Delete(duplicate); File.WriteAllBytes(path, original); }
                 }
                 Validate();
+                // Real collector-owned report gate. This validates attachment ownership/format,
+                // NOT yet complete graph module/PDB association or through-test preservation.
+                var coverageBinder = typeof(ProjectContextLoader).Assembly.GetType("Crap4CSharp.Core.OwnedCoverageAttachment")?
+                    .GetMethod("ReadOpenCover", BindingFlags.Static | BindingFlags.NonPublic);
+                Assert.NotNull(coverageBinder);
+                object ReadCoverage() => coverageBinder.Invoke(null,
+                    [typedObservation, testBinding.Context, compiler, TestContext.Current.CancellationToken])!;
+                var attachment = ReadCoverage();
+                var coveragePath = (string)attachment.GetType().GetProperty("Path")!.GetValue(attachment)!;
+                var coverageOriginal = File.ReadAllBytes(coveragePath);
+                var coverageTime = File.GetLastWriteTimeUtc(coveragePath);
+                Assert.Equal("CoverageSession", XDocument.Load(coveragePath).Root!.Name.LocalName);
+                foreach (var defect in new[] { "collector-missing", "collector-uri", "collector-duplicate", "collector-foreign-namespace", "deployment-missing", "deployment-traversal", "deployment-rooted", "href-traversal", "href-rooted", "href-uri", "href-backslash", "href-encoded", "href-agent", "attachment-missing", "attachment-duplicate", "attachment-hidden" })
+                {
+                    var changed = XDocument.Load(path);
+                    var collector = changed.Descendants(ns + "Collector").Single();
+                    var deployment = changed.Descendants(ns + "Deployment").Single();
+                    var link = collector.Descendants(ns + "A").Single();
+                    switch (defect)
+                    {
+                        case "collector-missing": collector.Remove(); break;
+                        case "collector-uri": collector.SetAttributeValue("uri", "datacollector://foreign/1.0"); break;
+                        case "collector-duplicate": collector.AddAfterSelf(new XElement(collector)); break;
+                        case "collector-foreign-namespace": collector.Name = XName.Get("Collector", "urn:foreign"); break;
+                        case "deployment-missing": deployment.Remove(); break;
+                        case "deployment-traversal": deployment.SetAttributeValue("runDeploymentRoot", "../outside"); break;
+                        case "deployment-rooted": deployment.SetAttributeValue("runDeploymentRoot", fixture.Path); break;
+                        case "href-traversal": link.SetAttributeValue("href", "../coverage.opencover.xml"); break;
+                        case "href-rooted": link.SetAttributeValue("href", coveragePath); break;
+                        case "href-uri": link.SetAttributeValue("href", "file://" + coveragePath); break;
+                        case "href-backslash": link.SetAttributeValue("href", "fuego\\coverage.opencover.xml"); break;
+                        case "href-encoded": link.SetAttributeValue("href", "%2e%2e/coverage.opencover.xml"); break;
+                        case "href-agent": collector.SetAttributeValue("agentName", "other-agent"); break;
+                        case "attachment-missing": link.Remove(); break;
+                        case "attachment-duplicate": link.Parent!.AddAfterSelf(new XElement(link.Parent)); break;
+                        case "attachment-hidden": changed.Root!.Add(new XElement(collector)); break;
+                    }
+                    changed.Save(path);
+                    try
+                    {
+                        var error = Assert.Throws<TargetInvocationException>(() => ReadCoverage());
+                        Assert.Equal("coverage.attachmentUnproven", Assert.IsType<ProjectContextException>(error.InnerException).Reason);
+                    }
+                    finally { File.WriteAllBytes(path, original); }
+                }
+                foreach (var report in new[] { "<coverage />", "<CoverageSession>", "<!DOCTYPE CoverageSession [<!ENTITY x 'unsafe'>]><CoverageSession>&x;</CoverageSession>" })
+                {
+                    File.WriteAllText(coveragePath, report);
+                    try
+                    {
+                        var error = Assert.Throws<TargetInvocationException>(() => ReadCoverage());
+                        Assert.Equal("coverage.attachmentUnproven", Assert.IsType<ProjectContextException>(error.InnerException).Reason);
+                    }
+                    finally { File.WriteAllBytes(coveragePath, coverageOriginal); File.SetLastWriteTimeUtc(coveragePath, coverageTime); }
+                }
+                File.Delete(coveragePath);
+                try
+                {
+                    var error = Assert.Throws<TargetInvocationException>(() => ReadCoverage());
+                    Assert.Equal("coverage.attachmentUnproven", Assert.IsType<ProjectContextException>(error.InnerException).Reason);
+                }
+                finally { File.WriteAllBytes(coveragePath, coverageOriginal); File.SetLastWriteTimeUtc(coveragePath, coverageTime); }
+                if (!OperatingSystem.IsWindows())
+                {
+                    var unowned = fixture.Write("unowned-coverage.xml", System.Text.Encoding.UTF8.GetString(coverageOriginal));
+                    File.Delete(coveragePath); File.CreateSymbolicLink(coveragePath, unowned);
+                    try
+                    {
+                        var error = Assert.Throws<TargetInvocationException>(() => ReadCoverage());
+                        Assert.Equal("coverage.attachmentUnproven", Assert.IsType<ProjectContextException>(error.InnerException).Reason);
+                    }
+                    finally { File.Delete(coveragePath); File.WriteAllBytes(coveragePath, coverageOriginal); File.SetLastWriteTimeUtc(coveragePath, coverageTime); }
+                }
+                ReadCoverage();
                 // Retain actual attachment/base/membership diagnostics for the next coverage
                 // binder. These observations alone do NOT validate coverage provenance.
                 TestContext.Current.TestOutputHelper!.WriteLine("ACTUAL_TRX_ATTACHMENT_SHAPE " +
