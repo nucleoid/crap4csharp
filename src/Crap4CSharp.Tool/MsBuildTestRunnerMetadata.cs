@@ -58,6 +58,7 @@ internal static partial class MsBuildProjectLoader
         if (!instance.Targets.TryGetValue("SetXPlatDataCollectorPath", out var collectorTarget) ||
             !PathComparer.Equals(Path.GetFullPath(collectorTarget.Location.File), Path.GetFullPath(collectorImport)))
             throw new ProjectContextException("test.collectorUnsupported", "The effective XPlat collector hook is absent or overridden.");
+        ValidateCollectorFiles(collectorImport);
         return new(node.Id, node.ProjectPath, node.Configuration, node.Platform, node.TargetFramework, "VSTest", sdkVersion, collectorVersion);
 
         string? PackageVersion(string name)
@@ -76,9 +77,56 @@ internal static partial class MsBuildProjectLoader
 
     private static ProjectContextException Unsupported(string message) => new("test.runnerUnsupported", message);
 
+    // Validate the installed flattened runtime inventory without loading package code.
+    // Presence is a support preflight, not a runtime or malicious-package attestation.
+    private static void ValidateCollectorFiles(string importedTarget)
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(importedTarget)!;
+            RequireRegular(importedTarget);
+            var depsPath = Path.Combine(directory, "coverlet.collector.deps.json");
+            RequireRegular(depsPath);
+            using var deps = ReadMetadataJson(depsPath);
+            if (!deps.RootElement.TryGetProperty("runtimeTarget", out var runtimeTarget) || runtimeTarget.ValueKind != JsonValueKind.Object ||
+                !runtimeTarget.TryGetProperty("name", out var name) || name.ValueKind != JsonValueKind.String ||
+                !deps.RootElement.TryGetProperty("targets", out var targets) || targets.ValueKind != JsonValueKind.Object ||
+                !targets.TryGetProperty(name.GetString()!, out var target) || target.ValueKind != JsonValueKind.Object)
+                throw RefuseCollector();
+            var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var library in target.EnumerateObject())
+            {
+                if (library.Value.ValueKind != JsonValueKind.Object) throw RefuseCollector();
+                if (!library.Value.TryGetProperty("runtime", out var runtime)) continue;
+                if (runtime.ValueKind != JsonValueKind.Object) throw RefuseCollector();
+                foreach (var asset in runtime.EnumerateObject())
+                {
+                    var filename = asset.Name.Replace('\\', '/').Split('/')[^1];
+                    if (!filename.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ||
+                        filename.IndexOfAny([':', '\0']) >= 0 || !files.Add(filename) || files.Count > 128)
+                        throw RefuseCollector();
+                    RequireRegular(Path.Combine(directory, filename));
+                }
+            }
+            if (!files.Contains("coverlet.collector.dll") || !files.Contains("coverlet.core.dll")) throw RefuseCollector();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or ProjectContextException)
+        {
+            throw RefuseCollector();
+        }
+
+        static void RequireRegular(string path)
+        {
+            if (TraversesReparsePoint(path) || !ArtifactBundle.IsRegularInput(path) || new FileInfo(path).Length == 0)
+                throw RefuseCollector();
+        }
+        static ProjectContextException RefuseCollector() => new("test.collectorUnsupported",
+            "The supported installed collector requires its regular nonempty runtime binaries and dependency manifest; no collector is injected.");
+    }
+
     private static JsonDocument ReadMetadataJson(string path)
     {
-        if (!File.Exists(path) || TraversesReparsePoint(path) || new FileInfo(path).Length > 16 * 1024 * 1024)
+        if (!File.Exists(path) || TraversesReparsePoint(path) || !ArtifactBundle.IsRegularInput(path) || new FileInfo(path).Length > 16 * 1024 * 1024)
             throw new ProjectContextException("test.runnerMetadataInvalid", "Runner metadata is missing, unsafe or exceeds 16 MiB.");
         try
         {
