@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -455,39 +454,22 @@ internal static partial class GitScopeResolver
     private static async Task<GitResult> Git(string workingDirectory, TimeSpan timeout, CancellationToken cancellationToken,
         IReadOnlyList<string> arguments, byte[]? input = null, bool allowFailure = false)
     {
-        var startInfo = new ProcessStartInfo("git")
+        ProcessProtocolResult captured;
+        try
         {
-            WorkingDirectory = workingDirectory,
-            RedirectStandardInput = input is not null,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        };
-        startInfo.Environment["GIT_OPTIONAL_LOCKS"] = "0";
-        foreach (var argument in SafeGitPrefix.Concat(arguments)) startInfo.ArgumentList.Add(argument);
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start git.");
-        if (input is not null)
-        {
-            await process.StandardInput.BaseStream.WriteAsync(input, cancellationToken);
-            process.StandardInput.Close();
+            captured = await ProcessRunner.RunProtocolAsync("git", SafeGitPrefix.Concat(arguments),
+                workingDirectory, timeout, cancellationToken, maximumBytesPerStream: 16777216,
+                standardInput: input is null ? null : new ReadOnlyMemory<byte>(input),
+                environment: new Dictionary<string, string> { ["GIT_OPTIONAL_LOCKS"] = "0" });
         }
-        await using var output = new MemoryStream();
-        var outputTask = process.StandardOutput.BaseStream.CopyToAsync(output);
-        var errorTask = process.StandardError.ReadToEndAsync();
-        using var timeoutSource = new CancellationTokenSource(timeout);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
-        try { await process.WaitForExitAsync(linked.Token); }
-        catch (OperationCanceledException)
+        catch (InvalidDataException exception)
         {
-            if (!process.HasExited) process.Kill(entireProcessTree: true);
-            await process.WaitForExitAsync(CancellationToken.None);
-            await Task.WhenAll(outputTask, errorTask);
-            if (cancellationToken.IsCancellationRequested) throw;
-            throw new ProcessTimeoutException("git", timeout);
+            throw new ScopeException("scope.gitProtocolLimit", "Git response exceeded the complete bounded protocol limit: " +
+                exception.Message, exception);
         }
-        await outputTask;
-        var error = await errorTask;
-        var result = new GitResult(process.ExitCode, output.ToArray(), error);
+        // Preserve raw stdout bytes (NUL-delimited paths/blobs); decode only diagnostics.
+        string error = Encoding.UTF8.GetString(captured.StandardError);
+        var result = new GitResult(captured.ExitCode, captured.StandardOutput, error);
         if (!allowFailure && result.ExitCode != 0)
             throw new ScopeException("scope.gitFailed", $"git {arguments[0]} failed: {error.Trim()}");
         return result;

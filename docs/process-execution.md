@@ -52,3 +52,12 @@ there is no secret-bearing persistent input artifact. The caller must keep its s
 memory unchanged until the call completes. The snapshot is deleted after owned cleanup.
 Windows handle inheritance/runtime behavior still requires actual Windows CI.
 Fresh `check` orchestration remains unfinished; these adapters do not establish its acceptance.
+
+Git scope commands now use the same owned byte-protocol adapter, with complete stdout and
+stderr limited independently to 16 MiB. They preserve existing no-optional-locks and diff
+safety switches/environment, exact NUL-delimited stdout and blob bytes, empty-tree stdin,
+nonzero handling and strict UTF-8 decoding at text-consuming callsites. Oversized replies
+fail `scope.gitProtocolLimit`; they are never silently parsed as a tail or partial scope.
+This intentionally refuses huge individual blobs/diffs/index listings instead of consuming
+unbounded memory. Worktree file reads and the combined captured scope inventory are separate
+from the per-process protocol bound; this is not a whole-scope memory limit.
