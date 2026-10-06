@@ -1,6 +1,6 @@
 namespace Crap4CSharp.Core;
 
-// Internal scheduling seam; final source/output binding is a separate mandatory gate.
+// Internal scheduling seams; RunBoundAsync composes mandatory source/output/reference gates.
 internal static class CompilerGraphExecution
 {
     internal static async Task<IReadOnlyList<CompilerObservation>> RunAsync(ProjectContextLoadResult loaded,
@@ -62,6 +62,113 @@ internal static class CompilerGraphExecution
         snapshot.Validate(final, token); // Rediscovered membership, not the old file list.
         return new(final, observations);
     }
+
+    // The fresh execution entrypoint. Structural RunPhasedAsync deliberately remains
+    // available to structural tests; it must never be used to assert compiler binding.
+    internal static async Task<CompilerGraphPhaseResult> RunBoundAsync(ProjectContextLoadRequest request,
+        ProjectContextLoadResult loaded,
+        Func<ProjectBuildGraphNode, CancellationToken, Task<CompilerObservation>> build,
+        CancellationToken token,
+        Func<ProjectContextLoadRequest, CancellationToken, Task<ProjectContextLoadResult>>? reload = null)
+    {
+        token.ThrowIfCancellationRequested();
+        var plan = ValidateAndFreeze(loaded);
+        var bindings = loaded.GraphContexts.Select(b => b with
+        {
+            Context = b.Context with
+            {
+                PhaseInputs = b.Context.PhaseInputs.ToArray(),
+                PreprocessorSymbols = b.Context.PreprocessorSymbols.ToArray(),
+                CompilerDocuments = b.Context.CompilerDocuments.ToArray(),
+                ReferencePaths = b.Context.ReferencePaths.ToArray(),
+                Sources = b.Context.Sources.ToArray(),
+                Imports = b.Context.Imports.ToArray(),
+                Exclusions = b.Context.Exclusions.ToArray(),
+                ProtectedPaths = b.Context.ProtectedPaths.ToArray(),
+                GeneratedTransitionPaths = b.Context.GeneratedTransitionPaths.ToArray()
+            }
+        }).ToArray();
+        var frozen = loaded with { BuildGraph = plan, GraphContexts = bindings, Contexts = bindings.Select(b => b.Context).ToArray() };
+        var paths = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        var byId = bindings.ToDictionary(b => b.GraphId, StringComparer.Ordinal);
+        var closures = new Dictionary<string, string[]>(StringComparer.Ordinal);
+        var snapshots = new Dictionary<string, CompilerReferenceSnapshot>(StringComparer.Ordinal);
+        // Classify graph-produced references independently, BEFORE any consumer callback.
+        // Stale reference assemblies are NEVER captured as prepared package/SDK inputs.
+        foreach (var node in plan)
+        {
+            var dependencies = new HashSet<string>(StringComparer.Ordinal);
+            void AddDependencies(string id)
+            {
+                foreach (var dependency in plan.Single(n => n.Id == id).Dependencies)
+                    if (dependencies.Add(dependency)) AddDependencies(dependency);
+            }
+            AddDependencies(node.Id);
+            var authorized = dependencies.Select(id => byId[id].Context.EvaluatedReferenceAssemblyPath!).ToArray();
+            closures.Add(node.Id, authorized);
+            var context = byId[node.Id].Context;
+            var references = new HashSet<string>(paths);
+            var prepared = new List<string>();
+            foreach (var reference in context.ReferencePaths)
+            {
+                token.ThrowIfCancellationRequested();
+                if (string.IsNullOrWhiteSpace(reference) || !Path.IsPathFullyQualified(reference) ||
+                    reference != Path.GetFullPath(reference) || !references.Add(reference)) throw ReferenceRefuse();
+                if (bindings.Any(b => paths.Equals(reference, b.Context.EvaluatedReferenceAssemblyPath)))
+                {
+                    if (!authorized.Contains(reference, paths)) throw ReferenceRefuse();
+                    continue;
+                }
+                // Do not accept implementation copies, refint outputs, or other graph
+                // output aliases as independently prepared references.
+                if (bindings.Any(b => Contains(b.Context.EvaluatedIntermediateDirectory!, reference) ||
+                    Contains(Path.GetDirectoryName(b.Context.EvaluatedTargetPath!)!, reference))) throw ReferenceRefuse();
+                prepared.Add(reference);
+            }
+            snapshots.Add(node.Id, CompilerReferenceSnapshot.Capture(prepared, token));
+        }
+        var completed = new Dictionary<string, CompilerObservation>(StringComparer.Ordinal);
+        var result = await RunPhasedAsync(request, frozen, async (node, cancellation) =>
+        {
+            foreach (var snapshot in snapshots.Values) snapshot.VerifyUnchanged(cancellation);
+            foreach (var (id, earlier) in completed)
+                CompilerReferenceOutputBinding.Validate(byId[id].Context, earlier, cancellation);
+            var closure = snapshots[node.Id].Extend(closures[node.Id], cancellation);
+            // All dependency copies above came from earlier once builds that passed the
+            // independent actual Csc/reference PE/copy gate; no implementation fallback.
+            var returned = await build(node, cancellation);
+            var observation = returned with { Parameters = returned.Parameters.Select(p =>
+                p with { Items = p.Items.ToArray() }).ToArray() };
+            CompilerReferenceOutputBinding.Validate(byId[node.Id].Context, observation, cancellation);
+            closure.Validate(observation, cancellation);
+            snapshots[node.Id] = closure;
+            completed.Add(node.Id, observation);
+            return observation;
+        }, token, reload);
+        foreach (var node in plan)
+        {
+            var context = result.FinalGraph.GraphContexts.Single(b => b.GraphId == node.Id).Context;
+            var observation = completed[node.Id];
+            CompilerOutputBinding.Validate(context, observation, token);
+            CompilerReferenceOutputBinding.Validate(context, observation, token);
+            snapshots[node.Id].Validate(observation, token);
+            // Final Workspace reference rediscovery plus authorized transitive graph
+            // references must independently agree with the staged compiler closure.
+            var rediscovered = new HashSet<string>(paths);
+            foreach (var reference in context.ReferencePaths)
+                if (string.IsNullOrWhiteSpace(reference) || !Path.IsPathFullyQualified(reference) ||
+                    reference != Path.GetFullPath(reference) || !rediscovered.Add(reference)) throw ReferenceRefuse();
+            var finalReferences = rediscovered.Concat(closures[node.Id]).Distinct(paths).ToArray();
+            snapshots[node.Id].Validate(observation with
+            {
+                Parameters = [new CompilerParameter("References", finalReferences)]
+            }, token);
+        }
+        return result; // No public capability or reusable-recipe assertion is invented.
+    }
+
+    private static ProjectContextException ReferenceRefuse() => new("compiler.referencesUnproven",
+        "Graph-produced references are not an authorized independently staged dependency closure.");
 
     private static void ValidateFinalGraph(ProjectContextLoadResult before, ProjectContextLoadResult after)
     {
