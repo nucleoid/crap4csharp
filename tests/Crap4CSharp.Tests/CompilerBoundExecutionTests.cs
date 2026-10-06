@@ -121,7 +121,7 @@ public sealed class CompilerBoundExecutionTests
         Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Root", "count.txt")));
         foreach (var (path, saved) in authored)
         {
-            if (mutation == "source" && path.EndsWith("Dependency/Code.cs", StringComparison.Ordinal)) continue;
+            if (mutation == "source" && path == Path.Combine(fixture.Path, "Dependency", "Code.cs")) continue;
             Assert.Equal(saved.Bytes, File.ReadAllBytes(path));
             Assert.Equal(saved.Mtime, File.GetLastWriteTimeUtc(path));
         }
