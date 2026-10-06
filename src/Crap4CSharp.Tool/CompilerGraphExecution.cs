@@ -33,6 +33,7 @@ internal static class CompilerGraphExecution
         var pathComparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
         var projects = new HashSet<string>(pathComparer);
         var completed = new HashSet<string>(StringComparer.Ordinal);
+        var outputDirectories = new List<(string Node, string Path)>();
         var bindings = loaded.GraphContexts.ToArray();
         if (bindings.Length != nodes.Length || bindings.Select(b => b.GraphId).Distinct(StringComparer.Ordinal).Count() != nodes.Length)
             throw Refuse("Every graph node requires exactly one Workspace binding.");
@@ -53,6 +54,15 @@ internal static class CompilerGraphExecution
                 binding.Context.Configuration != node.Configuration || binding.Context.Platform != node.Platform ||
                 binding.Context.TargetFramework != node.TargetFramework || !binding.Context.Capabilities.DesignTimeComplete)
                 throw Refuse("A graph context is missing, incomplete or mismatched.");
+            var target = RequireOutputPath(binding.Context.EvaluatedTargetPath);
+            var intermediate = RequireOutputPath(binding.Context.EvaluatedIntermediateDirectory);
+            foreach (var directory in new[] { Path.GetDirectoryName(target)!, intermediate })
+            {
+                if (outputDirectories.Any(previous => previous.Node != node.Id &&
+                    (Contains(previous.Path, directory) || Contains(directory, previous.Path))))
+                    throw OutputRefuse("Different graph contexts have overlapping evaluated output directories.");
+                outputDirectories.Add((node.Id, directory));
+            }
             foreach (var key in new[] { "Configuration", "Platform", "TargetFramework" })
             {
                 var expected = key == "Configuration" ? node.Configuration : key == "Platform" ? node.Platform : node.TargetFramework;
@@ -66,6 +76,27 @@ internal static class CompilerGraphExecution
         }
         return nodes;
     }
+
+    private static string RequireOutputPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path) ||
+            path != Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)))
+            throw OutputRefuse("Every graph context requires canonical evaluated target and intermediate destinations.");
+        for (var current = path; current is not null; current = Path.GetDirectoryName(current))
+            if ((File.Exists(current) || Directory.Exists(current)) &&
+                (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                throw OutputRefuse("Reparse-point output destinations are unsupported.");
+        return path;
+    }
+
+    private static bool Contains(string parent, string child)
+    {
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        return string.Equals(parent, child, comparison) || child.StartsWith(
+            Path.TrimEndingDirectorySeparator(parent) + Path.DirectorySeparatorChar, comparison);
+    }
+
+    private static ProjectContextException OutputRefuse(string message) => new("compiler.graphOutputUnproven", message);
 
     private static ProjectContextException Refuse(string message) => new("compiler.graphInvalid", message);
 }

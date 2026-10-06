@@ -299,6 +299,8 @@ internal static class MsBuildProjectLoader
             sources, new ProjectExclusionPolicy(request.IncludeTests, request.IncludeGenerated), adapter, exclusions) with
         {
             ResolvedProjectPath = Path.GetFullPath(projectPath),
+            EvaluatedTargetPath = metadata.TargetPath,
+            EvaluatedIntermediateDirectory = metadata.IntermediateDirectory,
             GeneratedTransitionPaths = project.AnalyzerConfigDocuments.Where(document => document.FilePath is not null)
                 .Select(document => Path.GetFullPath(document.FilePath!))
                 .Where(path => !trackedInputs.Contains(path) && !metadata.AuthoredInputs.Contains(path, PathComparer) &&
@@ -371,7 +373,15 @@ internal static class MsBuildProjectLoader
             new[] { "IntermediateOutputPath", "BaseIntermediateOutputPath" }
                 .Select(project.GetPropertyValue).Where(value => !string.IsNullOrWhiteSpace(value))
                 .Select(value => Path.GetFullPath(value, Path.GetDirectoryName(projectPath)!))
-                .Distinct(PathComparer).ToArray());
+                .Distinct(PathComparer).ToArray(),
+            EvaluatedPath("TargetPath"), EvaluatedPath("IntermediateOutputPath"));
+
+        string? EvaluatedPath(string name)
+        {
+            var value = project.GetPropertyValue(name);
+            return string.IsNullOrWhiteSpace(value) ? null : Path.TrimEndingDirectorySeparator(
+                Path.GetFullPath(value, Path.GetDirectoryName(projectPath)!));
+        }
     }
 
     private static async Task<HashSet<string>> TrackedInputs(string projectPath, TimeSpan timeout, CancellationToken cancellationToken)
@@ -466,6 +476,6 @@ internal static class MsBuildProjectLoader
 
     private sealed record EvaluatedMetadata(string[] Frameworks, bool IsTestProject, string AssemblyName,
         string Configuration, string Platform, string[] Imports, string AssetsFile, string ProjectExtensionsPath,
-        string[] AuthoredInputs, string[] CompileInputs, string[] IntermediatePaths);
+        string[] AuthoredInputs, string[] CompileInputs, string[] IntermediatePaths, string? TargetPath, string? IntermediateDirectory);
     private sealed record ProjectSelection(string Path, string Configuration, string? Platform);
 }

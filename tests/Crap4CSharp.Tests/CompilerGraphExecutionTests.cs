@@ -183,6 +183,47 @@ public sealed class CompilerGraphExecutionTests
     }
 
     [Fact]
+    public async Task ActualDistinctProjectsSharingEvaluatedOutputDirectoryRefuseBeforeBuild()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-actual-output-collision");
+        fixture.Write("Directory.Build.props", """
+            <Project><PropertyGroup><OutputPath>$(MSBuildThisFileDirectory)shared-output/</OutputPath></PropertyGroup></Project>
+            """);
+        fixture.Write("Dependency/Dependency.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>
+            """);
+        fixture.Write("Dependency/Code.cs", "public class Dependency {}");
+        var project = fixture.Write("Root/Root.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+            <ItemGroup><ProjectReference Include="../Dependency/Dependency.csproj" /></ItemGroup></Project>
+            """);
+        fixture.Write("Root/Code.cs", "public class Root {}");
+        var originals = Directory.GetFiles(fixture.Path, "*", SearchOption.AllDirectories).ToDictionary(p => p,
+            p => (Bytes: File.ReadAllBytes(p), Mtime: File.GetLastWriteTimeUtc(p)));
+        var request = new ProjectContextLoadRequest(project, "Release", "AnyCPU", [], false, false, TimeSpan.FromMinutes(2));
+        Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken)).ExitCode);
+        var loaded = await ProjectContextLoader.LoadGraphAsync(request, TestContext.Current.CancellationToken);
+        Assert.True(loaded.Success, loaded.FailureReason + ": " + string.Join(" | ", loaded.Diagnostics));
+        Assert.Equal(2, loaded.Contexts.Count);
+        Assert.All(loaded.Contexts, c => Assert.NotNull(c.EvaluatedIntermediateDirectory));
+        Assert.Equal(Path.GetDirectoryName(loaded.Contexts[0].EvaluatedTargetPath), Path.GetDirectoryName(loaded.Contexts[1].EvaluatedTargetPath));
+        Assert.NotEqual(loaded.Contexts[0].EvaluatedTargetPath, loaded.Contexts[1].EvaluatedTargetPath);
+        var launches = 0;
+        var error = await Assert.ThrowsAsync<ProjectContextException>(() => CompilerGraphExecution.RunAsync(loaded,
+            (node, _) => { launches++; return Task.FromResult(new CompilerObservation(node.ProjectPath, [])); },
+            TestContext.Current.CancellationToken));
+        Assert.Equal("compiler.graphOutputUnproven", error.Reason);
+        Assert.Equal(0, launches);
+        Assert.Empty(Directory.GetFiles(fixture.Path, "*.dll", SearchOption.AllDirectories));
+        Assert.Empty(Directory.GetFiles(fixture.Path, "*.pdb", SearchOption.AllDirectories));
+        foreach (var (path, original) in originals)
+        {
+            Assert.Equal(original.Bytes, File.ReadAllBytes(path));
+            Assert.Equal(original.Mtime, File.GetLastWriteTimeUtc(path));
+        }
+    }
+
+    [Fact]
     public void PhysicalProjectPathIsPrivateTransportOnly()
     {
         var context = Context(Path.GetFullPath("private-project.csproj"));
@@ -191,6 +232,12 @@ public sealed class CompilerGraphExecutionTests
         var transported = System.Text.Json.JsonSerializer.Deserialize<ProjectAnalysisContext>(
             System.Text.Json.JsonSerializer.Serialize(context, ProjectContextLoader.JsonOptions), ProjectContextLoader.JsonOptions);
         Assert.Equal(context.ResolvedProjectPath, transported!.ResolvedProjectPath);
+        Assert.Equal(context.EvaluatedTargetPath, transported.EvaluatedTargetPath);
+        Assert.Equal(context.EvaluatedIntermediateDirectory, transported.EvaluatedIntermediateDirectory);
+        var publicJson = System.Text.Json.JsonSerializer.Serialize(context,
+            new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+        Assert.DoesNotContain("evaluatedTargetPath", publicJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("evaluatedIntermediateDirectory", publicJson, StringComparison.Ordinal);
     }
 
     private static ProjectContextLoadResult Valid(string root)
