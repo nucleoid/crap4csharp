@@ -46,6 +46,7 @@ public static class ProcessRunner
         // On Linux a retained session leader owns the group even when the consumer exits.
         // The start handshake prevents the consumer from spawning before ownership is verified.
         bool ownedSession = OperatingSystem.IsLinux();
+        using var sessionStatus = ownedSession ? new SessionStatus() : null;
         var startInfo = new ProcessStartInfo(ownedSession ? "/usr/bin/setsid" : fileName)
         {
             WorkingDirectory = workingDirectory,
@@ -61,8 +62,9 @@ public static class ProcessRunner
             startInfo.ArgumentList.Add("--");
             startInfo.ArgumentList.Add("/bin/sh");
             startInfo.ArgumentList.Add("-c");
-            startInfo.ArgumentList.Add("read -r start || exit 125; \"$@\" & child=$!; exec >/dev/null 2>&1; wait \"$child\"; result=$?; read -r release; exit \"$result\"");
+            startInfo.ArgumentList.Add("status=$1; shift; read -r start || exit 125; \"$@\" & child=$!; exec >/dev/null 2>&1; wait \"$child\"; result=$?; printf '%s\\n' \"$result\" > \"$status\"; : > \"$status.done\"; read -r release; exit \"$result\"");
             startInfo.ArgumentList.Add("crap4csharp-owned-session");
+            startInfo.ArgumentList.Add(sessionStatus!.Path);
             startInfo.ArgumentList.Add(fileName);
         }
         foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
@@ -90,9 +92,13 @@ public static class ProcessRunner
                 // The supervisor has closed its own output descriptors. EOF now proves that
                 // all inherited consumer pipes completed, not merely that the parent exited.
                 await Task.WhenAll(output, error).WaitAsync(linkedSource.Token);
-                await process.StandardInput.WriteLineAsync("release".AsMemory(), linkedSource.Token);
-                await process.StandardInput.FlushAsync(linkedSource.Token);
-                process.StandardInput.Close();
+                int consumerExitCode = await sessionStatus!.ReadAsync(process, linkedSource.Token);
+                // EOF alone does not prove descendant exit: children can close or redirect
+                // both pipes and remain alive. Retain the group leader until cleanup ends.
+                TerminateSession(process);
+                await TerminateAsync(process);
+                await WaitForSessionTerminationAsync(process.Id);
+                return new ProcessResult(consumerExitCode, await output, await error);
             }
             await process.WaitForExitAsync(linkedSource.Token);
             await Task.WhenAll(output, error).WaitAsync(linkedSource.Token);
@@ -100,7 +106,7 @@ public static class ProcessRunner
         }
         catch (OperationCanceledException) when (linkedSource.IsCancellationRequested)
         {
-            if (sessionVerified) TerminateSession(process);
+            if (sessionVerified && !process.HasExited) TerminateSession(process);
             await TerminateAsync(process);
             if (sessionVerified) await WaitForSessionTerminationAsync(process.Id);
             try
@@ -124,6 +130,39 @@ public static class ProcessRunner
             await Task.WhenAll(output, error).WaitAsync(TimeSpan.FromSeconds(5));
             throw;
         }
+    }
+
+    private sealed class SessionStatus : IDisposable
+    {
+        private readonly string directory = Directory.CreateTempSubdirectory("crap4csharp-owned-session-").FullName;
+        public string Path => System.IO.Path.Combine(directory, "status");
+
+        public SessionStatus()
+        {
+            if (OperatingSystem.IsLinux())
+                File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        public async Task<int> ReadAsync(Process supervisor, CancellationToken cancellationToken)
+        {
+            while (!File.Exists(Path + ".done"))
+            {
+                if (supervisor.HasExited)
+                    throw new InvalidOperationException("Invocation-owned supervisor exited before publishing consumer status.");
+                await Task.Delay(1, cancellationToken);
+            }
+            using var stream = new FileStream(Path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (stream.Length is < 2 or > 4)
+                throw new InvalidOperationException("Invocation-owned consumer status is invalid.");
+            using var reader = new StreamReader(stream);
+            string value = await reader.ReadToEndAsync(cancellationToken);
+            if (!int.TryParse(value.TrimEnd('\n'), System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out int result) || result is < 0 or > 255)
+                throw new InvalidOperationException("Invocation-owned consumer status is invalid.");
+            return result;
+        }
+
+        public void Dispose() => Directory.Delete(directory, recursive: true);
     }
 
     [DllImport("libc", EntryPoint = "getpgid", SetLastError = true)]
