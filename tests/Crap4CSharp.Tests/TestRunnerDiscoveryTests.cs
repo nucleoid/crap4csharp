@@ -15,6 +15,7 @@ public sealed class TestRunnerDiscoveryTests
     [InlineData("no-collector", false, "test.collectorUnsupported")]
     [InlineData("custom-console", false, "test.runnerUnsupported")]
     [InlineData("custom-task", false, "test.runnerUnsupported")]
+    [InlineData("custom-collector", false, "test.collectorUnsupported")]
     public async Task RestoredRunnerDiscoveryNeverBuildsOrTests(string mode, bool success, string? reason)
     {
         using var fixture = TestDirectory.Create("crap4csharp-runner-discovery");
@@ -37,12 +38,14 @@ public sealed class TestRunnerDiscoveryTests
             {{(mode == "custom" ? "<Target Name=\"VSTest\"><Error Text=\"Custom runner\" /></Target>" : "")}}
             </Project>
             """);
-        if (mode == "custom")
+        if (mode is "custom" or "custom-collector")
         {
             // Implicit SDK targets overwrite inline VSTest; a real late override must follow Sdk.targets.
             var text = File.ReadAllText(project).Replace("<Project Sdk=\"Microsoft.NET.Sdk\">",
                 "<Project><Import Project=\"Sdk.props\" Sdk=\"Microsoft.NET.Sdk\" />", StringComparison.Ordinal)
                 .Replace("<Target Name=\"VSTest\">", "<Import Project=\"Sdk.targets\" Sdk=\"Microsoft.NET.Sdk\" /><Target Name=\"VSTest\">", StringComparison.Ordinal);
+            if (mode == "custom-collector")
+                text = text.Replace("</Project>", "<Import Project=\"Sdk.targets\" Sdk=\"Microsoft.NET.Sdk\" /><Target Name=\"SetXPlatDataCollectorPath\"><Error Text=\"Custom collector hook\" /></Target></Project>", StringComparison.Ordinal);
             File.WriteAllText(project, text);
         }
         fixture.Write("Test.cs", "public class Tests { [Xunit.Fact] public void Pass() { } }");
