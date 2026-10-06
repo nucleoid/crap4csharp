@@ -42,12 +42,19 @@ public sealed class PolicyCheckIntegrationTests
         var output = new StringWriter();
         var error = new StringWriter();
 
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
         var exit = await global::App.RunAsync(["check", "--reuse-artifacts", locator, "--policy", PolicyLogical,
             "--base", "HEAD", "--format", "json"], repository, output, error,
             TestContext.Current.CancellationToken);
 
         Assert.True(exit == 0, error + Environment.NewLine + output);
         using var result = JsonDocument.Parse(output.ToString());
+        var run = result.RootElement.GetProperty("run");
+        var reportedDuration = run.GetProperty("durationMilliseconds").GetDouble();
+        Assert.True(reportedDuration >= elapsed.Elapsed.TotalMilliseconds * .5,
+            $"CLI execution took {elapsed.Elapsed.TotalMilliseconds} ms but reported only {reportedDuration} ms.");
+        Assert.True(run.GetProperty("finishedAt").GetDateTimeOffset() >=
+            run.GetProperty("startedAt").GetDateTimeOffset().AddMilliseconds(reportedDuration - 1));
         Assert.Equal("base-trusted", result.RootElement.GetProperty("evaluation").GetProperty("policyTrust")
             .GetProperty("trust").GetString());
         Assert.Equal("verified", result.RootElement.GetProperty("evaluation").GetProperty("provenance")
