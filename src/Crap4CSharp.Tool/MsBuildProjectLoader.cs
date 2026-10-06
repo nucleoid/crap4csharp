@@ -355,6 +355,7 @@ internal static class MsBuildProjectLoader
             ReferencePaths = project.MetadataReferences.Select(r => r.Display)
                 .Where(p => !string.IsNullOrWhiteSpace(p)).Select(p => Path.GetFullPath(p!))
                 .Distinct(PathComparer).Order(StringComparer.Ordinal).ToArray(),
+            EvaluatedReferenceAssemblyPath = metadata.ReferenceAssemblyPath,
             EvaluatedTargetPath = metadata.TargetPath,
             EvaluatedIntermediateDirectory = metadata.IntermediateDirectory,
             GeneratedTransitionPaths = project.AnalyzerConfigDocuments.Where(document => document.FilePath is not null)
@@ -453,7 +454,9 @@ internal static class MsBuildProjectLoader
                 .Select(project.GetPropertyValue).Where(value => !string.IsNullOrWhiteSpace(value))
                 .Select(value => Path.GetFullPath(value, Path.GetDirectoryName(projectPath)!))
                 .Distinct(PathComparer).ToArray(),
-            EvaluatedPath("TargetPath"), EvaluatedPath("IntermediateOutputPath"), phaseInputs.ToArray());
+            EvaluatedPath("TargetPath"), EvaluatedPath("IntermediateOutputPath"),
+            string.Equals(project.GetPropertyValue("ProduceReferenceAssembly"), "true", StringComparison.OrdinalIgnoreCase)
+                ? EvaluatedPath("TargetRefPath") : null, phaseInputs.ToArray());
 
         string? EvaluatedPath(string name)
         {
@@ -555,6 +558,6 @@ internal static class MsBuildProjectLoader
 
     private sealed record EvaluatedMetadata(string[] Frameworks, bool IsTestProject, string AssemblyName,
         string Configuration, string Platform, string[] Imports, string AssetsFile, string ProjectExtensionsPath,
-        string[] AuthoredInputs, string[] CompileInputs, string[] IntermediatePaths, string? TargetPath, string? IntermediateDirectory, ProjectPhaseInput[] PhaseInputs);
+        string[] AuthoredInputs, string[] CompileInputs, string[] IntermediatePaths, string? TargetPath, string? IntermediateDirectory, string? ReferenceAssemblyPath, ProjectPhaseInput[] PhaseInputs);
     private sealed record ProjectSelection(string Path, string Configuration, string? Platform);
 }

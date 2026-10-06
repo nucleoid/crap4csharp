@@ -92,7 +92,8 @@ internal static class CompilerGraphExecution
                 oldContext.Adapter != newContext.Adapter ||
                 !oldContext.PreprocessorSymbols.Order(StringComparer.Ordinal).SequenceEqual(newContext.PreprocessorSymbols.Order(StringComparer.Ordinal)) ||
                 !paths.Equals(oldContext.EvaluatedTargetPath, newContext.EvaluatedTargetPath) ||
-                !paths.Equals(oldContext.EvaluatedIntermediateDirectory, newContext.EvaluatedIntermediateDirectory))
+                !paths.Equals(oldContext.EvaluatedIntermediateDirectory, newContext.EvaluatedIntermediateDirectory) ||
+                !paths.Equals(oldContext.EvaluatedReferenceAssemblyPath, newContext.EvaluatedReferenceAssemblyPath))
                 throw GraphChanged();
             // Content ContextId/SourceSetIdentity may legitimately change with generated transitions.
             // This is NOT actual compiler binding; the caller still owes source/options/output evidence.
