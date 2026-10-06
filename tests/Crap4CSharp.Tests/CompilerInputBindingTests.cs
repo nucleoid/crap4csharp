@@ -62,17 +62,23 @@ public sealed class CompilerInputBindingTests
         Assert.False(context.Capabilities.ReuseRecipeComplete);
     }
 
-    [Fact]
-    public async Task ActualSdkCompilerInputsBindIncludingExcludedSourcesAndOptionalFiles()
+    [Theory]
+    [InlineData("ordinary")]
+    [InlineData("build-only-source")]
+    [InlineData("build-only-additional")]
+    public async Task ActualSdkCompilerInputsBindIncludingExcludedSourcesAndOptionalFiles(string variant)
     {
         using var fixture = TestDirectory.Create("crap4csharp-input-actual");
-        var project = fixture.Write("App/App.csproj", """
+        var condition = variant == "build-only-source" ? " Condition=\"'$(DesignTimeBuild)' != 'true'\"" : "";
+        var extraAdditional = variant == "build-only-additional" ? "<AdditionalFiles Include=\"../Shared/Extra.txt\" Condition=\"'$(DesignTimeBuild)' != 'true'\" />" : "";
+        var project = fixture.Write("App/App.csproj", $$"""
             <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
             <ItemGroup><AdditionalFiles Include="Rules.txt" /></ItemGroup>
-            <Target Name="AddSource" BeforeTargets="CoreCompile"><ItemGroup><Compile Include="../Shared/Added.cs" Link="obj/Added.cs" /></ItemGroup></Target></Project>
+            <Target Name="AddSource" BeforeTargets="CoreCompile"><ItemGroup><Compile Include="../Shared/Added.cs" Link="obj/Added.cs"{{condition}} />{{extraAdditional}}</ItemGroup></Target></Project>
             """);
         fixture.Write("App/Code.cs", "public class Code { public int M() => 1; }");
         fixture.Write("App/Rules.txt", "rules");
+        fixture.Write("Shared/Extra.txt", "extra rules");
         fixture.Write("Shared/Added.cs", "public class Added {}"); // No sequence points; Sources remains mandatory.
         var original = Directory.GetFiles(fixture.Path, "*", SearchOption.AllDirectories).ToDictionary(p => p,
             p => (File.ReadAllBytes(p), File.GetLastWriteTimeUtc(p)));
@@ -87,12 +93,59 @@ public sealed class CompilerInputBindingTests
         var observed = Assert.Single(phase.Observations);
         Assert.Contains(context.CompilerDocuments, d => d.IsGenerated);
         Assert.Contains(observed.Parameters, p => p.Name == "AdditionalFiles" && p.Items.Count > 0);
-        CompilerInputBinding.Validate(context, observed, TestContext.Current.CancellationToken);
+        if (variant == "ordinary") CompilerInputBinding.Validate(context, observed, TestContext.Current.CancellationToken);
+        else
+        {
+            var error = Assert.Throws<ProjectContextException>(() => CompilerInputBinding.Validate(context, observed, TestContext.Current.CancellationToken));
+            Assert.Equal("compiler.inputsUnproven", error.Reason);
+            Assert.Contains(observed.Parameters, p => p.Name == (variant == "build-only-source" ? "Sources" : "AdditionalFiles") &&
+                p.Items.Any(i => i.EndsWith(variant == "build-only-source" ? "Added.cs" : "Extra.txt", StringComparison.Ordinal)));
+        }
         foreach (var (path, saved) in original)
         {
             Assert.Equal(saved.Item1, File.ReadAllBytes(path));
             Assert.Equal(saved.Item2, File.GetLastWriteTimeUtc(path));
         }
+    }
+
+    [Theory]
+    [InlineData("oversized-source")]
+    [InlineData("oversized-optional")]
+    [InlineData("present-probe")]
+    [InlineData("symlink-source")]
+    public void BoundReadsRefuseUnsupportedInputs(string defect)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-input-limits");
+        var (context, observed) = Valid(fixture);
+        if (defect.StartsWith("oversized", StringComparison.Ordinal))
+        {
+            var path = defect == "oversized-source" ? context.CompilerDocuments[0].ResolvedPath! : Path.Combine(fixture.Path, "Rules.txt");
+            using (var stream = File.Create(path)) stream.SetLength(CompilerPhaseSnapshot.MaximumFileBytes + 1);
+        }
+        else if (defect == "present-probe")
+            context = context with { PhaseInputs = [.. context.PhaseInputs, new(fixture.Write(".globalconfig", "root=true"), "analyzerConfigProbe", false)] };
+        else
+        {
+            // Windows symlink creation requires additional user privileges; runtime proof is Linux.
+            if (OperatingSystem.IsWindows()) return;
+            var path = context.CompilerDocuments[0].ResolvedPath!;
+            var target = fixture.Write("Original.cs", File.ReadAllText(path));
+            File.Delete(path);
+            File.CreateSymbolicLink(path, target);
+        }
+        var error = Assert.Throws<ProjectContextException>(() => CompilerInputBinding.Validate(context, observed, TestContext.Current.CancellationToken));
+        Assert.Equal(defect.StartsWith("oversized", StringComparison.Ordinal) ? "compiler.inputLimit" : "compiler.inputsUnproven", error.Reason);
+    }
+
+    [Fact]
+    public void PreCancellationPrecedesInputFileReads()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-input-cancel");
+        var (context, observed) = Valid(fixture);
+        File.Delete(context.CompilerDocuments[0].ResolvedPath!);
+        using var cancelled = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cancelled.Cancel();
+        Assert.ThrowsAny<OperationCanceledException>(() => CompilerInputBinding.Validate(context, observed, cancelled.Token));
     }
 
     private static (ProjectAnalysisContext, CompilerObservation) Valid(TestDirectory fixture)
