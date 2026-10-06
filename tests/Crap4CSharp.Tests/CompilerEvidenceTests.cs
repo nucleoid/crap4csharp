@@ -65,6 +65,40 @@ public sealed class CompilerEvidenceTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ActualReferenceOutputParameterAndParentHashAreCaptured(bool captureHash)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-reference-output-capture");
+        var project = fixture.Write("App.csproj", """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>""");
+        fixture.Write("Code.cs", "public class App { public int Value() => 42; }");
+        var request = new ProjectContextLoadRequest(project, "Release", "AnyCPU", [], false, false, TimeSpan.FromMinutes(2));
+        Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken)).ExitCode);
+        var graph = await ProjectContextLoader.DiscoverGraphAsync(request, TestContext.Current.CancellationToken);
+        Assert.True(graph.Success, string.Join(" | ", graph.Diagnostics));
+        var directory = Path.Combine(fixture.Path, "private");
+        Directory.CreateDirectory(directory);
+        var observation = await CompilerEvidence.BuildAsync(Assert.Single(graph.BuildGraph), directory,
+            TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+        if (!captureHash)
+        {
+            var parameter = Assert.Single(observation.Parameters, p => p.Name == "OutputRefAssembly");
+            var path = Path.GetFullPath(Assert.Single(parameter.Items), fixture.Path);
+            Assert.True(File.Exists(path));
+            Assert.Contains("refint", path, StringComparison.Ordinal);
+            return;
+        }
+        // Reflection keeps this missing-API regression executable before the implementation.
+        var property = typeof(CompilerObservation).GetProperty("ReferenceAssembly",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(property);
+        var captured = Assert.IsType<CompilerOutput>(property.GetValue(observation));
+        Assert.Equal(ProjectAnalysisContext.ContentHash(File.ReadAllBytes(captured.Path)), captured.Sha256);
+        Assert.Equal(new FileInfo(captured.Path).Length, captured.Length);
+        Assert.NotEqual(observation.Assembly!.Sha256, captured.Sha256);
+    }
+
     [Fact]
     public async Task OversizedBinlogRefusesBeforeWorkerAndPreCancellationDoesNotLaunch()
     {
