@@ -18,6 +18,22 @@ internal static class MsBuildProjectLoader
         var root = Path.GetDirectoryName(request.Target)!;
         var excludedProjects = new List<ProjectContextProjectExclusion>();
         var projects = await DiscoverProjects(request.Target, request.Configuration, request.Platform, diagnostics, excludedProjects, cancellationToken);
+        if (request.MetadataOnly)
+        {
+            // Evaluation only: no target invocation, assets check, Workspace, or runner inference.
+            // Cold package imports may not yet expose test/runner properties.
+            var discovered = new List<ProjectDiscoveryMetadata>();
+            foreach (var selection in projects.OrderBy(value => value.Path, StringComparer.Ordinal))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var selectedRequest = request with { Configuration = selection.Configuration, Platform = selection.Platform };
+                await EnsureProjectSdkAsync(selection.Path, selectedRequest, cancellationToken);
+                var metadata = Evaluate(selection.Path, selection.Configuration, selection.Platform, null);
+                discovered.Add(new(selection.Path, metadata.Configuration, metadata.Platform, metadata.Frameworks,
+                    metadata.AssetsFile, metadata.IsTestProject));
+            }
+            return new(true, [], diagnostics, null, excludedProjects) { Metadata = discovered };
+        }
         var contexts = new List<ProjectAnalysisContext>();
         var matchedFrameworks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var selection in projects.OrderBy(value => value.Path, StringComparer.Ordinal))
