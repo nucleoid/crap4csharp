@@ -15,6 +15,7 @@ public sealed record ProjectContextLoadRequest(
 {
     public bool MetadataOnly { get; init; }
     public bool GraphOnly { get; init; }
+    public bool LoadGraphContexts { get; init; }
     public string? SdkPath { get; init; }
     public string? SdkVersion { get; init; }
     public string? MsBuildVersion { get; init; }
@@ -31,10 +32,13 @@ public sealed record ProjectContextLoadResult(
 {
     public IReadOnlyList<ProjectDiscoveryMetadata> Metadata { get; init; } = [];
     public IReadOnlyList<ProjectBuildGraphNode> BuildGraph { get; init; } = [];
+    public IReadOnlyList<ProjectGraphContextBinding> GraphContexts { get; init; } = [];
 }
 
 public sealed record ProjectDiscoveryMetadata(string ProjectPath, string Configuration, string Platform,
     IReadOnlyList<string> Frameworks, string AssetsFile, bool IsTestProject);
+
+public sealed record ProjectGraphContextBinding(string GraphId, string ProjectPath, ProjectAnalysisContext Context, bool IsTestProject);
 
 public sealed record ProjectBuildGraphNode(string Id, string ProjectPath, string Configuration, string Platform,
     string TargetFramework, IReadOnlyDictionary<string, string> GlobalProperties, IReadOnlyList<string> Dependencies);
@@ -111,6 +115,9 @@ public static class ProjectContextLoader
     // Metadata discovery must precede any restore or Workspace loading.
     public static Task<ProjectContextLoadResult> DiscoverAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken) =>
         LoadAsync(request with { MetadataOnly = true }, cancellationToken);
+
+    public static Task<ProjectContextLoadResult> LoadGraphAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken) =>
+        LoadAsync(request with { LoadGraphContexts = true, GraphOnly = false, MetadataOnly = false }, cancellationToken);
 
     public static Task<ProjectContextLoadResult> DiscoverGraphAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken) =>
         LoadAsync(request with { GraphOnly = true, MetadataOnly = false }, cancellationToken);
