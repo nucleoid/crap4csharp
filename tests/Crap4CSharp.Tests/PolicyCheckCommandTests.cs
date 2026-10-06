@@ -23,6 +23,27 @@ public sealed class PolicyCheckCommandTests
     }
 
     [Fact]
+    public void FamilyPolicyFindingPreservesAggregateMetricsAndRootSpan()
+    {
+        var root = Callable("root", "observation", "Gate.cs", 10, 20);
+        var family = new CallableFamilyMetric("family", "root", CallableFamilyEvaluator.Rule,
+            ComplexityRules.CallablesV1, 7, .5, 4, 2, 13.125, true, ["root"], [], []);
+        var result = EmptyResult([root]);
+        result = result with { Evaluation = result.Evaluation with { Families = [family] } };
+        var policyFinding = new PolicyFinding("crap.thresholdExceeded", "family", "ctx",
+            "App/Gate.cs", "fail", []);
+        var method = typeof(PolicyCheckCommand).GetMethod("ToFinding",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        var finding = Assert.IsType<FindingResult>(method.Invoke(null, [policyFinding, result, 5d]));
+        Assert.Equal(new SourceSpan(10, 20), finding.Span);
+        Assert.Equal(7, finding.Complexity);
+        Assert.Equal(.5, finding.Coverage);
+        Assert.Equal(13.125, finding.Crap);
+        Assert.Equal(5, finding.Threshold);
+        Assert.Equal("family", finding.EntityKey);
+    }
+
+    [Fact]
     public void BaseScopeCannotUseAnotherMergeBaseThanTrustedPolicy()
     {
         var captured = new ManifestRevision("git", "repository", "workspace", "head", "scope-base", "head");
