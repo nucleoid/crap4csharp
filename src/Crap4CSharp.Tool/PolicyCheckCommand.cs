@@ -32,10 +32,8 @@ internal static class PolicyCheckCommand
         var captured = CapturedEvaluationInputs.Read(bundle);
         var replay = AnalyzeCommand.Replay(bundle, root, startedAt, duration, cancellationToken, allSources: true);
         var scope = await ResolveScopeAsync(policy, baseRef, root, timeout, cancellationToken);
-        if (scope is { } resolved && (bundle.Manifest.Revision.ScopeHead != resolved.Revision.CurrentHead ||
-                policy.Scope == "base" && bundle.Manifest.Revision.Base != resolved.Revision.MergeBase))
-            throw new PolicyException("provenance.scopeRevisionMismatch",
-                "Captured scope revision differs from the independently resolved Git scope.");
+        if (scope is { } resolved)
+            ValidateScopeRevision(policy.Scope, trusted.Revision, bundle.Manifest.Revision, resolved.Revision);
         var allSources = bundle.Manifest.Contexts.SelectMany(context => context.Inputs
                 .Where(input => input.Role == "source" && !input.Generated)
                 .Select(input => CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input)))
@@ -101,6 +99,14 @@ internal static class PolicyCheckCommand
                 Artifacts = replay.Run.Artifacts.Select(item => item.Kind == "manifest"
                     ? item with { Reusable = provenance.Reusable } : item).ToArray() }
         };
+    }
+
+    internal static void ValidateScopeRevision(string scope, string trustedRevision, ManifestRevision captured,
+        ScopeRevision resolved)
+    {
+        if (captured.ScopeHead != resolved.CurrentHead || scope == "base" && captured.Base != resolved.MergeBase)
+            throw new PolicyException("provenance.scopeRevisionMismatch",
+                "Captured scope revision differs from the independently resolved Git scope.");
     }
 
     private static async Task<ResolvedPolicyScope?> ResolveScopeAsync(RepositoryPolicy policy, string baseRef,

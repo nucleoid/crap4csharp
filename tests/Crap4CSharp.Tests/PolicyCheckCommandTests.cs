@@ -23,6 +23,19 @@ public sealed class PolicyCheckCommandTests
     }
 
     [Fact]
+    public void BaseScopeCannotUseAnotherMergeBaseThanTrustedPolicy()
+    {
+        var captured = new ManifestRevision("git", "repository", "workspace", "head", "scope-base", "head");
+        var resolved = new ScopeRevision("ref", "head", "scope-base", "head", "head", "scope-base", "index");
+        PolicyCheckCommand.ValidateScopeRevision("base", "scope-base", captured, resolved);
+        var error = Assert.Throws<PolicyException>(() => PolicyCheckCommand.ValidateScopeRevision(
+            "base", "policy-base", captured, resolved));
+        Assert.Equal("provenance.scopeRevisionMismatch", error.Code);
+        // Worktree scope has no base contract; the approved policy's revision is independent.
+        PolicyCheckCommand.ValidateScopeRevision("worktree", "policy-base", captured, resolved);
+    }
+
+    [Fact]
     public void DeletionOnlyHunkSelectsCurrentCallable()
     {
         var callable = Callable("method", "observation", "Gate.cs", 10, 20);
