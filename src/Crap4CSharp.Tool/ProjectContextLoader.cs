@@ -298,8 +298,15 @@ public static class ProjectBuildPreparation
     public static Task<ProcessResult> RestoreAsync(string target, TimeSpan timeout, CancellationToken cancellationToken) =>
         RunSerialized(target, ["restore", Path.GetFullPath(target), "--disable-parallel", "-nr:false"], timeout, cancellationToken);
 
-    public static Task<ProcessResult> RestoreAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken) =>
-        RestoreAsync(request.Target, request.Timeout, cancellationToken);
+    public static Task<ProcessResult> RestoreAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken)
+    {
+        // Restore all declared frameworks, while preserving the selected root configuration/platform.
+        // Dependency-specific mappings remain MSBuild-owned; a later graph freezes build contexts.
+        var arguments = new List<string> { "restore", Path.GetFullPath(request.Target), "--disable-parallel", "-nr:false",
+            $"-p:Configuration={request.Configuration}" };
+        if (request.Platform is not null) arguments.Add($"-p:Platform={request.Platform}");
+        return RunSerialized(request.Target, arguments, request.Timeout, cancellationToken);
+    }
 
     public static Task<ProcessResult> BuildAsync(string target, string configuration, string? framework, string? platform,
         TimeSpan timeout, CancellationToken cancellationToken)
