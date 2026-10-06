@@ -77,11 +77,14 @@ public sealed class TestExecutionAdapterTests
             .ToDictionary(p => p, p => File.ReadAllBytes(p));
         var assetsPath = System.IO.Path.Combine(fixture.Path, "Tests/obj/project.assets.json");
         var restores = (Bytes: File.ReadAllBytes(assetsPath), Time: File.GetLastWriteTimeUtc(assetsPath));
-        var method = typeof(ProjectContextLoader).Assembly.GetType("Crap4CSharp.Core.TestExecutionAdapter")?.GetMethod("RunAsync", BindingFlags.Static | BindingFlags.NonPublic);
+        var retainedProof = bound.GetType().GetProperty("RetainedProof", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        Assert.NotNull(retainedProof);
+        Assert.NotNull(retainedProof.GetValue(bound));
+        var method = typeof(ProjectContextLoader).Assembly.GetType("Crap4CSharp.Core.TestExecutionAdapter")?.GetMethod("RunVerifiedAsync", BindingFlags.Static | BindingFlags.NonPublic);
         Assert.NotNull(method);
         var ownedResults = System.IO.Path.Combine(fixture.Path, "test-run");
         Directory.CreateDirectory(ownedResults);
-        var operation = (Task)method.Invoke(null, [plan, ownedResults, TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken])!;
+        var operation = (Task)method.Invoke(null, [plan, bound, ownedResults, TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken])!;
         await operation;
         var results = Assert.IsAssignableFrom<System.Collections.IEnumerable>(operation.GetType().GetProperty("Result")!.GetValue(operation));
         var observation = Assert.Single(results.Cast<object>());
