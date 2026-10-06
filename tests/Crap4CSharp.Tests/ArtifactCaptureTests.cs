@@ -62,6 +62,46 @@ public sealed class ArtifactCaptureTests
         Assert.Contains(ProvenanceReasonCodes.ContextNotRevalidated, result.Reasons);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CurrentInputsDistinguishProjectRelativeNamesButDeduplicateSharedPhysicalFiles(bool shared)
+    {
+        using var directory = TestDirectory.Create("crap4csharp-current-project-paths");
+        var fixture = CreateFixture();
+        var original = fixture.Manifest.Contexts.Single();
+        var source = original.Inputs.Single();
+        var firstBytes = CompiledSourceBytes();
+        var secondBytes = shared ? firstBytes : Encoding.UTF8.GetBytes("different project source");
+        var firstPath = "Api/Program.cs";
+        var secondPath = shared ? firstPath : "Worker/Program.cs";
+        directory.Write(firstPath, Encoding.UTF8.GetString(firstBytes));
+        directory.Write(secondPath, Encoding.UTF8.GetString(secondBytes));
+        var first = source with { LogicalPath = "Program.cs", RepositoryPath = firstPath,
+            Length = firstBytes.Length, Sha256 = CanonicalIdentity.Sha256(firstBytes) };
+        var second = source with { LogicalPath = "Program.cs", RepositoryPath = secondPath,
+            Length = secondBytes.Length, Sha256 = CanonicalIdentity.Sha256(secondBytes) };
+        var manifest = ManifestIdentity.Seal(fixture.Manifest with
+        {
+            Contexts = [original with { Project = "Api/Api.csproj", Inputs = [first] },
+                original with { Id = "worker", Project = "Worker/Worker.csproj", Inputs = [second] }],
+            ManifestHash = null
+        });
+        var captured = CurrentEvidenceAdapter.Capture(manifest, directory.Path);
+        Assert.Equal(shared ? 1 : 2, captured.Inputs.Count);
+        // This is a workspace-byte consistency control, not a compiler/collector acceptance claim.
+        var current = captured with { RepositoryIdentity = manifest.Revision.RepositoryIdentity,
+            WorkspaceIdentity = manifest.Revision.WorkspaceIdentity,
+            ContextHashes = manifest.Contexts.ToDictionary(context => context.Id, context => context.ContextHash),
+            MembershipRecipeRevalidated = true };
+        Assert.DoesNotContain(ProvenanceReasonCodes.SourceChanged,
+            ProvenanceVerifier.VerifyCurrent(manifest, fixture.Bytes, current, true).Reasons);
+        var drift = current with { Inputs = current.Inputs.Select((input, index) => index == 0
+            ? input with { Sha256 = CanonicalIdentity.Sha256([1, 2, 3]) } : input).ToArray() };
+        Assert.Contains(ProvenanceReasonCodes.SourceChanged,
+            ProvenanceVerifier.VerifyCurrent(manifest, fixture.Bytes, drift, true).Reasons);
+    }
+
     [Fact]
     public void CurrentVerificationIncludesDeclaredReferenceBytes()
     {
