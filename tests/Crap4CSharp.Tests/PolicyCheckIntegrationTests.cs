@@ -263,6 +263,140 @@ public sealed class PolicyCheckIntegrationTests
     }
 
     [Theory]
+    [InlineData("new", 2)]
+    [InlineData("deletion", 2)]
+    [InlineData("untouched", 0)]
+    [InlineData("relaxed", 2)]
+    public async Task IncrementalCommittedBaseScopeEnforcesSelectedDebtUnderTrustedPolicy(string scenario, int expectedExit)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-incremental-base-matrix");
+        const string projectLogical = "App/App.csproj";
+        var project = fixture.Write(projectLogical, "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework><AssemblyName>Crap4CSharp.ProvenanceFixture</AssemblyName><DebugType>portable</DebugType><IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion></PropertyGroup></Project>");
+        var original = await File.ReadAllTextAsync(Path.Combine(RepositoryRoot(),
+            "tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs"), TestContext.Current.CancellationToken);
+        var newline = original.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        var baseSource = original.Replace("var value = 1;", "System.GC.KeepAlive(1);" + newline + "        var value = 1;", StringComparison.Ordinal);
+        var source = fixture.Write("App/CompiledEvidence.cs", baseSource);
+        string Policy(string mode, string scope, double threshold, string? baseline) => JsonSerializer.Serialize(new
+        {
+            schemaVersion = RepositoryPolicy.Version, mode, productionProjects = new[] { projectLogical },
+            testProjects = new[] { projectLogical }, configuration = BuildConfiguration, targetFrameworks = new[] { "net10.0" },
+            scope, threshold, missingCoverage = "fail", requiredChecks = new[] { "tests", "coverage", "crap" },
+            exclusions = Array.Empty<string>(), ruleset = ComplexityRules.CallablesV1,
+            exemptionFiles = Array.Empty<string>(), baseline
+        }, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
+        fixture.Write("policy.json", Policy("strict", "all", 0, null));
+        fixture.Write(".gitignore", "App/bin/\nApp/obj/\n*-bundle/\n*-coverage.xml\n");
+        async Task<string> Git(params string[] args)
+        {
+            var result = await ProcessRunner.RunAsync("git", args, fixture.Path, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            Assert.True(result.ExitCode == 0, result.StandardError);
+            return result.StandardOutput.Trim();
+        }
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "fixture@example.invalid");
+        await Git("config", "user.name", "Fixture");
+        await Git("add", "--", projectLogical, "App/CompiledEvidence.cs", "policy.json", ".gitignore");
+        await Git("commit", "--quiet", "-m", "bootstrap strict onboarding");
+        var restored = await ProjectBuildPreparation.RestoreAsync(project, TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+        Assert.True(restored.ExitCode == 0, restored.StandardError);
+        async Task Build()
+        {
+            var built = await ProjectBuildPreparation.BuildAsync(project, BuildConfiguration, "net10.0", "AnyCPU", TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+            Assert.True(built.ExitCode == 0, built.StandardOutput + built.StandardError);
+        }
+        var assembly = Path.Combine(fixture.Path, "App", "bin", BuildConfiguration, "net10.0", "Crap4CSharp.ProvenanceFixture.dll");
+        await Build();
+        // Real committed sources and compiled PE/PDB; exact-point coverage and successful
+        // TRX/test-module records are transparent protocol controls, not collector acceptance.
+        var initialCoverage = await WriteExactPointCoverage(assembly, fixture.Path, "base-coverage.xml", 1);
+        var (initialLocator, _, _, _, _) = await CreateBundle(fixture.Path, projectLogical, "policy.json", assembly,
+            Path.Combine(fixture.Path, "initial-bundle"), coveragePath: initialCoverage);
+        var bootstrapOutput = new StringWriter();
+        var bootstrapError = new StringWriter();
+        var bootstrapExit = await global::App.RunAsync(["baseline", "create", "--policy", "policy.json",
+            "--reuse-artifacts", initialLocator, "--output", "baseline.json", "--format", "json"], fixture.Path,
+            bootstrapOutput, bootstrapError, TestContext.Current.CancellationToken);
+        Assert.True(bootstrapExit == 2, bootstrapError + Environment.NewLine + bootstrapOutput);
+        var baseline = BaselineDocument.Parse(await File.ReadAllBytesAsync(Path.Combine(fixture.Path, "baseline.json"), TestContext.Current.CancellationToken));
+        Assert.NotEmpty(baseline.Entries);
+        fixture.Write("policy.json", Policy("incremental", "base", 0, "baseline.json"));
+        await Git("add", "--", "policy.json", "baseline.json");
+        await Git("commit", "--quiet", "-m", "approve incremental baseline");
+        var baseRevision = await Git("rev-parse", "HEAD");
+        if (scenario == "deletion")
+            fixture.Write("App/CompiledEvidence.cs", baseSource.Replace("        System.GC.KeepAlive(1);" + newline, "", StringComparison.Ordinal));
+        else if (scenario != "untouched")
+            fixture.Write("App/CompiledEvidence.cs", baseSource.Replace("    public int M()", "    public int NewDebt() => 42;" + newline + newline + "    public int M()", StringComparison.Ordinal));
+        else fixture.Write("README.md", "unrelated documentation-only commit");
+        if (scenario == "relaxed") fixture.Write("policy.json", Policy("incremental", "all", 100, "baseline.json"));
+        await Git("add", "--", "App/CompiledEvidence.cs", "policy.json");
+        if (scenario == "untouched") await Git("add", "--", "README.md");
+        await Git("commit", "--quiet", "-m", "current committed scenario");
+        var head = await Git("rev-parse", "HEAD");
+        Assert.NotEqual(baseRevision, head);
+        Assert.Equal(baseRevision, await Git("merge-base", baseRevision, "HEAD"));
+        if (scenario == "deletion")
+        {
+            var diff = await Git("diff", "--numstat", baseRevision, "HEAD", "--", "App/CompiledEvidence.cs");
+            Assert.StartsWith("0\t1\t", diff, StringComparison.Ordinal);
+        }
+        await Build();
+        var before = await File.ReadAllBytesAsync(source, TestContext.Current.CancellationToken);
+        var stamp = File.GetLastWriteTimeUtc(source);
+        var coverage = await WriteExactPointCoverage(assembly, fixture.Path, "current-coverage.xml",
+            scenario is "deletion" or "untouched" ? 0 : 1);
+        var observedScope = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Base, baseRevision),
+            fixture.Path, TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+        Assert.Equal(ScopeCompleteness.Complete, observedScope.Completeness);
+        Assert.Equal(scenario == "untouched" ? [] : new[] { "App/CompiledEvidence.cs" },
+            observedScope.Files.Select(file => file.NewPath).ToArray());
+        var (locator, _, _, _, _) = await CreateBundle(fixture.Path, projectLogical, "policy.json", assembly,
+            Path.Combine(fixture.Path, "current-bundle"), baseRevision, coverage,
+            scopedSources: scenario == "untouched" ? [] : ["App/CompiledEvidence.cs"]);
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var exit = await global::App.RunAsync(["check", "--reuse-artifacts", locator, "--policy", "policy.json",
+            "--base", baseRevision, "--format", "json"], fixture.Path, output, error, TestContext.Current.CancellationToken);
+        Assert.True(exit == expectedExit, error + Environment.NewLine + output);
+        using var document = JsonDocument.Parse(output.ToString());
+        var evaluation = document.RootElement.GetProperty("evaluation");
+        Assert.Equal(baseRevision, evaluation.GetProperty("policyTrust").GetProperty("revision").GetString());
+        Assert.Equal(0, evaluation.GetProperty("policy").GetProperty("threshold").GetDouble());
+        var findings = evaluation.GetProperty("findings").EnumerateArray().ToArray();
+        if (scenario == "deletion") Assert.Contains(findings, item => item.GetProperty("code").GetString() == "baseline.coverageWorsened");
+        else if (scenario == "untouched") Assert.Empty(findings);
+        else Assert.Contains(findings, item => item.GetProperty("code").GetString() == "crap.thresholdExceeded");
+        if (scenario == "relaxed") Assert.Contains(evaluation.GetProperty("policyDifferences").EnumerateArray(),
+            item => item.GetProperty("path").GetString() == "policy.json" && item.GetProperty("status").GetString() == "changed");
+        Assert.Equal(before, await File.ReadAllBytesAsync(source, TestContext.Current.CancellationToken));
+        Assert.Equal(stamp, File.GetLastWriteTimeUtc(source));
+    }
+
+    private static async Task<string> WriteExactPointCoverage(string assemblyPath, string directory, string name, int hits)
+    {
+        var evidence = ArtifactEvidenceInspector.InspectBuild(
+            ImmutableArray.Create(await File.ReadAllBytesAsync(assemblyPath, TestContext.Current.CancellationToken)),
+            ImmutableArray.Create(await File.ReadAllBytesAsync(Path.ChangeExtension(assemblyPath, ".pdb"), TestContext.Current.CancellationToken)));
+        var documents = evidence.Documents.Keys.Order(StringComparer.Ordinal).Select((document, index) => (document, id: index + 1))
+            .ToDictionary(item => item.document, item => item.id);
+        var classes = new XElement("Classes", evidence.Methods.Where(method => method.SequencePoints.Count > 0)
+            .GroupBy(method => method.TypeName).Select(group => new XElement("Class", new XElement("FullName", group.Key),
+                new XElement("Methods", group.Select(method => new XElement("Method",
+                    new XElement("Name", (method.MethodName is ".ctor" or ".cctor" ? "System.Void " : "System.Int32 ") + method.TypeName + "::" + method.MethodName + "()"),
+                    new XElement("SequencePoints", method.SequencePoints.Select(point => new XElement("SequencePoint",
+                        new XAttribute("vc", hits), new XAttribute("offset", point.Offset), new XAttribute("sl", point.StartLine),
+                        new XAttribute("sc", point.StartColumn), new XAttribute("el", point.EndLine), new XAttribute("ec", point.EndColumn),
+                        new XAttribute("fileid", documents[point.Document]))))))))));
+        var xml = new XElement("CoverageSession", new XElement("Modules", new XElement("Module",
+            new XElement("ModuleName", evidence.ModuleIdentity), new XElement("Files", documents.Select(item =>
+                new XElement("File", new XAttribute("uid", item.Value), new XAttribute("fullPath", item.Key)))), classes)));
+        var path = Path.Combine(directory, name);
+        await File.WriteAllTextAsync(path, xml.ToString(), TestContext.Current.CancellationToken);
+        return path;
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task CommittedTrustedExemptionsSurviveEditingAnotherSourceInTheSameProject(bool duplicateAnonymous)
@@ -484,7 +618,7 @@ public sealed class PolicyCheckIntegrationTests
     private static async Task<(string Locator, RunManifest Manifest, ManifestContext Context,
         List<ManifestInput> Inputs, Dictionary<string, ImmutableArray<byte>> Bytes)> CreateBundle(
         string repository, string projectLogical, string policyLogical, string assemblyPath,
-        string bundleDirectory, string? baseRevision = null, string? coveragePath = null)
+        string bundleDirectory, string? baseRevision = null, string? coveragePath = null, string[]? scopedSources = null)
     {
         var project = Path.Combine(repository, projectLogical.Replace('/', Path.DirectorySeparatorChar));
         var projectDirectory = Path.GetDirectoryName(project)!;
@@ -530,7 +664,7 @@ public sealed class PolicyCheckIntegrationTests
         var scope = ImmutableArray.Create(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
         {
             version = 1,
-            sources = inputs.Where(item => !item.Generated)
+            sources = scopedSources ?? inputs.Where(item => !item.Generated)
                 .Select(item => item.RepositoryPath).ToArray()
         })));
         var policyBytes = await File.ReadAllBytesAsync(Path.Combine(repository,
