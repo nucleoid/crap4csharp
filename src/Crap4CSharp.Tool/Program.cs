@@ -408,8 +408,10 @@ internal static class App
         }
         else if (options.Command == "analyze" && !options.SyntaxOnly)
             throw new ArgumentException("analyze requires either --reuse-artifacts or --syntax-only.");
-        if (options.Command == "analyze" && options.SyntaxOnly && options.Project is not null)
-            throw new ArgumentException("--project is not available with analyze --syntax-only.");
+        if (options.Command == "analyze" && options.SyntaxOnly &&
+            (options.Project is not null || options.Policy is not null || options.Base is not null ||
+             seen.Contains("--timeout-seconds")))
+            throw new ArgumentException("--project, --policy, --base, and --timeout-seconds are not available with analyze --syntax-only.");
         return options;
     }
 
