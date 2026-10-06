@@ -805,14 +805,118 @@ public sealed class PolicyCheckIntegrationTests
         Assert.Equal(stamp, File.GetLastWriteTimeUtc(source));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CommittedPolicyRevalidatesSharedLogicalNamesAcrossProjectsAndFrameworks(bool multiFramework)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-multi-context-policy");
+        var projects = multiFramework ? new[] { "Api/Api.csproj" } : new[] { "Api/Api.csproj", "Worker/Worker.csproj" };
+        var frameworks = multiFramework ? new[] { "net10.0", "netstandard2.1" } : new[] { "net10.0" };
+        var sourceText = await File.ReadAllTextAsync(Path.Combine(RepositoryRoot(),
+            "tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs"), TestContext.Current.CancellationToken);
+        fixture.Write(".gitignore", "**/bin/\n**/obj/\nbundle*/\ncandidate.json\n");
+        for (var index = 0; index < projects.Length; index++)
+        {
+            fixture.Write(projects[index], "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFrameworks>" +
+                string.Join(';', frameworks) + "</TargetFrameworks><AssemblyName>Crap4CSharp.ProvenanceFixture</AssemblyName>" +
+                "<DebugType>portable</DebugType><LangVersion>latest</LangVersion><IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>" +
+                "</PropertyGroup></Project>");
+            fixture.Write(Path.GetDirectoryName(projects[index])!.Replace('\\', '/') + "/CompiledEvidence.cs",
+                sourceText + (index == 0 ? "\n// API input\n" : "\n// Worker input differs\n"));
+        }
+        fixture.Write("policy.json", JsonSerializer.Serialize(new
+        {
+            schemaVersion = RepositoryPolicy.Version, mode = "strict", productionProjects = projects,
+            testProjects = projects, configuration = BuildConfiguration, targetFrameworks = frameworks,
+            scope = "all", threshold = 0, missingCoverage = "fail", requiredChecks = new[] { "tests", "coverage", "crap" },
+            exclusions = Array.Empty<string>(), ruleset = ComplexityRules.CallablesV1, exemptionFiles = Array.Empty<string>()
+        }));
+        foreach (var args in new[] { new[] { "init", "--quiet" }, new[] { "config", "user.email", "fixture@example.invalid" },
+            new[] { "config", "user.name", "Fixture" }, new[] { "add", "." }, new[] { "commit", "--quiet", "-m", "reviewed multi-context consumer" } })
+        {
+            var git = await ProcessRunner.RunAsync("git", args, fixture.Path, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            Assert.True(git.ExitCode == 0, git.StandardError);
+        }
+        var manifests = new List<RunManifest>();
+        var allBytes = new Dictionary<string, ImmutableArray<byte>>(StringComparer.Ordinal);
+        foreach (var projectLogical in projects)
+        {
+            var projectPath = Path.Combine(fixture.Path, projectLogical);
+            var restore = await ProjectBuildPreparation.RestoreAsync(projectPath, TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+            Assert.True(restore.ExitCode == 0, restore.StandardOutput + restore.StandardError);
+            foreach (var framework in frameworks)
+            {
+                var build = await ProjectBuildPreparation.BuildAsync(projectPath, BuildConfiguration, framework, "AnyCPU",
+                    TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+                Assert.True(build.ExitCode == 0, build.StandardOutput + build.StandardError);
+                var prefix = "context-" + manifests.Count + "/";
+                var (_, manifest, _, _, bytes) = await CreateBundle(fixture.Path, projectLogical, "policy.json",
+                    Path.Combine(Path.GetDirectoryName(projectPath)!, "bin", BuildConfiguration, framework, "Crap4CSharp.ProvenanceFixture.dll"),
+                    Path.Combine(fixture.Path, "bundle-" + manifests.Count), targetFramework: framework);
+                // Real compiled PE/PDB and committed inputs; TRX, test-module and coverage remain
+                // explicit adapter controls, not a real test runner/collector acceptance claim.
+                foreach (var pair in bytes.Where(pair => !pair.Key.StartsWith("evaluation/", StringComparison.Ordinal)))
+                    allBytes.Add(prefix + pair.Key, pair.Value);
+                manifests.Add(manifest with
+                {
+                    Contexts = manifest.Contexts.Select(context => context with { Inputs = context.Inputs.Select(input =>
+                        input with { Locator = prefix + input.Locator }).ToArray() }).ToArray(),
+                    Builds = manifest.Builds.Select(item => item with { Id = prefix + item.Id }).ToArray(),
+                    Executions = manifest.Executions.Select(item => item with { Id = prefix + item.Id, BuildId = prefix + item.BuildId }).ToArray(),
+                    Artifacts = manifest.Artifacts.Select(item => item with { Id = prefix + item.Id, Locator = prefix + item.Locator,
+                        BuildId = item.BuildId is null ? null : prefix + item.BuildId,
+                        ExecutionId = item.ExecutionId is null ? null : prefix + item.ExecutionId }).ToArray()
+                });
+            }
+        }
+        var combined = manifests[0] with
+        {
+            Contexts = manifests.SelectMany(item => item.Contexts).ToArray(),
+            Builds = manifests.SelectMany(item => item.Builds).ToArray(),
+            Executions = manifests.SelectMany(item => item.Executions).ToArray(),
+            Artifacts = manifests.SelectMany(item => item.Artifacts.Where(artifact => artifact.ContextId is not null)).ToArray()
+        };
+        var scope = ImmutableArray.Create(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { version = 1,
+            sources = combined.Contexts.SelectMany(context => context.Inputs.Where(input => input.Role == "source" && !input.Generated))
+                .Select(input => input.RepositoryPath).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray() })));
+        var policyBytes = ImmutableArray.Create(RepositoryPolicyParser.Parse(await File.ReadAllBytesAsync(
+            Path.Combine(fixture.Path, "policy.json"), TestContext.Current.CancellationToken), "policy.json").CanonicalBytes);
+        allBytes.Add("evaluation/scope.json", scope);
+        allBytes.Add("evaluation/policy.json", policyBytes);
+        combined = combined with { Artifacts = [.. combined.Artifacts,
+            new ManifestArtifact("scope", "scope", "evaluation/scope.json", scope.Length, CanonicalIdentity.Sha256(scope.AsSpan()), null, null, null, "json", null),
+            new ManifestArtifact("policy", "policy", "evaluation/policy.json", policyBytes.Length, CanonicalIdentity.Sha256(policyBytes.AsSpan()), null, null, null, "json", null)],
+            EvaluationInputs = new ManifestEvaluationInputs(CanonicalIdentity.Sha256(scope.AsSpan()), CanonicalIdentity.Sha256(policyBytes.AsSpan()), null, null) };
+        var observed = CurrentEvidenceAdapter.Capture(combined, fixture.Path);
+        combined = combined with { Revision = combined.Revision with { RepositoryIdentity = observed.RepositoryIdentity,
+            WorkspaceIdentity = observed.WorkspaceIdentity, Head = observed.Head, ScopeHead = observed.Head, StateHash = observed.StateHash } };
+        var locator = ArtifactCaptureAdapter.PublishNew(combined, allBytes, Path.Combine(fixture.Path, "bundle-combined"));
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var exit = await global::App.RunAsync(["check", "--reuse-artifacts", locator, "--policy", "policy.json",
+            "--base", "HEAD", "--format", "json"], fixture.Path, output, error, TestContext.Current.CancellationToken);
+        Assert.True(exit == 2, error + Environment.NewLine + output);
+        using var result = JsonDocument.Parse(output.ToString());
+        Assert.Equal("verified", result.RootElement.GetProperty("evaluation").GetProperty("provenance").GetProperty("status").GetString());
+        var candidateOutput = new StringWriter();
+        var candidateError = new StringWriter();
+        var candidateExit = await global::App.RunAsync(["baseline", "create", "--policy", "policy.json", "--reuse-artifacts", locator,
+            "--output", "candidate.json", "--format", "json"], fixture.Path, candidateOutput, candidateError, TestContext.Current.CancellationToken);
+        Assert.True(candidateExit == 2, candidateError + Environment.NewLine + candidateOutput);
+        var candidate = BaselineDocument.Parse(await File.ReadAllBytesAsync(Path.Combine(fixture.Path, "candidate.json"), TestContext.Current.CancellationToken));
+        Assert.NotEmpty(candidate.Entries);
+    }
+
     private static async Task<(string Locator, RunManifest Manifest, ManifestContext Context,
         List<ManifestInput> Inputs, Dictionary<string, ImmutableArray<byte>> Bytes)> CreateBundle(
         string repository, string projectLogical, string policyLogical, string assemblyPath,
-        string bundleDirectory, string? baseRevision = null, string? coveragePath = null, string[]? scopedSources = null)
+        string bundleDirectory, string? baseRevision = null, string? coveragePath = null, string[]? scopedSources = null,
+        string targetFramework = "net10.0")
     {
         var project = Path.Combine(repository, projectLogical.Replace('/', Path.DirectorySeparatorChar));
         var projectDirectory = Path.GetDirectoryName(project)!;
-        var request = new ProjectContextLoadRequest(project, BuildConfiguration, "AnyCPU", ["net10.0"], true, true,
+        var request = new ProjectContextLoadRequest(project, BuildConfiguration, "AnyCPU", [targetFramework], true, true,
             TimeSpan.FromMinutes(2));
         var loaded = await ProjectContextLoader.LoadAsync(request, TestContext.Current.CancellationToken);
         Assert.True(loaded.Success, loaded.FailureReason ?? string.Join(Environment.NewLine, loaded.Diagnostics));
