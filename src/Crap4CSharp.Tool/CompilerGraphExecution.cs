@@ -35,6 +35,16 @@ internal static class CompilerGraphExecution
         return results;
     }
 
+    internal static async Task<CompilerGraphPhaseResult> RunPhasedAsync(ProjectContextLoadRequest request,
+        ProjectContextLoadResult loaded,
+        Func<ProjectBuildGraphNode, CancellationToken, Task<CompilerObservation>> build,
+        CancellationToken token,
+        Func<ProjectContextLoadRequest, CancellationToken, Task<ProjectContextLoadResult>>? reload = null)
+    {
+        var observations = await RunAsync(loaded, build, token);
+        return new(loaded, observations); // RED seam: final rediscovery/reconciliation not implemented yet.
+    }
+
     private static IReadOnlyList<ProjectBuildGraphNode> ValidateAndFreeze(ProjectContextLoadResult loaded)
     {
         if (!loaded.Success || loaded.BuildGraph.Count == 0 || loaded.BuildGraph.Count > 4096)
@@ -118,3 +128,5 @@ internal static class CompilerGraphExecution
 
     private static ProjectContextException Refuse(string message) => new("compiler.graphInvalid", message);
 }
+
+internal sealed record CompilerGraphPhaseResult(ProjectContextLoadResult FinalGraph, IReadOnlyList<CompilerObservation> Observations);

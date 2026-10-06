@@ -351,6 +351,74 @@ public sealed class CompilerGraphExecutionTests
         Assert.DoesNotContain("evaluatedIntermediateDirectory", publicJson, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("failed-loader")]
+    [InlineData("missing-node")]
+    [InlineData("globals")]
+    [InlineData("dependency")]
+    [InlineData("test-flag")]
+    [InlineData("language")]
+    [InlineData("symbols")]
+    [InlineData("target")]
+    [InlineData("authored-membership")]
+    public async Task FinalReloadCannotChangeFrozenGraphOrAuthoredMembership(string defect)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-final-graph");
+        var loaded = Valid(fixture.Path);
+        var request = new ProjectContextLoadRequest(loaded.BuildGraph[1].ProjectPath, "Release", "AnyCPU", ["net10.0"], false, false, TimeSpan.FromMinutes(2));
+        var final = loaded;
+        var nodes = loaded.BuildGraph.ToArray();
+        var context = loaded.Contexts[1];
+        if (defect == "failed-loader") final = loaded with { Success = false, FailureReason = "context.failed" };
+        if (defect == "missing-node") final = loaded with { BuildGraph = [nodes[0]] };
+        if (defect == "globals") final = loaded with { BuildGraph = [nodes[0], nodes[1] with { GlobalProperties = new Dictionary<string,string> { ["Flavor"] = "RIGHT" } }] };
+        if (defect == "dependency") final = loaded with { BuildGraph = [nodes[0], nodes[1] with { Dependencies = [] }] };
+        if (defect == "test-flag") final = loaded with { GraphContexts = [loaded.GraphContexts[0], loaded.GraphContexts[1] with { IsTestProject = false }] };
+        if (defect == "language") context = context with { LanguageVersion = LanguageVersion.CSharp12 };
+        if (defect == "symbols") context = context with { PreprocessorSymbols = ["OTHER"] };
+        if (defect == "target") context = context with { EvaluatedTargetPath = Path.Combine(fixture.Path, "redirect", "Root.dll") };
+        if (defect == "authored-membership") context = context with { PhaseInputs = [.. context.PhaseInputs, new(fixture.Write("added.cs", "class Added {}"), "source", false)] };
+        if (context != loaded.Contexts[1]) final = loaded with { Contexts = [loaded.Contexts[0], context], GraphContexts = [loaded.GraphContexts[0], loaded.GraphContexts[1] with { Context = context }] };
+        var launches = new List<string>();
+        var reloads = 0;
+        var error = await Assert.ThrowsAsync<ProjectContextException>(() => CompilerGraphExecution.RunPhasedAsync(request, loaded,
+            (node, _) => { launches.Add(node.Id); return Task.FromResult(new CompilerObservation(node.ProjectPath, [])); },
+            TestContext.Current.CancellationToken, (actualRequest, _) =>
+            {
+                Assert.Equal(request, actualRequest);
+                reloads++;
+                return Task.FromResult(final);
+            }));
+        Assert.Equal(defect == "authored-membership" ? "compiler.inputsMutated" : "compiler.graphChanged", error.Reason);
+        Assert.Equal(new[] { "dependency", "root" }, launches);
+        Assert.Equal(1, reloads);
+    }
+
+    [Fact]
+    public async Task FinalReloadUsesFrozenRequestAndAcceptsGeneratedContextIdentityTransition()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-final-graph-control");
+        var loaded = Valid(fixture.Path);
+        var frameworks = new List<string> { "net10.0" };
+        var request = new ProjectContextLoadRequest(loaded.BuildGraph[1].ProjectPath, "Release", "AnyCPU", frameworks, false, false, TimeSpan.FromMinutes(2));
+        var contexts = loaded.Contexts.Select(c => c with { ContextId = c.ContextId + "-final" }).ToArray();
+        var final = loaded with { Contexts = contexts, GraphContexts = loaded.GraphContexts.Select((b,i) => b with { Context = contexts[i] }).ToArray() };
+        var reloads = 0;
+        var result = await CompilerGraphExecution.RunPhasedAsync(request, loaded,
+            (node, _) => { frameworks.Clear(); return Task.FromResult(new CompilerObservation(node.ProjectPath, [])); },
+            TestContext.Current.CancellationToken, (actualRequest, token) =>
+            {
+                Assert.Equal(new[] { "net10.0" }, actualRequest.Frameworks);
+                Assert.Equal(request.Target, actualRequest.Target);
+                Assert.Equal(TestContext.Current.CancellationToken, token);
+                reloads++;
+                return Task.FromResult(final);
+            });
+        Assert.Equal(1, reloads);
+        Assert.Same(final, result.FinalGraph);
+        Assert.Equal(2, result.Observations.Count);
+    }
+
     private static ProjectContextLoadResult Valid(string root)
     {
         var contexts = new[] { Context(Path.Combine(root, "Dependency.csproj")), Context(Path.Combine(root, "Root.csproj")) };
