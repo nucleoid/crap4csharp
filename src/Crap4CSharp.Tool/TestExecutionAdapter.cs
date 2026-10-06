@@ -3,7 +3,10 @@ namespace Crap4CSharp.Core;
 // Raw invocation observations only. Neither exit zero nor artifact filenames establish
 // successful tests, coverage provenance or reusable binding. The caller owes those gates.
 internal sealed record TestInvocationObservation(string GraphId, string ProjectPath,
-    string ResultsDirectory, LoggedProcessResult Process);
+    string ResultsDirectory, LoggedProcessResult Process)
+{
+    internal TestChildObservation? ChildBuild { get; init; }
+}
 
 // Raw process outcomes remain distinct from evidence failures. Passing tests followed
 // by drift are completed observations, never an accepted verification result.
@@ -85,7 +88,9 @@ internal static class TestExecutionAdapter
                 var logs = Path.Combine(entry, "logs");
                 Directory.CreateDirectory(resultDirectory); Directory.CreateDirectory(logs);
                 var sdk = await ProjectContextLoader.ResolveSdkAsync(Path.GetDirectoryName(launch.Node.ProjectPath)!, timeout, token);
-                var arguments = launch.Arguments.Concat(new[] { "--logger", "trx;LogFileName=tests.trx", "--results-directory", resultDirectory,
+                var childLog = Path.Combine(logs, "test-child.binlog");
+                if (childLog.IndexOfAny([';', ',']) >= 0) throw Refuse("Test-child logger paths with delimiters are unsupported.");
+                var arguments = launch.Arguments.Concat(new[] { "-bl:" + childLog + ";ProjectImports=None", "--logger", "trx;LogFileName=tests.trx", "--results-directory", resultDirectory,
                     "--collect", "XPlat Code Coverage", "--", "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover",
                     "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.IncludeTestAssembly=" +
                         (launch.IncludeTests ? "true" : "false") }).ToArray();
@@ -94,6 +99,10 @@ internal static class TestExecutionAdapter
                 var process = await ProcessRunner.RunLoggedAsync(sdk.HostPath, arguments, Path.GetDirectoryName(launch.Node.ProjectPath)!, timeout, token, logs);
                 results.Add(new(launch.Node.Id, launch.Node.ProjectPath, resultDirectory, process));
                 outcomes[launch.Index] = new(launch.Node.Id, process.ExitCode == 0 ? "completed" : "failed", resultDirectory, logs, process);
+                if (!OperatingSystem.IsWindows() && File.Exists(childLog)) File.SetUnixFileMode(childLog, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                var observed = await TestChildEvidence.ReadAsync(childLog, launch.Node.ProjectPath, timeout, token);
+                results[^1] = results[^1] with { ChildBuild = observed };
+                TestChildEvidence.Validate(observed, process);
                 proof?.ValidateCurrent(token);
             }
             catch (Exception error) when (IsOperational(error))

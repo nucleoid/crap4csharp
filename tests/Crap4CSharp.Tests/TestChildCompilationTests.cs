@@ -6,9 +6,10 @@ namespace Crap4CSharp.Tests;
 public sealed class TestChildCompilationTests
 {
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task ActualVSTestChildRequiresIndependentObservedNoCompilation(bool compileInsideTest)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task ActualVSTestChildRequiresIndependentObservedNoCompilation(bool compileInsideTest, bool unsupportedHook)
     {
         using var fixture = TestDirectory.Create("crap4csharp-test-child-compilation");
         var project = fixture.Write("Tests.csproj", """
@@ -26,8 +27,11 @@ public sealed class TestChildCompilationTests
             <MSBuild Projects="$(MSBuildProjectFullPath)" Targets="Build" BuildInParallel="false"
                 Properties="BuildProjectReferences=false;UseSharedCompilation=false;VSTestNoBuild=true" />
             <Touch Files="$(MSBuildProjectDirectory)/Tests.cs" Time="$(OriginalSourceClock)" />
-            </Target></Project>
-            """.Replace("COMPILE", compileInsideTest ? "true" : "false", StringComparison.Ordinal));
+            </Target>
+            <Target Name="UnsupportedTestHook" BeforeTargets="VSTest" Condition="'$(DesignTimeBuild)' != 'true' and 'HOOK' == 'true'">
+            <Exec Command="echo unsupported-hook" /></Target></Project>
+            """.Replace("COMPILE", compileInsideTest ? "true" : "false", StringComparison.Ordinal)
+                .Replace("HOOK", unsupportedHook ? "true" : "false", StringComparison.Ordinal));
         var source = fixture.Write("Tests.cs", "using Xunit; public class Once { [Fact] public void Pass() { Assert.True(true); } }");
         var originalSource = File.ReadAllBytes(source); var originalClock = File.GetLastWriteTimeUtc(source);
         File.WriteAllText(project, File.ReadAllText(project).Replace("ORIGINALCLOCK",
@@ -59,8 +63,14 @@ public sealed class TestChildCompilationTests
         Assert.Equal(compileInsideTest ? 2 : 1, File.ReadAllLines(Path.Combine(fixture.Path, "compile-target-count.txt")).Length);
         if (compileInsideTest)
             Assert.Equal("test.compilationObserved", Assert.IsType<ProjectContextException>(run.Failure).Reason);
+        else if (unsupportedHook) Assert.Equal("test.executionHookUnsupported", Assert.IsType<ProjectContextException>(run.Failure).Reason);
         else Assert.Null(run.Failure);
-        // After genuine RED: inspect the new attached actual child observation and assert
-        // one mapped VSTest task, actual Csc count 1/0, and bounded owned raw log identity.
+        var observed = Assert.IsType<TestChildObservation>(run[0].ChildBuild);
+        Assert.Equal(compileInsideTest ? 1 : 0, observed.CompilerTasks);
+        Assert.Equal(1, observed.VSTestTasks);
+        Assert.True(observed.BuildSucceeded);
+        if (unsupportedHook) { Assert.True(observed.UnsupportedTasks > 0); Assert.Contains("Exec", observed.UnsupportedDetail!); }
+        using var binlog = File.OpenRead(Path.Combine(run.Outcomes.Single().LogDirectory!, "test-child.binlog"));
+        Assert.Equal(observed.BinlogSha256, Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(binlog)).ToLowerInvariant());
     }
 }
