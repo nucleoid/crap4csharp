@@ -93,7 +93,22 @@ public sealed class CompilerInputBindingTests
         var observed = Assert.Single(phase.Observations);
         Assert.Contains(context.CompilerDocuments, d => d.IsGenerated);
         Assert.Contains(observed.Parameters, p => p.Name == "AdditionalFiles" && p.Items.Count > 0);
-        if (variant == "ordinary") CompilerInputBinding.Validate(context, observed, TestContext.Current.CancellationToken);
+        if (variant == "ordinary")
+        {
+            CompilerOutputBinding.Validate(context, observed, TestContext.Current.CancellationToken);
+            Assert.Equal(File.ReadAllBytes(observed.Assembly!.Path), File.ReadAllBytes(context.EvaluatedTargetPath!));
+            Assert.Equal(File.ReadAllBytes(observed.Pdb!.Path), File.ReadAllBytes(Path.ChangeExtension(context.EvaluatedTargetPath!, ".pdb")));
+            Assert.Contains(context.CompilerDocuments, d => d.ResolvedPath!.EndsWith("Added.cs", StringComparison.Ordinal) && !d.IsGenerated);
+            // Actual SDK Csc observation plus final Workspace; no-sequence-point Added.cs
+            // is still required by the complete Sources gate. Target-copy mutation is real.
+            var target = context.EvaluatedTargetPath!;
+            var saved = File.ReadAllBytes(target);
+            File.AppendAllText(target, "copy changed");
+            Assert.Equal("compiler.outputsUnproven", Assert.Throws<ProjectContextException>(() =>
+                CompilerOutputBinding.Validate(context, observed, TestContext.Current.CancellationToken)).Reason);
+            File.WriteAllBytes(target, saved);
+            CompilerOutputBinding.Validate(context, observed, TestContext.Current.CancellationToken);
+        }
         else
         {
             var error = Assert.Throws<ProjectContextException>(() => CompilerInputBinding.Validate(context, observed, TestContext.Current.CancellationToken));
