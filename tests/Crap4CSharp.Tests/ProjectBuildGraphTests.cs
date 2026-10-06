@@ -53,6 +53,36 @@ public sealed class ProjectBuildGraphTests
         }
     }
 
+    [Fact]
+    public async Task MultiFrameworkDependencyNegotiationIsExplicitRatherThanFlattened()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-graph-frameworks");
+        var dependency = fixture.Write("Dependency/Dependency.csproj", Project().Replace(
+            "<TargetFramework>net10.0</TargetFramework>", "<TargetFrameworks>netstandard2.1;net10.0</TargetFrameworks>"));
+        var root = fixture.Write("Root/Root.csproj", Project("<ItemGroup><ProjectReference Include=\"../Dependency/Dependency.csproj\" /></ItemGroup>"));
+        var result = await Discover(root);
+        Assert.True(result.Success, result.FailureReason + ": " + string.Join(" | ", result.Diagnostics));
+        Assert.All(result.BuildGraph, node => Assert.False(string.IsNullOrWhiteSpace(node.TargetFramework)));
+        var rootNode = Assert.Single(result.BuildGraph, node => node.ProjectPath == root);
+        Assert.NotEmpty(rootNode.Dependencies);
+        Assert.All(rootNode.Dependencies, id => Assert.Contains(result.BuildGraph,
+            node => node.Id == id && node.ProjectPath == dependency && node.TargetFramework == "net10.0"));
+    }
+
+    [Fact]
+    public async Task IdenticalSharedDependencyIsScheduledOnce()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-graph-identical");
+        var dependency = fixture.Write("Dependency/Dependency.csproj", Project());
+        fixture.Write("Left/Left.csproj", Project("<ItemGroup><ProjectReference Include=\"../Dependency/Dependency.csproj\" /></ItemGroup>"));
+        fixture.Write("Right/Right.csproj", Project("<ItemGroup><ProjectReference Include=\"../Dependency/Dependency.csproj\" /></ItemGroup>"));
+        var root = fixture.Write("Root/Root.csproj", Project("<ItemGroup><ProjectReference Include=\"../Left/Left.csproj\" /><ProjectReference Include=\"../Right/Right.csproj\" /></ItemGroup>"));
+        var result = await Discover(root);
+        Assert.True(result.Success, result.FailureReason + ": " + string.Join(" | ", result.Diagnostics));
+        Assert.Equal(4, result.BuildGraph.Count);
+        Assert.Single(result.BuildGraph, node => node.ProjectPath == dependency);
+    }
+
     private static Task<ProjectContextLoadResult> Discover(string root) => ProjectContextLoader.DiscoverGraphAsync(
         new(root, "Release", "AnyCPU", [], true, false, TimeSpan.FromMinutes(2)), TestContext.Current.CancellationToken);
 
