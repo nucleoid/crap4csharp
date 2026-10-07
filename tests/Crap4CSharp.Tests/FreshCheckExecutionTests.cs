@@ -100,8 +100,12 @@ public sealed class FreshCheckExecutionTests
     public Task PublicStrictMetricViolationRetainsSuccessfulOnceTestsAndCompleteNonReusableReplay()
         => RunCase(false, false, policyScope: "all", local: true, thresholdViolation: true);
 
+    [Fact]
+    public Task CompletedFreshEvidenceReusesRequiredTestsWithoutRestoreCompileOrTestAndPreservesDecisions()
+        => RunCase(false, false, policyScope: "all", completedReuse: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -140,7 +144,7 @@ public sealed class FreshCheckExecutionTests
                 (outputMutation == "source" ? "Authored.cs" : "Rules.json") +
                 "\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); ") +
             (partialDrift ? "var p = System.IO.Path.GetFullPath(\"../../../../Library/Code.cs\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); " : "") +
-            (priorBuild || measure || thresholdViolation ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
+            (priorBuild || measure || thresholdViolation || completedReuse ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
             "Assert.Equal(" + (failing ? "99" : "42") + ", " + (emptyEligible ? "42" : hasGenerated ? "Extra.Value" : "Library.Value") + "); } }");
         fixture.Write("policy.json", """
             {"schemaVersion":"repository-policy-v1","mode":"strict","productionProjects":["Library/Library.csproj"],
@@ -526,6 +530,31 @@ public sealed class FreshCheckExecutionTests
                     c => c.GetProperty("reason").GetString() == "output.notWritten");
                 File.WriteAllText(projectPath, projectText);
                 return;
+            }
+            if (completedReuse)
+            {
+                var testCounter = Assert.Single(Directory.GetFiles(Path.Combine(fixture.Path, "Tests", "bin"), "test-count.txt", SearchOption.AllDirectories));
+                Assert.Single(File.ReadAllLines(testCounter));
+                var locator = Assert.Single(terminal.RootElement.GetProperty("run").GetProperty("artifacts").EnumerateArray(),
+                    a => a.GetProperty("kind").GetString() == "manifest").GetProperty("path").GetString()!;
+                var reusedOutput = new StringWriter(); var reusedErrors = new StringWriter();
+                var reusedExit = await global::App.RunAsync(["check", "--reuse-artifacts", locator, "--policy", "policy.json",
+                    "--base", "HEAD", "--format", "json"], fixture.Path, reusedOutput, reusedErrors, token);
+                // A reused check must never silently fall back to fresh consumer execution,
+                // including when the currently supported recipe refuses this real capture.
+                Assert.Single(File.ReadAllLines(testCounter));
+                Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library", "build-count.txt")));
+                Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "build-count.txt")));
+                Assert.True(reusedExit == 0, reusedErrors + Environment.NewLine + reusedOutput);
+                using var reused = JsonDocument.Parse(reusedOutput.ToString());
+                var freshEvaluation = terminal.RootElement.GetProperty("evaluation");
+                var reusedEvaluation = reused.RootElement.GetProperty("evaluation");
+                Assert.Equal(freshEvaluation.GetProperty("metrics").GetRawText(), reusedEvaluation.GetProperty("metrics").GetRawText());
+                Assert.Equal(freshEvaluation.GetProperty("findings").GetRawText(), reusedEvaluation.GetProperty("findings").GetRawText());
+                Assert.Equal(freshEvaluation.GetProperty("decision").GetProperty("policyDecision").GetString(),
+                    reusedEvaluation.GetProperty("decision").GetProperty("policyDecision").GetString());
+                Assert.True(reusedEvaluation.GetProperty("decision").GetProperty("completed").GetBoolean());
+                Assert.Equal("verified", reusedEvaluation.GetProperty("provenance").GetProperty("status").GetString());
             }
             if (priorBuild)
             {
