@@ -285,6 +285,8 @@ public sealed class FreshCheckExecutionTests
                 measuredCapture = captured;
                 var planArtifact = captured.Manifest.Artifacts.Single(a => a.Kind == CompletedTestPlanRecipe.Kind);
                 var selectedRoot = ProjectTargetSelector.Select(fixture.Path, request.Project);
+                Assert.Equal(selectedRoot, CompletedTestPlanRecipe.ResolveSelectedRoot(
+                    captured.Bytes[planArtifact.Locator].ToArray(), fixture.Path, token));
                 var reloadRequest = new ProjectContextLoadRequest(selectedRoot, preflight.Policy.Configuration, "AnyCPU",
                     preflight.Policy.TargetFrameworks.ToArray(), false, false, request.Timeout);
                 var currentGraph = await ProjectContextLoader.LoadGraphAsync(reloadRequest, token);

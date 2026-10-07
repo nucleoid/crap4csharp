@@ -249,6 +249,17 @@ public sealed class TestExecutionPlanTests
     [InlineData("malformed")]
     [InlineData("oversized")]
     [InlineData("cancelled")]
+    [InlineData("provider")]
+    [InlineData("attested")]
+    [InlineData("reusable")]
+    [InlineData("unknown")]
+    [InlineData("null-locator")]
+    [InlineData("typed-locator")]
+    [InlineData("colon")]
+    [InlineData("dot")]
+    [InlineData("empty-segment")]
+    [InlineData("directory")]
+    [InlineData("oversized-locator")]
     public void SavedRootSelectorIsBoundedAndResolvedIndependentlyOfScoredProjects(string change)
     {
         using var directory = TestDirectory.Create("crap4csharp-saved-root");
@@ -261,12 +272,25 @@ public sealed class TestExecutionPlanTests
         var bytes = Assert.IsType<byte[]>(Recipe("Capture", plan, directory.Path, selected, TestContext.Current.CancellationToken));
         var saved = System.Text.Json.Nodes.JsonNode.Parse(bytes)!.AsObject();
         if (change == "missing") File.Delete(selected);
+        if (change == "directory") { File.Delete(selected); Directory.CreateDirectory(selected); }
+        if (change == "provider") saved["provider"] = "unsupported-provider";
+        if (change == "attested") saved["completedTestsAttested"] = true;
+        if (change == "reusable") saved["reusableRecipe"] = true;
+        if (change == "unknown") saved["command"] = "do-not-execute";
+        if (change == "null-locator") saved["selectedRootLocator"] = null;
+        if (change == "typed-locator") saved["selectedRootLocator"] = 42;
+        if (change == "colon") saved["selectedRootLocator"] = "C:Root.csproj";
+        if (change == "dot") saved["selectedRootLocator"] = "./Root.csproj";
+        if (change == "empty-segment") saved["selectedRootLocator"] = "Nested//Root.csproj";
+        if (change == "oversized-locator") saved["selectedRootLocator"] = new string('x', 4097) + ".csproj";
         if (change == "traversal") saved["selectedRootLocator"] = "../Root.csproj";
         if (change == "absolute") saved["selectedRootLocator"] = selected;
         if (change == "backslash") saved["selectedRootLocator"] = "Nested\\Consumer.csproj";
         if (change == "extension") saved["selectedRootLocator"] = "Root.targets";
         if (change == "identity") saved["selectedRoot"] = new string('0', 64);
-        if (change is "traversal" or "absolute" or "backslash" or "extension" or "identity")
+        if (change is "traversal" or "absolute" or "backslash" or "extension" or "identity" or
+            "provider" or "attested" or "reusable" or "unknown" or "null-locator" or "typed-locator" or
+            "colon" or "dot" or "empty-segment" or "oversized-locator")
             bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(saved);
         if (change == "duplicate") bytes = System.Text.Encoding.UTF8.GetBytes(System.Text.Encoding.UTF8.GetString(bytes)
             .Replace("{", "{\"selectedRootLocator\":\"Root.csproj\",", StringComparison.Ordinal));
@@ -281,6 +305,45 @@ public sealed class TestExecutionPlanTests
         else Assert.Equal("provenance.completedTestPlanMismatch", Assert.Throws<PolicyException>(() =>
             Recipe("ResolveSelectedRoot", bytes, root, cancellation.Token)).Code);
     }
+
+    public static bool IsLinux => OperatingSystem.IsLinux();
+
+    [Theory(Skip = "Linux saved-root special-file acceptance", SkipUnless = nameof(IsLinux))]
+    [InlineData("fifo")]
+    [InlineData("file-link")]
+    [InlineData("parent-link")]
+    public void SavedRootRefusesSpecialFilesAndReparseComponentsBeforeAnyOpening(string kind)
+    {
+        using var directory = TestDirectory.Create("crap4csharp-saved-root-special");
+        var plan = Freeze(Discovery(Valid(directory.Path)), Valid(directory.Path));
+        var selected = Path.Combine(directory.Path, "Nested", "Root.csproj");
+        Directory.CreateDirectory(Path.GetDirectoryName(selected)!);
+        File.WriteAllText(selected, "<Project />");
+        var bytes = Assert.IsType<byte[]>(Recipe("Capture", plan, directory.Path, selected, TestContext.Current.CancellationToken));
+        if (kind == "fifo")
+        {
+            File.Delete(selected);
+            Assert.Equal(0, MkFifo(selected, Convert.ToUInt32("600", 8)));
+        }
+        else if (kind == "file-link")
+        {
+            var target = Path.Combine(directory.Path, "Actual.csproj");
+            File.Move(selected, target);
+            File.CreateSymbolicLink(selected, target);
+        }
+        else
+        {
+            var nested = Path.GetDirectoryName(selected)!;
+            var target = Path.Combine(directory.Path, "Actual");
+            Directory.Move(nested, target);
+            Directory.CreateSymbolicLink(nested, target);
+        }
+        Assert.Equal("provenance.completedTestPlanMismatch", Assert.Throws<PolicyException>(() =>
+            Recipe("ResolveSelectedRoot", bytes, directory.Path, TestContext.Current.CancellationToken)).Code);
+    }
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "mkfifo", SetLastError = true)]
+    private static extern int MkFifo([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, uint mode);
 
     private static object? Recipe(string name, params object[] args)
     {

@@ -57,7 +57,7 @@ internal static class CompletedTestPlanRecipe
                 testSdk = r.TestSdkVersion, collector = r.CollectorVersion };
         }).ToArray();
         var bytes = JsonSerializer.SerializeToUtf8Bytes(new { provider = Provider, workspace = PathKey(root),
-            selectedRoot = PathKey(selector), graph, runners, completedTestsAttested = false, reusableRecipe = false });
+            selectedRoot = PathKey(selector), selectedRootLocator = RootLocator(root, selector), graph, runners, completedTestsAttested = false, reusableRecipe = false });
         if (bytes.Length > MaximumBytes) throw Refuse();
         token.ThrowIfCancellationRequested();
         return bytes;
@@ -72,6 +72,59 @@ internal static class CompletedTestPlanRecipe
         if (bytes is null || bytes.Length > MaximumBytes ||
             !bytes.AsSpan().SequenceEqual(Capture(current, workspaceRoot, selectedRoot, token))) throw Refuse();
         token.ThrowIfCancellationRequested();
+    }
+
+    // Resolves only a bounded current filesystem selector, NOT completed evidence.
+    // Before using its graph, callers still owe exact Validate and every compiler,
+    // test, artifact and coverage gate. Never infer roots from scored contexts.
+    internal static string ResolveSelectedRoot(byte[] bytes, string workspaceRoot, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        try
+        {
+            if (bytes is null || bytes.Length == 0 || bytes.Length > MaximumBytes ||
+                Path.GetFullPath(workspaceRoot) != workspaceRoot) throw Refuse();
+            using var document = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 8 });
+            var value = document.RootElement;
+            if (value.ValueKind != JsonValueKind.Object) throw Refuse();
+            var fields = new HashSet<string>(["provider", "workspace", "selectedRoot", "selectedRootLocator",
+                "graph", "runners", "completedTestsAttested", "reusableRecipe"], StringComparer.Ordinal);
+            foreach (var property in value.EnumerateObject())
+                if (!fields.Remove(property.Name)) throw Refuse();
+            if (fields.Count != 0 || value.GetProperty("provider").GetString() != Provider ||
+                value.GetProperty("workspace").GetString() != PathKey(workspaceRoot) ||
+                value.GetProperty("completedTestsAttested").GetBoolean() || value.GetProperty("reusableRecipe").GetBoolean()) throw Refuse();
+            var relative = value.GetProperty("selectedRootLocator").GetString();
+            if (string.IsNullOrWhiteSpace(relative) || relative.Length > 4096 || relative.Contains(':') ||
+                CanonicalIdentity.NormalizeLogicalPath(relative) != relative) throw Refuse();
+            var selector = Path.GetFullPath(Path.Combine(workspaceRoot, relative.Replace('/', Path.DirectorySeparatorChar)));
+            if (!Inside(workspaceRoot, selector) || RootLocator(workspaceRoot, selector) != relative ||
+                value.GetProperty("selectedRoot").GetString() != PathKey(selector) || !ArtifactBundle.IsRegularInput(selector)) throw Refuse();
+            // Check every selected path component, including the current root. A
+            // repository-relative declaration cannot authorize a reparse escape.
+            var path = selector;
+            while (true)
+            {
+                token.ThrowIfCancellationRequested();
+                if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw Refuse();
+                if (PathIdentityPolicy.Current.Comparer.Equals(path, workspaceRoot)) break;
+                path = Path.GetDirectoryName(path) ?? throw Refuse();
+            }
+            token.ThrowIfCancellationRequested();
+            return selector;
+        }
+        catch (Exception error) when (error is JsonException or InvalidOperationException or ArgumentException or
+            IOException or UnauthorizedAccessException or NotSupportedException)
+        { throw Refuse(); }
+    }
+
+    private static string RootLocator(string root, string selector)
+    {
+        var extension = Path.GetExtension(selector);
+        if (!new[] { ".csproj", ".sln", ".slnx" }.Contains(extension, StringComparer.OrdinalIgnoreCase)) throw Refuse();
+        var relative = Path.GetRelativePath(root, selector).Replace(Path.DirectorySeparatorChar, '/');
+        if (relative.Length > 4096 || relative.Contains(':') || CanonicalIdentity.NormalizeLogicalPath(relative) != relative) throw Refuse();
+        return relative;
     }
 
     private static bool Inside(string root, string path) => path.StartsWith(
