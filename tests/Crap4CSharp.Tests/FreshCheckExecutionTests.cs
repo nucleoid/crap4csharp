@@ -120,8 +120,12 @@ public sealed class FreshCheckExecutionTests
     public Task SavedSharedCoverageCannotUseAnotherRequiredInvocationToExcuseMissingModuleEvidence()
         => RunCase(false, true, standaloneTest: true, savedCoverage: true, sharedCoverage: true);
 
+    [Fact]
+    public Task SavedProductionExecutionsBindExactCurrentReachabilityAndRequiredArtifactBytes()
+        => RunCase(false, true, standaloneTest: true, savedCoverage: true, productionAgreement: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -385,6 +389,41 @@ public sealed class FreshCheckExecutionTests
                         try { return method.Invoke(null, [candidate, currentPlan, currentCompiler, fixture.Path, token])!; }
                         catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
                         { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw; }
+                    }
+                    if (productionAgreement)
+                    {
+                        var gate = typeof(App).Assembly.GetType("Crap4CSharp.Core.SavedProductionExecutions")?.GetMethod("Validate",
+                            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                        Assert.NotNull(gate);
+                        void Agree(ArtifactBundle candidate)
+                        {
+                            try { gate.Invoke(null, [candidate, currentPlan, currentCompiler, fixture.Path, token]); }
+                            catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
+                            { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); }
+                        }
+                        void Reject(RunManifest changed)
+                            => Assert.Equal("provenance.savedProductionExecutionsUnproven", Assert.Throws<PolicyException>(() =>
+                                Agree(bundle with { Manifest = ManifestIdentity.Seal(changed) })).Code);
+                        Agree(bundle);
+                        var originalExecution = Assert.Single(bundle.Manifest.Executions);
+                        Reject(bundle.Manifest with { Executions = [] });
+                        Reject(bundle.Manifest with { Executions = [originalExecution with { Id = "foreign-execution" }] });
+                        Reject(bundle.Manifest with { Executions = [originalExecution with { TestProject = "Independent/Independent.csproj" }] });
+                        Reject(bundle.Manifest with { Executions = [originalExecution with { TestMvid = Guid.NewGuid().ToString() }] });
+                        Reject(bundle.Manifest with { Executions = [originalExecution with { PassedTests = originalExecution.PassedTests + 1 }] });
+                        Reject(bundle.Manifest with { Builds = bundle.Manifest.Builds.Select(b => b with { Id = "foreign-build" }).ToArray() });
+                        var coverage = bundle.Manifest.Artifacts.Single(a => a.Kind == "coverage");
+                        // Genuine same-shaped normalized module, but visits differ from
+                        // the all-required saved report. Resealing is not agreement.
+                        var xml = TestResultBinding.Parse(bundle.Bytes[coverage.Locator]);
+                        xml.Descendants("SequencePoint").First().SetAttributeValue("vc", "999");
+                        var changedBytes = System.Collections.Immutable.ImmutableArray.Create(System.Text.Encoding.UTF8.GetBytes(xml.ToString()));
+                        var hash = CanonicalIdentity.Sha256(changedBytes.AsSpan()); var locator = "inputs/" + hash + ".bin";
+                        var changedBundle = bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Artifacts = bundle.Manifest.Artifacts.Select(a =>
+                            a.Id == coverage.Id ? a with { Locator = locator, Length = changedBytes.Length, Sha256 = hash } : a).ToArray() }),
+                            Bytes = new Dictionary<string, System.Collections.Immutable.ImmutableArray<byte>>(bundle.Bytes) { [locator] = changedBytes } };
+                        Assert.Equal("provenance.savedProductionExecutionsUnproven", Assert.Throws<PolicyException>(() => Agree(changedBundle)).Code);
+                        Agree(bundle);
                     }
                     var accepted = Assert.IsType<BoundSavedGraphCoverage>(Validate(bundle));
                     Assert.Equal(currentPlan.Tests.Select(t => t.GraphId), accepted.Invocations.Select(i => i.GraphId));
