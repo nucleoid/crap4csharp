@@ -234,6 +234,54 @@ public sealed class TestExecutionPlanTests
         else Assert.Equal("provenance.completedTestPlanMismatch", Assert.Throws<PolicyException>(() => Recipe("Validate", bytes, newPlan, root, selector, cancellation.Token)).Code);
     }
 
+    [Theory]
+    [InlineData("same")]
+    [InlineData("solution")]
+    [InlineData("nested")]
+    [InlineData("missing")]
+    [InlineData("traversal")]
+    [InlineData("absolute")]
+    [InlineData("backslash")]
+    [InlineData("extension")]
+    [InlineData("identity")]
+    [InlineData("workspace")]
+    [InlineData("duplicate")]
+    [InlineData("malformed")]
+    [InlineData("oversized")]
+    [InlineData("cancelled")]
+    public void SavedRootSelectorIsBoundedAndResolvedIndependentlyOfScoredProjects(string change)
+    {
+        using var directory = TestDirectory.Create("crap4csharp-saved-root");
+        var loaded = Valid(directory.Path);
+        var plan = Freeze(Discovery(loaded), loaded);
+        var relative = change == "solution" ? "Consumer.slnx" : change == "nested" ? "Nested/Consumer.csproj" : "Root.csproj";
+        var selected = Path.Combine(directory.Path, relative.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(selected)!);
+        File.WriteAllText(selected, "<Project />");
+        var bytes = Assert.IsType<byte[]>(Recipe("Capture", plan, directory.Path, selected, TestContext.Current.CancellationToken));
+        var saved = System.Text.Json.Nodes.JsonNode.Parse(bytes)!.AsObject();
+        if (change == "missing") File.Delete(selected);
+        if (change == "traversal") saved["selectedRootLocator"] = "../Root.csproj";
+        if (change == "absolute") saved["selectedRootLocator"] = selected;
+        if (change == "backslash") saved["selectedRootLocator"] = "Nested\\Consumer.csproj";
+        if (change == "extension") saved["selectedRootLocator"] = "Root.targets";
+        if (change == "identity") saved["selectedRoot"] = new string('0', 64);
+        if (change is "traversal" or "absolute" or "backslash" or "extension" or "identity")
+            bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(saved);
+        if (change == "duplicate") bytes = System.Text.Encoding.UTF8.GetBytes(System.Text.Encoding.UTF8.GetString(bytes)
+            .Replace("{", "{\"selectedRootLocator\":\"Root.csproj\",", StringComparison.Ordinal));
+        if (change == "malformed") bytes = [123];
+        if (change == "oversized") bytes = new byte[256 * 1024 + 1];
+        var root = change == "workspace" ? Path.GetDirectoryName(directory.Path)! : directory.Path;
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        if (change == "cancelled") cancellation.Cancel();
+        if (change is "same" or "solution" or "nested")
+            Assert.Equal(selected, Assert.IsType<string>(Recipe("ResolveSelectedRoot", bytes, root, cancellation.Token)));
+        else if (change == "cancelled") Assert.Throws<OperationCanceledException>(() => Recipe("ResolveSelectedRoot", bytes, root, cancellation.Token));
+        else Assert.Equal("provenance.completedTestPlanMismatch", Assert.Throws<PolicyException>(() =>
+            Recipe("ResolveSelectedRoot", bytes, root, cancellation.Token)).Code);
+    }
+
     private static object? Recipe(string name, params object[] args)
     {
         var type = typeof(ProjectContextLoader).Assembly.GetType("Crap4CSharp.Core.CompletedTestPlanRecipe");
