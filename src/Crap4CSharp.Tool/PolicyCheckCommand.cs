@@ -371,7 +371,7 @@ internal static class PolicyCheckCommand
     private static string RepositorySourcePath(RunManifest manifest, string contextId, string logicalPath)
     {
         var context = manifest.Contexts.Single(item => item.Id == contextId);
-        var input = context.Inputs.Single(item => item.Role == "source" && !item.Generated &&
+        var input = context.Inputs.Single(item => item.Role == "source" && (!item.Generated || context.IncludeGenerated) &&
             item.LogicalPath == logicalPath);
         return CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input);
     }

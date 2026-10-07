@@ -96,19 +96,20 @@ internal static class FreshManifestCapture
                 Microsoft.CodeAnalysis.MetadataReference.CreateFromImage(bytes[i.Locator])).ToArray();
             var analysis = new CallableAnalysisContext(RepositoryPath(binding.ProjectPath), context.TargetFramework, context.Configuration,
                 context.Platform, binding.GraphId, context.ParseOptions);
-            foreach (var source in inputs.Where(i => i.Role == "compiler-source" && !i.Generated))
+            foreach (var source in inputs.Where(i => i.Role == "compiler-source" && (!i.Generated || context.ExclusionPolicy.IncludeGenerated)))
                 if (CallableInventory.Analyze(CapturedSource.Create(source.LogicalPath, bytes[source.Locator].AsSpan()).Text,
                     source.LogicalPath, analysis, metadataReferences, syntax).Callables.Any(c => c.Applicability == CallableApplicability.Applicable))
                     throw new PolicyException("coverage.pdbUnavailable", "An authored callable has no independently bound PDB document; it cannot be silently omitted or labelled N/A.");
             var compilerSources = inputs.Where(i => i.Role is "source" or "compiler-source")
                 .Select(i => CapturedSource.Create(i.LogicalPath, bytes[i.Locator].AsSpan())).ToArray();
-            var eligibleSources = inputs.Where(i => i.Role is "source" or "compiler-source" && !i.Generated)
+            var eligibleSources = inputs.Where(i => (i.Role is "source" or "compiler-source") && (!i.Generated || context.ExclusionPolicy.IncludeGenerated))
                 .Select(i => CapturedSource.Create(i.LogicalPath, bytes[i.Locator].AsSpan())).ToArray();
             var semanticEmpty = !SemanticEligibility.HasApplicable(eligibleSources, compilerSources, analysis, metadataReferences);
             var captured = new ManifestContext(binding.GraphId, RepositoryPath(binding.ProjectPath), context.TargetFramework,
                 context.Configuration, context.Platform, "", "", "", true, false, inputs)
             {
                 CoverageApplicability = semanticEmpty ? "semantic-empty" : null,
+                IncludeGenerated = context.ExclusionPolicy.IncludeGenerated,
                 ParseOptions = new(inspected.LanguageVersion, context.SourceKind.ToString(), inspected.PreprocessorSymbols,
                     context.ParseOptions.Features.ToDictionary(p => p.Key, p => p.Value, StringComparer.Ordinal)),
                 PathPolicy = new(OperatingSystem.IsWindows() ? "insensitive" : "sensitive",
@@ -188,7 +189,7 @@ internal static class FreshManifestCapture
             Artifact("test-closure-" + test.GraphId, "test-compiler-input-closure", ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(new
                 { provider = "validated-csc-inputs-v1", project = RepositoryPath(test.ProjectPath), inputs = identities, reusableRecipe = false })), format: "json");
         }
-        var available = contexts.SelectMany(c => c.Inputs.Where(i => i.Role == "source" && !i.Generated)
+        var available = contexts.SelectMany(c => c.Inputs.Where(i => i.Role == "source" && (!i.Generated || c.IncludeGenerated))
             .Select(i => i.RepositoryPath!)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         var selected = preflight.Scope is null || preflight.Scope.Completeness == ScopeCompleteness.ContextIncomplete ? available :
             preflight.Scope.Files.Select(f => f.NewPath).Where(p => p is not null && available.Contains(p, StringComparer.Ordinal))

@@ -67,6 +67,8 @@ public sealed record ManifestContext(string Id, string Project, string TargetFra
     public ManifestPathPolicy? PathPolicy { get; init; }
     public ManifestCurrentRevalidation? CurrentRevalidation { get; init; }
     public string? CoverageApplicability { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public bool IncludeGenerated { get; init; }
 }
 public sealed record ManifestCurrentRevalidation(string Provider, string Project, string AssemblyPath, string PdbPath)
 {
@@ -139,6 +141,9 @@ public static class ManifestIdentity
             CanonicalIdentity.Tuple("parse-options", parse.LanguageVersion, parse.SourceKind),
             CanonicalIdentity.Tuple("path-policy", paths.CasePolicy)
         };
+        if (context.CoverageApplicability is not null)
+            values.Add(CanonicalIdentity.Tuple("semantic-coverage-applicability-v1", context.CoverageApplicability));
+        if (context.IncludeGenerated) values.Add(CanonicalIdentity.Tuple("include-generated-v1", "true"));
         values.AddRange(parse.PreprocessorSymbols.Select(value => CanonicalIdentity.Tuple("preprocessor-symbol", value)));
         values.AddRange(parse.Features.Select(pair => CanonicalIdentity.Tuple("parse-feature", pair.Key, pair.Value)));
         values.AddRange(paths.ReportRootMappings.Select(mapping =>
@@ -170,6 +175,8 @@ public static class ManifestIdentity
             CanonicalIdentity.Tuple("context", value.Id, value.Project, value.TargetFramework, value.Configuration,
                 value.Platform, value.SourceSetHash, value.ContextHash, value.InputClosureHash,
                 value.ActualCompilerBindingComplete.ToString(), value.ReuseRecipeComplete.ToString())));
+        values.AddRange(manifest.Contexts.Where(value => value.IncludeGenerated).Select(value =>
+            CanonicalIdentity.Tuple("include-generated-v1", value.Id, "true")));
         values.AddRange(manifest.Contexts.Where(value => value.CoverageApplicability is not null).Select(value =>
             CanonicalIdentity.Tuple("semantic-coverage-applicability-v1", value.Id, value.CoverageApplicability)));
         values.AddRange(manifest.Contexts.Where(value => value.CurrentRevalidation is not null).Select(value =>

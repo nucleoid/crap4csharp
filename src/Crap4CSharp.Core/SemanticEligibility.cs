@@ -17,7 +17,7 @@ public static class SemanticEligibility
             var inputs = context.Inputs.Where(i => i.Role is "source" or "compiler-source").ToArray();
             if (inputs.Length == 0) return false;
             var captured = inputs.Select(i => CapturedSource.Create(i.LogicalPath, bytes[i.Locator].AsSpan())).ToArray();
-            var eligible = inputs.Where(i => !i.Generated).Select(i => CapturedSource.Create(i.LogicalPath, bytes[i.Locator].AsSpan())).ToArray();
+            var eligible = inputs.Where(i => !i.Generated || context.IncludeGenerated).Select(i => CapturedSource.Create(i.LogicalPath, bytes[i.Locator].AsSpan())).ToArray();
             var references = context.Inputs.Where(i => i.Role == "reference").Select(i => MetadataReference.CreateFromImage(bytes[i.Locator])).ToArray();
             return !HasApplicable(eligible, captured, new(context.Project,context.TargetFramework,context.Configuration,context.Platform,context.Id,parse),references);
         }

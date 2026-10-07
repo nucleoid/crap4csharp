@@ -12,8 +12,6 @@ internal static class FreshCheckCommand
         var preflight = await FreshCheckPreflightLoader.LoadAsync(request, root, token);
         // Generated eligibility needs an explicit replay/scope contract, not the
         // historical generated-input filter. Refuse before metadata/restore/build.
-        if (request.Overrides.IncludeGenerated == true)
-            throw new PolicyException("check.generatedEligibilityIncomplete", "Generated-inclusive fresh evaluation is not supported yet; no restore/build/test was launched.");
         var evidence = await FreshCheckExecution.RunAsync(preflight, token);
         if (evidence.Tests.Failure is not null || evidence.Tests.Count != evidence.Plan.Tests.Count || evidence.Tests.Any(t => t.Process.ExitCode != 0))
             return FreshFailureResult.Create(evidence, started, elapsed.Elapsed);
