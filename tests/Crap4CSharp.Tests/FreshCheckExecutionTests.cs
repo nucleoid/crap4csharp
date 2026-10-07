@@ -144,6 +144,16 @@ public sealed class FreshCheckExecutionTests
             {
                 Assert.NotEmpty(bundle.Manifest.Executions);
                 Assert.DoesNotContain(bundle.Manifest.Artifacts, a => a.Kind == "coverage");
+                Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(bundle.Manifest, bundle.Bytes).Status);
+                var hidden = System.Collections.Immutable.ImmutableArray.Create(System.Text.Encoding.UTF8.GetBytes(
+                    "#line hidden\npublic static class Hidden { public static int M() => 42; }"));
+                var forgedBytes = bundle.Bytes.ToDictionary(p => p.Key, p => p.Value);
+                forgedBytes.Add("inputs/hidden.cs", hidden);
+                var oldContext = bundle.Manifest.Contexts.Single();
+                var forged = ManifestIdentity.Seal(bundle.Manifest with { Contexts = [oldContext with { Inputs = [.. oldContext.Inputs,
+                    new ManifestInput("compiler-source", "Hidden.cs", "inputs/hidden.cs", hidden.Length,
+                        CanonicalIdentity.Sha256(hidden.AsSpan()), "utf-8", false) { RepositoryPath = "Library/Hidden.cs" }] }] });
+                Assert.Equal(ProvenanceStatus.Invalid, ProvenanceVerifier.VerifyCapture(forged, forgedBytes).Status);
                 var checks = terminal.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray().ToArray();
                 Assert.Contains(checks, c => c.GetProperty("name").GetString() == "testExecution" && c.GetProperty("status").GetString() == "pass");
                 Assert.Contains(checks, c => c.GetProperty("name").GetString() == "coverage" && c.GetProperty("status").GetString() == "notApplicable");

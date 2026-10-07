@@ -100,11 +100,15 @@ internal static class FreshManifestCapture
                 if (CallableInventory.Analyze(CapturedSource.Create(source.LogicalPath, bytes[source.Locator].AsSpan()).Text,
                     source.LogicalPath, analysis, metadataReferences, syntax).Callables.Any(c => c.Applicability == CallableApplicability.Applicable))
                     throw new PolicyException("coverage.pdbUnavailable", "An authored callable has no independently bound PDB document; it cannot be silently omitted or labelled N/A.");
-            if (!inputs.Any(i => i.Role == "source"))
-                throw new PolicyException("check.emptyCaptureIncomplete", "Empty eligible/PDB-document capture requires independently validated N/A support; no bundle was published.");
+            var compilerSources = inputs.Where(i => i.Role is "source" or "compiler-source")
+                .Select(i => CapturedSource.Create(i.LogicalPath, bytes[i.Locator].AsSpan())).ToArray();
+            var eligibleSources = inputs.Where(i => i.Role is "source" or "compiler-source" && !i.Generated)
+                .Select(i => CapturedSource.Create(i.LogicalPath, bytes[i.Locator].AsSpan())).ToArray();
+            var semanticEmpty = !SemanticEligibility.HasApplicable(eligibleSources, compilerSources, analysis, metadataReferences);
             var captured = new ManifestContext(binding.GraphId, RepositoryPath(binding.ProjectPath), context.TargetFramework,
                 context.Configuration, context.Platform, "", "", "", true, false, inputs)
             {
+                CoverageApplicability = semanticEmpty ? "semantic-empty" : null,
                 ParseOptions = new(inspected.LanguageVersion, context.SourceKind.ToString(), inspected.PreprocessorSymbols,
                     context.ParseOptions.Features.ToDictionary(p => p.Key, p => p.Value, StringComparer.Ordinal)),
                 PathPolicy = new(OperatingSystem.IsWindows() ? "insensitive" : "sensitive",
@@ -118,7 +122,13 @@ internal static class FreshManifestCapture
                 inspected.Mvid, CanonicalIdentity.Sha256(pdb.AsSpan()), inspected.DebugIdentity));
             Artifact(buildId + "-pe", "assembly", assembly, binding.GraphId, buildId);
             Artifact(buildId + "-pdb", "pdb", pdb, binding.GraphId, buildId);
-            foreach (var report in execution.Coverage.Invocations.Where(r => r.Modules.Any(m => m.GraphId == binding.GraphId)))
+            bool Reaches(string id, HashSet<string> seen)
+            {
+                if (id == binding.GraphId) return true;
+                if (!seen.Add(id)) return false;
+                return graph.BuildGraph.Single(n => n.Id == id).Dependencies.Any(d => Reaches(d, seen));
+            }
+            foreach (var report in execution.Coverage.Invocations.Where(r => Reaches(r.GraphId, new(StringComparer.Ordinal))))
             {
                 var invocation = execution.Tests.Single(t => t.GraphId == report.GraphId);
                 var testContext = bindings[report.GraphId].Context; var testObservation = observations[invocation.ProjectPath];
@@ -139,8 +149,9 @@ internal static class FreshManifestCapture
                 Artifact(id + "-trx", "test-result", trx, binding.GraphId, buildId, id, "trx");
                 Artifact(id + "-pe", "test-assembly", testPe, binding.GraphId, buildId, id);
                 Artifact(id + "-pdb", "test-pdb", testPdb, binding.GraphId, buildId, id);
-                Artifact(id + "-coverage", "coverage", report.Modules.Single(m => m.GraphId == binding.GraphId).LineProjection,
-                    binding.GraphId, buildId, id, "opencover", "line");
+                if (!semanticEmpty)
+                    Artifact(id + "-coverage", "coverage", report.Modules.Single(m => m.GraphId == binding.GraphId).LineProjection,
+                        binding.GraphId, buildId, id, "opencover", "line");
                 Artifact(id + "-child", "test-child-build", TestChildEvidenceExport.Capture(invocation,
                     execution.Tests.Outcomes.Single(o => o.GraphId == report.GraphId), cancellation), binding.GraphId, buildId, id, "json");
             }

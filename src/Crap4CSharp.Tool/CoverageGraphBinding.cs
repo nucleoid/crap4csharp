@@ -105,6 +105,25 @@ internal static class CoverageGraphBinding
                 var bytes = ImmutableArray.Create(System.Text.Encoding.UTF8.GetBytes(singleModule.ToString(SaveOptions.DisableFormatting)));
                 stage = "coverage-reader";
                 var methods = CoverageReader.Read(bytes.AsSpan(), "coverage.opencover.xml");
+                if (rawMethods.Length == 0)
+                {
+                    // Actual Coverlet can emit a named empty module. It is not zero
+                    // coverage: accept only independently empty executable inventory.
+                    if (files.Length != 0 || module.Descendants("SequencePoint").Any()) throw Refuse();
+                    var capturedSources = context.CompilerDocuments.Select(d =>
+                    {
+                        var content = CompilerOutputBinding.Read(d.ResolvedPath!, ref total, token);
+                        if (CanonicalIdentity.Sha256(content.AsSpan()) != d.ContentIdentity) throw Refuse();
+                        return CapturedSource.Create(d.LogicalPath, content.AsSpan());
+                    }).ToArray();
+                    var eligiblePaths = context.Sources.Select(s => s.LogicalPath).ToHashSet(StringComparer.Ordinal);
+                    var references = observations[bindings[selected.Id].ProjectPath].Parameters.Single(p => p.Name == "References").Items
+                        .Select(p => Microsoft.CodeAnalysis.MetadataReference.CreateFromImage(CompilerOutputBinding.Read(p, ref total, token))).ToArray();
+                    if (SemanticEligibility.HasApplicable(capturedSources.Where(s => eligiblePaths.Contains(s.LogicalPath)).ToArray(),
+                        capturedSources, new CallableAnalysisContext(context.ProjectPath, context.TargetFramework, context.Configuration,
+                            context.Platform, selected.Id, context.ParseOptions), references)) throw Refuse();
+                    continue; // Do not manufacture coverage/module token observations.
+                }
                 if (methods.Count != rawMethods.Length || methods.Count == 0) throw Refuse();
                 stage = "method-validation";
                 for (var i = 0; i < rawMethods.Length; i++)

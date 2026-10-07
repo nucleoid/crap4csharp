@@ -66,6 +66,7 @@ public sealed record ManifestContext(string Id, string Project, string TargetFra
     public ManifestParseOptions? ParseOptions { get; init; }
     public ManifestPathPolicy? PathPolicy { get; init; }
     public ManifestCurrentRevalidation? CurrentRevalidation { get; init; }
+    public string? CoverageApplicability { get; init; }
 }
 public sealed record ManifestCurrentRevalidation(string Provider, string Project, string AssemblyPath, string PdbPath)
 {
@@ -169,6 +170,8 @@ public static class ManifestIdentity
             CanonicalIdentity.Tuple("context", value.Id, value.Project, value.TargetFramework, value.Configuration,
                 value.Platform, value.SourceSetHash, value.ContextHash, value.InputClosureHash,
                 value.ActualCompilerBindingComplete.ToString(), value.ReuseRecipeComplete.ToString())));
+        values.AddRange(manifest.Contexts.Where(value => value.CoverageApplicability is not null).Select(value =>
+            CanonicalIdentity.Tuple("semantic-coverage-applicability-v1", value.Id, value.CoverageApplicability)));
         values.AddRange(manifest.Contexts.Where(value => value.CurrentRevalidation is not null).Select(value =>
             CanonicalIdentity.Tuple("current-revalidation", value.Id, value.CurrentRevalidation!.Provider,
                 value.CurrentRevalidation.Project, value.CurrentRevalidation.AssemblyPath,
@@ -354,7 +357,12 @@ public static class ProvenanceVerifier
                 artifact.ContextId == context.Id).ToArray();
             if (contextBuilds.Length == 0) reasons.Add(ProvenanceReasonCodes.BuildEvidenceMissing);
             if (contextExecutions.Length == 0) reasons.Add(ProvenanceReasonCodes.TestExecutionIncomplete);
-            if (contextCoverage.Length == 0 || context.Inputs.All(input => input.Role != "source"))
+            if (context.CoverageApplicability is not (null or "semantic-empty") ||
+                context.CoverageApplicability != "semantic-empty" &&
+                (contextCoverage.Length == 0 || context.Inputs.All(input => input.Role != "source")))
+                reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
+            if (context.CoverageApplicability == "semantic-empty" &&
+                (contextCoverage.Length != 0 || context.ReuseRecipeComplete))
                 reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
             if (context.Inputs.Where(input => input.Role == "source").Any(input =>
                     !string.Equals(input.Encoding, "utf-8", StringComparison.OrdinalIgnoreCase)))
@@ -408,7 +416,13 @@ public static class ProvenanceVerifier
                     !context.ParseOptions.PreprocessorSymbols.Order(StringComparer.Ordinal)
                         .SequenceEqual(inspected.PreprocessorSymbols, StringComparer.Ordinal))
                     reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
-                else inspectedBuilds[build.Id] = inspected;
+                else
+                {
+                    if (context.CoverageApplicability == "semantic-empty" &&
+                        !SemanticEligibility.ValidateEmptyCaptured(context, artifactBytes))
+                        reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
+                    inspectedBuilds[build.Id] = inspected;
+                }
             }
             catch (InvalidDataException) { reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete); }
             catch (ArgumentException) { reasons.Add(ProvenanceReasonCodes.InvalidLocator); }

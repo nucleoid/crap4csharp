@@ -62,6 +62,11 @@ internal static class AnalyzeCommand
                 var groups = manifest.Artifacts.Where(item => item.Kind == "coverage" && item.ContextId == context.Id)
                     .GroupBy(item => item.BuildId!, StringComparer.Ordinal)
                     .OrderBy(group => group.Key, StringComparer.Ordinal).ToArray();
+                if (context.CoverageApplicability == "semantic-empty")
+                {
+                    partitions.Add(EmptyPartition(context.Id, context));
+                    continue; // independently validated source inventory, never inferred zero coverage
+                }
                 foreach (var group in groups)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
