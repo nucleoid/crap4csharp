@@ -9,7 +9,8 @@ internal sealed record FreshExecutionEvidence(FreshCheckPreflight Preflight, Che
 
 internal static class FreshCheckExecution
 {
-    internal static async Task<FreshExecutionEvidence> RunAsync(FreshCheckPreflight preflight, CancellationToken cancellationToken)
+    internal static async Task<FreshExecutionEvidence> RunAsync(FreshCheckPreflight preflight, CancellationToken cancellationToken,
+        Action<FreshFailureOutputProof>? retainFailureOutputProof = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var priorBundle = preflight.Request.NoBuild
@@ -44,6 +45,9 @@ internal static class FreshCheckExecution
         var plan = CheckExecutionPlan.Create(runners, loaded, token);
         RequirePolicyTargets(preflight, plan.PreparedGraph);
         ProtectPreparedDestinations(preflight, plan.PreparedGraph);
+        if (preflight.Request.Output is not null)
+            retainFailureOutputProof?.Invoke(new FreshFailureOutputProof(preflight, request, plan.PreparedGraph,
+                priorBundle is null ? [] : priorBundle.ResolvedInputs.Append(priorBundle.ManifestPath).ToArray()));
         var priorObservations = priorBundle is null ? null : FreshPriorBuild.Load(priorBundle, plan.PreparedGraph, preflight.Root, token);
         var owned = Directory.CreateTempSubdirectory("crap4csharp-fresh-private-").FullName;
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(owned, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);

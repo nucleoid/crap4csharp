@@ -4,14 +4,14 @@ using Crap4CSharp.Core;
 internal static class FreshCheckCommand
 {
     internal static async Task<ResultDocument> RunAsync(FreshCheckRequest request, string root, DateTimeOffset started,
-        CancellationToken cancellation)
+        CancellationToken cancellation, Action<FreshFailureOutputProof>? retainFailureOutputProof = null)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         deadline.CancelAfter(request.Timeout);
         var elapsed = Stopwatch.StartNew();
         try
         {
-            return await RunCoreAsync(request, root, started, elapsed, cancellation, deadline);
+            return await RunCoreAsync(request, root, started, elapsed, cancellation, deadline, retainFailureOutputProof);
         }
         catch (OperationCanceledException) when (!cancellation.IsCancellationRequested && deadline.IsCancellationRequested)
         {
@@ -20,13 +20,13 @@ internal static class FreshCheckCommand
     }
 
     private static async Task<ResultDocument> RunCoreAsync(FreshCheckRequest request, string root,
-        DateTimeOffset started, Stopwatch elapsed, CancellationToken cancellation, CancellationTokenSource deadline)
+        DateTimeOffset started, Stopwatch elapsed, CancellationToken cancellation, CancellationTokenSource deadline, Action<FreshFailureOutputProof>? retainFailureOutputProof)
     {
         var token = deadline.Token;
         var preflight = await FreshCheckPreflightLoader.LoadAsync(request, root, token);
         // Trusted generated eligibility is retained in hash-bound capture/replay
         // metadata without relabeling physical generated inputs as authored.
-        var evidence = await FreshCheckExecution.RunAsync(preflight, token);
+        var evidence = await FreshCheckExecution.RunAsync(preflight, token, retainFailureOutputProof);
         if (evidence.Tests.Failure is not null || evidence.Tests.Count != evidence.Plan.Tests.Count || evidence.Tests.Any(t => t.Process.ExitCode != 0))
         {
             var failure = FreshFailureResult.Create(evidence, started, elapsed.Elapsed,

@@ -214,6 +214,7 @@ internal static class App
         var startedAt = DateTimeOffset.UtcNow;
         var stopwatch = Stopwatch.StartNew();
         ModernOptions? options = null;
+        FreshFailureOutputProof? failureOutputProof = null;
         try
         {
             options = ParseModern(args, out options);
@@ -227,7 +228,8 @@ internal static class App
                         Frameworks: options.Frameworks.Count == 0 ? null : options.Frameworks,
                         Configuration: options.Configuration, ExemptionFile: options.Exemptions,
                         IncludeTests: options.IncludeTests, IncludeGenerated: options.IncludeGenerated), options.Timeout);
-                freshResult = await FreshCheckCommand.RunAsync(request, workingDirectory, startedAt, cancellationToken);
+                freshResult = await FreshCheckCommand.RunAsync(request, workingDirectory, startedAt, cancellationToken,
+                    proof => failureOutputProof = proof);
             }
             // Fresh execution has already materialized the graceful cancellation
             // terminal, including actual completed/interrupted/not-run contexts.
@@ -325,6 +327,15 @@ internal static class App
             if (args[0] == "check" && (options?.ReuseArtifacts is null) &&
                 !args.Contains("--reuse-artifacts", StringComparer.Ordinal) && !contextFreeArgumentFailure)
                 mayWrite = false;
+            if (!protectedAliasFailure && destination is not null && failureOutputProof is not null)
+            {
+                try
+                {
+                    await failureOutputProof.ValidateAsync();
+                    mayWrite = true;
+                }
+                catch (Exception aliasException) when (IsHandled(aliasException)) { mayWrite = false; }
+            }
             if (destination is not null && !mayWrite)
                 result = result with
                 {
