@@ -26,7 +26,7 @@ public sealed class FreshCancellationOutcomeTests
                 """);
             fixture.Write(name + "/Tests.cs", "using Xunit; public class Once { [Fact] public void Test() { Assert.Equal(42, Dependency.Value); " +
                 "System.IO.File.AppendAllText(" + JsonSerializer.Serialize(order) + ", " + JsonSerializer.Serialize(name + "\n") + "); " +
-                (name == "Second" ? "System.IO.File.WriteAllText(" + JsonSerializer.Serialize(ready) + ", \"ready\"); System.Threading.Thread.Sleep(System.Threading.Timeout.Infinite); " : "") + "} }");
+                "if (System.IO.File.ReadAllLines(" + JsonSerializer.Serialize(order) + ").Length == 2) { System.IO.File.WriteAllText(" + JsonSerializer.Serialize(ready) + ", \"ready\"); System.Threading.Thread.Sleep(System.Threading.Timeout.Infinite); } } }");
         }
         fixture.Write("Root/Root.csproj", """
             <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
@@ -61,7 +61,9 @@ public sealed class FreshCancellationOutcomeTests
             try { await observer; } catch (OperationCanceledException) when (observerStop.IsCancellationRequested) { }
         }
         Assert.True(File.Exists(ready), output.ToString());
-        Assert.Equal(new[] { "First", "Second" }, File.ReadAllLines(order));
+        var launched = File.ReadAllLines(order);
+        Assert.Equal(2, launched.Length);
+        Assert.Equal(2, launched.Distinct(StringComparer.Ordinal).Count());
         Assert.Equal(1, exit);
         using var json = JsonDocument.Parse(output.ToString());
         var run = json.RootElement.GetProperty("run");
@@ -70,6 +72,8 @@ public sealed class FreshCancellationOutcomeTests
         Assert.Equal("run.cancelled", json.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("reason").GetString());
         var outcomes = run.GetProperty("testOutcomes").EnumerateArray().ToArray();
         Assert.Equal(3, outcomes.Length);
+        Assert.Equal(launched, outcomes.Take(2).Select(o => Path.GetFileNameWithoutExtension(o.GetProperty("project").GetString())));
+        Assert.DoesNotContain(Path.GetFileNameWithoutExtension(outcomes[2].GetProperty("project").GetString()), launched);
         Assert.Equal(new[] { "completed", "failed", "not-run" }, outcomes.Select(o => o.GetProperty("status").GetString()));
         Assert.Equal(0, outcomes[0].GetProperty("exitCode").GetInt32());
         Assert.Equal(JsonValueKind.Null, outcomes[1].GetProperty("exitCode").ValueKind);
