@@ -18,6 +18,12 @@ public sealed class FreshCheckExecutionTests
     public Task ColdExecutionCoordinatorPreservesActualOnceBuildsAndRawFailedTests(bool failing)
         => RunCase(failing, true);
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task NoChangedIncrementalScopeStillExecutesRequiredTestsAndReportsCrapNAOnlyAfterSuccess(bool failing)
+        => RunCase(failing, false, scopedEmpty: true);
+
     [Fact]
     public Task SemanticEmptyProductionStillRunsRequiredTestsAndReportsExplicitNA()
         => RunCase(false, false, true);
@@ -55,7 +61,7 @@ public sealed class FreshCheckExecutionTests
             policyScope: scope, granularity: granularity);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -90,6 +96,17 @@ public sealed class FreshCheckExecutionTests
             """.Replace("\"ruleset\":\"callables-v1\"", includeGenerated ?
                 "\"ruleset\":\"callables-v1\",\"allowedOverrides\":{\"includeGenerated\":true}" : "\"ruleset\":\"callables-v1\"", StringComparison.Ordinal)
                 .Replace("\"scope\":\"base\"", "\"scope\":\"" + policyScope + "\"", StringComparison.Ordinal));
+        if (scopedEmpty)
+        {
+            var policyPath = Path.Combine(fixture.Path, "policy.json");
+            var text = File.ReadAllText(policyPath).Replace("\"mode\":\"strict\"", "\"mode\":\"incremental\",\"baseline\":\"baseline.json\"", StringComparison.Ordinal);
+            File.WriteAllText(policyPath, text);
+            var parsed = RepositoryPolicyParser.Parse(System.Text.Encoding.UTF8.GetBytes(text), "policy.json");
+            var compatibility = TrustedPolicyLoader.BoundCompatibilityHash(parsed, new Dictionary<string, byte[]>());
+            File.WriteAllBytes(Path.Combine(fixture.Path, "baseline.json"), BaselineDocument.Serialize(
+                new BaselineDocument(BaselineDocument.Version, ComplexityRules.CallablesV1, compatibility,
+                    new string('a', 64), "fixture-adoption", [])));
+        }
         fixture.Write(".gitignore", coordinatorOnly ? "build-count.txt\nbundle/\n" : "bin/\nobj/\nbuild-count.txt\nbundle/\n");
         var token = TestContext.Current.CancellationToken;
         if (!local)
@@ -239,6 +256,19 @@ public sealed class FreshCheckExecutionTests
             var bundle = ArtifactBundle.Load(Path.Combine(fixture.Path, "bundle", "manifest.json"), fixture.Path);
             Assert.Contains(bundle.Manifest.Artifacts, a => a.Kind == "test-child-build");
             Assert.DoesNotContain(bundle.Manifest.Artifacts, a => a.Kind == "binlog");
+            if (scopedEmpty)
+            {
+                var checks = terminal.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray().ToArray();
+                Assert.Contains(checks, c => c.GetProperty("name").GetString() == "testExecution" && c.GetProperty("status").GetString() == "pass");
+                Assert.Contains(checks, c => c.GetProperty("name").GetString() == "coverage" && c.GetProperty("status").GetString() == "pass");
+                Assert.Contains(checks, c => c.GetProperty("name").GetString() == "crap" && c.GetProperty("status").GetString() == "notApplicable" &&
+                    c.GetProperty("reason").GetString() == "crap.noApplicableChangedCallables");
+                Assert.NotEmpty(bundle.Manifest.Executions);
+                Assert.Contains(bundle.Manifest.Artifacts, a => a.Kind == "coverage");
+                var outcome = Assert.Single(terminal.RootElement.GetProperty("run").GetProperty("testOutcomes").EnumerateArray());
+                Assert.Equal("completed", outcome.GetProperty("status").GetString());
+                Assert.Equal(0, outcome.GetProperty("exitCode").GetInt32());
+            }
             if (local)
             {
                 Assert.False(Directory.Exists(Path.Combine(fixture.Path, ".git")));
