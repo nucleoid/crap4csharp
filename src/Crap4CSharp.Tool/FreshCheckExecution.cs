@@ -12,8 +12,11 @@ internal static class FreshCheckExecution
     internal static async Task<FreshExecutionEvidence> RunAsync(FreshCheckPreflight preflight, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (preflight.Request.NoBuild)
-            throw new PolicyException("check.priorBuildIncomplete", "Explicit prior-build evidence acceptance is not available yet; no restore/build/test was launched.");
+        var priorBundle = preflight.Request.NoBuild
+            ? ArtifactBundle.Load(preflight.Request.BuildArtifacts!, preflight.Root) : null;
+        if (priorBundle is not null)
+            FreshCheckPreflightLoader.ValidateDestinations(preflight.Request, preflight.Root,
+                priorBundle.ResolvedInputs.Append(priorBundle.ManifestPath));
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(preflight.Request.Timeout);
         var token = deadline.Token;
@@ -28,7 +31,7 @@ internal static class FreshCheckExecution
         RequirePolicyTargets(preflight, graph);
         FreshCheckPreflightLoader.ValidateDestinations(preflight.Request, preflight.Root,
             graph.BuildGraph.Select(n => n.ProjectPath).Concat(metadata.Metadata.Select(m => m.AssetsFile)));
-        if (!preflight.Request.NoRestore)
+        if (!preflight.Request.NoRestore && !preflight.Request.NoBuild)
         {
             var restored = await ProjectBuildPreparation.RestoreAsync(request, token);
             if (restored.ExitCode != 0) throw new ProjectContextException("context.restoreFailed", "Explicit selected-root restore failed; raw restore output is not public execution evidence.");
@@ -41,10 +44,12 @@ internal static class FreshCheckExecution
         var plan = CheckExecutionPlan.Create(runners, loaded, token);
         RequirePolicyTargets(preflight, plan.PreparedGraph);
         ProtectPreparedDestinations(preflight, plan.PreparedGraph);
+        var priorObservations = priorBundle is null ? null : FreshPriorBuild.Load(priorBundle, plan.PreparedGraph, preflight.Root, token);
         var owned = Directory.CreateTempSubdirectory("crap4csharp-fresh-private-").FullName;
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(owned, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         var bound = await CompilerGraphExecution.RunBoundAsync(request, plan.PreparedGraph, async (node, ct) =>
         {
+            if (priorObservations is not null) return priorObservations[node.Id];
             var directory = Path.Combine(owned, "build", node.Id);
             Directory.CreateDirectory(directory);
             return await CompilerEvidence.BuildAsync(node, directory, preflight.Request.Timeout, ct);

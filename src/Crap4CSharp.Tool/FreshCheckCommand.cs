@@ -36,7 +36,7 @@ internal static class FreshCheckCommand
         var checks = new CheckResult[]
         {
             new("policyTrust", "pass", preflight.Trusted.Trust == "base-trusted" ? "policy.baseTrusted" : "policy.localUnreviewed", true),
-            new("provenance", "pass", "provenance.freshCompilerTestPostflightBound", true),
+            new("provenance", "pass", preflight.Request.NoBuild ? "provenance.priorCompilerFreshTestPostflightBound" : "provenance.freshCompilerTestPostflightBound", true),
             new("testExecution", "pass", "tests.actualRequiredContextsPassed", true),
             new("coverage", semanticEmpty ? "notApplicable" : policy.Evaluation.OperationalReasons.Count == 0 ? "pass" : "operationalError",
                 semanticEmpty ? "coverage.noApplicableSourceInventory" : policy.Evaluation.OperationalReasons.FirstOrDefault() ?? "coverage.complete", preflight.Policy.RequiredChecks.Contains("coverage")),
@@ -53,7 +53,7 @@ internal static class FreshCheckCommand
                 InvocationMode = "check", Policy = new(preflight.Policy.Threshold, false), Checks = checks, Findings = policy.Findings,
                 Decision = new(complete, policy.Evaluation.Decision, policy.Evaluation.OperationalReasons.FirstOrDefault() ??
                     (policy.Evaluation.ExitCode == 2 ? "crap.thresholdExceeded" : "crap.withinThreshold")),
-                Provenance = new("verified", "freshCompilerTestPostflightBinding", true, false, [ProvenanceReasonCodes.ReuseRecipeIncomplete]),
+                Provenance = new("verified", preflight.Request.NoBuild ? "priorCompilerFreshTestPostflightBinding" : "freshCompilerTestPostflightBinding", true, false, [ProvenanceReasonCodes.ReuseRecipeIncomplete]),
                 PolicyTrust = new(preflight.Trusted.Trust, preflight.Trusted.Revision, preflight.Trusted.Policy.PolicyPath,
                     preflight.Trusted.Policy.Hash, policy.CompatibilityHash), PolicyDifferences = differences,
                 CallableExemptions = policy.Exemptions.Matches, ExemptionErrors = []

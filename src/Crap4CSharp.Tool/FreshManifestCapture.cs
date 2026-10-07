@@ -44,6 +44,7 @@ internal static class FreshManifestCapture
             var relative = Path.GetRelativePath(preflight.Root, physical).Replace('\\', '/');
             return CanonicalIdentity.NormalizeLogicalPath(relative);
         }
+        Artifact("prior-compiler-graph", FreshPriorBuild.Kind, FreshPriorBuild.Capture(execution, cancellation));
         foreach (var binding in graph.GraphContexts.Where(b => !b.IsTestProject || b.Context.ExclusionPolicy.IncludeTests))
         {
             cancellation.ThrowIfCancellationRequested();

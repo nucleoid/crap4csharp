@@ -209,6 +209,47 @@ public sealed class FreshCheckExecutionTests
                 using var secondTerminal = JsonDocument.Parse(secondOutput.ToString());
                 Assert.Contains(secondTerminal.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
                     c => c.GetProperty("name").GetString() == "testExecution" && c.GetProperty("status").GetString() == "pass");
+                Assert.Equal("priorCompilerFreshTestPostflightBinding",
+                    secondTerminal.RootElement.GetProperty("evaluation").GetProperty("provenance").GetProperty("basis").GetString());
+                var recipeArtifact = Assert.Single(bundle.Manifest.Artifacts, a => a.Kind == FreshPriorBuild.Kind);
+                using var recipe = JsonDocument.Parse(bundle.Bytes[recipeArtifact.Locator].ToArray());
+                var savedNode = recipe.RootElement.GetProperty("nodes").EnumerateArray().Single(n =>
+                    n.GetProperty("id").GetString() == bundle.Manifest.Contexts.Single().Id);
+                string SavedOutput(string name) => Path.GetFullPath(savedNode.GetProperty(name).GetProperty("path")
+                    .GetProperty("relative").GetString()!, fixture.Path);
+                async Task RejectMutation(string name, string path, bool add = false)
+                {
+                    var originalBytes = add ? null : File.ReadAllBytes(path);
+                    try
+                    {
+                        if (add) File.WriteAllText(path, "public class NewCompilerInput {}");
+                        else if (path.EndsWith(".cs", StringComparison.Ordinal)) File.AppendAllText(path, "\n// authored drift\n");
+                        else { var changed = originalBytes!.ToArray(); changed[^1] ^= 1; File.WriteAllBytes(path, changed); }
+                        var rejectedOutput = new StringWriter(); var rejectedErrors = new StringWriter();
+                        var rejectedArgs = secondArgs.Select(a => a == "bundle-next" ? "bundle-rejected-" + name : a).ToArray();
+                        var rejectedExit = await global::App.RunAsync(rejectedArgs, fixture.Path, rejectedOutput, rejectedErrors, token);
+                        Assert.True(rejectedExit == 1, name + Environment.NewLine + rejectedOutput + rejectedErrors);
+                        using var rejected = JsonDocument.Parse(rejectedOutput.ToString());
+                        Assert.False(rejected.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("completed").GetBoolean());
+                        Assert.Equal(2, File.ReadAllLines(testCounter).Length);
+                        Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library", "build-count.txt")));
+                        Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "build-count.txt")));
+                        Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle-rejected-" + name)));
+                    }
+                    finally
+                    {
+                        if (add) File.Delete(path); // Only this newly created owned fixture input.
+                        else File.WriteAllBytes(path, originalBytes!);
+                    }
+                }
+                await RejectMutation("source", Path.Combine(fixture.Path, "Library", "Code.cs"));
+                await RejectMutation("membership", Path.Combine(fixture.Path, "Library", "Added.cs"), add: true);
+                await RejectMutation("test-source", Path.Combine(fixture.Path, "Tests", "Tests.cs"));
+                await RejectMutation("pe", SavedOutput("assembly"));
+                await RejectMutation("pdb", SavedOutput("pdb"));
+                var copiedLibrary = Assert.Single(Directory.GetFiles(Path.Combine(fixture.Path, "Tests", "bin"), "Library.dll", SearchOption.AllDirectories));
+                await RejectMutation("runtime-copy", copiedLibrary);
+                await RejectMutation("recipe", Path.GetFullPath(recipeArtifact.Locator, Path.Combine(fixture.Path, "bundle")));
             }
             if (hasGenerated)
             {
