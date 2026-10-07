@@ -379,14 +379,14 @@ internal static partial class GitScopeResolver
     private static bool Eligible(string? path) => path is not null && SourceDiscovery.IsSource(path) &&
         !SourceDiscovery.IsExcludedByDirectory(path, ".");
 
-    private static bool ContextInput(string? path) => path is not null &&
+    internal static bool ContextInput(string? path) => path is not null &&
         (Path.GetExtension(path).ToLowerInvariant() is ".csproj" or ".sln" or ".slnx" or ".props" or ".targets" ||
          Path.GetFileName(path).Equals("global.json", StringComparison.OrdinalIgnoreCase) ||
          Path.GetFileName(path).Equals("nuget.config", StringComparison.OrdinalIgnoreCase) ||
          Path.GetFileName(path).Equals(".editorconfig", StringComparison.OrdinalIgnoreCase) ||
          Path.GetFileName(path).Equals(".globalconfig", StringComparison.OrdinalIgnoreCase));
 
-    private static bool BuildRelevantFilteredInput(string path) =>
+    internal static bool BuildRelevantFilteredInput(string path) =>
         ContextInput(path) ||
         path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) && !IsExcludedTestSource(path) ||
         Path.GetExtension(path).ToLowerInvariant() is ".rsp" or ".resx";

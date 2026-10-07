@@ -5,7 +5,10 @@ internal sealed record FreshCheckRequest(string? Project, string PolicyPath, str
     string? Output, string? ArtifactOutput, bool NoRestore, bool NoBuild, string? BuildArtifacts,
     PolicyOverrides Overrides, TimeSpan Timeout);
 internal sealed record FreshCheckPreflight(string Root, FreshCheckRequest Request,
-    TrustedPolicyResolution Trusted, RepositoryPolicy Policy, CapturedChangeScope? Scope);
+    TrustedPolicyResolution Trusted, RepositoryPolicy Policy, CapturedChangeScope? Scope)
+{
+    internal CapturedChangeScope? GitSnapshot { get; init; }
+}
 
 internal static class FreshCheckPreflightLoader
 {
@@ -46,8 +49,12 @@ internal static class FreshCheckPreflightLoader
                 policy.Scope == "base" ? request.BaseRef : null, request.Head), root, request.Timeout, token);
         if (scope is not null && policy.Scope == "base" && scope.Revision.MergeBase != trusted.Revision)
             throw new PolicyException("provenance.scopeRevisionMismatch", "Scope and trusted policy did not resolve the same immutable base.");
+        var gitSnapshot = scope is { Mode: ChangeScopeMode.Base } ? scope : await GitScopeResolver.CaptureAsync(
+            new GitScopeRequest(ChangeScopeMode.Base, request.BaseRef), root, request.Timeout, token);
+        if (gitSnapshot.Revision.MergeBase != trusted.Revision)
+            throw new PolicyException("provenance.scopeRevisionMismatch", "Git identity and trusted policy did not resolve the same immutable base.");
         token.ThrowIfCancellationRequested();
-        return new(root, request, trusted, policy, scope);
+        return new(root, request, trusted, policy, scope) { GitSnapshot = gitSnapshot };
     }
 
     internal static void ValidateDestinations(FreshCheckRequest request, string root, IEnumerable<string> protectedPaths)

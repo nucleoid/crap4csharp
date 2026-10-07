@@ -42,7 +42,7 @@ public sealed class FreshCheckExecutionTests
             "testProjects":["Tests/Tests.csproj"],"configuration":"Debug","targetFrameworks":["net10.0"],"scope":"base",
             "threshold":8,"missingCoverage":"fail","requiredChecks":["tests","coverage","crap"],"exclusions":[],"ruleset":"callables-v1"}
             """);
-        fixture.Write(".gitignore", "bin/\nobj/\nbuild-count.txt\nbundle/\n");
+        fixture.Write(".gitignore", coordinatorOnly ? "build-count.txt\nbundle/\n" : "bin/\nobj/\nbuild-count.txt\nbundle/\n");
         var token = TestContext.Current.CancellationToken;
         foreach (var args in new[] { new[] { "init", "-q" }, new[] { "config", "user.name", "Fixture" },
             new[] { "config", "user.email", "fixture@example.invalid" }, new[] { "add", "." }, new[] { "commit", "-qm", "cold fixture" } })

@@ -57,6 +57,15 @@ internal static class FreshCheckExecution
             return new(preflight, plan, bound, tests, null,
                 new Dictionary<string, ImmutableArray<byte>>(StringComparer.Ordinal), owned);
         await bound.RetainedProof!.ValidateFinalAsync(token);
+        var outputFootprint = bound.FinalGraph.GraphContexts.SelectMany(b =>
+            new[] { b.Context.EvaluatedIntermediateDirectory!, Path.GetDirectoryName(b.Context.EvaluatedTargetPath!)! }
+                .Concat(b.Context.PhaseInputs.Where(i => i.Role == "restoreAssets").Select(i => Path.GetDirectoryName(i.Path)!)))
+            .Distinct(PathIdentityPolicy.Current.Comparer).ToArray();
+        if (outputFootprint.Any(directory => bound.FinalGraph.BuildGraph.Any(node => node.ProjectPath.StartsWith(
+            Path.TrimEndingDirectorySeparator(directory) + Path.DirectorySeparatorChar,
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))))
+            throw new PolicyException("provenance.gitOutputFootprintUnsupported", "Generated output footprint must not contain consumer project inputs.");
+        await FreshGitProof.ValidateAsync(preflight, token, outputFootprint);
         var coverage = CoverageGraphBinding.ValidateAggregate(tests, bound, token);
         var children = tests.ToDictionary(t => t.GraphId,
             t => TestChildEvidenceExport.Capture(t, tests.Outcomes.Single(o => o.GraphId == t.GraphId), token), StringComparer.Ordinal);
