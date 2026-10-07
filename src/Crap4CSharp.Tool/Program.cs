@@ -270,7 +270,8 @@ internal static class App
                 exception is DecoderFallbackException && options?.ReuseArtifacts is not null ? "artifact.invalid" :
                 exception is ArgumentException ? "arguments.invalid" :
                 exception is InvalidDataException ? "artifact.invalid" :
-                exception is OperationCanceledException ? "run.cancelled" : "execution.failed";
+                exception is OperationCanceledException ? "run.cancelled" :
+                exception is ProcessTimeoutException ? "run.timedOut" : "execution.failed";
             var ruleset = options?.Ruleset ?? PreDetectValue(args, "--ruleset") switch
             {
                 ComplexityRules.OrdinaryMethodsV1 => ComplexityRules.OrdinaryMethodsV1,
@@ -699,7 +700,8 @@ internal static class App
         };
         var run = new RunSection(Guid.NewGuid().ToString("D"), startedAt, DateTimeOffset.UtcNow,
             duration.TotalMilliseconds, [], [], [],
-            new CancellationDetails(reason == "run.cancelled", false, reason == "run.cancelled" ? reason : null),
+            new CancellationDetails(reason == "run.cancelled", reason == "run.timedOut",
+                reason is "run.cancelled" or "run.timedOut" ? reason : null),
             reason == "run.cancelled" ? "cancelled" : "operationalError", 1);
         return new ResultDocument(ResultContract.SchemaVersion, ToolVersion, ruleset, evaluation, run);
     }

@@ -4,13 +4,13 @@ using Crap4CSharp.Core;
 // inferred from exit zero, filenames, prior completed contexts or a failing TRX.
 internal static class FreshFailureResult
 {
-    internal static ResultDocument Create(FreshExecutionEvidence evidence, DateTimeOffset started, TimeSpan duration)
+    internal static ResultDocument Create(FreshExecutionEvidence evidence, DateTimeOffset started, TimeSpan duration, bool deadlineExpired = false)
     {
         var tests = evidence.Tests;
         if (tests.Failure is null && tests.Count == evidence.Plan.Tests.Count && tests.All(t => t.Process.ExitCode == 0))
             throw new InvalidOperationException("Successful execution requires the final analysis/publication path.");
-        var cancelled = tests.Failure is OperationCanceledException;
-        var timedOut = tests.Failure is ProcessTimeoutException;
+        var cancelled = tests.Failure is OperationCanceledException && !deadlineExpired;
+        var timedOut = tests.Failure is ProcessTimeoutException || deadlineExpired;
         var reason = cancelled ? "run.cancelled" : timedOut ? "run.timedOut" : tests.Failure is ProjectContextException context ? context.Reason :
             tests.Failure is PolicyException policy ? policy.Code : tests.Any(t => t.Process.ExitCode != 0) ? "tests.failed" : "tests.incomplete";
         var outcomes = tests.Outcomes.Select(o => new TestExecutionOutcomeResult(o.GraphId,

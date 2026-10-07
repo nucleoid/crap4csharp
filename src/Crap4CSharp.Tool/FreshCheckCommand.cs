@@ -8,13 +8,34 @@ internal static class FreshCheckCommand
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         deadline.CancelAfter(request.Timeout);
-        var token = deadline.Token; var elapsed = Stopwatch.StartNew();
+        var elapsed = Stopwatch.StartNew();
+        try
+        {
+            return await RunCoreAsync(request, root, started, elapsed, cancellation, deadline);
+        }
+        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested && deadline.IsCancellationRequested)
+        {
+            throw new ProcessTimeoutException("Fresh check", request.Timeout);
+        }
+    }
+
+    private static async Task<ResultDocument> RunCoreAsync(FreshCheckRequest request, string root,
+        DateTimeOffset started, Stopwatch elapsed, CancellationToken cancellation, CancellationTokenSource deadline)
+    {
+        var token = deadline.Token;
         var preflight = await FreshCheckPreflightLoader.LoadAsync(request, root, token);
         // Trusted generated eligibility is retained in hash-bound capture/replay
         // metadata without relabeling physical generated inputs as authored.
         var evidence = await FreshCheckExecution.RunAsync(preflight, token);
         if (evidence.Tests.Failure is not null || evidence.Tests.Count != evidence.Plan.Tests.Count || evidence.Tests.Any(t => t.Process.ExitCode != 0))
-            return await FreshPartialAnalysis.AttachAsync(evidence, FreshFailureResult.Create(evidence, started, elapsed.Elapsed), token);
+        {
+            var failure = FreshFailureResult.Create(evidence, started, elapsed.Elapsed,
+                deadlineExpired: !cancellation.IsCancellationRequested && deadline.IsCancellationRequested);
+            // Interrupted proof cannot support partial analysis. Keep the actual
+            // completed/failed/not-run outcomes instead of throwing them away.
+            if (token.IsCancellationRequested) return failure;
+            return await FreshPartialAnalysis.AttachAsync(evidence, failure, token);
+        }
         var captured = await FreshManifestCapture.CaptureAsync(evidence, token);
         var privateManifest = await FreshManifestCapture.PublishAsync(evidence, captured,
             Path.Combine(evidence.PrivateDirectory, "evaluation-bundle"), token);
