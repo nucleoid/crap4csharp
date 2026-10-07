@@ -355,6 +355,7 @@ public sealed class FreshCheckExecutionTests
                     Assert.Equal(1, await global::App.RunAsync(retryArgs, fixture.Path, text, diagnostic, token));
                     using var failed = JsonDocument.Parse(text.ToString());
                     Assert.False(failed.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("completed").GetBoolean());
+                    AssertRetainedPrivateDiagnostics(failed.RootElement, requireBuildLog: true);
                     return text.ToString();
                 }
                 var failedText = await Retry();
@@ -483,5 +484,24 @@ public sealed class FreshCheckExecutionTests
             File.WriteAllBytes(path, original[path]);
         }
         foreach (var (path, bytes) in original) Assert.Equal(bytes, File.ReadAllBytes(path));
+    }
+
+    private static void AssertRetainedPrivateDiagnostics(JsonElement terminal, bool requireBuildLog)
+    {
+        var run = terminal.GetProperty("run");
+        var artifact = Assert.Single(run.GetProperty("artifacts").EnumerateArray(),
+            a => a.GetProperty("kind").GetString() == "private-diagnostics");
+        var path = artifact.GetProperty("path").GetString()!;
+        Assert.True(Path.IsPathFullyQualified(path));
+        Assert.True(Directory.Exists(path));
+        Assert.StartsWith("crap4csharp-fresh-private-", Path.GetFileName(path), StringComparison.Ordinal);
+        Assert.Equal("retained", artifact.GetProperty("retention").GetString());
+        Assert.False(artifact.GetProperty("complete").GetBoolean());
+        Assert.False(artifact.GetProperty("reusable").GetBoolean());
+        Assert.Contains(run.GetProperty("logLocations").EnumerateArray(), p => p.GetString() == path);
+        if (!OperatingSystem.IsWindows())
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, File.GetUnixFileMode(path));
+        if (requireBuildLog)
+            Assert.NotEmpty(Directory.GetFiles(path, "compiler.binlog", SearchOption.AllDirectories));
     }
 }
