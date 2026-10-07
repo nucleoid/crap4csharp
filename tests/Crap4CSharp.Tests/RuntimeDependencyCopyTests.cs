@@ -74,6 +74,9 @@ public sealed class RuntimeDependencyCopyTests
         {
             Assert.Null(run.Failure); Assert.Equal(original, File.ReadAllBytes(destination));
             var safe = TestChildEvidenceExport.Capture(run[0], run.Outcomes[0], token);
+            TestChildEvidenceExport.ValidateSaved(safe, selected.GraphId, token);
+            Assert.Equal("provenance.savedTestChildUnproven", Assert.Throws<PolicyException>(() =>
+                TestChildEvidenceExport.ValidateSaved(safe, library.GraphId, token)).Code);
             using (var document = System.Text.Json.JsonDocument.Parse(safe.ToArray()))
             {
                 Assert.Equal(0, document.RootElement.GetProperty("compilerTasks").GetInt32());

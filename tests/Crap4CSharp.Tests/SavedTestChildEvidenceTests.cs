@@ -28,6 +28,14 @@ public sealed class SavedTestChildEvidenceTests
     [InlineData("duplicate")]
     [InlineData("null")]
     [InlineData("oversize")]
+    [InlineData("string-count")]
+    [InlineData("overflow")]
+    [InlineData("null-hash")]
+    [InlineData("string-bool")]
+    [InlineData("negative-count")]
+    [InlineData("malformed")]
+    [InlineData("array")]
+    [InlineData("empty")]
     public void SavedChildProjectionRequiresExactSuccessfulIdentityAndSupportedShape(string mutation)
     {
         var method = typeof(TestChildEvidenceExport).GetMethod("ValidateSaved", BindingFlags.Static | BindingFlags.NonPublic);
@@ -54,10 +62,18 @@ public sealed class SavedTestChildEvidenceTests
             case "reusable": value["reusableRecipe"] = true; break;
             case "extra": value["command"] = "do not execute captured commands"; break;
             case "missing": value.Remove("compilerTasks"); break;
+            case "string-count": value["compilerTasks"] = "0"; break;
+            case "overflow": value["compilerTasks"] = long.MaxValue; break;
+            case "null-hash": value["privateLogSha256"] = null; break;
+            case "string-bool": value["buildSucceeded"] = "true"; break;
+            case "negative-count": value["vstestTasks"] = -1; break;
         }
         var json = value.ToJsonString();
         if (mutation == "duplicate") json = json.Replace("\"compilerTasks\":0", "\"compilerTasks\":1,\"compilerTasks\":0", StringComparison.Ordinal);
         if (mutation == "null") json = "null";
+        if (mutation == "array") json = "[]";
+        if (mutation == "malformed") json = "{";
+        if (mutation == "empty") json = "";
         if (mutation == "oversize") json += new string(' ', 65537);
         var bytes = ImmutableArray.Create(Encoding.UTF8.GetBytes(json));
         if (mutation == "none") method.Invoke(null, [bytes, "required-test", TestContext.Current.CancellationToken]);
