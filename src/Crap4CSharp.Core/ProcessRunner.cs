@@ -55,8 +55,13 @@ public static partial class ProcessRunner
         if (!ownedSession && standardInputPath is not null)
             throw new PlatformNotSupportedException("Consumer protocol input is supported on Linux and Windows only.");
         string consumerExecutable = ownedSession ? ResolveLinuxExecutable(fileName, workingDirectory, environment) : fileName;
+        // Utilities use the same effective child PATH and executable preflight as
+        // the consumer. Refuse missing dependencies before starting any process;
+        // retain the verified-session handshake rather than falling back unowned.
+        string sessionExecutable = ownedSession ? ResolveLinuxExecutable("setsid", workingDirectory, environment) : fileName;
+        string? sessionShell = ownedSession ? ResolveLinuxExecutable("sh", workingDirectory, environment) : null;
         using var sessionStatus = ownedSession ? new SessionStatus() : null;
-        var startInfo = new ProcessStartInfo(ownedSession ? "/usr/bin/setsid" : fileName)
+        var startInfo = new ProcessStartInfo(sessionExecutable)
         {
             WorkingDirectory = workingDirectory,
             RedirectStandardOutput = true,
@@ -69,7 +74,7 @@ public static partial class ProcessRunner
         if (ownedSession)
         {
             startInfo.ArgumentList.Add("--");
-            startInfo.ArgumentList.Add("/bin/sh");
+            startInfo.ArgumentList.Add(sessionShell!);
             startInfo.ArgumentList.Add("-c");
             startInfo.ArgumentList.Add("status=$1; input=$2; shift 2; read -r start || exit 125; \"$@\" < \"$input\" & child=$!; exec >/dev/null 2>&1; wait \"$child\"; result=$?; printf '%s\\n' \"$result\" > \"$status\"; : > \"$status.done\"; read -r release; exit \"$result\"");
             startInfo.ArgumentList.Add("crap4csharp-owned-session");

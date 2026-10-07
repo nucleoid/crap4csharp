@@ -23,6 +23,11 @@ success. Deliberate session escape is unsupported. Windows creates the consumer 
 assigns a non-breakaway kill-on-close job before resuming, and terminates/positively observes
 the job on completion or failure. Windows runtime acceptance remains pending; Linux tests
 and compilation are not Windows proof. Cleanup has a separate finite five-second bound.
+Linux requires executable `setsid` and `sh` on the effective child `PATH`, including
+per-invocation environment overrides. Both utilities are resolved before launch rather
+than assumed at fixed distribution paths. Missing utilities fail with a typed launch
+diagnostic before consumer execution; there is no unowned-process fallback. Utility
+selection and later file replacement are not malicious-executable attestation.
 
 `RunProtocolAsync` captures complete stdout/stderr bytes without UTF-8 transcoding.
 Each stream has an independent configurable limit, default 4 MiB and maximum 16 MiB;
