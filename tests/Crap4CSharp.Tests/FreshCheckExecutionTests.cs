@@ -104,8 +104,12 @@ public sealed class FreshCheckExecutionTests
     public Task CompletedFreshEvidenceReusesRequiredTestsWithoutRestoreCompileOrTestAndPreservesDecisions()
         => RunCase(false, false, policyScope: "all", completedReuse: true);
 
+    [Fact]
+    public Task CaptureRetainsRequiredTestWithoutReachableScoredProduction()
+        => RunCase(false, true, standaloneTest: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -175,6 +179,16 @@ public sealed class FreshCheckExecutionTests
                 new BaselineDocument(BaselineDocument.Version, ComplexityRules.CallablesV1, compatibility,
                     new string('a', 64), "fixture-adoption", [])));
         }
+        if (standaloneTest)
+        {
+            fixture.Write("Independent/Independent.csproj", File.ReadAllText(Path.Combine(fixture.Path, "Tests/Tests.csproj"))
+                .Replace("<ProjectReference Include=\"../Library/Library.csproj\" />", "", StringComparison.Ordinal));
+            fixture.Write("Independent/Tests.cs", "using Xunit; public class IndependentTests { [Fact] public void Test() { Assert.Equal(42, 42); } }");
+            fixture.Write("Root.slnx", "<Solution><Configurations><Platform Name=\"AnyCPU\" /></Configurations><Project Path=\"Tests/Tests.csproj\" /><Project Path=\"Independent/Independent.csproj\" /></Solution>");
+            var policyPath = Path.Combine(fixture.Path, "policy.json");
+            File.WriteAllText(policyPath, File.ReadAllText(policyPath).Replace("\"testProjects\":[\"Tests/Tests.csproj\"]",
+                "\"testProjects\":[\"Tests/Tests.csproj\",\"Independent/Independent.csproj\"]", StringComparison.Ordinal));
+        }
         fixture.Write(".gitignore", coordinatorOnly ? "build-count.txt\nbundle/\n" : "bin/\nobj/\nbuild-count.txt\nbundle/\n");
         var token = TestContext.Current.CancellationToken;
         if (!local)
@@ -209,12 +223,13 @@ public sealed class FreshCheckExecutionTests
                 timings.Add(name, clock.Elapsed.TotalMilliseconds);
                 return value;
             }
-            var request = new FreshCheckRequest("Tests/Tests.csproj", "policy.json", local ? null : "HEAD", local ? "all" : null, null, "worktree", "method",
+            var request = new FreshCheckRequest(standaloneTest ? "Root.slnx" : "Tests/Tests.csproj", "policy.json", local ? null : "HEAD", local ? "all" : null, null, "worktree", "method",
                 null, "bundle", false, false, null, new PolicyOverrides(), TimeSpan.FromMinutes(3));
             var preflight = await MeasureAsync("trustedPreflight", () => FreshCheckPreflightLoader.LoadAsync(request, fixture.Path, token));
             var evidence = await MeasureAsync("executionComposite", () => FreshCheckExecution.RunAsync(preflight, token));
-            Assert.Equal(2, evidence.Compiler.Observations.Count);
-            Assert.Single(evidence.Tests); Assert.Single(evidence.Tests.Outcomes);
+            Assert.Equal(standaloneTest ? 3 : 2, evidence.Compiler.Observations.Count);
+            Assert.Equal(standaloneTest ? 2 : 1, evidence.Tests.Count);
+            Assert.Equal(standaloneTest ? 2 : 1, evidence.Tests.Outcomes.Count);
             FreshCapturedBundle? measuredCapture = null;
             if (failing)
             {
@@ -265,7 +280,7 @@ public sealed class FreshCheckExecutionTests
             else
             {
                 Assert.Equal(0, evidence.Tests[0].Process.ExitCode); Assert.Null(evidence.Tests.Failure);
-                Assert.NotNull(evidence.Coverage); Assert.Single(evidence.SafeChildren);
+                Assert.NotNull(evidence.Coverage); Assert.Equal(standaloneTest ? 2 : 1, evidence.SafeChildren.Count);
                 var captured = await MeasureAsync("captureWithRegates", () => FreshManifestCapture.CaptureAsync(evidence, token));
                 measuredCapture = captured;
                 var planArtifact = captured.Manifest.Artifacts.Single(a => a.Kind == CompletedTestPlanRecipe.Kind);
@@ -280,6 +295,13 @@ public sealed class FreshCheckExecutionTests
                     fixture.Path, selectedRoot, token);
                 Assert.False(captured.Manifest.Contexts.Single().ReuseRecipeComplete); // plan alone never enables reuse
                 var requiredInventory = captured.Manifest.Artifacts.Single(a => a.Kind == "required-test-inventory");
+                if (standaloneTest)
+                {
+                    var independent = currentPlan.Tests.Single(t => Path.GetFileName(t.ProjectPath) == "Independent.csproj");
+                    Assert.DoesNotContain(captured.Manifest.Executions, e => e.TestProject == "Independent/Independent.csproj");
+                    Assert.Contains(captured.Manifest.Artifacts, a => a.Id == "required-test-" + independent.GraphId + "-trx");
+                    Assert.Equal("once", File.ReadAllText(Path.Combine(fixture.Path, "Independent/build-count.txt")).Trim());
+                }
                 using (var saved = JsonDocument.Parse(captured.Bytes[requiredInventory.Locator].AsMemory()))
                 {
                     var required = saved.RootElement.GetProperty("tests").EnumerateArray().ToArray();

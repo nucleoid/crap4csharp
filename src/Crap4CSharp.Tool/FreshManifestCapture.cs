@@ -48,6 +48,47 @@ internal static class FreshManifestCapture
         Artifact("completed-test-plan", CompletedTestPlanRecipe.Kind, ImmutableArray.Create(
             CompletedTestPlanRecipe.Capture(execution.Plan, preflight.Root,
                 ProjectTargetSelector.Select(preflight.Root, preflight.Request.Project), cancellation)), format: "json");
+        // Save every required invocation independently of its reachability to a scored
+        // production context. Production-linked replay executions below remain intact.
+        var requiredIds = execution.Plan.Tests.Select(t => t.GraphId).ToArray();
+        if (!requiredIds.SequenceEqual(execution.Tests.Select(t => t.GraphId)) ||
+            !requiredIds.SequenceEqual(execution.Coverage.Invocations.Select(t => t.GraphId))) throw Refuse();
+        var requiredTests = new List<object>();
+        foreach (var invocation in execution.Tests)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            var binding = bindings[invocation.GraphId];
+            if (!binding.IsTestProject) throw Refuse();
+            var observed = observations[invocation.ProjectPath];
+            var boundResult = TestResultBinding.ValidateSuccessfulTrx(invocation, binding.Context, observed, cancellation);
+            var pe = CompilerOutputBinding.Read(observed.Assembly!.Path, ref readTotal, cancellation);
+            var pdb = CompilerOutputBinding.Read(observed.Pdb!.Path, ref readTotal, cancellation);
+            CompilerOutputBinding.Match(observed.Assembly, pe); CompilerOutputBinding.Match(observed.Pdb, pdb);
+            var inspected = ArtifactEvidenceInspector.InspectBuild(pe, pdb);
+            var trx = TestResultBinding.ReadTrx(Path.Combine(invocation.ResultsDirectory, "tests.trx"), cancellation);
+            if (CanonicalIdentity.Sha256(trx.AsSpan()) != boundResult.TrxSha256) throw Refuse();
+            var child = TestChildEvidenceExport.Capture(invocation,
+                execution.Tests.Outcomes.Single(o => o.GraphId == invocation.GraphId), cancellation);
+            TestChildEvidenceExport.ValidateSaved(child, invocation.GraphId, cancellation);
+            var id = "required-test-" + invocation.GraphId;
+            Artifact(id + "-trx", "required-test-result", trx, format: "trx");
+            Artifact(id + "-pe", "required-test-assembly", pe);
+            Artifact(id + "-pdb", "required-test-pdb", pdb);
+            Artifact(id + "-child", "required-test-child", child, format: "json");
+            var report = execution.Coverage.Invocations.Single(r => r.GraphId == invocation.GraphId);
+            var modules = report.Modules.Select(module =>
+            {
+                var moduleId = id + "-coverage-" + module.GraphId;
+                Artifact(moduleId, "required-test-module-coverage", module.LineProjection, format: "opencover", coordinates: "line");
+                return new { graphId = module.GraphId, artifact = moduleId };
+            }).ToArray();
+            requiredTests.Add(new { graphId = invocation.GraphId, project = RepositoryPath(invocation.ProjectPath),
+                trx = id + "-trx", assembly = id + "-pe", pdb = id + "-pdb", child = id + "-child",
+                moduleIdentity = inspected.ModuleIdentity, mvid = inspected.Mvid, debugIdentity = inspected.DebugIdentity,
+                passed = boundResult.Passed, rawExitCode = invocation.Process.ExitCode, modules });
+        }
+        Artifact("required-test-inventory", "required-test-inventory", ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(new
+            { provider = "finite-sdk-required-test-inventory-v1", tests = requiredTests, reusableRecipe = false })), format: "json");
         foreach (var binding in graph.GraphContexts.Where(b => !b.IsTestProject || b.Context.ExclusionPolicy.IncludeTests))
         {
             cancellation.ThrowIfCancellationRequested();
