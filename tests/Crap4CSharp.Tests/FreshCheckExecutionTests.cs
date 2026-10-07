@@ -108,8 +108,12 @@ public sealed class FreshCheckExecutionTests
     public Task CaptureRetainsRequiredTestWithoutReachableScoredProduction()
         => RunCase(false, true, standaloneTest: true);
 
+    [Fact]
+    public Task SavedRequiredResultsBindEveryActualTestArtifactAgainstCurrentCompilerWithoutNewLaunches()
+        => RunCase(false, true, standaloneTest: true, savedResults: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -358,6 +362,34 @@ public sealed class FreshCheckExecutionTests
                     File.GetUnixFileMode(Path.GetDirectoryName(manifest)!));
                 var bundle = Measure("bundleLoad", () => ArtifactBundle.Load(manifest, evidence.PrivateDirectory));
                 Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(bundle.Manifest, bundle.Bytes).Status);
+                if (savedResults)
+                {
+                    var type = typeof(App).Assembly.GetType("Crap4CSharp.Core.SavedRequiredTestResults");
+                    Assert.NotNull(type);
+                    var method = type.GetMethod("Validate", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                    Assert.NotNull(method);
+                    void Validate(ArtifactBundle candidate)
+                    {
+                        try { method.Invoke(null, [candidate, currentPlan, evidence.Compiler, fixture.Path, token]); }
+                        catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
+                        { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); }
+                    }
+                    Validate(bundle);
+                    Assert.Equal(2, parsedRequired.Count);
+                    foreach (var savedTest in parsedRequired)
+                    {
+                        var artifact = bundle.Manifest.Artifacts.Single(a => a.Id == savedTest.Trx);
+                        var changed = bundle.Manifest with { Artifacts = bundle.Manifest.Artifacts.Select(a => a.Id == artifact.Id ? a with { Kind = "test-result" } : a).ToArray() };
+                        Assert.Throws<PolicyException>(() => Validate(bundle with { Manifest = changed }));
+                        var missing = new Dictionary<string, System.Collections.Immutable.ImmutableArray<byte>>(bundle.Bytes);
+                        missing.Remove(artifact.Locator);
+                        Assert.Throws<PolicyException>(() => Validate(bundle with { Bytes = missing }));
+                    }
+                    Validate(bundle);
+                    Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "bin", "Debug", "net10.0", "test-count.txt")));
+                    Assert.Equal("once", File.ReadAllText(Path.Combine(fixture.Path, "Independent/build-count.txt")).Trim());
+                }
+
                 var replay = Measure("capturedReplay", () => AnalyzeCommand.Replay(bundle, fixture.Path, DateTimeOffset.UtcNow, TimeSpan.Zero, token, allSources: true));
                 Assert.Equal(0, replay.Run.ExitCode);
                 Assert.Equal("captured", replay.Evaluation.Provenance!.Status);
