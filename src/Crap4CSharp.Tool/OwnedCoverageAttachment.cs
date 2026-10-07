@@ -17,14 +17,23 @@ internal static class OwnedCoverageAttachment
 
     internal static OwnedOpenCover ReadOpenCover(TestInvocationObservation invocation,
         ProjectAnalysisContext context, CompilerObservation compiler, CancellationToken token)
+        => ReadCore(invocation, context, compiler, token, false);
+
+    internal static OwnedOpenCover ReadFailedOpenCover(TestInvocationObservation invocation,
+        ProjectAnalysisContext context, CompilerObservation compiler, CancellationToken token)
+        => ReadCore(invocation, context, compiler, token, true);
+
+    private static OwnedOpenCover ReadCore(TestInvocationObservation invocation,
+        ProjectAnalysisContext context, CompilerObservation compiler, CancellationToken token, bool failed)
     {
         token.ThrowIfCancellationRequested();
         try
         {
-            var result = TestResultBinding.ValidateSuccessfulTrx(invocation, context, compiler, token);
+            var trxHash = failed ? TestResultBinding.ValidateFailedTrx(invocation, context, compiler, token).TrxSha256 :
+                TestResultBinding.ValidateSuccessfulTrx(invocation, context, compiler, token).TrxSha256;
             var trxPath = System.IO.Path.Combine(invocation.ResultsDirectory, "tests.trx");
             var trxBytes = TestResultBinding.ReadTrx(trxPath, token);
-            if (Hash(trxBytes) != result.TrxSha256) throw Refuse();
+            if (Hash(trxBytes) != trxHash) throw Refuse();
             var root = TestResultBinding.Parse(trxBytes).Root ?? throw Refuse();
             var settings = Single(root, "TestSettings");
             var deployment = Single(settings, "Deployment");

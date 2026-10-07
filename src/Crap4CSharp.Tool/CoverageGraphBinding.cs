@@ -17,6 +17,14 @@ internal static class CoverageGraphBinding
 {
     internal static BoundInvocationCoverage ValidateInvocation(TestInvocationObservation invocation,
         CompilerGraphPhaseResult bound, CancellationToken token)
+        => ValidateInvocationCore(invocation, bound, token, false);
+
+    internal static BoundInvocationCoverage ValidateFailedInvocation(TestInvocationObservation invocation,
+        CompilerGraphPhaseResult bound, CancellationToken token)
+        => ValidateInvocationCore(invocation, bound, token, true);
+
+    private static BoundInvocationCoverage ValidateInvocationCore(TestInvocationObservation invocation,
+        CompilerGraphPhaseResult bound, CancellationToken token, bool failed)
     {
         token.ThrowIfCancellationRequested();
         var stage = "graph";
@@ -41,7 +49,8 @@ internal static class CoverageGraphBinding
             }
             Add(invocation.GraphId);
             stage = "attachment";
-            var attachment = OwnedCoverageAttachment.ReadOpenCover(invocation, test.Context,
+            var attachment = failed ? OwnedCoverageAttachment.ReadFailedOpenCover(invocation, test.Context,
+                observations[test.ProjectPath], token) : OwnedCoverageAttachment.ReadOpenCover(invocation, test.Context,
                 observations[test.ProjectPath], token);
             var builds = new Dictionary<string, (string Id, ProjectAnalysisContext Context, InspectedBuildEvidence Build)>(StringComparer.Ordinal);
             long total = 0;

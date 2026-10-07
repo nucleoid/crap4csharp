@@ -10,6 +10,8 @@ namespace Crap4CSharp.Core;
 // preservation THROUGH execution are separate obligations, not asserted by this record.
 internal sealed record BoundTestResult(string GraphId, int Passed, string TrxSha256,
     string AssemblySha256, string PdbSha256);
+internal sealed record BoundFailedTestResult(string GraphId, int Executed, string TrxSha256,
+    string AssemblySha256, string PdbSha256);
 
 internal static class TestResultBinding
 {
@@ -21,10 +23,22 @@ internal static class TestResultBinding
     internal static BoundTestResult ValidateSuccessfulTrx(TestInvocationObservation invocation,
         ProjectAnalysisContext context, CompilerObservation compiler, CancellationToken token)
     {
+        var result = ValidateTrx(invocation, context, compiler, token, false);
+        return new(result.GraphId, result.Executed, result.TrxSha256, result.AssemblySha256, result.PdbSha256);
+    }
+
+    // Explicit failed-test evidence only; never a successful/reusable test result.
+    internal static BoundFailedTestResult ValidateFailedTrx(TestInvocationObservation invocation,
+        ProjectAnalysisContext context, CompilerObservation compiler, CancellationToken token)
+        => ValidateTrx(invocation, context, compiler, token, true);
+
+    private static BoundFailedTestResult ValidateTrx(TestInvocationObservation invocation,
+        ProjectAnalysisContext context, CompilerObservation compiler, CancellationToken token, bool failed)
+    {
         token.ThrowIfCancellationRequested();
         try
         {
-            if (invocation.Process.ExitCode != 0 || string.IsNullOrWhiteSpace(invocation.GraphId) ||
+            if (invocation.Process.ExitCode != (failed ? 1 : 0) || string.IsNullOrWhiteSpace(invocation.GraphId) ||
                 !Paths.Equals(Canonical(invocation.ProjectPath), Canonical(context.ResolvedProjectPath)) ||
                 !Paths.Equals(Canonical(compiler.ProjectPath), invocation.ProjectPath)) throw Refuse();
             // Independent actual intermediate/copy PE/PDB and complete compiler input gate,
@@ -35,7 +49,7 @@ internal static class TestResultBinding
             var trxs = Directory.EnumerateFiles(directory, "*.trx").Take(2).ToArray();
             if (trxs.Length != 1 || !Paths.Equals(trxs[0], path)) throw Refuse();
             var bytes = ReadTrx(path, token);
-            var count = ValidateDocument(bytes, Canonical(context.EvaluatedTargetPath), token);
+            var count = ValidateDocumentCore(bytes, Canonical(context.EvaluatedTargetPath), token, failed);
             return new(invocation.GraphId, count, Hash(bytes), compiler.Assembly!.Sha256, compiler.Pdb!.Sha256);
         }
         catch (ProjectContextException error) when (error.Reason != "test.resultsUnproven") { throw Refuse(); }
@@ -44,6 +58,12 @@ internal static class TestResultBinding
     }
 
     internal static int ValidateDocument(ImmutableArray<byte> bytes, string target, CancellationToken token)
+        => ValidateDocumentCore(bytes, target, token, false);
+
+    internal static int ValidateFailedDocument(ImmutableArray<byte> bytes, string target, CancellationToken token)
+        => ValidateDocumentCore(bytes, target, token, true);
+
+    private static int ValidateDocumentCore(ImmutableArray<byte> bytes, string target, CancellationToken token, bool failed)
     {
         token.ThrowIfCancellationRequested();
         try
@@ -62,12 +82,16 @@ internal static class TestResultBinding
             foreach (var (name, expected) in new[] { ("UnitTestResult", results.Length), ("UnitTest", definitions.Length), ("TestEntry", entries.Length) })
                 if (root.Descendants().Count(e => e.Name.LocalName == name) != expected) throw Refuse();
             var summary = Single(root, "ResultSummary");
-            if (Value(summary, "outcome") is not ("Completed" or "Passed") ||
-                root.Descendants().Any(e => e.Name.LocalName is "ErrorInfo" or "RunInfo")) throw Refuse();
+            if ((failed ? Value(summary, "outcome") != "Failed" : Value(summary, "outcome") is not ("Completed" or "Passed")) ||
+                root.Descendants().Any(e => e.Name.LocalName == "RunInfo" && (!failed || !KnownFailedTestMessage(e, summary, results)) ||
+                    e.Name.LocalName == "ErrorInfo" && (!failed || !e.Ancestors(Ns + "UnitTestResult").Any(r => r.Attribute("outcome")?.Value == "Failed")))) throw Refuse();
             var counters = Single(summary, "Counters");
-            foreach (var name in new[] { "total", "executed", "passed" })
+            foreach (var name in new[] { "total", "executed" })
                 if (Number(counters, name, true) != results.Length) throw Refuse();
-            foreach (var name in new[] { "failed", "error", "timeout", "aborted", "inconclusive", "passedButRunAborted", "notRunnable", "notExecuted", "disconnected", "warning", "inProgress", "pending" })
+            var failedCount = results.Count(r => r.Attribute("outcome")?.Value == "Failed");
+            if ((failed ? failedCount == 0 : failedCount != 0) || Number(counters, "failed", false) != failedCount ||
+                Number(counters, "passed", true) != results.Length - failedCount) throw Refuse();
+            foreach (var name in new[] { "error", "timeout", "aborted", "inconclusive", "passedButRunAborted", "notRunnable", "notExecuted", "disconnected", "warning", "inProgress", "pending" })
                 if (Number(counters, name, false) != 0) throw Refuse();
             // VSTest legitimately emits completed=0 even when total/executed/passed>0.
             var completed = Number(counters, "completed", false);
@@ -95,7 +119,7 @@ internal static class TestResultBinding
             {
                 token.ThrowIfCancellationRequested();
                 var testId = Id(result, "testId"); var executionId = Id(result, "executionId");
-                if (Value(result, "outcome") != "Passed" || !resultIds.Add(testId) || !resultExecutions.Add(executionId) ||
+                if (!(Value(result, "outcome") == "Passed" || failed && Value(result, "outcome") == "Failed") || !resultIds.Add(testId) || !resultExecutions.Add(executionId) ||
                     !byId.TryGetValue(testId, out var definition) || !byExecution.TryGetValue(executionId, out var entry) ||
                     Id(Single(definition, "Execution"), "id") != executionId || Id(entry, "testId") != testId ||
                     Value(result, "testName") != Value(definition, "name") ||
@@ -153,5 +177,20 @@ internal static class TestResultBinding
         return int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var count) && count >= 0 ? count : throw Refuse();
     }
     private static string Hash(ImmutableArray<byte> bytes) => Convert.ToHexString(SHA256.HashData(bytes.AsSpan())).ToLowerInvariant();
+    private static bool KnownFailedTestMessage(XElement info, XElement summary, XElement[] results)
+    {
+        // Actual xUnit VSTest emits an Error RunInfo for each failed named test.
+        // This is not a general warning/aborted-run exemption, and applies only to
+        // diagnostic failed-result parsing, never the successful result gate.
+        if (info.Name != Ns + "RunInfo" || info.Parent?.Name != Ns + "RunInfos" || info.Parent.Parent != summary ||
+            info.Attribute("outcome")?.Value != "Error" || info.Elements().Count() != 1 || info.Element(Ns + "Text") is not { } text)
+            return false;
+        var value = text.Value; const string prefix = "[xUnit.net ";
+        var end = value.IndexOf(']');
+        return value.StartsWith(prefix, StringComparison.Ordinal) && end > prefix.Length &&
+            TimeSpan.TryParse(value[prefix.Length..end], CultureInfo.InvariantCulture, out var time) && time >= TimeSpan.Zero &&
+            results.Any(r => r.Attribute("outcome")?.Value == "Failed" &&
+                value[(end + 1)..].Trim() == r.Attribute("testName")?.Value + " [FAIL]");
+    }
     private static ProjectContextException Refuse() => new("test.resultsUnproven", "Required VSTest results, individual identities, counters or independently bound test module are missing, failed or inconsistent.");
 }

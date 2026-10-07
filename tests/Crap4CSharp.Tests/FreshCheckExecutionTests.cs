@@ -31,6 +31,10 @@ public sealed class FreshCheckExecutionTests
         => RunCase(true, false, policyScope: "all", local: true, partial: true);
 
     [Fact]
+    public Task FailedTestsWithPreservedTimestampSourceDriftCannotExposeStalePartialMetrics()
+        => RunCase(true, false, policyScope: "all", local: true, partialDrift: true);
+
+    [Fact]
     public Task ExplicitPriorBuildRevalidatesCapturedGraphWithoutRecompilingAndRunsFreshTestsOnce()
         => RunCase(false, false, policyScope: "all", local: true, priorBuild: true);
 
@@ -51,7 +55,7 @@ public sealed class FreshCheckExecutionTests
             policyScope: scope, granularity: granularity);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -76,6 +80,7 @@ public sealed class FreshCheckExecutionTests
             COUNTER</Project>
             """.Replace("COUNTER", counter, StringComparison.Ordinal));
         fixture.Write("Tests/Tests.cs", "using Xunit; public class Once { [Fact] public void Test() { " +
+            (partialDrift ? "var p = System.IO.Path.GetFullPath(\"../../../../Library/Code.cs\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); " : "") +
             (priorBuild ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
             "Assert.Equal(" + (failing ? "99" : "42") + ", " + (emptyEligible ? "42" : hasGenerated ? "Extra.Value" : "Library.Value") + "); } }");
         fixture.Write("policy.json", """
@@ -120,6 +125,38 @@ public sealed class FreshCheckExecutionTests
                 Assert.Equal("failed", outcome.Status); Assert.Equal(evidence.Tests[0].Process.ExitCode, outcome.ExitCode);
                 Assert.All(rawFailure.Run.Artifacts, a => { Assert.False(a.Complete); Assert.False(a.Reusable); });
                 Assert.DoesNotContain(rawFailure.Run.Artifacts, a => a.Kind == "manifest");
+                var partialCoverage = CoverageGraphBinding.ValidateFailedInvocation(evidence.Tests[0], evidence.Compiler, token);
+                Assert.NotEmpty(partialCoverage.Modules);
+                Assert.Throws<ProjectContextException>(() => CoverageGraphBinding.ValidateInvocation(evidence.Tests[0], evidence.Compiler, token));
+                Assert.Throws<ProjectContextException>(() => CoverageGraphBinding.ValidateAggregate(evidence.Tests, evidence.Compiler, token));
+                var partialResult = await FreshPartialAnalysis.AttachAsync(evidence, rawFailure, token);
+                // HEAD was captured after committing this fixture: base scope is
+                // genuinely empty. Required failed tests still run; no all-scope
+                // metrics may leak into the selected changed scope.
+                Assert.Empty(partialResult.Evaluation.Metrics);
+                Assert.Contains(partialResult.Evaluation.Checks, c => c.Name == "coverage" && c.Reason == "coverage.boundPartialObservations");
+                Assert.Equal(1, partialResult.Run.ExitCode);
+                Assert.False(partialResult.Evaluation.Decision.Completed);
+                var trxPath = Path.Combine(evidence.Tests[0].ResultsDirectory, "tests.trx");
+                var trxBytes = File.ReadAllBytes(trxPath); var trxTime = File.GetLastWriteTimeUtc(trxPath);
+                try
+                {
+                    var document = System.Xml.Linq.XDocument.Load(trxPath);
+                    document.Descendants().Single(e => e.Name.LocalName == "Counters").SetAttributeValue("failed", "0");
+                    document.Save(trxPath); File.SetLastWriteTimeUtc(trxPath, trxTime);
+                    Assert.Throws<ProjectContextException>(() => CoverageGraphBinding.ValidateFailedInvocation(evidence.Tests[0], evidence.Compiler, token));
+                }
+                finally { File.WriteAllBytes(trxPath, trxBytes); File.SetLastWriteTimeUtc(trxPath, trxTime); }
+                var attachmentPath = partialCoverage.Attachment.Path;
+                var attachmentTime = File.GetLastWriteTimeUtc(attachmentPath);
+                try
+                {
+                    var document = System.Xml.Linq.XDocument.Load(attachmentPath);
+                    document.Descendants("ModuleName").First().Value = "UnrelatedModule";
+                    document.Save(attachmentPath); File.SetLastWriteTimeUtc(attachmentPath, attachmentTime);
+                    Assert.Throws<ProjectContextException>(() => CoverageGraphBinding.ValidateFailedInvocation(evidence.Tests[0], evidence.Compiler, token));
+                }
+                finally { File.WriteAllBytes(attachmentPath, partialCoverage.Attachment.Bytes.ToArray()); File.SetLastWriteTimeUtc(attachmentPath, attachmentTime); }
                 using var rawJson = JsonDocument.Parse(ResultWriter.Serialize(rawFailure));
                 Assert.Equal("failed", rawJson.RootElement.GetProperty("run").GetProperty("testOutcomes")[0].GetProperty("status").GetString());
             }
@@ -176,9 +213,16 @@ public sealed class FreshCheckExecutionTests
         if (failing)
         {
             Assert.Equal(1, exit);
+            if (partialDrift)
+            {
+                Assert.Empty(terminal.RootElement.GetProperty("evaluation").GetProperty("metrics").EnumerateArray());
+                Assert.False(terminal.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("completed").GetBoolean());
+                Assert.Contains(terminal.RootElement.GetProperty("run").GetProperty("testOutcomes").EnumerateArray(),
+                    o => o.GetProperty("exitCode").GetInt32() == 1);
+            }
             if (partial)
             {
-                Assert.NotEmpty(terminal.RootElement.GetProperty("evaluation").GetProperty("metrics").EnumerateArray());
+                Assert.True(terminal.RootElement.GetProperty("evaluation").GetProperty("metrics").GetArrayLength() > 0, output.ToString());
                 Assert.True(terminal.RootElement.GetProperty("evaluation").GetProperty("coverage").GetProperty("known").GetInt32() > 0);
                 Assert.False(terminal.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("completed").GetBoolean());
                 Assert.Equal("invalid", terminal.RootElement.GetProperty("evaluation").GetProperty("provenance").GetProperty("status").GetString());
@@ -305,6 +349,13 @@ public sealed class FreshCheckExecutionTests
         }
         Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library", "build-count.txt")));
         Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "build-count.txt")));
+        if (partialDrift)
+        {
+            var path = Path.Combine(fixture.Path, "Library", "Code.cs");
+            Assert.Contains("43", File.ReadAllText(path), StringComparison.Ordinal);
+            // Only the intentionally adversarial test body mutates this owned fixture.
+            File.WriteAllBytes(path, original[path]);
+        }
         foreach (var (path, bytes) in original) Assert.Equal(bytes, File.ReadAllBytes(path));
     }
 }

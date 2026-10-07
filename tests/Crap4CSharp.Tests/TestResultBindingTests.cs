@@ -102,6 +102,50 @@ public sealed class TestResultBindingTests
     }
 
     private static ImmutableArray<byte> Bytes(XDocument document) => ImmutableArray.Create(Encoding.UTF8.GetBytes(document.ToString()));
+    [Theory]
+    [InlineData("valid")]
+    [InlineData("named-failure-info")]
+    [InlineData("unrelated-run-info")]
+    [InlineData("warning-run-info")]
+    [InlineData("counter")]
+    [InlineData("summary")]
+    [InlineData("identity")]
+    [InlineData("skipped")]
+    [InlineData("run-error")]
+    [InlineData("hidden")]
+    public void FailedResultPathRetainsStrictStructureAndCannotPassSuccessGate(string defect)
+    {
+        var target = Path.GetFullPath("MixedCase.Tests.dll");
+        var document = Document(target, 2);
+        var result = document.Descendants(Ns + "UnitTestResult").First();
+        result.SetAttributeValue("outcome", "Failed");
+        result.Add(new XElement(Ns + "Output", new XElement(Ns + "ErrorInfo", new XElement(Ns + "Message", "actual assertion failure"))));
+        var summary = document.Descendants(Ns + "ResultSummary").Single();
+        summary.SetAttributeValue("outcome", "Failed");
+        var counters = document.Descendants(Ns + "Counters").Single();
+        counters.SetAttributeValue("passed", 1); counters.SetAttributeValue("failed", 1);
+        switch (defect)
+        {
+            case "counter": counters.SetAttributeValue("failed", 0); break;
+            case "summary": summary.SetAttributeValue("outcome", "Completed"); break;
+            case "identity": result.SetAttributeValue("testId", Guid.NewGuid()); break;
+            case "skipped": result.SetAttributeValue("outcome", "NotExecuted"); break;
+            case "run-error": summary.Add(new XElement(Ns + "ErrorInfo", "run failure")); break;
+            case "named-failure-info": summary.Add(new XElement(Ns + "RunInfos", new XElement(Ns + "RunInfo",
+                new XAttribute("outcome", "Error"), new XElement(Ns + "Text", "[xUnit.net 00:00:00.89]     Test0 [FAIL]")))); break;
+            case "unrelated-run-info": summary.Add(new XElement(Ns + "RunInfos", new XElement(Ns + "RunInfo",
+                new XAttribute("outcome", "Error"), new XElement(Ns + "Text", "[xUnit.net 00:00:00.89]     Other [FAIL]")))); break;
+            case "warning-run-info": summary.Add(new XElement(Ns + "RunInfos", new XElement(Ns + "RunInfo",
+                new XAttribute("outcome", "Warning"), new XElement(Ns + "Text", "[xUnit.net 00:00:00.89]     Test0 [FAIL]")))); break;
+            case "hidden": result.Add(new XElement(Ns + "InnerResults", new XElement(result))); break;
+        }
+        var bytes = Bytes(document); var token = TestContext.Current.CancellationToken;
+        Assert.Throws<ProjectContextException>(() => TestResultBinding.ValidateDocument(bytes, target, token));
+        if (defect is "valid" or "named-failure-info") Assert.Equal(2, TestResultBinding.ValidateFailedDocument(bytes, target, token));
+        else Assert.Throws<ProjectContextException>(() => TestResultBinding.ValidateFailedDocument(bytes, target, token));
+        Assert.Throws<ProjectContextException>(() => TestResultBinding.ValidateFailedDocument(Bytes(Document(target, 1)), target, token));
+    }
+
     private static XDocument Document(string target, int count)
     {
         var list = Guid.NewGuid();

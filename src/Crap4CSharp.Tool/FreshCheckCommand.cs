@@ -14,7 +14,7 @@ internal static class FreshCheckCommand
         // metadata without relabeling physical generated inputs as authored.
         var evidence = await FreshCheckExecution.RunAsync(preflight, token);
         if (evidence.Tests.Failure is not null || evidence.Tests.Count != evidence.Plan.Tests.Count || evidence.Tests.Any(t => t.Process.ExitCode != 0))
-            return FreshFailureResult.Create(evidence, started, elapsed.Elapsed);
+            return await FreshPartialAnalysis.AttachAsync(evidence, FreshFailureResult.Create(evidence, started, elapsed.Elapsed), token);
         var captured = await FreshManifestCapture.CaptureAsync(evidence, token);
         var privateManifest = await FreshManifestCapture.PublishAsync(evidence, captured,
             Path.Combine(evidence.PrivateDirectory, "evaluation-bundle"), token);

@@ -170,16 +170,23 @@ internal static class AnalyzeCommand
         ManifestBuild build, IReadOnlyList<CapturedSource> sources, IReadOnlyList<CapturedCoverage> coverage,
         IReadOnlyList<MetadataReference> references, CSharpParseOptions parseOptions,
         CapturedPathPolicy pathPolicy, double threshold, IReadOnlyList<SyntaxTree> compilerTrees)
+        => EvaluateBoundCallables(new CallableAnalysisContext(manifestContext.Project, manifestContext.TargetFramework,
+            manifestContext.Configuration, manifestContext.Platform, contextId, parseOptions), manifestContext.SourceSetHash,
+            build.ModuleIdentity, sources, coverage, references, pathPolicy, threshold, compilerTrees);
+
+    internal static ReplayPartition EvaluateBoundCallables(CallableAnalysisContext context, string sourceSetHash,
+        string moduleIdentity, IReadOnlyList<CapturedSource> sources, IReadOnlyList<CapturedCoverage> coverage,
+        IReadOnlyList<MetadataReference> references, CapturedPathPolicy pathPolicy, double threshold,
+        IReadOnlyList<SyntaxTree> compilerTrees)
     {
-        var context = new CallableAnalysisContext(manifestContext.Project, manifestContext.TargetFramework,
-            manifestContext.Configuration, manifestContext.Platform, contextId, parseOptions);
+        var contextId = context.ContextId;
         var inventory = CallableInventory.Merge(sources.Select(source =>
             CallableInventory.Analyze(source.Text, source.LogicalPath, context, references, compilerTrees)).ToArray());
         var sourcePaths = sources.Select(source => source.LogicalPath).ToArray();
         var reports = coverage.SelectMany(report => CapturedLogicalPathResolver.ResolveMethods(
                 CoverageReader.Read(report.Bytes.AsSpan(), report.LogicalPath), sourcePaths, pathPolicy))
             .Select(method => method with { ContextId = contextId }).ToArray();
-        var resolution = CallableCoverageResolver.Resolve(inventory, reports, build.ModuleIdentity);
+        var resolution = CallableCoverageResolver.Resolve(inventory, reports, moduleIdentity);
         var observations = resolution.Observations.ToDictionary(item => item.ObservationId!, StringComparer.Ordinal);
         var families = CallableFamilyEvaluator.Evaluate(inventory, resolution.Observations, threshold);
         var callables = inventory.Callables.Select(item =>
@@ -215,8 +222,8 @@ internal static class AnalyzeCommand
                 contextId, root.Path, family.FamilyId, null, span, family.Complexity, family.Coverage, family.Crap,
                 null, threshold, "gt", "fail", []);
         })).OrderBy(item => item.Id, StringComparer.Ordinal).ToArray();
-        return new ReplayPartition(contextId, manifestContext.Project, manifestContext.TargetFramework,
-            manifestContext.Configuration, manifestContext.Platform, manifestContext.SourceSetHash,
+        return new ReplayPartition(contextId, context.Project, context.TargetFramework,
+            context.Configuration, context.Platform, sourceSetHash,
             metrics, findings, callables, families, resolution.Diagnostics);
     }
 
@@ -260,7 +267,7 @@ internal static class AnalyzeCommand
     private static string ToolVersion => typeof(AnalyzeCommand).Assembly
         .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
 
-    private sealed record ReplayPartition(string ContextId, string? Project, string? TargetFramework,
+    internal sealed record ReplayPartition(string ContextId, string? Project, string? TargetFramework,
         string? Configuration, string? Platform, string? SourceSetHash, IReadOnlyList<MetricResult> Metrics,
         IReadOnlyList<FindingResult> Findings, IReadOnlyList<CallableResult> Callables,
         IReadOnlyList<CallableFamilyMetric> Families, IReadOnlyList<CoverageDiagnostic> Diagnostics);
