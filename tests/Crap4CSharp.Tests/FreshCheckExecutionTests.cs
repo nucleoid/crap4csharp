@@ -128,8 +128,16 @@ public sealed class FreshCheckExecutionTests
     public Task SavedProductionExecutionsRetainBothSharedRequiredTestReachabilityPairs()
         => RunCase(false, true, standaloneTest: true, savedCoverage: true, sharedCoverage: true, productionAgreement: true);
 
+    [Fact]
+    public Task SavedCompilerContextsBindAllCurrentSourcesReferencesParsePathsAndMetadata()
+        => RunCase(false, true, standaloneTest: true, savedCoverage: true, contextAgreement: true);
+
+    [Fact]
+    public Task SavedSharedCompilerContextsRetainEveryExcludedRequiredTestInput()
+        => RunCase(false, true, standaloneTest: true, savedCoverage: true, sharedCoverage: true, contextAgreement: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -393,6 +401,45 @@ public sealed class FreshCheckExecutionTests
                         try { return method.Invoke(null, [candidate, currentPlan, currentCompiler, fixture.Path, token])!; }
                         catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
                         { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw; }
+                    }
+                    if (contextAgreement)
+                    {
+                        var gate = typeof(App).Assembly.GetType("Crap4CSharp.Core.SavedCompilerContexts")?.GetMethod("Validate",
+                            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                        Assert.NotNull(gate);
+                        void Agree(ArtifactBundle candidate)
+                        {
+                            try { gate.Invoke(null, [candidate, currentCompiler, fixture.Path, token]); }
+                            catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
+                            { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); }
+                        }
+                        void Reject(ManifestContext changed)
+                            => Assert.Equal("provenance.savedCompilerContextsUnproven", Assert.Throws<PolicyException>(() =>
+                                Agree(bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Contexts = [changed] }) })).Code);
+                        Agree(bundle);
+                        var savedContext = bundle.Manifest.Contexts.Single();
+                        var source = savedContext.Inputs.First(i => i.Role == "source" && !i.Generated);
+                        Reject(savedContext with { Inputs = savedContext.Inputs.Where(i => i != source).ToArray() });
+                        Reject(savedContext with { Inputs = savedContext.Inputs.Select(i => i == source ? i with { Generated = true } : i).ToArray() });
+                        Reject(savedContext with { Inputs = savedContext.Inputs.Select(i => i == source ? i with { RepositoryPath = "foreign.cs" } : i).ToArray() });
+                        Reject(savedContext with { Inputs = savedContext.Inputs.Where(i => i.Role != "reference").ToArray() });
+                        Reject(savedContext with { IncludeGenerated = !savedContext.IncludeGenerated });
+                        Reject(savedContext with { CoverageApplicability = "semantic-empty" });
+                        Reject(savedContext with { ParseOptions = savedContext.ParseOptions! with { SourceKind = "Script" } });
+                        Reject(savedContext with { ParseOptions = savedContext.ParseOptions! with { PreprocessorSymbols = ["FOREIGN"] } });
+                        Reject(savedContext with { ParseOptions = savedContext.ParseOptions! with { Features = new Dictionary<string, string> { ["foreign"] = "true" } } });
+                        Reject(savedContext with { PathPolicy = savedContext.PathPolicy! with { CasePolicy = "foreign" } });
+                        Reject(savedContext with { PathPolicy = savedContext.PathPolicy! with { ReportRootMappings = [] } });
+                        foreach (var closure in bundle.Manifest.Artifacts.Where(a => a.Kind is "compiler-input-closure" or "test-compiler-input-closure"))
+                        {
+                            var altered = System.Collections.Immutable.ImmutableArray.Create(System.Text.Encoding.UTF8.GetBytes("{}"));
+                            var hash = CanonicalIdentity.Sha256(altered.AsSpan()); var locator = "inputs/" + hash + ".bin";
+                            var candidate = bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Artifacts = bundle.Manifest.Artifacts.Select(a =>
+                                a.Id == closure.Id ? a with { Locator = locator, Length = altered.Length, Sha256 = hash } : a).ToArray() }),
+                                Bytes = new Dictionary<string, System.Collections.Immutable.ImmutableArray<byte>>(bundle.Bytes) { [locator] = altered } };
+                            Assert.Equal("provenance.savedCompilerContextsUnproven", Assert.Throws<PolicyException>(() => Agree(candidate)).Code);
+                        }
+                        Agree(bundle);
                     }
                     if (productionAgreement)
                     {
