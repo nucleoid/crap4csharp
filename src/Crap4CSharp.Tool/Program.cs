@@ -247,12 +247,34 @@ internal static class App
                 : options.Ruleset == ComplexityRules.OrdinaryMethodsV1
                 ? await AnalyzeLegacyCapturedInputsAsync(options, workingDirectory, startedAt, stopwatch, cancellationToken)
                 : AnalyzeCapturedInputs(options, workingDirectory, startedAt, stopwatch));
+            var writeResult = true;
+            if (freshResult is not null && result.Run.ExitCode == 1 && options.Output is not null)
+            {
+                // Raw failed/interrupted tests return an evidence-bearing terminal
+                // rather than throwing. Apply the same final destination proof,
+                // without replacing their actual outcomes with a generic exception.
+                writeResult = false;
+                if (failureOutputProof is not null)
+                {
+                    try { await failureOutputProof.ValidateAsync(); writeResult = true; }
+                    catch (Exception aliasException) when (IsHandled(aliasException)) { }
+                }
+                if (!writeResult)
+                    result = result with
+                    {
+                        Evaluation = result.Evaluation with
+                        {
+                            Checks = result.Evaluation.Checks.Concat(
+                                [new CheckResult("output", "operationalError", "output.notWritten", true)]).ToArray()
+                        }
+                    };
+            }
             // Capture terminal timing after replay/current revalidation, not before awaiting it.
             var duration = stopwatch.Elapsed;
             result = result with { Run = result.Run with
                 { FinishedAt = startedAt + duration, DurationMilliseconds = duration.TotalMilliseconds } };
             var json = ResultWriter.Serialize(result);
-            if (options.Output is not null)
+            if (options.Output is not null && writeResult)
             {
                 var inputs = options.Inputs.Concat(options.Coverage)
                     .Concat(options.ReuseArtifacts is null ? [] : [options.ReuseArtifacts])
