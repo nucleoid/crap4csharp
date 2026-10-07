@@ -268,6 +268,18 @@ public sealed class FreshCheckExecutionTests
                 Assert.NotNull(evidence.Coverage); Assert.Single(evidence.SafeChildren);
                 var captured = await MeasureAsync("captureWithRegates", () => FreshManifestCapture.CaptureAsync(evidence, token));
                 measuredCapture = captured;
+                var planArtifact = captured.Manifest.Artifacts.Single(a => a.Kind == CompletedTestPlanRecipe.Kind);
+                var selectedRoot = ProjectTargetSelector.Select(fixture.Path, request.Project);
+                var reloadRequest = new ProjectContextLoadRequest(selectedRoot, preflight.Policy.Configuration, "AnyCPU",
+                    preflight.Policy.TargetFrameworks.ToArray(), false, false, request.Timeout);
+                var currentGraph = await ProjectContextLoader.LoadGraphAsync(reloadRequest, token);
+                var currentRunners = await ProjectContextLoader.DiscoverTestRunnersAsync(reloadRequest, token);
+                Assert.True(currentGraph.Success); Assert.True(currentRunners.Success);
+                var currentPlan = CheckExecutionPlan.Create(currentRunners, currentGraph, token);
+                CompletedTestPlanRecipe.Validate(captured.Bytes[planArtifact.Locator].ToArray(), currentPlan,
+                    fixture.Path, selectedRoot, token);
+                Assert.False(captured.Manifest.Contexts.Single().ReuseRecipeComplete); // plan alone never enables reuse
+
                 var sourceInputs = captured.Manifest.Contexts.Single().Inputs.Where(i => i.Role is "source" or "compiler-source").ToArray();
                 Assert.Equal(evidence.Compiler.FinalGraph.GraphContexts.Single(b => !b.IsTestProject).Context.CompilerDocuments.Count, sourceInputs.Length);
                 var capturedPe = captured.Manifest.Artifacts.Single(a => a.Kind == "assembly");

@@ -45,6 +45,9 @@ internal static class FreshManifestCapture
             return CanonicalIdentity.NormalizeLogicalPath(relative);
         }
         Artifact("prior-compiler-graph", FreshPriorBuild.Kind, FreshPriorBuild.Capture(execution, cancellation));
+        Artifact("completed-test-plan", CompletedTestPlanRecipe.Kind, ImmutableArray.Create(
+            CompletedTestPlanRecipe.Capture(execution.Plan, preflight.Root,
+                ProjectTargetSelector.Select(preflight.Root, preflight.Request.Project), cancellation)), format: "json");
         foreach (var binding in graph.GraphContexts.Where(b => !b.IsTestProject || b.Context.ExclusionPolicy.IncludeTests))
         {
             cancellation.ThrowIfCancellationRequested();
