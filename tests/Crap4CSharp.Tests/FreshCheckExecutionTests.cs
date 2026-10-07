@@ -22,7 +22,11 @@ public sealed class FreshCheckExecutionTests
     public Task SemanticEmptyProductionStillRunsRequiredTestsAndReportsExplicitNA()
         => RunCase(false, false, true);
 
-    private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false)
+    [Fact]
+    public Task ExplicitGeneratedInclusionRetainsGeneratedClassificationAndScoresItsCallable()
+        => RunCase(false, false, false, true);
+
+    private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false)
     {
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
         const string counter = """
@@ -31,8 +35,10 @@ public sealed class FreshCheckExecutionTests
             """;
         const string privateCanary = "fresh-private-property-never-export-7264c8e";
         fixture.Write("Library/Library.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework>" +
-            (coordinatorOnly ? "<PrivateCanary>" + privateCanary + "</PrivateCanary>" : "") + "</PropertyGroup>" + counter + "</Project>");
+            (coordinatorOnly ? "<PrivateCanary>" + privateCanary + "</PrivateCanary>" : "") + "</PropertyGroup>" + counter +
+            (includeGenerated ? "<Target Name=\"AddGenerated\" BeforeTargets=\"CoreCompile\"><ItemGroup><Compile Include=\"obj/Extra.cs\" /></ItemGroup></Target>" : "") + "</Project>");
         fixture.Write("Library/Code.cs", emptyEligible ? "public static class Library {}" : "public static class Library { public static int Value => 42; }");
+        if (includeGenerated) fixture.Write("Library/obj/Extra.cs", "public static class Extra { public static int Value => 42; }");
         if (coordinatorOnly) fixture.Write("Library/NoRuntime.cs", "#if NOT_DEFINED\npublic class Inactive {}\n#endif\n");
         fixture.Write("Tests/Tests.csproj", """
             <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><IsPackable>false</IsPackable></PropertyGroup>
@@ -43,12 +49,13 @@ public sealed class FreshCheckExecutionTests
             <ProjectReference Include="../Library/Library.csproj" /></ItemGroup>
             COUNTER</Project>
             """.Replace("COUNTER", counter, StringComparison.Ordinal));
-        fixture.Write("Tests/Tests.cs", "using Xunit; public class Once { [Fact] public void Test() { Assert.Equal(" + (failing ? "99" : "42") + ", " + (emptyEligible ? "42" : "Library.Value") + "); } }");
+        fixture.Write("Tests/Tests.cs", "using Xunit; public class Once { [Fact] public void Test() { Assert.Equal(" + (failing ? "99" : "42") + ", " + (emptyEligible ? "42" : includeGenerated ? "Extra.Value" : "Library.Value") + "); } }");
         fixture.Write("policy.json", """
             {"schemaVersion":"repository-policy-v1","mode":"strict","productionProjects":["Library/Library.csproj"],
             "testProjects":["Tests/Tests.csproj"],"configuration":"Debug","targetFrameworks":["net10.0"],"scope":"base",
             "threshold":8,"missingCoverage":"fail","requiredChecks":["tests","coverage","crap"],"exclusions":[],"ruleset":"callables-v1"}
-            """);
+            """.Replace("\"ruleset\":\"callables-v1\"", includeGenerated ?
+                "\"ruleset\":\"callables-v1\",\"allowedOverrides\":{\"includeGenerated\":true}" : "\"ruleset\":\"callables-v1\"", StringComparison.Ordinal));
         fixture.Write(".gitignore", coordinatorOnly ? "build-count.txt\nbundle/\n" : "bin/\nobj/\nbuild-count.txt\nbundle/\n");
         var token = TestContext.Current.CancellationToken;
         foreach (var args in new[] { new[] { "init", "-q" }, new[] { "config", "user.name", "Fixture" },
@@ -57,7 +64,13 @@ public sealed class FreshCheckExecutionTests
         var original = Directory.GetFiles(fixture.Path, "*", SearchOption.AllDirectories).Where(p =>
             !p.Contains(Path.DirectorySeparatorChar + ".git" + Path.DirectorySeparatorChar, StringComparison.Ordinal))
             .ToDictionary(p => p, File.ReadAllBytes);
-        Assert.Empty(Directory.GetDirectories(fixture.Path, "obj", SearchOption.AllDirectories));
+        if (includeGenerated)
+        {
+            Assert.Single(Directory.GetDirectories(fixture.Path, "obj", SearchOption.AllDirectories));
+            Assert.Single(Directory.GetFiles(Path.Combine(fixture.Path, "Library", "obj")));
+            Assert.Empty(Directory.GetFiles(fixture.Path, "*.dll", SearchOption.AllDirectories));
+        }
+        else Assert.Empty(Directory.GetDirectories(fixture.Path, "obj", SearchOption.AllDirectories));
         if (coordinatorOnly)
         {
             var request = new FreshCheckRequest("Tests/Tests.csproj", "policy.json", "HEAD", null, null, "worktree", "method",
@@ -124,8 +137,10 @@ public sealed class FreshCheckExecutionTests
             return;
         }
         var output = new StringWriter(); var errors = new StringWriter();
-        var exit = await global::App.RunAsync(["check", "--project", "Tests/Tests.csproj", "--policy", "policy.json", "--base", "HEAD",
-            "--artifact-output", "bundle", "--format", "json", "--timeout-seconds", "180"], fixture.Path, output, errors, token);
+        string[] publicArgs = ["check", "--project", "Tests/Tests.csproj", "--policy", "policy.json", "--base", "HEAD",
+            "--artifact-output", "bundle", "--format", "json", "--timeout-seconds", "180"];
+        if (includeGenerated) publicArgs = [.. publicArgs, "--include-generated"];
+        var exit = await global::App.RunAsync(publicArgs, fixture.Path, output, errors, token);
         using var terminal = JsonDocument.Parse(output.ToString());
         if (failing)
         {
@@ -140,6 +155,12 @@ public sealed class FreshCheckExecutionTests
             var bundle = ArtifactBundle.Load(Path.Combine(fixture.Path, "bundle", "manifest.json"), fixture.Path);
             Assert.Contains(bundle.Manifest.Artifacts, a => a.Kind == "test-child-build");
             Assert.DoesNotContain(bundle.Manifest.Artifacts, a => a.Kind == "binlog");
+            if (includeGenerated)
+            {
+                Assert.Contains(bundle.Manifest.Contexts.Single().Inputs, i => i.Generated && i.LogicalPath.EndsWith("Extra.cs", StringComparison.Ordinal));
+                var replay = AnalyzeCommand.Replay(bundle, fixture.Path, DateTimeOffset.UtcNow, TimeSpan.Zero, token, allSources: true);
+                Assert.Contains(replay.Evaluation.Callables!, c => c.SemanticSignature?.Contains("Extra", StringComparison.Ordinal) == true && c.Applicability == "applicable" && c.Coverage is not null);
+            }
             if (emptyEligible)
             {
                 Assert.NotEmpty(bundle.Manifest.Executions);
