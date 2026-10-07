@@ -21,6 +21,30 @@ public sealed class FreshPolicyEvaluationTests
         Assert.Equal(0, replay.Run.ExitCode);
     }
 
+    [Theory]
+    [InlineData("all", "method", false, true, 2)]
+    [InlineData("all", "file", false, true, 2)]
+    [InlineData("base", "method", false, false, 0)]
+    [InlineData("base", "file", false, true, 2)]
+    [InlineData("base", "method", true, false, 0)]
+    [InlineData("base", "file", true, false, 0)]
+    public void GeneratedObservationsFollowExactSelectionRatherThanBeingRelabeledOrSilentlyDropped(
+        string scope, string granularity, bool noChanges, bool coldSelected, int expectedExit)
+    {
+        var (preflight, manifest, replay) = Fixture("incremental", granularity);
+        var context = manifest.Contexts.Single();
+        manifest = manifest with { Contexts = [context with { IncludeGenerated = true,
+            Inputs = context.Inputs.Select(i => i with { Generated = true }).ToArray() }] };
+        preflight = preflight with { Policy = preflight.Policy with { Scope = scope },
+            Scope = scope == "all" ? null : noChanges ? preflight.Scope! with { Files = [] } : preflight.Scope };
+        var result = FreshPolicyEvaluation.Evaluate(preflight, manifest, replay);
+        Assert.Equal(expectedExit, result.Evaluation.ExitCode);
+        Assert.Equal(coldSelected, result.Observations.Single(o => o.EntityKey == "cold").Selected);
+        Assert.Equal(scope == "all" || !noChanges, result.Observations.Single(o => o.EntityKey == "changed").Selected);
+        Assert.Equal(2, result.Observations.Count);
+        Assert.All(manifest.Contexts.Single().Inputs, i => Assert.True(i.Generated));
+    }
+
     [Fact]
     public void PermittedTightenedThresholdIsAppliedWithoutChangingBaselineCompatibility()
     {
