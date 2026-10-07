@@ -10,8 +10,8 @@ internal static class FreshCheckCommand
         deadline.CancelAfter(request.Timeout);
         var token = deadline.Token; var elapsed = Stopwatch.StartNew();
         var preflight = await FreshCheckPreflightLoader.LoadAsync(request, root, token);
-        // Generated eligibility needs an explicit replay/scope contract, not the
-        // historical generated-input filter. Refuse before metadata/restore/build.
+        // Trusted generated eligibility is retained in hash-bound capture/replay
+        // metadata without relabeling physical generated inputs as authored.
         var evidence = await FreshCheckExecution.RunAsync(preflight, token);
         if (evidence.Tests.Failure is not null || evidence.Tests.Count != evidence.Plan.Tests.Count || evidence.Tests.Any(t => t.Process.ExitCode != 0))
             return FreshFailureResult.Create(evidence, started, elapsed.Elapsed);

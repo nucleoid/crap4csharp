@@ -197,10 +197,8 @@ internal static class App
         ModernOptions? options = null;
         try
         {
-            options = ParseModern(args);
+            options = ParseModern(args, out options);
             ResultDocument? freshResult = null;
-            if (options.Command == "check" && options.Ruleset == ComplexityRules.OrdinaryMethodsV1)
-                throw new ArgumentException("check requires callables-v1; ordinary-methods-v1 is available through the legacy option-only invocation.");
             if (options.Command == "check" && options.ReuseArtifacts is null)
             {
                 var request = new FreshCheckRequest(options.Project, options.Policy!, options.Base!, options.Scope,
@@ -293,9 +291,15 @@ internal static class App
                 }
                 else mayWrite = IsAbsentOutputDestination(destination, workingDirectory);
             }
-            // Fresh preflight failures have not established complete evaluated source/
-            // import/output alias safety. Keep the terminal document on stdout only.
-            if (args[0] == "check" && (options?.ReuseArtifacts is null) && !args.Contains("--reuse-artifacts", StringComparer.Ordinal))
+            // Fully parsed argument failures without a declared consumer context may
+            // write a new/prior result through the guards above. Once any project or
+            // trust selector is present, preflight failure cannot prove evaluated
+            // source/import/output alias safety: retain stdout-only diagnostics.
+            var contextFreeArgumentFailure = exception is ArgumentException && options is
+                { Command: "check", ReuseArtifacts: null, Project: null, Policy: null, Base: null } &&
+                options.Inputs.Count == 0 && options.Coverage.Count == 0;
+            if (args[0] == "check" && (options?.ReuseArtifacts is null) &&
+                !args.Contains("--reuse-artifacts", StringComparer.Ordinal) && !contextFreeArgumentFailure)
                 mayWrite = false;
             if (destination is not null && !mayWrite)
                 result = result with
@@ -326,8 +330,9 @@ internal static class App
         }
     }
 
-    private static ModernOptions ParseModern(string[] args)
+    private static ModernOptions ParseModern(string[] args, out ModernOptions? parsedCheck)
     {
+        parsedCheck = null;
         var options = new ModernOptions { Command = args[0] };
         var seen = new HashSet<string>(StringComparer.Ordinal);
         for (var index = 1; index < args.Length; index++)
@@ -447,6 +452,11 @@ internal static class App
                     break;
             }
         }
+        // Expose only a fully token-parsed check for guarded argument-error output;
+        // duplicate/missing/unknown tokens still cannot authorize an overwrite.
+        if (options.Command == "check") parsedCheck = options;
+        if (options.Command == "check" && options.Ruleset == ComplexityRules.OrdinaryMethodsV1)
+            throw new ArgumentException("check requires callables-v1; ordinary-methods-v1 is available through the legacy option-only invocation.");
         if (options.Ruleset is not (ComplexityRules.CallablesV1 or ComplexityRules.OrdinaryMethodsV1))
             throw new ArgumentException($"Unknown ruleset '{options.Ruleset}'.");
         if (options.Ruleset == ComplexityRules.CallablesV1 && options.AllowMissingCoverage)
