@@ -295,6 +295,12 @@ public sealed class FreshCheckExecutionTests
                     fixture.Path, selectedRoot, token);
                 Assert.False(captured.Manifest.Contexts.Single().ReuseRecipeComplete); // plan alone never enables reuse
                 var requiredInventory = captured.Manifest.Artifacts.Single(a => a.Kind == "required-test-inventory");
+                var parsedRequired = SavedRequiredTestInventory.Parse(captured.Bytes[requiredInventory.Locator].ToArray(),
+                    currentPlan.Tests.Select(t => t.GraphId).ToArray(), token);
+                Assert.Equal(currentPlan.Tests.Select(t => t.GraphId), parsedRequired.Select(t => t.GraphId));
+                Assert.Equal("provenance.savedRequiredInventoryUnproven", Assert.Throws<PolicyException>(() =>
+                    SavedRequiredTestInventory.Parse(captured.Bytes[requiredInventory.Locator].ToArray(),
+                        currentPlan.Tests.Select(t => t.GraphId + "-wrong").ToArray(), token)).Code);
                 if (standaloneTest)
                 {
                     var independent = currentPlan.Tests.Single(t => Path.GetFileName(t.ProjectPath) == "Independent.csproj");

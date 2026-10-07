@@ -87,8 +87,10 @@ internal static class FreshManifestCapture
                 moduleIdentity = inspected.ModuleIdentity, mvid = inspected.Mvid, debugIdentity = inspected.DebugIdentity,
                 passed = boundResult.Passed, rawExitCode = invocation.Process.ExitCode, modules });
         }
-        Artifact("required-test-inventory", "required-test-inventory", ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(new
-            { provider = "finite-sdk-required-test-inventory-v1", tests = requiredTests, reusableRecipe = false })), format: "json");
+        var inventoryBytes = JsonSerializer.SerializeToUtf8Bytes(new
+            { provider = "finite-sdk-required-test-inventory-v1", tests = requiredTests, reusableRecipe = false });
+        _ = SavedRequiredTestInventory.Parse(inventoryBytes, requiredIds, cancellation);
+        Artifact("required-test-inventory", "required-test-inventory", ImmutableArray.Create(inventoryBytes), format: "json");
         foreach (var binding in graph.GraphContexts.Where(b => !b.IsTestProject || b.Context.ExclusionPolicy.IncludeTests))
         {
             cancellation.ThrowIfCancellationRequested();
