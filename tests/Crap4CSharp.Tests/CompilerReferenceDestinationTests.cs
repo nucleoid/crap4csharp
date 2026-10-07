@@ -103,6 +103,26 @@ public sealed class CompilerReferenceDestinationTests
     }
 
     [Fact]
+    public async Task SolutionMappedIntermediateDirectoryMatchesActualSdkReferenceDestinationBeforeBuild()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-solution-intermediate");
+        fixture.Write("App/App.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>");
+        fixture.Write("App/Code.cs", "public class App {}");
+        var solution = fixture.Write("Root.slnx", "<Solution><Configurations><Platform Name=\"AnyCPU\" /></Configurations><Project Path=\"App/App.csproj\" /></Solution>");
+        var token = TestContext.Current.CancellationToken;
+        var request = new ProjectContextLoadRequest(solution, "Debug", "AnyCPU", ["net10.0"], false, false, TimeSpan.FromMinutes(2));
+        Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, token)).ExitCode);
+        var loaded = await ProjectContextLoader.LoadGraphAsync(request, token);
+        Assert.True(loaded.Success, loaded.FailureReason + ": " + string.Join(" | ", loaded.Diagnostics));
+        var context = Assert.Single(loaded.GraphContexts).Context;
+        Assert.Equal(Path.Combine(fixture.Path, "App", "obj", "Debug", "net10.0"), context.EvaluatedIntermediateDirectory);
+        Assert.Equal(Path.Combine(context.EvaluatedIntermediateDirectory!, "ref", "App.dll"), context.EvaluatedReferenceAssemblyPath);
+        Assert.Single(CompilerGraphExecution.ValidateAndFreeze(loaded));
+        Assert.Empty(Directory.GetFiles(fixture.Path, "*.dll", SearchOption.AllDirectories));
+        Assert.Empty(Directory.GetFiles(fixture.Path, "*.pdb", SearchOption.AllDirectories));
+    }
+
+    [Fact]
     public void PrivateReferenceDestinationDoesNotChangePublicIdentityOrCapabilities()
     {
         var context = ProjectAnalysisContext.Create("App.csproj", "App", "net10.0", "Release", "AnyCPU",
