@@ -124,6 +124,10 @@ public sealed class FreshCheckExecutionTests
     public Task SavedProductionExecutionsBindExactCurrentReachabilityAndRequiredArtifactBytes()
         => RunCase(false, true, standaloneTest: true, savedCoverage: true, productionAgreement: true);
 
+    [Fact]
+    public Task SavedProductionExecutionsRetainBothSharedRequiredTestReachabilityPairs()
+        => RunCase(false, true, standaloneTest: true, savedCoverage: true, sharedCoverage: true, productionAgreement: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
         bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false)
     {
@@ -405,14 +409,15 @@ public sealed class FreshCheckExecutionTests
                             => Assert.Equal("provenance.savedProductionExecutionsUnproven", Assert.Throws<PolicyException>(() =>
                                 Agree(bundle with { Manifest = ManifestIdentity.Seal(changed) })).Code);
                         Agree(bundle);
-                        var originalExecution = Assert.Single(bundle.Manifest.Executions);
+                        Assert.Equal(sharedCoverage ? 2 : 1, bundle.Manifest.Executions.Count);
+                        var originalExecution = bundle.Manifest.Executions.First();
                         Reject(bundle.Manifest with { Executions = [] });
                         Reject(bundle.Manifest with { Executions = [originalExecution with { Id = "foreign-execution" }] });
                         Reject(bundle.Manifest with { Executions = [originalExecution with { TestProject = "Independent/Independent.csproj" }] });
                         Reject(bundle.Manifest with { Executions = [originalExecution with { TestMvid = Guid.NewGuid().ToString() }] });
                         Reject(bundle.Manifest with { Executions = [originalExecution with { PassedTests = originalExecution.PassedTests + 1 }] });
                         Reject(bundle.Manifest with { Builds = bundle.Manifest.Builds.Select(b => b with { Id = "foreign-build" }).ToArray() });
-                        var coverage = bundle.Manifest.Artifacts.Single(a => a.Kind == "coverage");
+                        var coverage = bundle.Manifest.Artifacts.Single(a => a.Kind == "coverage" && a.ExecutionId == originalExecution.Id);
                         // Genuine same-shaped normalized module, but visits differ from
                         // the all-required saved report. Resealing is not agreement.
                         var xml = TestResultBinding.Parse(bundle.Bytes[coverage.Locator]);
@@ -423,6 +428,22 @@ public sealed class FreshCheckExecutionTests
                             a.Id == coverage.Id ? a with { Locator = locator, Length = changedBytes.Length, Sha256 = hash } : a).ToArray() }),
                             Bytes = new Dictionary<string, System.Collections.Immutable.ImmutableArray<byte>>(bundle.Bytes) { [locator] = changedBytes } };
                         Assert.Equal("provenance.savedProductionExecutionsUnproven", Assert.Throws<PolicyException>(() => Agree(changedBundle)).Code);
+                        Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(changedBundle.Manifest, changedBundle.Bytes).Status);
+                        // Coherently renamed associations still satisfy captured schema,
+                        // but are not canonical IDs derived from the current graph.
+                        var renamedId = "renamed-" + originalExecution.Id;
+                        var renamed = bundle.Manifest with { Executions = bundle.Manifest.Executions.Select(e => e.Id == originalExecution.Id ? e with { Id = renamedId } : e).ToArray(),
+                            Artifacts = bundle.Manifest.Artifacts.Select(a => a.ExecutionId == originalExecution.Id ? a with { ExecutionId = renamedId } : a).ToArray() };
+                        renamed = ManifestIdentity.Seal(renamed);
+                        Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(renamed, bundle.Bytes).Status);
+                        Reject(renamed);
+                        var renamedBuild = "renamed-" + originalExecution.BuildId;
+                        var buildRenamed = ManifestIdentity.Seal(bundle.Manifest with {
+                            Builds = bundle.Manifest.Builds.Select(b => b with { Id = renamedBuild }).ToArray(),
+                            Executions = bundle.Manifest.Executions.Select(e => e with { BuildId = renamedBuild }).ToArray(),
+                            Artifacts = bundle.Manifest.Artifacts.Select(a => a.BuildId is null ? a : a with { BuildId = renamedBuild }).ToArray() });
+                        Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(buildRenamed, bundle.Bytes).Status);
+                        Reject(buildRenamed);
                         Agree(bundle);
                     }
                     var accepted = Assert.IsType<BoundSavedGraphCoverage>(Validate(bundle));
