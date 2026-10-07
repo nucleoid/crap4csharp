@@ -198,6 +198,7 @@ internal static class App
         try
         {
             options = ParseModern(args);
+            ResultDocument? freshResult = null;
             if (options.Command == "check" && options.Ruleset == ComplexityRules.OrdinaryMethodsV1)
                 throw new ArgumentException("check requires callables-v1; ordinary-methods-v1 is available through the legacy option-only invocation.");
             if (options.Command == "check" && options.ReuseArtifacts is null)
@@ -209,13 +210,12 @@ internal static class App
                         Frameworks: options.Frameworks.Count == 0 ? null : options.Frameworks,
                         Configuration: options.Configuration, ExemptionFile: options.Exemptions,
                         IncludeTests: options.IncludeTests, IncludeGenerated: options.IncludeGenerated), options.Timeout);
-                _ = await FreshCheckPreflightLoader.LoadAsync(request, workingDirectory, cancellationToken);
-                throw new PolicyException("check.freshExecutionIncomplete", "Fresh trust/scope/output preflight completed; execution/export integration is not yet available. No restore/build/test was launched.");
+                freshResult = await FreshCheckCommand.RunAsync(request, workingDirectory, startedAt, cancellationToken);
             }
             cancellationToken.ThrowIfCancellationRequested();
             if (options.Command == "check" && options.Output is not null)
                 OutputDestinationSafety.RejectExistingConsumerFile(options.Output, workingDirectory);
-            var result = options.Command == "check"
+            var result = freshResult ?? (options.Command == "check"
                 ? await PolicyCheckCommand.RunAsync(options.ReuseArtifacts!, options.Policy!, options.Base!,
                     workingDirectory, options.Output, options.Timeout, startedAt, stopwatch.Elapsed, cancellationToken)
                 : options.ReuseArtifacts is not null
@@ -223,7 +223,7 @@ internal static class App
                     startedAt, stopwatch.Elapsed, cancellationToken)
                 : options.Ruleset == ComplexityRules.OrdinaryMethodsV1
                 ? await AnalyzeLegacyCapturedInputsAsync(options, workingDirectory, startedAt, stopwatch, cancellationToken)
-                : AnalyzeCapturedInputs(options, workingDirectory, startedAt, stopwatch);
+                : AnalyzeCapturedInputs(options, workingDirectory, startedAt, stopwatch));
             // Capture terminal timing after replay/current revalidation, not before awaiting it.
             var duration = stopwatch.Elapsed;
             result = result with { Run = result.Run with

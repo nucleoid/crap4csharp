@@ -31,7 +31,7 @@ internal static class FreshCheckExecution
         if (!preflight.Request.NoRestore)
         {
             var restored = await ProjectBuildPreparation.RestoreAsync(request, token);
-            if (restored.ExitCode != 0) throw new ProjectContextException("context.restoreFailed", "Explicit selected-root restore failed: " + restored.StandardError);
+            if (restored.ExitCode != 0) throw new ProjectContextException("context.restoreFailed", "Explicit selected-root restore failed; raw restore output is not public execution evidence.");
         }
         // Workspace never bootstraps restore or treats warm outputs as compiler evidence.
         var loaded = await ProjectContextLoader.LoadGraphAsync(request, token);
