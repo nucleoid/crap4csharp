@@ -18,7 +18,11 @@ public sealed class FreshCheckExecutionTests
     public Task ColdExecutionCoordinatorPreservesActualOnceBuildsAndRawFailedTests(bool failing)
         => RunCase(failing, true);
 
-    private static async Task RunCase(bool failing, bool coordinatorOnly)
+    [Fact]
+    public Task SemanticEmptyProductionStillRunsRequiredTestsAndReportsExplicitNA()
+        => RunCase(false, false, true);
+
+    private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false)
     {
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
         const string counter = """
@@ -28,7 +32,7 @@ public sealed class FreshCheckExecutionTests
         const string privateCanary = "fresh-private-property-never-export-7264c8e";
         fixture.Write("Library/Library.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework>" +
             (coordinatorOnly ? "<PrivateCanary>" + privateCanary + "</PrivateCanary>" : "") + "</PropertyGroup>" + counter + "</Project>");
-        fixture.Write("Library/Code.cs", "public static class Library { public static int Value => 42; }");
+        fixture.Write("Library/Code.cs", emptyEligible ? "public static class Library {}" : "public static class Library { public static int Value => 42; }");
         if (coordinatorOnly) fixture.Write("Library/NoRuntime.cs", "#if NOT_DEFINED\npublic class Inactive {}\n#endif\n");
         fixture.Write("Tests/Tests.csproj", """
             <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><IsPackable>false</IsPackable></PropertyGroup>
@@ -39,7 +43,7 @@ public sealed class FreshCheckExecutionTests
             <ProjectReference Include="../Library/Library.csproj" /></ItemGroup>
             COUNTER</Project>
             """.Replace("COUNTER", counter, StringComparison.Ordinal));
-        fixture.Write("Tests/Tests.cs", "using Xunit; public class Once { [Fact] public void Test() { Assert.Equal(" + (failing ? "99" : "42") + ", Library.Value); } }");
+        fixture.Write("Tests/Tests.cs", "using Xunit; public class Once { [Fact] public void Test() { Assert.Equal(" + (failing ? "99" : "42") + ", " + (emptyEligible ? "42" : "Library.Value") + "); } }");
         fixture.Write("policy.json", """
             {"schemaVersion":"repository-policy-v1","mode":"strict","productionProjects":["Library/Library.csproj"],
             "testProjects":["Tests/Tests.csproj"],"configuration":"Debug","targetFrameworks":["net10.0"],"scope":"base",
@@ -136,6 +140,15 @@ public sealed class FreshCheckExecutionTests
             var bundle = ArtifactBundle.Load(Path.Combine(fixture.Path, "bundle", "manifest.json"), fixture.Path);
             Assert.Contains(bundle.Manifest.Artifacts, a => a.Kind == "test-child-build");
             Assert.DoesNotContain(bundle.Manifest.Artifacts, a => a.Kind == "binlog");
+            if (emptyEligible)
+            {
+                Assert.NotEmpty(bundle.Manifest.Executions);
+                Assert.DoesNotContain(bundle.Manifest.Artifacts, a => a.Kind == "coverage");
+                var checks = terminal.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray().ToArray();
+                Assert.Contains(checks, c => c.GetProperty("name").GetString() == "testExecution" && c.GetProperty("status").GetString() == "pass");
+                Assert.Contains(checks, c => c.GetProperty("name").GetString() == "coverage" && c.GetProperty("status").GetString() == "notApplicable");
+                Assert.Contains(checks, c => c.GetProperty("name").GetString() == "crap" && c.GetProperty("status").GetString() == "notApplicable");
+            }
         }
         Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library", "build-count.txt")));
         Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "build-count.txt")));
