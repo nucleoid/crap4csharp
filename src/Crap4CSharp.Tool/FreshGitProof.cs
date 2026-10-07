@@ -7,6 +7,11 @@ internal static class FreshGitProof
     internal static async Task ValidateAsync(FreshCheckPreflight preflight, CancellationToken token,
         IReadOnlyList<string>? provenOutputDirectories = null)
     {
+        if (preflight.Request.BaseRef is null)
+        {
+            FreshLocalProof.Validate(preflight, token);
+            return;
+        }
         var before = preflight.GitSnapshot ?? throw Refuse();
         var after = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Base,
             preflight.Request.BaseRef, preflight.Request.Head), preflight.Root, preflight.Request.Timeout, token);

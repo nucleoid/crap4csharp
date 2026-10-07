@@ -201,7 +201,7 @@ internal static class App
             ResultDocument? freshResult = null;
             if (options.Command == "check" && options.ReuseArtifacts is null)
             {
-                var request = new FreshCheckRequest(options.Project, options.Policy!, options.Base!, options.Scope,
+                var request = new FreshCheckRequest(options.Project, options.Policy!, options.Base, options.Scope,
                     options.Head, options.SourceState, options.Granularity, options.Output, options.ArtifactOutput,
                     options.NoRestore, options.NoBuild, options.BuildArtifacts,
                     new PolicyOverrides(Threshold: options.ThresholdExplicit ? options.Threshold : null,
@@ -467,7 +467,9 @@ internal static class App
             throw new ArgumentException("Fresh execution selectors cannot be combined with analyze or --reuse-artifacts.");
         if (options.Command == "check" && options.ReuseArtifacts is null)
         {
-            if (options.Policy is null || options.Base is null) throw new ArgumentException("Base-trusted fresh check requires --policy and --base.");
+            if (options.Policy is null) throw new ArgumentException("Fresh check requires --policy.");
+            if (options.Base is null && options.Scope != "all")
+                throw new ArgumentException("Fresh check requires --base unless explicit --scope all selects local-unreviewed policy.");
             if (options.SyntaxOnly || options.Inputs.Count != 0 || options.Coverage.Count != 0 || options.AllowMissingCoverage ||
                 options.CoveragePathMappings.Count != 0 || seen.Contains("--coverage-path-case"))
                 throw new ArgumentException("Fresh check does not accept supplied source/coverage/syntax inputs or unsupported path mappings.");

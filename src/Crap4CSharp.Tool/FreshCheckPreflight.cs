@@ -1,6 +1,6 @@
 using Crap4CSharp.Core;
 
-internal sealed record FreshCheckRequest(string? Project, string PolicyPath, string BaseRef,
+internal sealed record FreshCheckRequest(string? Project, string PolicyPath, string? BaseRef,
     string? Scope, string? Head, string SourceState, string Granularity,
     string? Output, string? ArtifactOutput, bool NoRestore, bool NoBuild, string? BuildArtifacts,
     PolicyOverrides Overrides, TimeSpan Timeout);
@@ -8,6 +8,7 @@ internal sealed record FreshCheckPreflight(string Root, FreshCheckRequest Reques
     TrustedPolicyResolution Trusted, RepositoryPolicy Policy, CapturedChangeScope? Scope)
 {
     internal CapturedChangeScope? GitSnapshot { get; init; }
+    internal IReadOnlyDictionary<string, string>? LocalSnapshot { get; init; }
 }
 
 internal static class FreshCheckPreflightLoader
@@ -22,6 +23,26 @@ internal static class FreshCheckPreflightLoader
             request.Granularity is not ("method" or "file")) throw new ArgumentException("Unsupported fresh scope/source-state/granularity selector.");
         if (request.NoBuild != (request.BuildArtifacts is not null))
             throw new ArgumentException("Fresh --no-build requires exactly one explicit --build-artifacts manifest; prior build evidence never comes from warm bin/obj files.");
+        if (request.BaseRef is null)
+        {
+            if (request.Scope != "all" || request.Head is not null)
+                throw new PolicyException("scope.gitEvidenceRequired", "Local fresh check requires explicit all scope and no Git head selector.");
+            var localRoot = Path.GetFullPath(workingDirectory);
+            var local = TrustedPolicyLoader.LoadLocal(localRoot, request.PolicyPath);
+            var validationLocal = PolicyOverrideValidator.Validate(local.Policy.Policy, request.Overrides with { Scope = "all" });
+            if (!validationLocal.Allowed)
+                throw new PolicyException(validationLocal.Reasons[0], "CLI override cannot weaken local policy: " + string.Join(", ", validationLocal.Reasons));
+            var localPolicy = local.Policy.Policy with
+            {
+                Threshold = request.Overrides.Threshold ?? local.Policy.Policy.Threshold,
+                Configuration = request.Overrides.Configuration ?? local.Policy.Policy.Configuration,
+                TargetFrameworks = request.Overrides.Frameworks?.ToArray() ?? local.Policy.Policy.TargetFrameworks.ToArray(), Scope = "all"
+            };
+            ValidateDestinations(request, localRoot, local.ContentHashes.Keys.Concat(localPolicy.ProductionProjects)
+                .Concat(localPolicy.TestProjects).Concat(request.Project is null ? [] : [request.Project]));
+            return new(localRoot, request, local, localPolicy, null)
+                { LocalSnapshot = FreshLocalProof.Capture(localRoot, token) };
+        }
         var gitRoot = await ProcessRunner.RunAsync("git", ["--no-optional-locks", "rev-parse", "--show-toplevel"],
             Path.GetFullPath(workingDirectory), request.Timeout, token);
         if (gitRoot.ExitCode != 0 || string.IsNullOrWhiteSpace(gitRoot.StandardOutput))

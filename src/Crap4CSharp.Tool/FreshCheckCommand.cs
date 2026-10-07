@@ -35,7 +35,7 @@ internal static class FreshCheckCommand
         var semanticEmpty = bundle.Manifest.Contexts.Count > 0 && bundle.Manifest.Contexts.All(c => c.CoverageApplicability == "semantic-empty");
         var checks = new CheckResult[]
         {
-            new("policyTrust", "pass", "policy.baseTrusted", true),
+            new("policyTrust", "pass", preflight.Trusted.Trust == "base-trusted" ? "policy.baseTrusted" : "policy.localUnreviewed", true),
             new("provenance", "pass", "provenance.freshCompilerTestPostflightBound", true),
             new("testExecution", "pass", "tests.actualRequiredContextsPassed", true),
             new("coverage", semanticEmpty ? "notApplicable" : policy.Evaluation.OperationalReasons.Count == 0 ? "pass" : "operationalError",

@@ -196,7 +196,7 @@ internal static class FreshManifestCapture
                 .Select(p => p!).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         var scopeBytes = ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(new { version = 1, sources = selected,
             sourceState = "worktree", granularity = preflight.Request.Granularity, requestedScope = preflight.Policy.Scope,
-            revision = preflight.GitSnapshot!.Revision }));
+            revision = preflight.GitSnapshot?.Revision }));
         // Tiny replay policy is effective threshold only; base policy/overlays are independently
         // retained and the caller must run the pure trusted policy gate, not trust replay's verdict.
         var policyBytes = ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(new { version = 1,
@@ -207,13 +207,16 @@ internal static class FreshManifestCapture
             Artifact("exemption-" + CanonicalIdentity.Tuple("exemption", exemption.Key), "trusted-exemption", ImmutableArray.Create(exemption.Value), format: "json");
         if (preflight.Trusted.Baseline is { } baseline)
             Artifact("trusted-baseline", "trusted-baseline", ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(baseline)), format: "json");
-        var revision = preflight.GitSnapshot!.Revision;
+        var revision = preflight.GitSnapshot?.Revision;
+        var stateHash = preflight.GitSnapshot is { } git ? FreshGitProof.Identity(git) :
+            FreshLocalProof.Identity(preflight.LocalSnapshot ?? throw new InvalidDataException("Local workspace fingerprint is missing."));
         var manifest = ManifestIdentity.Seal(new(ManifestIdentity.SchemaVersion, CanonicalIdentity.Algorithm,
             new("crap4csharp", typeof(AnalyzeCommand).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion,
                 preflight.Policy.Ruleset, ProjectAnalysisContext.ProtocolVersion, ManifestIdentity.CoverageProtocol, ManifestIdentity.PathProtocol),
-            new("completed", true, true, []), new("git", CanonicalIdentity.Tuple("fresh-repository", preflight.Root),
-                CanonicalIdentity.Tuple("fresh-workspace", preflight.Root), revision.CurrentHead, preflight.Trusted.Revision, revision.ResolvedHead)
-                { StateHash = FreshGitProof.Identity(preflight.GitSnapshot) },
+            new("completed", true, true, []), new(revision is null ? "none" : "git", CanonicalIdentity.Tuple("fresh-repository", preflight.Root),
+                CanonicalIdentity.Tuple("fresh-workspace", preflight.Root), revision?.CurrentHead,
+                revision is null ? null : preflight.Trusted.Revision, revision?.ResolvedHead)
+                { StateHash = stateHash },
             [new("workspace", "workspace", OperatingSystem.IsWindows() ? "insensitive" : "sensitive")], contexts, builds, executions, artifacts,
             new(CanonicalIdentity.Sha256(scopeBytes.AsSpan()), CanonicalIdentity.Sha256(policyBytes.AsSpan()), null, null), null));
         await RegateAsync(execution, cancellation);

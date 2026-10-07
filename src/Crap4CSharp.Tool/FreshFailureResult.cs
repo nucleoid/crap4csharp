@@ -22,7 +22,7 @@ internal static class FreshFailureResult
         }).Where(a => a is not null).Select(a => a!).ToArray();
         var evaluation = new EvaluationSection("check", new PolicyOptions(evidence.Preflight.Policy.Threshold, false),
             new EvaluationScope(evidence.Preflight.Root, []), [],
-            [new("policyTrust", "pass", "policy.baseTrusted", true),
+            [new("policyTrust", "pass", evidence.Preflight.Trusted.Trust == "base-trusted" ? "policy.baseTrusted" : "policy.localUnreviewed", true),
                 new("testExecution", cancelled ? "cancelled" : tests.Any(t => t.Process.ExitCode != 0) ? "fail" : "operationalError", reason, true),
                 new("provenance", "operationalError", "provenance.incompleteExecution", true),
                 new("coverage", "operationalError", "coverage.unacceptedPartialEvidence", true),
