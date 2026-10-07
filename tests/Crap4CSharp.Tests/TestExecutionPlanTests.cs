@@ -181,6 +181,70 @@ public sealed class TestExecutionPlanTests
         Assert.Throws<OperationCanceledException>(() => Freeze(new(false, [], []), new(false, [], []), cancellation.Token));
     }
 
+    [Theory]
+    [InlineData("same")]
+    [InlineData("root-selector")]
+    [InlineData("workspace")]
+    [InlineData("globals")]
+    [InlineData("symbols")]
+    [InlineData("generated")]
+    [InlineData("include-tests")]
+    [InlineData("required-test")]
+    [InlineData("bytes")]
+    [InlineData("oversized")]
+    [InlineData("cancelled")]
+    public void CompletedTestPlanRecipeIndependentlyBindsRequiredScheduleWithoutPublishingSecrets(string change)
+    {
+        using var directory = TestDirectory.Create("crap4csharp-completed-plan");
+        var loaded = Valid(directory.Path);
+        const string secret = "private-global-canary-do-not-export";
+        loaded = loaded with { BuildGraph = loaded.BuildGraph.Select(n => n with
+            { GlobalProperties = new Dictionary<string,string> { ["Flavor"] = secret } }).ToArray() };
+        var plan = Freeze(Discovery(loaded), loaded);
+        var selector = Path.Combine(directory.Path, "Root.csproj");
+        var bytes = Assert.IsType<byte[]>(Recipe("Capture", plan, directory.Path, selector, TestContext.Current.CancellationToken));
+        Assert.DoesNotContain(secret, System.Text.Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
+        Assert.DoesNotContain(directory.Path, System.Text.Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
+        var current = loaded;
+        if (change == "globals") current = current with { BuildGraph = current.BuildGraph.Select(n => n with
+            { GlobalProperties = new Dictionary<string,string> { ["Flavor"] = "changed" } }).ToArray() };
+        if (change is "symbols" or "generated" or "include-tests")
+        {
+            var contexts = current.Contexts.Select(c => change switch
+            {
+                "symbols" => c with { PreprocessorSymbols = ["RIGHT"] },
+                "generated" => c with { ExclusionPolicy = new(false, true) },
+                _ => c with { ExclusionPolicy = new(true, false) }
+            }).ToArray();
+            current = current with { Contexts = contexts, GraphContexts = current.GraphContexts.Select((b,i) => b with { Context = contexts[i] }).ToArray() };
+        }
+        if (change == "required-test") current = current with { GraphContexts = current.GraphContexts.Select(b => b with { IsTestProject = true }).ToArray() };
+        var discovery = Discovery(current);
+        if (change == "required-test") discovery = discovery with { TestRunners = [discovery.TestRunners[0], discovery.TestRunners[0] with
+            { GraphId = "root", ProjectPath = selector, Configuration = "Release" }] };
+        var newPlan = Freeze(discovery, current);
+        if (change == "root-selector") selector = Path.Combine(directory.Path, "Dep.csproj");
+        var root = change == "workspace" ? Path.GetDirectoryName(directory.Path)! : directory.Path;
+        if (change == "bytes") bytes[0] ^= 1;
+        if (change == "oversized") bytes = new byte[256 * 1024 + 1];
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        if (change == "cancelled") cancellation.Cancel();
+        if (change == "same") Recipe("Validate", bytes, newPlan, root, selector, cancellation.Token);
+        else if (change == "cancelled") Assert.Throws<OperationCanceledException>(() => Recipe("Validate", bytes, newPlan, root, selector, cancellation.Token));
+        else Assert.Equal("provenance.completedTestPlanMismatch", Assert.Throws<PolicyException>(() => Recipe("Validate", bytes, newPlan, root, selector, cancellation.Token)).Code);
+    }
+
+    private static object? Recipe(string name, params object[] args)
+    {
+        var type = typeof(ProjectContextLoader).Assembly.GetType("Crap4CSharp.Core.CompletedTestPlanRecipe");
+        Assert.True(type is not null, "Missing distinct completed-test required-plan recipe; prior compiler evidence cannot substitute for it.");
+        var method = type.GetMethod(name, BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        try { return method.Invoke(null, args); }
+        catch (TargetInvocationException error) when (error.InnerException is not null)
+        { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw; }
+    }
+
     private static object Freeze(ProjectContextLoadResult discovery, ProjectContextLoadResult loaded, CancellationToken? token = null)
     {
         var type = typeof(ProjectContextLoader).Assembly.GetType("Crap4CSharp.Core.CheckExecutionPlan");
