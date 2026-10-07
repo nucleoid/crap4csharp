@@ -182,7 +182,7 @@ public sealed class FreshCheckExecutionTests
                 Assert.Equal("none", bundle.Manifest.Revision.Kind);
                 Assert.Null(bundle.Manifest.Revision.Head);
                 Assert.NotEmpty(bundle.Manifest.Revision.StateHash!);
-                Assert.Equal("local-unreviewed", terminal.RootElement.GetProperty("evaluation").GetProperty("policyTrust").GetProperty("status").GetString());
+                Assert.Equal("local-unreviewed", terminal.RootElement.GetProperty("evaluation").GetProperty("policyTrust").GetProperty("trust").GetString());
                 Assert.Contains(terminal.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
                     c => c.GetProperty("name").GetString() == "testExecution" && c.GetProperty("status").GetString() == "pass");
             }
