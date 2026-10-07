@@ -27,6 +27,10 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, false, policyScope: "all", local: true);
 
     [Fact]
+    public Task FailedTestsRetainUsableBoundPartialMetricsWithoutCompletedOrReusableSuccess()
+        => RunCase(true, false, policyScope: "all", local: true, partial: true);
+
+    [Fact]
     public Task ExplicitPriorBuildRevalidatesCapturedGraphWithoutRecompilingAndRunsFreshTestsOnce()
         => RunCase(false, false, policyScope: "all", local: true, priorBuild: true);
 
@@ -47,7 +51,7 @@ public sealed class FreshCheckExecutionTests
             policyScope: scope, granularity: granularity);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -172,6 +176,15 @@ public sealed class FreshCheckExecutionTests
         if (failing)
         {
             Assert.Equal(1, exit);
+            if (partial)
+            {
+                Assert.NotEmpty(terminal.RootElement.GetProperty("evaluation").GetProperty("metrics").EnumerateArray());
+                Assert.True(terminal.RootElement.GetProperty("evaluation").GetProperty("coverage").GetProperty("known").GetInt32() > 0);
+                Assert.False(terminal.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("completed").GetBoolean());
+                Assert.Equal("invalid", terminal.RootElement.GetProperty("evaluation").GetProperty("provenance").GetProperty("status").GetString());
+                Assert.DoesNotContain(terminal.RootElement.GetProperty("run").GetProperty("artifacts").EnumerateArray(),
+                    a => a.GetProperty("kind").GetString() == "manifest" || a.GetProperty("complete").GetBoolean() || a.GetProperty("reusable").GetBoolean());
+            }
             Assert.Contains(terminal.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
                 c => c.GetProperty("name").GetString() == "testExecution" && c.GetProperty("status").GetString() == "fail");
         }
