@@ -38,6 +38,12 @@ public sealed class FreshCheckExecutionTests
     public Task LocalColdFreshCheckAcceptsEvaluatedCustomOutputWithoutRebaseliningAuthoredInputs(string outputLayout)
         => RunCase(false, false, policyScope: "all", local: true, outputLayout: outputLayout);
 
+    [Theory]
+    [InlineData("source")]
+    [InlineData("additional")]
+    public Task LocalCustomOutputStillRejectsTestSideAuthoredInputDriftWithPreservedTimestamp(string inputRole)
+        => RunCase(false, false, policyScope: "all", local: true, outputLayout: "intermediate", outputMutation: inputRole);
+
     [Fact]
     public Task FailedTestsRetainUsableBoundPartialMetricsWithoutCompletedOrReusableSuccess()
         => RunCase(true, false, policyScope: "all", local: true, partial: true);
@@ -79,7 +85,7 @@ public sealed class FreshCheckExecutionTests
             policyScope: scope, granularity: granularity);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -94,7 +100,13 @@ public sealed class FreshCheckExecutionTests
         const string privateCanary = "fresh-private-property-never-export-7264c8e";
         fixture.Write("Library/Library.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework>" +
             (coordinatorOnly ? "<PrivateCanary>" + privateCanary + "</PrivateCanary>" : "") + "</PropertyGroup>" + counter +
+            (outputMutation is null ? "" : outputMutation == "source"
+                ? "<ItemGroup><Compile Include=\"compiler-cache/Authored.cs\" /></ItemGroup>"
+                : "<ItemGroup><AdditionalFiles Include=\"compiler-cache/Rules.json\" /></ItemGroup>") +
             (hasGenerated ? "<Target Name=\"AddGenerated\" BeforeTargets=\"CoreCompile\"><ItemGroup><Compile Include=\"obj/Extra.cs\" /></ItemGroup></Target>" : "") + "</Project>");
+        if (outputMutation is not null)
+            fixture.Write(outputMutation == "source" ? "Library/compiler-cache/Authored.cs" : "Library/compiler-cache/Rules.json",
+                outputMutation == "source" ? "public static class Authored { public static int Value => 42; }" : "{\"value\":42}");
         fixture.Write("Library/Code.cs", emptyEligible ? "public static class Library {}" : "public static class Library { public static int Value => 42; }");
         if (hasGenerated) fixture.Write("Library/obj/Extra.cs", "public static class Extra { public static int Value => 42; }");
         if (coordinatorOnly) fixture.Write("Library/NoRuntime.cs", "#if NOT_DEFINED\npublic class Inactive {}\n#endif\n");
@@ -108,6 +120,9 @@ public sealed class FreshCheckExecutionTests
             COUNTER</Project>
             """.Replace("COUNTER", counter, StringComparison.Ordinal));
         fixture.Write("Tests/Tests.cs", "using Xunit; public class Once { [Fact] public void Test() { " +
+            (outputMutation is null ? "" : "var p = System.IO.Path.GetFullPath(\"../../../../Library/compiler-cache/" +
+                (outputMutation == "source" ? "Authored.cs" : "Rules.json") +
+                "\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); ") +
             (partialDrift ? "var p = System.IO.Path.GetFullPath(\"../../../../Library/Code.cs\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); " : "") +
             (priorBuild ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
             "Assert.Equal(" + (failing ? "99" : "42") + ", " + (emptyEligible ? "42" : hasGenerated ? "Extra.Value" : "Library.Value") + "); } }");
@@ -251,6 +266,21 @@ public sealed class FreshCheckExecutionTests
         var exit = await global::App.RunAsync(publicArgs, fixture.Path, output, errors, token);
         using var terminal = JsonDocument.Parse(output.ToString());
         AssertRetainedPrivateDiagnostics(terminal.RootElement, requireBuildLog: true);
+        if (outputMutation is not null)
+        {
+            Assert.Equal(1, exit);
+            Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));
+            Assert.Empty(terminal.RootElement.GetProperty("evaluation").GetProperty("metrics").EnumerateArray());
+            Assert.False(terminal.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("completed").GetBoolean());
+            Assert.True(output.ToString().Contains("compiler.inputsMutated", StringComparison.Ordinal) || output.ToString().Contains("provenance.localWorkspaceChanged", StringComparison.Ordinal), output.ToString());
+            Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library", "build-count.txt")));
+            Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "build-count.txt")));
+            var path = Path.Combine(fixture.Path, "Library/compiler-cache", outputMutation == "source" ? "Authored.cs" : "Rules.json");
+            Assert.Contains("43", File.ReadAllText(path), StringComparison.Ordinal);
+            File.WriteAllBytes(path, original[path]);
+            foreach (var (input, bytes) in original) Assert.Equal(bytes, File.ReadAllBytes(input));
+            return;
+        }
         if (failing)
         {
             Assert.Equal(1, exit);

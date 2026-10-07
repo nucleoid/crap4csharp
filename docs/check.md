@@ -10,7 +10,7 @@ crap4csharp check --project tests/App.Tests/App.Tests.csproj \
 
 The caller supplies an available base; the tool does not fetch it. Policy, baseline and approved exemption bytes come from the same immutable merge-base. Local proposed changes are reported, not silently trusted. All declared production/test projects and target frameworks must exist in the selected dependency graph. Policy owns permitted overrides; CLI selectors cannot narrow required targets, weaken thresholds or forge exemptions. See [policy](policy.md).
 
-For a non-Git workspace, explicitly select `--scope all`. Policy is then read locally, labelled `local-unreviewed`, with revision `none` and content/context/workspace fingerprints. It is not reviewed-base enforcement.
+For a non-Git workspace, explicitly select `--scope all`. Policy is then read locally, labelled `local-unreviewed`, with revision `none` and content/context/workspace fingerprints. It is not reviewed-base enforcement. Local membership permits new build files under independently validated evaluated intermediate, target and restore-assets directories, including cold custom intermediate layouts. Every entry captured before preparation remains immutable even beneath those directories: existing authored files are never retrospectively reclassified or dropped. A change to a pre-existing captured output is conservatively refused; this is not unrestricted warm custom-output support. Actual compiler inputs and generated documents remain independently phase-bound.
 
 ## Preparation and execution
 

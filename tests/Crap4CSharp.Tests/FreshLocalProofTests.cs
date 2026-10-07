@@ -45,6 +45,56 @@ public sealed class FreshLocalProofTests
         Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));
     }
 
+    [Theory]
+    [InlineData("none")]
+    [InlineData("source-content")]
+    [InlineData("source-delete")]
+    [InlineData("additional-content")]
+    [InlineData("sibling-add")]
+    [InlineData("outside-add")]
+    public async Task EvaluatedOutputAdditionsNeverEraseOriginalAuthoredSnapshot(string mutation)
+    {
+        using var fixture = Create();
+        fixture.Write("compiler-cache/Authored.cs", "public class Authored { }");
+        fixture.Write("compiler-cache/Rules.json", "{\"immutable\":true}");
+        var token = TestContext.Current.CancellationToken;
+        var preflight = await Load(fixture, token);
+        var outputs = new[] { Path.Combine(fixture.Path, "compiler-cache") };
+        fixture.Write("compiler-cache/Debug/Generated.g.cs", "public class Generated { }");
+        fixture.Write("compiler-cache/project.assets.json", "{}");
+        switch (mutation)
+        {
+            case "source-content":
+                var path = Path.Combine(fixture.Path, "compiler-cache/Authored.cs");
+                var time = File.GetLastWriteTimeUtc(path);
+                fixture.Write("compiler-cache/Authored.cs", "public class Mutated { }");
+                File.SetLastWriteTimeUtc(path, time); break;
+            case "source-delete": File.Delete(Path.Combine(fixture.Path, "compiler-cache/Authored.cs")); break;
+            case "additional-content": fixture.Write("compiler-cache/Rules.json", "{}"); break;
+            case "sibling-add": fixture.Write("compiler-cache-sibling/New.cs", "public class New { }"); break;
+            case "outside-add": fixture.Write("App/New.cs", "public class New { }"); break;
+        }
+        if (mutation == "none") await FreshGitProof.ValidateAsync(preflight, token, outputs);
+        else Assert.Equal("provenance.localWorkspaceChanged", (await Assert.ThrowsAsync<PolicyException>(() =>
+            FreshGitProof.ValidateAsync(preflight, token, outputs))).Code);
+        Assert.Equal(6, preflight.LocalSnapshot!.Count); // all original entries retained, including custom output inputs
+    }
+
+    [Theory]
+    [InlineData("relative")]
+    [InlineData("root")]
+    [InlineData("project")]
+    [InlineData("filesystem-root")]
+    public async Task LocalOutputFootprintCannotSwallowWorkspaceOrRequiredProjects(string layout)
+    {
+        using var fixture = Create();
+        var token = TestContext.Current.CancellationToken;
+        var preflight = await Load(fixture, token);
+        var output = layout == "relative" ? "compiler-cache" : layout == "root" ? fixture.Path : layout == "filesystem-root" ? Path.GetPathRoot(fixture.Path)! : Path.Combine(fixture.Path, "App");
+        Assert.Equal("provenance.localSnapshotUnsupported", (await Assert.ThrowsAsync<PolicyException>(() =>
+            FreshGitProof.ValidateAsync(preflight, token, [output]))).Code);
+    }
+
     [Fact]
     public async Task DeclaredLocalOverlayOutsideAuthoredExtensionInventoryStillHasImmutableContentGuard()
     {

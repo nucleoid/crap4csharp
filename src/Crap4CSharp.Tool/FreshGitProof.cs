@@ -9,7 +9,7 @@ internal static class FreshGitProof
     {
         if (preflight.Request.BaseRef is null)
         {
-            FreshLocalProof.Validate(preflight, token);
+            FreshLocalProof.Validate(preflight, token, provenOutputDirectories);
             return;
         }
         var before = preflight.GitSnapshot ?? throw Refuse();
