@@ -3,7 +3,8 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 
 // Diagnostic observations from genuinely failed tests. No manifest, successful
-// aggregate, approved baseline/waiver decision or reusable evidence is constructed.
+// aggregate or reusable evidence is constructed. Trusted policy filters diagnostic
+// findings only; its decision never replaces the failed execution terminal.
 internal static class FreshPartialAnalysis
 {
     internal static async Task<ResultDocument> AttachAsync(FreshExecutionEvidence evidence,
@@ -72,14 +73,31 @@ internal static class FreshPartialAnalysis
                     ? preflight.Policy.Scope == "all" || widened || excluded.Contains(path, StringComparer.Ordinal) || (scope?.Files ?? []).Any(f => f.NewPath == path)
                     : PolicyCheckCommand.IsSelected(preflight.Policy.Scope, widened, scope?.Files ?? [], callable, path, excluded);
             }
-            var callables = partitions.SelectMany(p => p.Callables).Where(Selected).ToArray();
+            var allCallables = partitions.SelectMany(p => p.Callables).ToArray();
+            var allFamilies = partitions.SelectMany(p => p.Families).ToArray();
+            var selections = allCallables.ToDictionary(c => c.ObservationId, Selected, StringComparer.Ordinal);
+            var diagnosticInventory = terminal with { Evaluation = terminal.Evaluation with
+            {
+                Contexts = partitions.Select(p => new EvaluationContext(p.ContextId, "project", p.Project, p.TargetFramework,
+                    p.Configuration, p.SourceSetHash, null)).ToArray(),
+                Callables = allCallables, Families = allFamilies
+            }};
+            var policy = evidence.Preflight.Policy;
+            var observationsForPolicy = PolicyCheckCommand.PolicyObservations(diagnosticInventory, policy, selections,
+                (contextId, logicalPath) => repositoryPaths[(contextId, logicalPath)]).ToArray();
+            var exemptions = PolicyCheckCommand.ParseExemptions(evidence.Preflight.Trusted.ExemptionBytes, diagnosticInventory);
+            var compatibility = TrustedPolicyLoader.BoundCompatibilityHash(evidence.Preflight.Trusted.Policy,
+                evidence.Preflight.Trusted.ExemptionBytes);
+            var diagnosticPolicy = PolicyEvaluator.Evaluate(policy, evidence.Preflight.Trusted.Baseline,
+                observationsForPolicy, exemptions.Active, compatibility);
+            var callables = allCallables.Where(c => selections[c.ObservationId]).ToArray();
             var observationIds = callables.Select(c => c.ObservationId).ToHashSet(StringComparer.Ordinal);
             var families = partitions.SelectMany(p => p.Families).Where(f => f.MemberObservationIds.All(observationIds.Contains)).ToArray();
             var familyIds = families.Select(f => f.FamilyId).ToHashSet(StringComparer.Ordinal);
             callables = callables.Select(c => c with { FamilyIds = c.FamilyIds.Where(familyIds.Contains).ToArray() }).ToArray();
             var selected = callables.Select(c => (c.ContextId, c.CallableId)).ToHashSet();
             var metrics = partitions.SelectMany(p => p.Metrics).Where(m => selected.Contains((m.ContextId, m.MethodIdentity))).ToArray();
-            var findings = partitions.SelectMany(p => p.Findings).Where(f => selected.Contains((f.ContextId, f.MethodIdentity)) || familyIds.Contains(f.MethodIdentity)).ToArray();
+            var findings = diagnosticPolicy.Findings.Select(f => PolicyCheckCommand.ToFinding(f, diagnosticInventory, policy.Threshold)).ToArray();
             var unknown = metrics.Where(m => m.Coverage is null).ToArray();
             // Re-read every owned attachment and compiler/consumer input after analysis.
             await RegateAsync(evidence, token);
@@ -96,6 +114,7 @@ internal static class FreshPartialAnalysis
                 Contexts = partitions.Select(p => new EvaluationContext(p.ContextId, "project", p.Project, p.TargetFramework,
                     p.Configuration, p.SourceSetHash, null)).ToArray(),
                 Metrics = metrics, Findings = findings, Callables = callables, Families = families,
+                CallableExemptions = exemptions.Matches, ExemptionErrors = diagnosticPolicy.OperationalReasons,
                 Coverage = new(metrics.Length, metrics.Length - unknown.Length, unknown.Length,
                     unknown.GroupBy(m => m.CoverageReason ?? CoverageReasonCodes.Unavailable).ToDictionary(g => g.Key, g => g.Count())),
                 CoverageDiagnostics = partitions.SelectMany(p => p.Diagnostics).ToArray(),

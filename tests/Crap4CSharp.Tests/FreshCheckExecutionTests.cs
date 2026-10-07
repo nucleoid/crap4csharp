@@ -84,12 +84,16 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, false, includeGenerated: includeGenerated, generatedFixture: true,
             policyScope: scope, granularity: granularity);
 
-    [Fact]
-    public Task FailedTestsPartialFindingsRespectTrustedProductionExclusion()
-        => RunCase(true, false, policyScope: "all", local: true, partial: true, partialExclusion: true);
+    [Theory]
+    [InlineData("Library/Code.cs", true)]
+    [InlineData("Library/Other.cs", false)]
+    [InlineData("Library/Code.cs/sibling", false)]
+    public Task FailedTestsPartialFindingsRespectTrustedProductionExclusion(string exclusion, bool excluded)
+        => RunCase(true, false, policyScope: "all", local: true, partial: true, partialExclusion: exclusion,
+            partialExpectedExcluded: excluded);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, bool partialExclusion = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -137,11 +141,11 @@ public sealed class FreshCheckExecutionTests
             """.Replace("\"ruleset\":\"callables-v1\"", includeGenerated ?
                 "\"ruleset\":\"callables-v1\",\"allowedOverrides\":{\"includeGenerated\":true}" : "\"ruleset\":\"callables-v1\"", StringComparison.Ordinal)
                 .Replace("\"scope\":\"base\"", "\"scope\":\"" + policyScope + "\"", StringComparison.Ordinal));
-        if (partialExclusion)
+        if (partialExclusion is not null)
         {
             var path = Path.Combine(fixture.Path, "policy.json");
             File.WriteAllText(path, File.ReadAllText(path).Replace("\"threshold\":8", "\"threshold\":0.5", StringComparison.Ordinal)
-                .Replace("\"exclusions\":[]", "\"exclusions\":[\"Library/Code.cs\"]", StringComparison.Ordinal));
+                .Replace("\"exclusions\":[]", "\"exclusions\":[\"" + partialExclusion + "\"]", StringComparison.Ordinal));
         }
         if (scopedEmpty)
         {
@@ -304,7 +308,16 @@ public sealed class FreshCheckExecutionTests
             if (partial)
             {
                 Assert.True(terminal.RootElement.GetProperty("evaluation").GetProperty("metrics").GetArrayLength() > 0, output.ToString());
-                if (partialExclusion) Assert.Empty(terminal.RootElement.GetProperty("evaluation").GetProperty("findings").EnumerateArray());
+                if (partialExclusion is not null)
+                {
+                    var findings = terminal.RootElement.GetProperty("evaluation").GetProperty("findings").EnumerateArray().ToArray();
+                    if (partialExpectedExcluded) Assert.Empty(findings);
+                    else Assert.Contains(findings, f => f.GetProperty("decision").GetString() == "fail" &&
+                        f.GetProperty("path").GetString() == "Library/Code.cs");
+                    Assert.Contains(terminal.RootElement.GetProperty("run").GetProperty("testOutcomes").EnumerateArray(),
+                        o => o.GetProperty("exitCode").GetInt32() == 1);
+                    Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));
+                }
                 Assert.True(terminal.RootElement.GetProperty("evaluation").GetProperty("coverage").GetProperty("known").GetInt32() > 0);
                 Assert.False(terminal.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("completed").GetBoolean());
                 Assert.Equal("invalid", terminal.RootElement.GetProperty("evaluation").GetProperty("provenance").GetProperty("status").GetString());

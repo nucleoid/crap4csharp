@@ -130,13 +130,21 @@ internal static class PolicyCheckCommand
 
     internal static IEnumerable<PolicyObservation> PolicyObservations(ResultDocument result, RunManifest manifest,
         RepositoryPolicy policy, IReadOnlyDictionary<string, bool> selected)
+        => PolicyObservations(result, policy, selected,
+            (contextId, logicalPath) => RepositorySourcePath(manifest, contextId, logicalPath));
+
+    // The resolver supplies independently bound repository paths. Partial failed-test
+    // observations do not need, and must not fabricate, a successful run manifest.
+    internal static IEnumerable<PolicyObservation> PolicyObservations(ResultDocument result,
+        RepositoryPolicy policy, IReadOnlyDictionary<string, bool> selected,
+        Func<string, string, string> repositoryPath)
     {
         var callables = result.Evaluation.Callables ?? [];
         foreach (var callable in callables.Where(item => item.Applicability == "applicable" &&
                      item.CoverageReason != CoverageReasonCodes.AmbiguousCallableOwnership &&
-                     !Excluded(policy, RepositorySourcePath(manifest, item.ContextId, item.Path))))
+                     !Excluded(policy, repositoryPath(item.ContextId, item.Path))))
         {
-            var path = RepositorySourcePath(manifest, callable.ContextId, callable.Path);
+            var path = repositoryPath(callable.ContextId, callable.Path);
             yield return new PolicyObservation(callable.Kind is "Lambda" or "AnonymousMethod" or "lambda" or "anonymous-method"
                     ? "anonymous" : "method", callable.CallableId,
                 "crap.thresholdExceeded", callable.Ruleset, callable.ContextId, path, callable.BodyChecksum,
@@ -149,7 +157,7 @@ internal static class PolicyCheckCommand
         {
             var values = group.ToArray();
             var first = values[0];
-            var path = RepositorySourcePath(manifest, first.ContextId, first.Path);
+            var path = repositoryPath(first.ContextId, first.Path);
             if (Excluded(policy, path)) continue;
             yield return new PolicyObservation(values.All(item => item.Kind is "Lambda" or "AnonymousMethod" or "lambda" or "anonymous-method")
                     ? "anonymous" : "method", first.CallableId, "crap.thresholdExceeded",
@@ -162,7 +170,7 @@ internal static class PolicyCheckCommand
             var roots = callables.Where(item => item.CallableId == family.RootCallableId).ToArray();
             if (roots.Length != 1) throw new InvalidDataException("A callable family did not resolve uniquely.");
             var root = roots[0];
-            var path = RepositorySourcePath(manifest, root.ContextId, root.Path);
+            var path = repositoryPath(root.ContextId, root.Path);
             if (Excluded(policy, path)) continue;
             var familySelected = callables.Where(item => item.FamilyIds.Contains(family.FamilyId, StringComparer.Ordinal))
                 .Any(item => selected.GetValueOrDefault(item.ObservationId));
