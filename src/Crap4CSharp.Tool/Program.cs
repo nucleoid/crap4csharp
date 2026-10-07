@@ -236,7 +236,12 @@ internal static class App
             // Do not replace it with a generic exception terminal and lose evidence.
             // Early fresh failures and nonfresh paths still use exception handling.
             if (freshResult is null) cancellationToken.ThrowIfCancellationRequested();
-            if (options.Command == "check" && options.Output is not null)
+            // A failed fresh terminal already contains actual child outcomes. Its
+            // destination may have become consumer data during that child; let the
+            // guarded write path below refuse it without discarding those outcomes.
+            // Success and nonfresh paths retain their existing consumer-file guard.
+            if (options.Command == "check" && options.Output is not null &&
+                (freshResult is null || freshResult.Run.ExitCode != 1))
                 OutputDestinationSafety.RejectExistingConsumerFile(options.Output, workingDirectory);
             var result = freshResult ?? (options.Command == "check"
                 ? await PolicyCheckCommand.RunAsync(options.ReuseArtifacts!, options.Policy!, options.Base!,
