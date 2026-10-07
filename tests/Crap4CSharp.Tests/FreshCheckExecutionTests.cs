@@ -66,6 +66,15 @@ public sealed class FreshCheckExecutionTests
             {
                 Assert.NotEqual(0, evidence.Tests[0].Process.ExitCode);
                 Assert.Null(evidence.Coverage); Assert.Empty(evidence.SafeChildren);
+                var rawFailure = FreshFailureResult.Create(evidence, DateTimeOffset.UnixEpoch, TimeSpan.Zero);
+                Assert.Equal(1, rawFailure.Run.ExitCode);
+                Assert.Contains(rawFailure.Evaluation.Checks, c => c.Name == "testExecution" && c.Status == "fail");
+                var outcome = Assert.Single(rawFailure.Run.TestOutcomes!);
+                Assert.Equal("failed", outcome.Status); Assert.Equal(evidence.Tests[0].Process.ExitCode, outcome.ExitCode);
+                Assert.All(rawFailure.Run.Artifacts, a => { Assert.False(a.Complete); Assert.False(a.Reusable); });
+                Assert.DoesNotContain(rawFailure.Run.Artifacts, a => a.Kind == "manifest");
+                using var rawJson = JsonDocument.Parse(ResultWriter.Serialize(rawFailure));
+                Assert.Equal("failed", rawJson.RootElement.GetProperty("run").GetProperty("testOutcomes")[0].GetProperty("status").GetString());
             }
             else
             {
