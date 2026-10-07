@@ -12,7 +12,7 @@ public sealed class TestExecutionAdapterTests
     [InlineData(false, false)]
     [InlineData(true, true)]
     [InlineData(false, true)]
-    public async Task ActualMappedTestsRunOnceWithoutAnyImplicitBuildOrRestore(bool passes, bool opposingNoBuild)
+    public async Task ActualMappedTestsRunOnceWithoutAnyImplicitBuildOrRestore(bool passes, bool opposingNoBuild, bool skipped = false)
     {
         using var fixture = TestDirectory.Create("crap4csharp-actual-once-tests");
         var dependency = fixture.Write("Dep/Dep.csproj", """
@@ -47,6 +47,8 @@ public sealed class TestExecutionAdapterTests
             Assert.Equal(EXPECTED, Dependency.Value);
             } }
             """.Replace("EXPECTED", passes ? "42" : "43", StringComparison.Ordinal));
+        if (skipped)
+            File.AppendAllText(source, "\npublic class SkippedAssertions { [Xunit.Fact(Skip=\"deliberate fixture skip\")] public void NotRun() { throw new System.Exception(\"must not run\"); } }\n");
         var request = new ProjectContextLoadRequest(project, "Release", "AnyCPU", [], false, false, TimeSpan.FromMinutes(2));
         // LoadGraph has no extra root-global argument: use an entry root with the mapped test dependency.
         var root = fixture.Write("Root/Root.csproj", """
@@ -98,11 +100,25 @@ public sealed class TestExecutionAdapterTests
         var resultsDirectory = (string)observation.GetType().GetProperty("ResultsDirectory")!.GetValue(observation)!;
         var trx = XDocument.Load(Assert.Single(Directory.GetFiles(resultsDirectory, "*.trx")));
         var counters = Assert.Single(trx.Descendants(), e => e.Name.LocalName == "Counters");
-        Assert.Equal("1", counters.Attribute("total")!.Value);
+        Assert.Equal(skipped ? "2" : "1", counters.Attribute("total")!.Value);
         Assert.Equal(passes ? "1" : "0", counters.Attribute("passed")!.Value);
         Assert.Equal(passes ? "0" : "1", counters.Attribute("failed")!.Value);
-        Assert.Equal(passes ? "Passed" : "Failed", Assert.Single(trx.Descendants(), e => e.Name.LocalName == "UnitTestResult").Attribute("outcome")!.Value);
-        if (!opposingNoBuild)
+        Assert.Equal(passes ? "Passed" : "Failed", Assert.Single(trx.Descendants(), e => e.Name.LocalName == "UnitTestResult" && e.Attribute("outcome")?.Value != "NotExecuted").Attribute("outcome")!.Value);
+        if (skipped)
+        {
+            TestContext.Current.TestOutputHelper!.WriteLine("ACTUAL_SKIPPED_TRX " + trx.ToString());
+            var typedObservation = Assert.IsType<TestInvocationObservation>(observation);
+            var testBinding = Assert.Single(bound.FinalGraph.GraphContexts, b => b.IsTestProject);
+            var compiler = Assert.Single(bound.Observations, o => o.ProjectPath == project);
+            var verified = TestResultBinding.ValidateSuccessfulTrx(typedObservation, testBinding.Context, compiler, TestContext.Current.CancellationToken);
+            Assert.Equal(1, verified.Passed);
+            var captured = ArtifactEvidenceInspector.InspectTrx(TestResultBinding.ReadTrx(Path.Combine(resultsDirectory, "tests.trx"), TestContext.Current.CancellationToken));
+            Assert.Equal(2, captured.Total); Assert.Equal(1, captured.Passed); Assert.Equal(0, captured.Failed); Assert.Equal(1, captured.Skipped);
+            Assert.Single(trx.Descendants(), e => e.Name.LocalName == "UnitTestResult" && e.Attribute("outcome")?.Value == "NotExecuted");
+            Assert.NotNull(OwnedCoverageAttachment.ReadOpenCover(typedObservation, testBinding.Context, compiler, TestContext.Current.CancellationToken));
+            Assert.NotNull(CoverageGraphBinding.ValidateInvocation(typedObservation, bound, TestContext.Current.CancellationToken));
+        }
+        else if (!opposingNoBuild)
         {
             // Real RunBoundAsync outputs followed by actual VSTest, not fabricated Csc.
             var typedObservation = Assert.IsType<TestInvocationObservation>(observation);
@@ -378,6 +394,10 @@ public sealed class TestExecutionAdapterTests
         foreach (var (path, saved) in authored) { Assert.Equal(saved.Bytes, File.ReadAllBytes(path)); Assert.Equal(saved.Time, File.GetLastWriteTimeUtc(path)); }
         foreach (var (path, bytes) in outputs) Assert.Equal(bytes, File.ReadAllBytes(path));
     }
+    [Fact]
+    public Task ActualSkippedTestRetainsPassedCountAndRealCompilerCollectorEvidence()
+        => ActualMappedTestsRunOnceWithoutAnyImplicitBuildOrRestore(true, false, true);
+
     [Fact]
     public void ActualTestArgumentsPreserveMappedSelectorsAndEscapeMSBuildDelimiters()
     {
