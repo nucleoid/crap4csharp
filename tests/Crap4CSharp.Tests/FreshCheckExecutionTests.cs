@@ -152,7 +152,7 @@ public sealed class FreshCheckExecutionTests
                 (outputMutation == "source" ? "Authored.cs" : "Rules.json") +
                 "\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); ") +
             (partialDrift ? "var p = System.IO.Path.GetFullPath(\"../../../../Library/Code.cs\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); " : "") +
-            (priorBuild || measure || thresholdViolation || completedReuse ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
+            (priorBuild || measure || thresholdViolation || completedReuse || savedResults ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
             "Assert.Equal(" + (failing ? "99" : "42") + ", " + (emptyEligible ? "42" : hasGenerated ? "Extra.Value" : "Library.Value") + "); } }");
         fixture.Write("policy.json", """
             {"schemaVersion":"repository-policy-v1","mode":"strict","productionProjects":["Library/Library.csproj"],
@@ -187,7 +187,8 @@ public sealed class FreshCheckExecutionTests
         {
             fixture.Write("Independent/Independent.csproj", File.ReadAllText(Path.Combine(fixture.Path, "Tests/Tests.csproj"))
                 .Replace("<ProjectReference Include=\"../Library/Library.csproj\" />", "", StringComparison.Ordinal));
-            fixture.Write("Independent/Tests.cs", "using Xunit; public class IndependentTests { [Fact] public void Test() { Assert.Equal(42, 42); } }");
+            fixture.Write("Independent/Tests.cs", "using Xunit; public class IndependentTests { [Fact] public void Test() { " +
+                (savedResults ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") + "Assert.Equal(42, 42); } }");
             fixture.Write("Root.slnx", "<Solution><Configurations><Platform Name=\"AnyCPU\" /></Configurations><Project Path=\"Tests/Tests.csproj\" /><Project Path=\"Independent/Independent.csproj\" /></Solution>");
             var policyPath = Path.Combine(fixture.Path, "policy.json");
             File.WriteAllText(policyPath, File.ReadAllText(policyPath).Replace("\"testProjects\":[\"Tests/Tests.csproj\"]",
@@ -368,25 +369,97 @@ public sealed class FreshCheckExecutionTests
                     Assert.NotNull(type);
                     var method = type.GetMethod("Validate", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
                     Assert.NotNull(method);
+                    var imported = FreshPriorBuild.Load(bundle, currentPlan.PreparedGraph, fixture.Path, token);
+                    var currentCompiler = await CompilerGraphExecution.RunBoundAsync(reloadRequest, currentPlan.PreparedGraph,
+                        (node, cancellation) => { cancellation.ThrowIfCancellationRequested(); return Task.FromResult(imported[node.Id]); }, token);
                     void Validate(ArtifactBundle candidate)
                     {
-                        try { method.Invoke(null, [candidate, currentPlan, evidence.Compiler, fixture.Path, token]); }
+                        try { method.Invoke(null, [candidate, currentPlan, currentCompiler, fixture.Path, token]); }
                         catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
                         { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); }
                     }
                     Validate(bundle);
                     Assert.Equal(2, parsedRequired.Count);
+                    ArtifactBundle ChangeArtifact(string id, Func<ManifestArtifact, ManifestArtifact> change)
+                        => bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with
+                            { Artifacts = bundle.Manifest.Artifacts.Select(a => a.Id == id ? change(a) : a).ToArray() }) };
+                    ArtifactBundle ChangeBytes(string id, byte[] content)
+                    {
+                        var bytes = System.Collections.Immutable.ImmutableArray.Create(content);
+                        var hash = CanonicalIdentity.Sha256(bytes.AsSpan());
+                        var locator = "inputs/" + hash + ".bin";
+                        var changed = ChangeArtifact(id, a => a with { Locator = locator, Length = bytes.Length, Sha256 = hash });
+                        var dictionary = new Dictionary<string, System.Collections.Immutable.ImmutableArray<byte>>(bundle.Bytes) { [locator] = bytes };
+                        return changed with { Bytes = dictionary };
+                    }
+                    void Refused(ArtifactBundle candidate)
+                        => Assert.Equal("provenance.savedRequiredResultsUnproven", Assert.Throws<PolicyException>(() => Validate(candidate)).Code);
+                    var savedInventoryId = requiredInventory.Id;
                     foreach (var savedTest in parsedRequired)
                     {
-                        var artifact = bundle.Manifest.Artifacts.Single(a => a.Id == savedTest.Trx);
-                        var changed = bundle.Manifest with { Artifacts = bundle.Manifest.Artifacts.Select(a => a.Id == artifact.Id ? a with { Kind = "test-result" } : a).ToArray() };
-                        Assert.Throws<PolicyException>(() => Validate(bundle with { Manifest = changed }));
-                        var missing = new Dictionary<string, System.Collections.Immutable.ImmutableArray<byte>>(bundle.Bytes);
-                        missing.Remove(artifact.Locator);
-                        Assert.Throws<PolicyException>(() => Validate(bundle with { Bytes = missing }));
+                        foreach (var id in new[] { savedTest.Trx, savedTest.Assembly, savedTest.Pdb, savedTest.Child })
+                        {
+                            var artifact = bundle.Manifest.Artifacts.Single(a => a.Id == id);
+                            Refused(ChangeArtifact(id, a => a with { Kind = "unsupported-required-evidence" }));
+                            Refused(ChangeArtifact(id, a => a with { Format = "unsupported" }));
+                            Refused(ChangeArtifact(id, a => a with { CoordinateKind = "line" }));
+                            Refused(ChangeArtifact(id, a => a with { ContextId = bundle.Manifest.Contexts[0].Id }));
+                            Refused(ChangeArtifact(id, a => a with { BuildId = bundle.Manifest.Builds[0].Id }));
+                            Refused(ChangeArtifact(id, a => a with { ExecutionId = bundle.Manifest.Executions[0].Id }));
+                            var missing = new Dictionary<string, System.Collections.Immutable.ImmutableArray<byte>>(bundle.Bytes);
+                            missing.Remove(artifact.Locator);
+                            Refused(bundle with { Bytes = missing });
+                        }
+                        foreach (var field in new[] { "project", "moduleIdentity", "mvid", "debugIdentity", "passed" })
+                        {
+                            var inventory = System.Text.Json.Nodes.JsonNode.Parse(bundle.Bytes[requiredInventory.Locator].AsSpan())!;
+                            var item = inventory["tests"]!.AsArray().Single(t => t!["graphId"]!.GetValue<string>() == savedTest.GraphId)!;
+                            if (field == "passed") item[field] = 2; else item[field] = "unrelated";
+                            Refused(ChangeBytes(savedInventoryId, System.Text.Encoding.UTF8.GetBytes(inventory.ToJsonString())));
+                        }
+                        var savedChild = bundle.Manifest.Artifacts.Single(a => a.Id == savedTest.Child);
+                        var child = System.Text.Json.Nodes.JsonNode.Parse(bundle.Bytes[savedChild.Locator].AsSpan())!;
+                        child["graphId"] = parsedRequired.Single(t => t.GraphId != savedTest.GraphId).GraphId;
+                        Refused(ChangeBytes(savedTest.Child, System.Text.Encoding.UTF8.GetBytes(child.ToJsonString())));
+                        child["graphId"] = savedTest.GraphId; child["rawExitCode"] = 1;
+                        Refused(ChangeBytes(savedTest.Child, System.Text.Encoding.UTF8.GetBytes(child.ToJsonString())));
+                        var trxArtifact = bundle.Manifest.Artifacts.Single(a => a.Id == savedTest.Trx);
+                        var trxDocument = TestResultBinding.Parse(bundle.Bytes[trxArtifact.Locator]);
+                        trxDocument.Descendants().First(e => e.Name.LocalName == "TestMethod").SetAttributeValue("codeBase",
+                            Path.Combine(fixture.Path, "unrelated.dll"));
+                        Refused(ChangeBytes(savedTest.Trx, System.Text.Encoding.UTF8.GetBytes(trxDocument.ToString())));
+                        var other = parsedRequired.Single(t => t.GraphId != savedTest.GraphId);
+                        Refused(ChangeBytes(savedTest.Assembly, bundle.Bytes[bundle.Manifest.Artifacts.Single(a => a.Id == other.Assembly).Locator].ToArray()));
+                        Refused(ChangeBytes(savedTest.Pdb, bundle.Bytes[bundle.Manifest.Artifacts.Single(a => a.Id == other.Pdb).Locator].ToArray()));
                     }
+                    Refused(bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Artifacts = [.. bundle.Manifest.Artifacts,
+                        bundle.Manifest.Artifacts.Single(a => a.Id == parsedRequired[0].Trx) with { Id = "required-test-orphan-trx" }] }) });
+                    Refused(bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Artifacts = bundle.Manifest.Artifacts
+                        .Where(a => a.Id != parsedRequired[1].Trx).ToArray() }) });
+                    var input = currentCompiler.FinalGraph.GraphContexts.Single(b => b.GraphId == parsedRequired[1].GraphId).Context.CompilerDocuments
+                        .First(d => !d.IsGenerated).ResolvedPath!;
+                    var originalInput = File.ReadAllBytes(input); var mtime = File.GetLastWriteTimeUtc(input);
+                    try
+                    {
+                        File.AppendAllText(input, "\n// saved result drift"); File.SetLastWriteTimeUtc(input, mtime);
+                        Refused(bundle);
+                    }
+                    finally { File.WriteAllBytes(input, originalInput); File.SetLastWriteTimeUtc(input, mtime); }
+                    var observedPe = currentCompiler.Observations.Single(o => o.ProjectPath == currentPlan.Tests[0].ProjectPath).Assembly!.Path;
+                    var originalPe = File.ReadAllBytes(observedPe); var peTime = File.GetLastWriteTimeUtc(observedPe);
+                    try
+                    {
+                        var changedPe = originalPe.ToArray(); changedPe[^1] ^= 1;
+                        File.WriteAllBytes(observedPe, changedPe); File.SetLastWriteTimeUtc(observedPe, peTime);
+                        Refused(bundle);
+                    }
+                    finally { File.WriteAllBytes(observedPe, originalPe); File.SetLastWriteTimeUtc(observedPe, peTime); }
                     Validate(bundle);
-                    Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "bin", "Debug", "net10.0", "test-count.txt")));
+                    foreach (var required in currentPlan.Tests)
+                    {
+                        var context = currentCompiler.FinalGraph.GraphContexts.Single(b => b.GraphId == required.GraphId).Context;
+                        Assert.Single(File.ReadAllLines(Path.Combine(Path.GetDirectoryName(context.EvaluatedTargetPath!)!, "test-count.txt")));
+                    }
                     Assert.Equal("once", File.ReadAllText(Path.Combine(fixture.Path, "Independent/build-count.txt")).Trim());
                 }
 
