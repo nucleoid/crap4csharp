@@ -112,8 +112,12 @@ public sealed class FreshCheckExecutionTests
     public Task SavedRequiredResultsBindEveryActualTestArtifactAgainstCurrentCompilerWithoutNewLaunches()
         => RunCase(false, true, standaloneTest: true, savedResults: true);
 
+    [Fact]
+    public Task SavedNormalizedCoverageBindsCurrentReachabilityModulePathsAndPdbPointsWithoutNewLaunches()
+        => RunCase(false, true, standaloneTest: true, savedCoverage: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -152,7 +156,7 @@ public sealed class FreshCheckExecutionTests
                 (outputMutation == "source" ? "Authored.cs" : "Rules.json") +
                 "\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); ") +
             (partialDrift ? "var p = System.IO.Path.GetFullPath(\"../../../../Library/Code.cs\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); " : "") +
-            (priorBuild || measure || thresholdViolation || completedReuse || savedResults ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
+            (priorBuild || measure || thresholdViolation || completedReuse || savedResults || savedCoverage ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
             "Assert.Equal(" + (failing ? "99" : "42") + ", " + (emptyEligible ? "42" : hasGenerated ? "Extra.Value" : "Library.Value") + "); } }");
         fixture.Write("policy.json", """
             {"schemaVersion":"repository-policy-v1","mode":"strict","productionProjects":["Library/Library.csproj"],
@@ -188,7 +192,7 @@ public sealed class FreshCheckExecutionTests
             fixture.Write("Independent/Independent.csproj", File.ReadAllText(Path.Combine(fixture.Path, "Tests/Tests.csproj"))
                 .Replace("<ProjectReference Include=\"../Library/Library.csproj\" />", "", StringComparison.Ordinal));
             fixture.Write("Independent/Tests.cs", "using Xunit; public class IndependentTests { [Fact] public void Test() { " +
-                (savedResults ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") + "Assert.Equal(42, 42); } }");
+                (savedResults || savedCoverage ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") + "Assert.Equal(42, 42); } }");
             fixture.Write("Root.slnx", "<Solution><Configurations><Platform Name=\"AnyCPU\" /></Configurations><Project Path=\"Tests/Tests.csproj\" /><Project Path=\"Independent/Independent.csproj\" /></Solution>");
             var policyPath = Path.Combine(fixture.Path, "policy.json");
             File.WriteAllText(policyPath, File.ReadAllText(policyPath).Replace("\"testProjects\":[\"Tests/Tests.csproj\"]",
@@ -363,6 +367,74 @@ public sealed class FreshCheckExecutionTests
                     File.GetUnixFileMode(Path.GetDirectoryName(manifest)!));
                 var bundle = Measure("bundleLoad", () => ArtifactBundle.Load(manifest, evidence.PrivateDirectory));
                 Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(bundle.Manifest, bundle.Bytes).Status);
+                if (savedCoverage)
+                {
+                    var method = typeof(CoverageGraphBinding).GetMethod("ValidateSavedNormalized",
+                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                    Assert.NotNull(method);
+                    var imported = FreshPriorBuild.Load(bundle, currentPlan.PreparedGraph, fixture.Path, token);
+                    var currentCompiler = await CompilerGraphExecution.RunBoundAsync(reloadRequest, currentPlan.PreparedGraph,
+                        (node, cancellation) => { cancellation.ThrowIfCancellationRequested(); return Task.FromResult(imported[node.Id]); }, token);
+                    object Validate(ArtifactBundle candidate)
+                    {
+                        try { return method.Invoke(null, [candidate, currentPlan, currentCompiler, fixture.Path, token])!; }
+                        catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
+                        { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw; }
+                    }
+                    var accepted = Validate(bundle);
+                    Assert.NotNull(accepted);
+                    ArtifactBundle ChangeBytes(string id, byte[] content)
+                    {
+                        var bytes = System.Collections.Immutable.ImmutableArray.Create(content);
+                        var hash = CanonicalIdentity.Sha256(bytes.AsSpan()); var locator = "inputs/" + hash + ".bin";
+                        var manifestChanged = ManifestIdentity.Seal(bundle.Manifest with { Artifacts = bundle.Manifest.Artifacts.Select(a =>
+                            a.Id == id ? a with { Locator = locator, Length = bytes.Length, Sha256 = hash } : a).ToArray() });
+                        return bundle with { Manifest = manifestChanged,
+                            Bytes = new Dictionary<string, System.Collections.Immutable.ImmutableArray<byte>>(bundle.Bytes) { [locator] = bytes } };
+                    }
+                    void Refused(ArtifactBundle candidate)
+                        => Assert.Equal("provenance.savedCoverageUnproven", Assert.Throws<PolicyException>(() => Validate(candidate)).Code);
+                    var module = Assert.Single(parsedRequired.SelectMany(t => t.Modules));
+                    var coverageArtifact = bundle.Manifest.Artifacts.Single(a => a.Id == module.Artifact);
+                    void XmlChange(Action<System.Xml.Linq.XDocument> mutate)
+                    {
+                        var xml = TestResultBinding.Parse(bundle.Bytes[coverageArtifact.Locator]); mutate(xml);
+                        Refused(ChangeBytes(module.Artifact, System.Text.Encoding.UTF8.GetBytes(xml.ToString())));
+                    }
+                    XmlChange(xml => xml.Descendants("ModuleName").Single().Value = "UnrelatedModule");
+                    XmlChange(xml => xml.Descendants("File").First().SetAttributeValue("fullPath", Path.Combine(fixture.Path, "Independent/Tests.cs")));
+                    XmlChange(xml => xml.Descendants("File").First().SetAttributeValue("fullPath", "Library/Code.cs"));
+                    XmlChange(xml => xml.Descendants("SequencePoint").First().SetAttributeValue("sl", "100000"));
+                    XmlChange(xml => xml.Descendants("SequencePoint").First().SetAttributeValue("vc", "-1"));
+                    XmlChange(xml => xml.Descendants("SequencePoint").First().SetAttributeValue("sc", "1"));
+                    XmlChange(xml => xml.Descendants("SequencePoint").First().SetAttributeValue("offset", "0"));
+                    XmlChange(xml => xml.Descendants("MetadataToken").First().Value = "06000001");
+                    XmlChange(xml => xml.Descendants("FileRef").First().SetAttributeValue("uid", "missing"));
+                    XmlChange(xml => xml.Descendants("Modules").Single().Add(new System.Xml.Linq.XElement(xml.Descendants("Module").Single())));
+                    XmlChange(xml => xml.Descendants("Method").First().Remove());
+                    XmlChange(xml => xml.Descendants("Name").First().Value = "System.Int32 Library::get_Foreign()");
+                    var inventory = System.Text.Json.Nodes.JsonNode.Parse(bundle.Bytes[requiredInventory.Locator].AsSpan())!;
+                    var owner = parsedRequired.Single(t => t.Modules.Count != 0);
+                    var independent = parsedRequired.Single(t => t.Modules.Count == 0);
+                    inventory["tests"]!.AsArray().Single(t => t!["graphId"]!.GetValue<string>() == owner.GraphId)!["modules"] = new System.Text.Json.Nodes.JsonArray();
+                    Refused(ChangeBytes(requiredInventory.Id, System.Text.Encoding.UTF8.GetBytes(inventory.ToJsonString())));
+                    inventory = System.Text.Json.Nodes.JsonNode.Parse(bundle.Bytes[requiredInventory.Locator].AsSpan())!;
+                    var transferredId = "required-test-" + independent.GraphId + "-coverage-" + module.GraphId;
+                    inventory["tests"]!.AsArray().Single(t => t!["graphId"]!.GetValue<string>() == owner.GraphId)!["modules"] = new System.Text.Json.Nodes.JsonArray();
+                    inventory["tests"]!.AsArray().Single(t => t!["graphId"]!.GetValue<string>() == independent.GraphId)!["modules"] =
+                        new System.Text.Json.Nodes.JsonArray(new System.Text.Json.Nodes.JsonObject { ["graphId"] = module.GraphId, ["artifact"] = transferredId });
+                    var transferred = ChangeBytes(requiredInventory.Id, System.Text.Encoding.UTF8.GetBytes(inventory.ToJsonString()));
+                    transferred = transferred with { Manifest = ManifestIdentity.Seal(transferred.Manifest with { Artifacts = transferred.Manifest.Artifacts.Select(a =>
+                        a.Id == module.Artifact ? a with { Id = transferredId } : a).ToArray() }) };
+                    Refused(transferred);
+                    Validate(bundle);
+                    foreach (var required in currentPlan.Tests)
+                    {
+                        var context = currentCompiler.FinalGraph.GraphContexts.Single(b => b.GraphId == required.GraphId).Context;
+                        Assert.Single(File.ReadAllLines(Path.Combine(Path.GetDirectoryName(context.EvaluatedTargetPath!)!, "test-count.txt")));
+                    }
+                    Assert.Equal("once", File.ReadAllText(Path.Combine(fixture.Path, "Independent/build-count.txt")).Trim());
+                }
                 if (savedResults)
                 {
                     var type = typeof(App).Assembly.GetType("Crap4CSharp.Core.SavedRequiredTestResults");
