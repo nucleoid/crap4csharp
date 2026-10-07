@@ -45,6 +45,33 @@ public sealed class FreshPolicyEvaluationTests
         Assert.All(manifest.Contexts.Single().Inputs, i => Assert.True(i.Generated));
     }
 
+    [Theory]
+    [InlineData("strict", false, true, 2)]
+    [InlineData("incremental", false, false, 0)]
+    [InlineData("incremental", true, true, 2)]
+    public void EmptyGitSelectionDoesNotBypassStrictOrWidenedEffectivePolicyInventory(
+        string mode, bool widened, bool applicable, int exit)
+    {
+        var (preflight, manifest, replay) = Fixture(mode, "method");
+        preflight = preflight with { Scope = preflight.Scope! with { Files = [],
+            Completeness = widened ? ScopeCompleteness.ContextIncomplete : ScopeCompleteness.Complete } };
+        var result = FreshPolicyEvaluation.Evaluate(preflight, manifest, replay);
+        Assert.Equal(applicable, result.HasApplicableCrap);
+        Assert.Equal(exit, result.Evaluation.ExitCode);
+        Assert.Equal(2, result.Observations.Count);
+    }
+
+    [Fact]
+    public void EmptyApplicablePolicyInventoryIsExplicitWithoutErasingCapturedCallables()
+    {
+        var (preflight, manifest, replay) = Fixture("strict", "method");
+        preflight = preflight with { Policy = preflight.Policy with { Exclusions = ["App/Code.cs"] } };
+        var result = FreshPolicyEvaluation.Evaluate(preflight, manifest, replay);
+        Assert.False(result.HasApplicableCrap);
+        Assert.Empty(result.Observations);
+        Assert.Equal(2, replay.Evaluation.Callables!.Count);
+    }
+
     [Fact]
     public void PermittedTightenedThresholdIsAppliedWithoutChangingBaselineCompatibility()
     {
@@ -75,6 +102,7 @@ public sealed class FreshPolicyEvaluationTests
             { MemberObservationIds = callables.Select(c => c.ObservationId).ToArray() };
         var result = FreshPolicyEvaluation.Evaluate(preflight, manifest, replay with
             { Evaluation = replay.Evaluation with { Callables = callables, Families = [family] } });
+        Assert.True(result.HasApplicableCrap);
         Assert.True(result.Observations.Single(o => o.Kind == "family").Selected);
         Assert.Contains(result.Findings, f => f.EntityKey == "family" && f.Decision == "fail");
         Assert.Equal(2, result.Evaluation.ExitCode);
@@ -89,6 +117,7 @@ public sealed class FreshPolicyEvaluationTests
         var result = FreshPolicyEvaluation.Evaluate(preflight, manifest, replay with
             { Evaluation = replay.Evaluation with { Callables = callables } });
         Assert.Equal(1, result.Evaluation.ExitCode);
+        Assert.True(result.HasApplicableCrap);
         Assert.Contains(CoverageReasonCodes.NoMatchingMethod, result.Evaluation.OperationalReasons);
     }
 

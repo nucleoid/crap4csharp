@@ -281,6 +281,12 @@ public sealed class CallableCliTests : IDisposable
         Assert.Contains("callables-v1", result.Output);
         Assert.Contains("--callable-exemptions", result.Output);
         Assert.Contains("analyze --syntax-only", result.Output);
+        Assert.Contains("check --project", result.Output);
+        Assert.Contains("--artifact-output", result.Output);
+        Assert.Contains("--build-artifacts", result.Output);
+        Assert.Contains("required tests still run", result.Output);
+        Assert.Contains("Fresh whole-run", result.Output);
+        Assert.Contains("local-unreviewed", result.Output);
     }
 
     [Fact]

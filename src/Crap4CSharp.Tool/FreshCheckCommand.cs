@@ -33,6 +33,13 @@ internal static class FreshCheckCommand
             { Request = request with { ArtifactOutput = null } }, evidence.Compiler.FinalGraph);
         var complete = policy.Evaluation.ExitCode != 1;
         var semanticEmpty = bundle.Manifest.Contexts.Count > 0 && bundle.Manifest.Contexts.All(c => c.CoverageApplicability == "semantic-empty");
+        // Applicability follows the effective policy observations, not raw Git
+        // file count. Strict mode still evaluates all callables; incremental
+        // widening and selected family guards remain applicable.
+        var crapNotApplicable = complete && !policy.HasApplicableCrap;
+        var crapReason = semanticEmpty ? "crap.noApplicableSourceInventory" : crapNotApplicable
+            ? preflight.Policy.Mode == RepositoryPolicyMode.Incremental ? "crap.noApplicableChangedCallables" : "crap.noApplicablePolicyCallables"
+            : policy.Evaluation.ExitCode == 2 ? "crap.thresholdExceeded" : complete ? "crap.withinThreshold" : "crap.analysisIncomplete";
         var checks = new CheckResult[]
         {
             new("policyTrust", "pass", preflight.Trusted.Trust == "base-trusted" ? "policy.baseTrusted" : "policy.localUnreviewed", true),
@@ -40,8 +47,8 @@ internal static class FreshCheckCommand
             new("testExecution", "pass", "tests.actualRequiredContextsPassed", true),
             new("coverage", semanticEmpty ? "notApplicable" : policy.Evaluation.OperationalReasons.Count == 0 ? "pass" : "operationalError",
                 semanticEmpty ? "coverage.noApplicableSourceInventory" : policy.Evaluation.OperationalReasons.FirstOrDefault() ?? "coverage.complete", preflight.Policy.RequiredChecks.Contains("coverage")),
-            new("crap", semanticEmpty ? "notApplicable" : policy.Evaluation.ExitCode == 2 ? "fail" : complete ? "pass" : "operationalError",
-                semanticEmpty ? "crap.noApplicableSourceInventory" : policy.Evaluation.ExitCode == 2 ? "crap.thresholdExceeded" : complete ? "crap.withinThreshold" : "crap.analysisIncomplete",
+            new("crap", crapNotApplicable ? "notApplicable" : policy.Evaluation.ExitCode == 2 ? "fail" : complete ? "pass" : "operationalError",
+                crapReason,
                 preflight.Policy.RequiredChecks.Contains("crap"))
         };
         var differences = TrustedPolicyLoader.CompareProposed(preflight.Root, preflight.Trusted)

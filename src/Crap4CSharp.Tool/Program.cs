@@ -43,22 +43,40 @@ internal static class App
         Usage:
           crap4csharp [options] [file-or-directory ...]
           crap4csharp analyze --syntax-only [options] [file-or-directory ...]
+          crap4csharp check --project <path> --policy <path> [--base <ref> | --scope all] [options]
           crap4csharp check --reuse-artifacts <manifest> --policy <path> --base <ref> [options]
           crap4csharp baseline create|update --policy <path> --reuse-artifacts <manifest> --output <candidate>
 
         Options:
           --coverage <xml>   Use an OpenCover or Cobertura/Coverlet XML report; repeatable.
-                             Supplying coverage skips dotnet test.
+                             Legacy inspection skips dotnet test; fresh check rejects supplied XML.
           --coverage-path-map <report-root> <local-root>
                              Translate an absolute report root to an existing selected-source
                              directory; repeatable. Longest component prefix wins.
           --coverage-path-case <auto|sensitive|insensitive>
                              Compare foreign report roots using dialect defaults (auto), or the
                              explicit policy. Local source identity is unchanged.
-          --project <path>   Solution or project passed to dotnet test.
+          --project <path>   Selected solution/project; fresh check must include all policy targets.
+          --configuration <name>
+                             Fresh policy-permitted build configuration.
+          --framework <tfm>  Fresh policy-permitted target framework; repeatable.
+          --scope <mode>     Fresh all/worktree/base scope; staged execution is rejected.
+          --head <ref>       Fresh base scope requires the current HEAD.
+          --source-state <worktree|head>
+                             Fresh check executes worktree only; head execution is rejected.
+          --granularity <method|file>
+                             Fresh changed-scope selector (default: method).
+          --include-tests / --include-generated
+                             Fresh inclusion requires explicit policy permission.
+          --artifact-output <new-directory>
+                             Retain a fresh replay bundle; destination must not exist.
+          --no-restore       Fresh check requires already prepared restore assets.
+          --no-build         Fresh check skips compilation only with --build-artifacts.
+          --build-artifacts <manifest>
+                             Revalidate prior compiler binding; required tests still run.
           --threshold <n>    Fail when a known CRAP score is strictly greater than n (default: 8).
           --timeout-seconds <n>
-                             Maximum time for each external command (default: 300; max: 86400).
+                             Fresh whole-run / legacy per-command bound (default: 300; max: 86400).
           --allow-missing-coverage
                              Legacy ordinary-methods-v1 inspection opt-out for N/A methods.
                              Not accepted by callables-v1.
@@ -70,8 +88,9 @@ internal static class App
                              local input and cannot approve enforcement by themselves.
           --syntax-only      Analyze captured source and coverage without launching child processes.
           --reuse-artifacts <manifest>
-                             Replay a hash-bound captured bundle without loading projects or running processes.
-          --policy <path>    Repository policy path resolved from the immutable merge-base for check.
+                             Analyze: captured replay without child processes.
+                             Check: current revalidation; requires complete reusable evidence.
+          --policy <path>    Check policy from immutable base; non-Git all scope is local-unreviewed.
           --base <ref>       CI-authorized base ref used to resolve trusted policy and changed scope.
           --format <value>   Render human (default) or json output.
           --output <path>    Atomically write the versioned JSON result document to path.

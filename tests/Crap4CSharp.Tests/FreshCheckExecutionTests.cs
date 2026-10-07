@@ -263,6 +263,10 @@ public sealed class FreshCheckExecutionTests
                 Assert.Contains(checks, c => c.GetProperty("name").GetString() == "coverage" && c.GetProperty("status").GetString() == "pass");
                 Assert.Contains(checks, c => c.GetProperty("name").GetString() == "crap" && c.GetProperty("status").GetString() == "notApplicable" &&
                     c.GetProperty("reason").GetString() == "crap.noApplicableChangedCallables");
+                Assert.True(terminal.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("completed").GetBoolean());
+                // CRAP applicability is separate from the overall pure policy
+                // decision: all required tests/evidence completed successfully.
+                Assert.Equal("pass", terminal.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("policyDecision").GetString());
                 Assert.NotEmpty(bundle.Manifest.Executions);
                 Assert.Contains(bundle.Manifest.Artifacts, a => a.Kind == "coverage");
                 var outcome = Assert.Single(terminal.RootElement.GetProperty("run").GetProperty("testOutcomes").EnumerateArray());

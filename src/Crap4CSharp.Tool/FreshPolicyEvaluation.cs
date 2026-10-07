@@ -1,7 +1,7 @@
 using Crap4CSharp.Core;
 
 internal sealed record FreshPolicyDecision(PolicyEvaluationResult Evaluation, IReadOnlyList<PolicyObservation> Observations,
-    IReadOnlyList<FindingResult> Findings, ParsedPolicyExemptions Exemptions, string CompatibilityHash);
+    IReadOnlyList<FindingResult> Findings, ParsedPolicyExemptions Exemptions, string CompatibilityHash, bool HasApplicableCrap);
 
 // Pure evaluation only: does not attest execution, publish artifacts or turn captured
 // replay into current/verified provenance. The orchestration boundary owns those gates.
@@ -46,6 +46,6 @@ internal static class FreshPolicyEvaluation
         var compatibility = TrustedPolicyLoader.BoundCompatibilityHash(preflight.Trusted.Policy, preflight.Trusted.ExemptionBytes);
         var evaluated = PolicyEvaluator.Evaluate(policy, preflight.Trusted.Baseline, observations, exemptions.Active, compatibility);
         return new(evaluated, observations, evaluated.Findings.Select(f => PolicyCheckCommand.ToFinding(f, replay, policy.Threshold)).ToArray(),
-            exemptions, compatibility);
+            exemptions, compatibility, observations.Any(o => policy.Mode == RepositoryPolicyMode.Strict || o.Selected));
     }
 }
