@@ -23,6 +23,10 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, false, true);
 
     [Fact]
+    public Task NonGitAllScopeFreshCheckRunsRequiredContextsWithLocalUnreviewedTrustAndNoGitRevision()
+        => RunCase(false, false, policyScope: "all", local: true);
+
+    [Fact]
     public Task ExplicitGeneratedInclusionRetainsGeneratedClassificationAndScoresItsCallable()
         => RunCase(false, false, false, true);
 
@@ -39,7 +43,7 @@ public sealed class FreshCheckExecutionTests
             policyScope: scope, granularity: granularity);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method")
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -73,9 +77,10 @@ public sealed class FreshCheckExecutionTests
                 .Replace("\"scope\":\"base\"", "\"scope\":\"" + policyScope + "\"", StringComparison.Ordinal));
         fixture.Write(".gitignore", coordinatorOnly ? "build-count.txt\nbundle/\n" : "bin/\nobj/\nbuild-count.txt\nbundle/\n");
         var token = TestContext.Current.CancellationToken;
-        foreach (var args in new[] { new[] { "init", "-q" }, new[] { "config", "user.name", "Fixture" },
-            new[] { "config", "user.email", "fixture@example.invalid" }, new[] { "add", "." }, new[] { "commit", "-qm", "cold fixture" } })
-            Assert.Equal(0, (await ProcessRunner.RunAsync("git", args, fixture.Path, TimeSpan.FromSeconds(30), token)).ExitCode);
+        if (!local)
+            foreach (var args in new[] { new[] { "init", "-q" }, new[] { "config", "user.name", "Fixture" },
+                new[] { "config", "user.email", "fixture@example.invalid" }, new[] { "add", "." }, new[] { "commit", "-qm", "cold fixture" } })
+                Assert.Equal(0, (await ProcessRunner.RunAsync("git", args, fixture.Path, TimeSpan.FromSeconds(30), token)).ExitCode);
         var original = Directory.GetFiles(fixture.Path, "*", SearchOption.AllDirectories).Where(p =>
             !p.Contains(Path.DirectorySeparatorChar + ".git" + Path.DirectorySeparatorChar, StringComparison.Ordinal))
             .ToDictionary(p => p, File.ReadAllBytes);
@@ -152,7 +157,8 @@ public sealed class FreshCheckExecutionTests
             return;
         }
         var output = new StringWriter(); var errors = new StringWriter();
-        string[] publicArgs = ["check", "--project", "Tests/Tests.csproj", "--policy", "policy.json", "--base", "HEAD",
+        string[] baseArgs = local ? [] : ["--base", "HEAD"];
+        string[] publicArgs = ["check", "--project", "Tests/Tests.csproj", "--policy", "policy.json", .. baseArgs,
             "--artifact-output", "bundle", "--format", "json", "--timeout-seconds", "180", "--granularity", granularity, "--scope", policyScope];
         if (includeGenerated) publicArgs = [.. publicArgs, "--include-generated"];
         var exit = await global::App.RunAsync(publicArgs, fixture.Path, output, errors, token);
@@ -170,6 +176,16 @@ public sealed class FreshCheckExecutionTests
             var bundle = ArtifactBundle.Load(Path.Combine(fixture.Path, "bundle", "manifest.json"), fixture.Path);
             Assert.Contains(bundle.Manifest.Artifacts, a => a.Kind == "test-child-build");
             Assert.DoesNotContain(bundle.Manifest.Artifacts, a => a.Kind == "binlog");
+            if (local)
+            {
+                Assert.False(Directory.Exists(Path.Combine(fixture.Path, ".git")));
+                Assert.Equal("none", bundle.Manifest.Revision.Kind);
+                Assert.Null(bundle.Manifest.Revision.Head);
+                Assert.NotEmpty(bundle.Manifest.Revision.StateHash!);
+                Assert.Equal("local-unreviewed", terminal.RootElement.GetProperty("evaluation").GetProperty("policyTrust").GetProperty("status").GetString());
+                Assert.Contains(terminal.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
+                    c => c.GetProperty("name").GetString() == "testExecution" && c.GetProperty("status").GetString() == "pass");
+            }
             if (hasGenerated)
             {
                 var context = bundle.Manifest.Contexts.Single();
