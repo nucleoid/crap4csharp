@@ -96,8 +96,12 @@ public sealed class FreshCheckExecutionTests
     public Task ColdOrdinaryConsumerMeasuresCompositeBoundariesWithoutDroppingProofOrRepeatingTests()
         => RunCase(false, true, policyScope: "all", local: true, measure: true);
 
+    [Fact]
+    public Task PublicStrictMetricViolationRetainsSuccessfulOnceTestsAndCompleteNonReusableReplay()
+        => RunCase(false, false, policyScope: "all", local: true, thresholdViolation: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -136,7 +140,7 @@ public sealed class FreshCheckExecutionTests
                 (outputMutation == "source" ? "Authored.cs" : "Rules.json") +
                 "\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); ") +
             (partialDrift ? "var p = System.IO.Path.GetFullPath(\"../../../../Library/Code.cs\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); " : "") +
-            (priorBuild || measure ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
+            (priorBuild || measure || thresholdViolation ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
             "Assert.Equal(" + (failing ? "99" : "42") + ", " + (emptyEligible ? "42" : hasGenerated ? "Extra.Value" : "Library.Value") + "); } }");
         fixture.Write("policy.json", """
             {"schemaVersion":"repository-policy-v1","mode":"strict","productionProjects":["Library/Library.csproj"],
@@ -145,6 +149,11 @@ public sealed class FreshCheckExecutionTests
             """.Replace("\"ruleset\":\"callables-v1\"", includeGenerated ?
                 "\"ruleset\":\"callables-v1\",\"allowedOverrides\":{\"includeGenerated\":true}" : "\"ruleset\":\"callables-v1\"", StringComparison.Ordinal)
                 .Replace("\"scope\":\"base\"", "\"scope\":\"" + policyScope + "\"", StringComparison.Ordinal));
+        if (thresholdViolation)
+        {
+            var path = Path.Combine(fixture.Path, "policy.json");
+            File.WriteAllText(path, File.ReadAllText(path).Replace("\"threshold\":8", "\"threshold\":0.5", StringComparison.Ordinal));
+        }
         if (partialExclusion is not null)
         {
             var path = Path.Combine(fixture.Path, "policy.json");
@@ -365,11 +374,47 @@ public sealed class FreshCheckExecutionTests
         }
         else
         {
-            Assert.True(exit == 0, errors + Environment.NewLine + output);
+            Assert.True(exit == (thresholdViolation ? 2 : 0), errors + Environment.NewLine + output);
             Assert.True(File.Exists(Path.Combine(fixture.Path, "bundle", "manifest.json")));
             var bundle = ArtifactBundle.Load(Path.Combine(fixture.Path, "bundle", "manifest.json"), fixture.Path);
             Assert.Contains(bundle.Manifest.Artifacts, a => a.Kind == "test-child-build");
             Assert.DoesNotContain(bundle.Manifest.Artifacts, a => a.Kind == "binlog");
+            if (thresholdViolation)
+            {
+                var evaluation = terminal.RootElement.GetProperty("evaluation");
+                Assert.True(evaluation.GetProperty("decision").GetProperty("completed").GetBoolean());
+                Assert.Equal("fail", evaluation.GetProperty("decision").GetProperty("policyDecision").GetString());
+                var outcome = Assert.Single(terminal.RootElement.GetProperty("run").GetProperty("testOutcomes").EnumerateArray());
+                Assert.Equal("completed", outcome.GetProperty("status").GetString());
+                Assert.Equal(0, outcome.GetProperty("exitCode").GetInt32());
+                var manifest = Assert.Single(terminal.RootElement.GetProperty("run").GetProperty("artifacts").EnumerateArray(),
+                    a => a.GetProperty("kind").GetString() == "manifest");
+                Assert.True(manifest.GetProperty("complete").GetBoolean());
+                Assert.False(manifest.GetProperty("reusable").GetBoolean());
+                Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "bin", "Debug", "net10.0", "test-count.txt")));
+                var replay = AnalyzeCommand.Replay(bundle, fixture.Path, DateTimeOffset.UnixEpoch, TimeSpan.Zero, token, allSources: true);
+                Assert.Equal(2, replay.Run.ExitCode);
+                Assert.Equal("captured", replay.Evaluation.Provenance!.Status);
+                using var replayJson = JsonDocument.Parse(ResultWriter.Serialize(replay));
+                Assert.Equal(evaluation.GetProperty("metrics").GetRawText(), replayJson.RootElement.GetProperty("evaluation").GetProperty("metrics").GetRawText());
+                // Captured engine findings use metric identities/category; trusted
+                // policy findings use stable callable identities/category. Compare
+                // source-level numeric decisions, not those intentional wrappers.
+                string[] NormalizeFindings(JsonElement value) => value.EnumerateArray().Select(f =>
+                    string.Join("|", new[] { "code", "severity", "contextId", "path", "span", "complexity",
+                        "coverage", "crap", "threshold", "comparisonOperator", "decision" }
+                        .Select(name => name == "path" ? JsonSerializer.Serialize(bundle.Manifest.Contexts
+                            .Single(c => c.Id == f.GetProperty("contextId").GetString()).Inputs
+                            .Where(i => i.Role == "source").Select(i => new { i.LogicalPath, RepositoryPath =
+                                CapturedEvaluationInputs.DeclaredRepositorySourcePath(bundle.Manifest.Contexts
+                                    .Single(c => c.Id == f.GetProperty("contextId").GetString()), i) })
+                            .Single(i => i.LogicalPath == f.GetProperty("path").GetString() ||
+                                i.RepositoryPath == f.GetProperty("path").GetString()).RepositoryPath)
+                            : JsonSerializer.Serialize(f.GetProperty(name))))).Order(StringComparer.Ordinal).ToArray();
+                Assert.Equal(NormalizeFindings(evaluation.GetProperty("findings")),
+                    NormalizeFindings(replayJson.RootElement.GetProperty("evaluation").GetProperty("findings")));
+                Assert.Equal("fail", replay.Evaluation.Decision.PolicyDecision);
+            }
             if (scopedEmpty)
             {
                 var checks = terminal.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray().ToArray();
