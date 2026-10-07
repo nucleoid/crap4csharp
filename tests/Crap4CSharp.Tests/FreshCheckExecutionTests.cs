@@ -41,6 +41,10 @@ public sealed class FreshCheckExecutionTests
         => RunCase(true, false, policyScope: "all", local: true, partialDrift: true);
 
     [Fact]
+    public Task ValidatedFreshBuildFailureReplacesPriorPassButNeverNewlySelectedConsumerInput()
+        => RunCase(false, false, policyScope: "all", local: true, staleOutput: true);
+
+    [Fact]
     public Task ExplicitPriorBuildRevalidatesCapturedGraphWithoutRecompilingAndRunsFreshTestsOnce()
         => RunCase(false, false, policyScope: "all", local: true, priorBuild: true);
 
@@ -61,7 +65,7 @@ public sealed class FreshCheckExecutionTests
             policyScope: scope, granularity: granularity);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -224,6 +228,7 @@ public sealed class FreshCheckExecutionTests
         string[] baseArgs = local ? [] : ["--base", "HEAD"];
         string[] publicArgs = ["check", "--project", "Tests/Tests.csproj", "--policy", "policy.json", .. baseArgs,
             "--artifact-output", "bundle", "--format", "json", "--timeout-seconds", "180", "--granularity", granularity, "--scope", policyScope];
+        if (staleOutput) publicArgs = [.. publicArgs, "--output", "result.json"];
         if (includeGenerated) publicArgs = [.. publicArgs, "--include-generated"];
         var exit = await global::App.RunAsync(publicArgs, fixture.Path, output, errors, token);
         using var terminal = JsonDocument.Parse(output.ToString());
@@ -282,6 +287,43 @@ public sealed class FreshCheckExecutionTests
                 Assert.Equal("local-unreviewed", terminal.RootElement.GetProperty("evaluation").GetProperty("policyTrust").GetProperty("trust").GetString());
                 Assert.Contains(terminal.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
                     c => c.GetProperty("name").GetString() == "testExecution" && c.GetProperty("status").GetString() == "pass");
+            }
+            if (staleOutput)
+            {
+                var resultPath = Path.Combine(fixture.Path, "result.json");
+                Assert.Equal(output.ToString(), File.ReadAllText(resultPath));
+                var projectPath = Path.Combine(fixture.Path, "Library/Library.csproj");
+                var projectText = File.ReadAllText(projectPath);
+                var failureProject = projectText.Replace("</Project>",
+                    "<Target Name=\"FailActualBuild\" BeforeTargets=\"CoreCompile\" Condition=\"'$(DesignTimeBuild)' != 'true'\"><Error Text=\"owned actual build failure\" /></Target></Project>", StringComparison.Ordinal);
+                File.WriteAllText(projectPath, failureProject);
+                var retryArgs = publicArgs.Where((_, index) => index != Array.IndexOf(publicArgs, "--artifact-output") &&
+                    index != Array.IndexOf(publicArgs, "--artifact-output") + 1).ToArray();
+                async Task<string> Retry()
+                {
+                    var text = new StringWriter(); var diagnostic = new StringWriter();
+                    Assert.Equal(1, await global::App.RunAsync(retryArgs, fixture.Path, text, diagnostic, token));
+                    using var failed = JsonDocument.Parse(text.ToString());
+                    Assert.False(failed.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("completed").GetBoolean());
+                    return text.ToString();
+                }
+                var failedText = await Retry();
+                Assert.Equal(failedText, File.ReadAllText(resultPath));
+                using var failedResult = JsonDocument.Parse(failedText);
+                Assert.DoesNotContain(failedResult.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
+                    c => c.GetProperty("reason").GetString() == "output.notWritten");
+                // A schema-valid previous result is still a consumer input if the
+                // current evaluated compiler graph explicitly selects its bytes.
+                var saved = File.ReadAllBytes(resultPath);
+                File.WriteAllText(projectPath, failureProject.Replace("</Project>",
+                    "<ItemGroup><AdditionalFiles Include=\"../result.json\" /></ItemGroup></Project>", StringComparison.Ordinal));
+                var aliasText = await Retry();
+                Assert.Equal(saved, File.ReadAllBytes(resultPath));
+                using var aliasResult = JsonDocument.Parse(aliasText);
+                Assert.Contains(aliasResult.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
+                    c => c.GetProperty("reason").GetString() == "output.notWritten");
+                File.WriteAllText(projectPath, projectText);
+                return;
             }
             if (priorBuild)
             {
