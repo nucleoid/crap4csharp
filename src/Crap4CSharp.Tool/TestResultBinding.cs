@@ -24,15 +24,22 @@ internal static class TestResultBinding
         ProjectAnalysisContext context, CompilerObservation compiler, CancellationToken token)
     {
         var result = ValidateTrx(invocation, context, compiler, token, false);
-        return new(result.GraphId, result.Executed, result.TrxSha256, result.AssemblySha256, result.PdbSha256);
+        return new(result.GraphId, result.Passed, result.TrxSha256, result.AssemblySha256, result.PdbSha256);
     }
 
     // Explicit failed-test evidence only; never a successful/reusable test result.
     internal static BoundFailedTestResult ValidateFailedTrx(TestInvocationObservation invocation,
         ProjectAnalysisContext context, CompilerObservation compiler, CancellationToken token)
-        => ValidateTrx(invocation, context, compiler, token, true);
+    {
+        var result = ValidateTrx(invocation, context, compiler, token, true);
+        return new(result.GraphId, result.Executed, result.TrxSha256, result.AssemblySha256, result.PdbSha256);
+    }
 
-    private static BoundFailedTestResult ValidateTrx(TestInvocationObservation invocation,
+    private sealed record ValidatedResult(string GraphId, int Executed, int Passed, string TrxSha256,
+        string AssemblySha256, string PdbSha256);
+    private sealed record ResultCounts(int Executed, int Passed);
+
+    private static ValidatedResult ValidateTrx(TestInvocationObservation invocation,
         ProjectAnalysisContext context, CompilerObservation compiler, CancellationToken token, bool failed)
     {
         token.ThrowIfCancellationRequested();
@@ -50,7 +57,7 @@ internal static class TestResultBinding
             if (trxs.Length != 1 || !Paths.Equals(trxs[0], path)) throw Refuse();
             var bytes = ReadTrx(path, token);
             var count = ValidateDocumentCore(bytes, Canonical(context.EvaluatedTargetPath), token, failed);
-            return new(invocation.GraphId, count, Hash(bytes), compiler.Assembly!.Sha256, compiler.Pdb!.Sha256);
+            return new(invocation.GraphId, count.Executed, count.Passed, Hash(bytes), compiler.Assembly!.Sha256, compiler.Pdb!.Sha256);
         }
         catch (ProjectContextException error) when (error.Reason != "test.resultsUnproven") { throw Refuse(); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or XmlException or OverflowException)
@@ -58,12 +65,12 @@ internal static class TestResultBinding
     }
 
     internal static int ValidateDocument(ImmutableArray<byte> bytes, string target, CancellationToken token)
-        => ValidateDocumentCore(bytes, target, token, false);
+        => ValidateDocumentCore(bytes, target, token, false).Passed;
 
     internal static int ValidateFailedDocument(ImmutableArray<byte> bytes, string target, CancellationToken token)
-        => ValidateDocumentCore(bytes, target, token, true);
+        => ValidateDocumentCore(bytes, target, token, true).Executed;
 
-    private static int ValidateDocumentCore(ImmutableArray<byte> bytes, string target, CancellationToken token, bool failed)
+    private static ResultCounts ValidateDocumentCore(ImmutableArray<byte> bytes, string target, CancellationToken token, bool failed)
     {
         token.ThrowIfCancellationRequested();
         try
@@ -83,15 +90,22 @@ internal static class TestResultBinding
                 if (root.Descendants().Count(e => e.Name.LocalName == name) != expected) throw Refuse();
             var summary = Single(root, "ResultSummary");
             if ((failed ? Value(summary, "outcome") != "Failed" : Value(summary, "outcome") is not ("Completed" or "Passed")) ||
-                root.Descendants().Any(e => e.Name.LocalName == "RunInfo" && (!failed || !KnownFailedTestMessage(e, summary, results)) ||
-                    e.Name.LocalName == "ErrorInfo" && (!failed || !e.Ancestors(Ns + "UnitTestResult").Any(r => r.Attribute("outcome")?.Value == "Failed")))) throw Refuse();
+                root.Descendants().Any(e => e.Name.LocalName == "RunInfo" && !(KnownNamedTestMessage(e, summary, results, "NotExecuted", "Warning", "[SKIP]") ||
+                        failed && KnownNamedTestMessage(e, summary, results, "Failed", "Error", "[FAIL]")) ||
+                    e.Name.LocalName == "ErrorInfo" && !e.Ancestors(Ns + "UnitTestResult").Any(r => r.Attribute("outcome")?.Value == "NotExecuted" ||
+                        failed && r.Attribute("outcome")?.Value == "Failed"))) throw Refuse();
             var counters = Single(summary, "Counters");
-            foreach (var name in new[] { "total", "executed" })
-                if (Number(counters, name, true) != results.Length) throw Refuse();
+            var skipped = results.Count(r => r.Attribute("outcome")?.Value == "NotExecuted");
+            var passed = results.Count(r => r.Attribute("outcome")?.Value == "Passed");
+            var executed = results.Length - skipped;
+            if (Number(counters, "total", true) != results.Length || Number(counters, "executed", true) != executed ||
+                executed <= 0 || !failed && passed <= 0) throw Refuse();
+            var notExecuted = Number(counters, "notExecuted", false);
+            if (notExecuted != 0 && notExecuted != skipped) throw Refuse();
             var failedCount = results.Count(r => r.Attribute("outcome")?.Value == "Failed");
             if ((failed ? failedCount == 0 : failedCount != 0) || Number(counters, "failed", false) != failedCount ||
-                Number(counters, "passed", true) != results.Length - failedCount) throw Refuse();
-            foreach (var name in new[] { "error", "timeout", "aborted", "inconclusive", "passedButRunAborted", "notRunnable", "notExecuted", "disconnected", "warning", "inProgress", "pending" })
+                Number(counters, "passed", true) != passed || passed + failedCount != executed) throw Refuse();
+            foreach (var name in new[] { "error", "timeout", "aborted", "inconclusive", "passedButRunAborted", "notRunnable", "disconnected", "warning", "inProgress", "pending" })
                 if (Number(counters, name, false) != 0) throw Refuse();
             // VSTest legitimately emits completed=0 even when total/executed/passed>0.
             var completed = Number(counters, "completed", false);
@@ -119,14 +133,14 @@ internal static class TestResultBinding
             {
                 token.ThrowIfCancellationRequested();
                 var testId = Id(result, "testId"); var executionId = Id(result, "executionId");
-                if (!(Value(result, "outcome") == "Passed" || failed && Value(result, "outcome") == "Failed") || !resultIds.Add(testId) || !resultExecutions.Add(executionId) ||
+                if (!(Value(result, "outcome") is "Passed" or "NotExecuted" || failed && Value(result, "outcome") == "Failed") || !resultIds.Add(testId) || !resultExecutions.Add(executionId) ||
                     !byId.TryGetValue(testId, out var definition) || !byExecution.TryGetValue(executionId, out var entry) ||
                     Id(Single(definition, "Execution"), "id") != executionId || Id(entry, "testId") != testId ||
                     Value(result, "testName") != Value(definition, "name") ||
                     Id(result, "testListId") != Id(entry, "testListId") || !lists.Contains(Id(result, "testListId"))) throw Refuse();
             }
             token.ThrowIfCancellationRequested();
-            return results.Length;
+            return new(executed, passed);
         }
         catch (Exception error) when (error is XmlException or ArgumentException or InvalidOperationException or OverflowException)
         { throw Refuse(); }
@@ -177,20 +191,21 @@ internal static class TestResultBinding
         return int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var count) && count >= 0 ? count : throw Refuse();
     }
     private static string Hash(ImmutableArray<byte> bytes) => Convert.ToHexString(SHA256.HashData(bytes.AsSpan())).ToLowerInvariant();
-    private static bool KnownFailedTestMessage(XElement info, XElement summary, XElement[] results)
+    private static bool KnownNamedTestMessage(XElement info, XElement summary, XElement[] results,
+        string resultOutcome, string infoOutcome, string suffix)
     {
-        // Actual xUnit VSTest emits an Error RunInfo for each failed named test.
-        // This is not a general warning/aborted-run exemption, and applies only to
-        // diagnostic failed-result parsing, never the successful result gate.
+        // Actual xUnit VSTest emits named SKIP warnings and FAIL errors. Accept
+        // only a message matching an individually identity-bound result, never an
+        // unrelated warning, aborted run or generic diagnostic exemption.
         if (info.Name != Ns + "RunInfo" || info.Parent?.Name != Ns + "RunInfos" || info.Parent.Parent != summary ||
-            info.Attribute("outcome")?.Value != "Error" || info.Elements().Count() != 1 || info.Element(Ns + "Text") is not { } text)
+            info.Attribute("outcome")?.Value != infoOutcome || info.Elements().Count() != 1 || info.Element(Ns + "Text") is not { } text)
             return false;
         var value = text.Value; const string prefix = "[xUnit.net ";
         var end = value.IndexOf(']');
         return value.StartsWith(prefix, StringComparison.Ordinal) && end > prefix.Length &&
             TimeSpan.TryParse(value[prefix.Length..end], CultureInfo.InvariantCulture, out var time) && time >= TimeSpan.Zero &&
-            results.Any(r => r.Attribute("outcome")?.Value == "Failed" &&
-                value[(end + 1)..].Trim() == r.Attribute("testName")?.Value + " [FAIL]");
+            results.Any(r => r.Attribute("outcome")?.Value == resultOutcome &&
+                value[(end + 1)..].Trim() == r.Attribute("testName")?.Value + " " + suffix);
     }
     private static ProjectContextException Refuse() => new("test.resultsUnproven", "Required VSTest results, individual identities, counters or independently bound test module are missing, failed or inconsistent.");
 }

@@ -146,6 +146,83 @@ public sealed class TestResultBindingTests
         Assert.Throws<ProjectContextException>(() => TestResultBinding.ValidateFailedDocument(Bytes(Document(target, 1)), target, token));
     }
 
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, false)]
+    [InlineData(0, true)]
+    [InlineData(1, true)]
+    public void SkipsNeverInflatePassedOrExecutedCounts(int notExecuted, bool failed)
+    {
+        var target = Path.GetFullPath("MixedCase.Tests.dll");
+        var document = SkippedDocument(target, failed);
+        document.Descendants(Ns + "Counters").Single().SetAttributeValue("notExecuted", notExecuted);
+        var token = TestContext.Current.CancellationToken;
+        if (failed)
+        {
+            Assert.Equal(1, TestResultBinding.ValidateFailedDocument(Bytes(document), target, token));
+            Assert.Throws<ProjectContextException>(() => TestResultBinding.ValidateDocument(Bytes(document), target, token));
+        }
+        else Assert.Equal(1, TestResultBinding.ValidateDocument(Bytes(document), target, token));
+    }
+
+    [Theory]
+    [InlineData("all-skipped")]
+    [InlineData("passed-count")]
+    [InlineData("executed-count")]
+    [InlineData("skip-count")]
+    [InlineData("skip-identity")]
+    [InlineData("skip-storage")]
+    [InlineData("skip-codebase")]
+    [InlineData("skip-entry")]
+    [InlineData("unknown-outcome")]
+    [InlineData("unrelated-skip-info")]
+    [InlineData("skip-info-error")]
+    [InlineData("generic-warning")]
+    [InlineData("passed-error")]
+    [InlineData("summary-error")]
+    public void SkippedResultsDoNotWaiveRunModuleIdentityOrCounterGuards(string defect)
+    {
+        var target = Path.GetFullPath("MixedCase.Tests.dll");
+        var document = SkippedDocument(target, false);
+        var results = document.Descendants(Ns + "UnitTestResult").ToArray();
+        var definitions = document.Descendants(Ns + "UnitTest").ToArray();
+        var counters = document.Descendants(Ns + "Counters").Single();
+        switch (defect)
+        {
+            case "all-skipped": results[0].SetAttributeValue("outcome", "NotExecuted"); counters.SetAttributeValue("passed", 0); counters.SetAttributeValue("executed", 0); break;
+            case "passed-count": counters.SetAttributeValue("passed", 2); break;
+            case "executed-count": counters.SetAttributeValue("executed", 2); break;
+            case "skip-count": counters.SetAttributeValue("notExecuted", 2); break;
+            case "skip-identity": results[1].SetAttributeValue("testId", results[0].Attribute("testId")!.Value); break;
+            case "skip-storage": definitions[1].SetAttributeValue("storage", Path.GetFullPath("Other.dll")); break;
+            case "skip-codebase": definitions[1].Element(Ns + "TestMethod")!.SetAttributeValue("codeBase", Path.GetFullPath("Other.dll")); break;
+            case "skip-entry": document.Descendants(Ns + "TestEntry").Last().Remove(); break;
+            case "unknown-outcome": results[1].SetAttributeValue("outcome", "Aborted"); break;
+            case "unrelated-skip-info": document.Descendants(Ns + "Text").Single().Value = "[xUnit.net 00:00:00.89] Other [SKIP]"; break;
+            case "skip-info-error": document.Descendants(Ns + "RunInfo").Single().SetAttributeValue("outcome", "Error"); break;
+            case "generic-warning": document.Descendants(Ns + "Text").Single().Value = "infrastructure warning"; break;
+            case "passed-error": results[0].Add(new XElement(Ns + "Output", new XElement(Ns + "ErrorInfo", "unexpected error"))); break;
+            case "summary-error": document.Descendants(Ns + "ResultSummary").Single().Add(new XElement(Ns + "ErrorInfo", "unexpected error")); break;
+        }
+        Assert.Throws<ProjectContextException>(() => TestResultBinding.ValidateDocument(Bytes(document), target, TestContext.Current.CancellationToken));
+    }
+
+    private static XDocument SkippedDocument(string target, bool failed)
+    {
+        var document = Document(target, 2);
+        var results = document.Descendants(Ns + "UnitTestResult").ToArray();
+        results[1].SetAttributeValue("outcome", "NotExecuted");
+        results[1].Add(new XElement(Ns + "Output", new XElement(Ns + "ErrorInfo", new XElement(Ns + "Message", "deliberate fixture skip"))));
+        if (failed) results[0].SetAttributeValue("outcome", "Failed");
+        var summary = document.Descendants(Ns + "ResultSummary").Single();
+        summary.SetAttributeValue("outcome", failed ? "Failed" : "Completed");
+        var counters = summary.Element(Ns + "Counters")!;
+        counters.SetAttributeValue("passed", failed ? 0 : 1); counters.SetAttributeValue("failed", failed ? 1 : 0); counters.SetAttributeValue("executed", 1);
+        summary.Add(new XElement(Ns + "RunInfos", new XElement(Ns + "RunInfo", new XAttribute("outcome", "Warning"),
+            new XElement(Ns + "Text", "[xUnit.net 00:00:00.89] Test1 [SKIP]"))));
+        return document;
+    }
+
     private static XDocument Document(string target, int count)
     {
         var list = Guid.NewGuid();
