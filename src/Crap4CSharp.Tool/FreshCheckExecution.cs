@@ -68,21 +68,34 @@ internal static class FreshCheckExecution
         if (tests.Failure is not null || tests.Count != plan.Tests.Count || tests.Any(t => t.Process.ExitCode != 0))
             return new(preflight, plan, bound, tests, null,
                 new Dictionary<string, ImmutableArray<byte>>(StringComparer.Ordinal), owned);
-        await bound.RetainedProof!.ValidateFinalAsync(token);
-        var outputFootprint = bound.FinalGraph.GraphContexts.SelectMany(b =>
-            new[] { b.Context.EvaluatedIntermediateDirectory!, Path.GetDirectoryName(b.Context.EvaluatedTargetPath!)! }
-                .Concat(b.Context.PhaseInputs.Where(i => i.Role == "restoreAssets").Select(i => Path.GetDirectoryName(i.Path)!)))
-            .Distinct(PathIdentityPolicy.Current.Comparer).ToArray();
-        if (outputFootprint.Any(directory => bound.FinalGraph.BuildGraph.Any(node => node.ProjectPath.StartsWith(
-            Path.TrimEndingDirectorySeparator(directory) + Path.DirectorySeparatorChar,
-            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))))
-            throw new PolicyException("provenance.gitOutputFootprintUnsupported", "Generated output footprint must not contain consumer project inputs.");
-        await FreshGitProof.ValidateAsync(preflight, token, outputFootprint);
-        var coverage = CoverageGraphBinding.ValidateAggregate(tests, bound, token);
-        var children = tests.ToDictionary(t => t.GraphId,
-            t => TestChildEvidenceExport.Capture(t, tests.Outcomes.Single(o => o.GraphId == t.GraphId), token), StringComparer.Ordinal);
-        token.ThrowIfCancellationRequested();
-        return new(preflight, plan, bound, tests, coverage, children, owned);
+        try
+        {
+            await bound.RetainedProof!.ValidateFinalAsync(token);
+            var outputFootprint = bound.FinalGraph.GraphContexts.SelectMany(b =>
+                new[] { b.Context.EvaluatedIntermediateDirectory!, Path.GetDirectoryName(b.Context.EvaluatedTargetPath!)! }
+                    .Concat(b.Context.PhaseInputs.Where(i => i.Role == "restoreAssets").Select(i => Path.GetDirectoryName(i.Path)!)))
+                .Distinct(PathIdentityPolicy.Current.Comparer).ToArray();
+            if (outputFootprint.Any(directory => bound.FinalGraph.BuildGraph.Any(node => node.ProjectPath.StartsWith(
+                Path.TrimEndingDirectorySeparator(directory) + Path.DirectorySeparatorChar,
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))))
+                throw new PolicyException("provenance.gitOutputFootprintUnsupported", "Generated output footprint must not contain consumer project inputs.");
+            await FreshGitProof.ValidateAsync(preflight, token, outputFootprint);
+            var coverage = CoverageGraphBinding.ValidateAggregate(tests, bound, token);
+            var children = tests.ToDictionary(t => t.GraphId,
+                t => TestChildEvidenceExport.Capture(t, tests.Outcomes.Single(o => o.GraphId == t.GraphId), token), StringComparer.Ordinal);
+            token.ThrowIfCancellationRequested();
+            return new(preflight, plan, bound, tests, coverage, children, owned);
+        }
+        catch (Exception error) when (error is ProjectContextException or PolicyException or OperationCanceledException or ProcessTimeoutException)
+        {
+            // Post-test proof/aggregate refusal must not erase actual process
+            // outcomes or turn a completed raw-zero child into a failed test.
+            // Explicit evidence failure prevents partial analysis and capture;
+            // no coverage or successful child export escapes this boundary.
+            var refused = new TestExecutionRun(tests.ToArray(), tests.Outcomes, error);
+            return new(preflight, plan, bound, refused, null,
+                new Dictionary<string, ImmutableArray<byte>>(StringComparer.Ordinal), owned);
+        }
     }
 
     private static void Require(ProjectContextLoadResult result)

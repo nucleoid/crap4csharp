@@ -22,6 +22,12 @@ For a non-Git workspace, explicitly select `--scope all`. Policy is then read lo
 
 Supported fixture versions are .NET 10, `Microsoft.NET.Test.Sdk` 18.0.1, `xunit.v3` 3.2.2, `xunit.runner.visualstudio` 3.1.5 and `coverlet.collector` 6.0.4. This is not a promise of every runner/version. MTP, unknown collector hooks, emitted generator-only trees, ambiguous associations, repeated contexts of one physical project and colliding output directories are conservatively refused. A successful compiler event or a warm DLL alone is not accepted test evidence. Binding proves supported evidence consistency, not universal runtime-load tracing, hostile-filesystem atomicity or malicious-actor attestation.
 
+### Collector and mapped-document boundaries
+
+Every eligible authored compiler/PDB method must be represented by uniquely bound aggregate coverage. `ExcludeFromCodeCoverage` on an executable authored method does not itself change policy eligibility: if the collector omits that method, fresh check refuses with `coverage.aggregateUnproven`, even when the actual tests pass. It never invents zero coverage or silently makes the omitted body not applicable. Coverlet 6.0.4 emits empty metadata-token declarations; supported association uses actual module identity, unique method names and PDB sequence points, not purported report tokens.
+
+Deterministic compilation without mapped PDB documents is supported. Explicit `PathMap`, `#line` aliases or SDK CI source-root remapping are refused with `compiler.outputsUnproven` when a PDB document cannot resolve to the independently enumerated physical compiler document with matching checksum. In the tested SDK/xUnit consumer, `ContinuousIntegrationBuild=true` introduces such remapping in the test-project PDB and is refused before tests. No suffix matching or user-supplied coverage path map upgrades this compiler evidence. These are conservative unsupported-evidence failures, not known metric violations or failed-test claims.
+
 `--no-restore` requires prepared assets. `--no-build` additionally requires explicit prior compiler evidence:
 
 ```bash
