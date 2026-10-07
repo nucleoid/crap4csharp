@@ -27,6 +27,10 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, false, policyScope: "all", local: true);
 
     [Fact]
+    public Task ExplicitPriorBuildRevalidatesCapturedGraphWithoutRecompilingAndRunsFreshTestsOnce()
+        => RunCase(false, false, policyScope: "all", local: true, priorBuild: true);
+
+    [Fact]
     public Task ExplicitGeneratedInclusionRetainsGeneratedClassificationAndScoresItsCallable()
         => RunCase(false, false, false, true);
 
@@ -43,7 +47,7 @@ public sealed class FreshCheckExecutionTests
             policyScope: scope, granularity: granularity);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -67,7 +71,9 @@ public sealed class FreshCheckExecutionTests
             <ProjectReference Include="../Library/Library.csproj" /></ItemGroup>
             COUNTER</Project>
             """.Replace("COUNTER", counter, StringComparison.Ordinal));
-        fixture.Write("Tests/Tests.cs", "using Xunit; public class Once { [Fact] public void Test() { Assert.Equal(" + (failing ? "99" : "42") + ", " + (emptyEligible ? "42" : hasGenerated ? "Extra.Value" : "Library.Value") + "); } }");
+        fixture.Write("Tests/Tests.cs", "using Xunit; public class Once { [Fact] public void Test() { " +
+            (priorBuild ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
+            "Assert.Equal(" + (failing ? "99" : "42") + ", " + (emptyEligible ? "42" : hasGenerated ? "Extra.Value" : "Library.Value") + "); } }");
         fixture.Write("policy.json", """
             {"schemaVersion":"repository-policy-v1","mode":"strict","productionProjects":["Library/Library.csproj"],
             "testProjects":["Tests/Tests.csproj"],"configuration":"Debug","targetFrameworks":["net10.0"],"scope":"base",
@@ -184,6 +190,24 @@ public sealed class FreshCheckExecutionTests
                 Assert.NotEmpty(bundle.Manifest.Revision.StateHash!);
                 Assert.Equal("local-unreviewed", terminal.RootElement.GetProperty("evaluation").GetProperty("policyTrust").GetProperty("trust").GetString());
                 Assert.Contains(terminal.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
+                    c => c.GetProperty("name").GetString() == "testExecution" && c.GetProperty("status").GetString() == "pass");
+            }
+            if (priorBuild)
+            {
+                var testCounter = Assert.Single(Directory.GetFiles(Path.Combine(fixture.Path, "Tests", "bin"), "test-count.txt", SearchOption.AllDirectories));
+                Assert.Single(File.ReadAllLines(testCounter));
+                var secondOutput = new StringWriter(); var secondErrors = new StringWriter();
+                var secondArgs = publicArgs.Select(a => a == "bundle" ? "bundle-next" : a)
+                    .Concat(["--no-build", "--build-artifacts", "bundle/manifest.json"]).ToArray();
+                var secondExit = await global::App.RunAsync(secondArgs, fixture.Path, secondOutput, secondErrors, token);
+                Assert.True(secondExit == 0, secondErrors + Environment.NewLine + secondOutput);
+                Assert.Equal(2, File.ReadAllLines(testCounter).Length);
+                Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library", "build-count.txt")));
+                Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "build-count.txt")));
+                var secondBundle = ArtifactBundle.Load(Path.Combine(fixture.Path, "bundle-next", "manifest.json"), fixture.Path);
+                Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(secondBundle.Manifest, secondBundle.Bytes).Status);
+                using var secondTerminal = JsonDocument.Parse(secondOutput.ToString());
+                Assert.Contains(secondTerminal.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
                     c => c.GetProperty("name").GetString() == "testExecution" && c.GetProperty("status").GetString() == "pass");
             }
             if (hasGenerated)
