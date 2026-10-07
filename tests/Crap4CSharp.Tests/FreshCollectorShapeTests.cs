@@ -14,6 +14,8 @@ public sealed class FreshCollectorShapeTests
     [InlineData("lambda")]
     [InlineData("localfunction")]
     [InlineData("record")]
+    [InlineData("positionalrecord")]
+    [InlineData("recordinitializer")]
     public Task ActualPassingTestShapesKeepUnsupportedCoverageExplicit(string variant)
         => RunCase(variant);
 
@@ -29,11 +31,18 @@ public sealed class FreshCollectorShapeTests
             "iterator" => " public static System.Collections.Generic.IEnumerable<int> Other()\n {\n  yield return 43;\n }\n",
             "lambda" => " public static int Other()\n {\n  System.Func<int> value = () =>\n  {\n   return 43;\n  };\n  return value();\n }\n",
             "localfunction" => " public static int Other()\n {\n  int Value()\n  {\n   return 43;\n  }\n  return Value();\n }\n",
-            "record" => " public static int Other() => new Value().Read();\n",
+            "record" or "recordinitializer" => " public static int Other() => new Value().Read();\n",
+            "positionalrecord" => " public static int Other() => new Value(43).Read();\n",
             _ => throw new System.ArgumentOutOfRangeException(nameof(variant))
         };
         fixture.Write("Library/Code.cs", "public static class Library\n{\n public static int Covered() => 42;\n" + body + "}\n" +
-            (variant == "record" ? "public record Value\n{\n public int Read() => 43;\n}\n" : ""));
+            (variant switch
+            {
+                "record" => "public record Value\n{\n public int Read() => 43;\n}\n",
+                "positionalrecord" => "public record Value(int Number)\n{\n public int Read() => Number;\n}\n",
+                "recordinitializer" => "public record Value\n{\n public int Number { get; init; } = 43;\n public int Read() => Number;\n}\n",
+                _ => ""
+            }));
         fixture.Write("Tests/Tests.csproj", """
             <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><IsPackable>false</IsPackable></PropertyGroup>
             <ItemGroup><PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" PrivateAssets="all" />
@@ -105,7 +114,7 @@ public sealed class FreshCollectorShapeTests
         var decision = evaluation.GetProperty("decision");
         Assert.False(decision.GetProperty("completed").GetBoolean());
         Assert.Equal("unknown", decision.GetProperty("policyDecision").GetString());
-        var aggregateRefusal = variant is "lambda" or "record";
+        var aggregateRefusal = variant is "lambda" or "record" or "positionalrecord" or "recordinitializer";
         Assert.Equal(aggregateRefusal ? "coverage.aggregateUnproven" : "coverage.unsupportedGeneratedMapping",
             decision.GetProperty("reason").GetString());
         Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));
@@ -115,10 +124,15 @@ public sealed class FreshCollectorShapeTests
         {
             Assert.Empty(metrics.EnumerateArray());
             Assert.Equal("invalid", evaluation.GetProperty("provenance").GetProperty("status").GetString());
-            if (variant == "record")
+            if (variant is "record" or "positionalrecord" or "recordinitializer")
             {
                 Assert.Contains(inspected.Methods, m => m.MethodName == "Read" && m.SequencePoints.Count > 0);
                 Assert.True(inspected.Methods.Count(m => m.SequencePoints.Count > 0) > 3);
+                if (variant is "positionalrecord" or "recordinitializer")
+                {
+                    Assert.Contains(inspected.Methods, m => m.MethodName == ".ctor" && m.SequencePoints.Count > 0);
+                    Assert.Contains(inspected.Methods, m => m.MethodName == "get_Number" && m.SequencePoints.Count > 0);
+                }
             }
         }
         else
