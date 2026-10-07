@@ -14,7 +14,7 @@ internal static class CapturedEvaluationInputs
         if (bundle.Manifest.Producer.ComplexityRuleset == ComplexityRules.CallablesV1 && policy.AllowMissingCoverage)
             throw new InvalidDataException("callables-v1 captured policy cannot allow missing coverage.");
         var available = bundle.Manifest.Contexts.SelectMany(context => context.Inputs
-                .Where(input => input.Role == "source" && !input.Generated)
+                .Where(input => input.Role == "source" && (!input.Generated || context.IncludeGenerated))
                 .Select(input => input.RepositoryPath is null ? input.LogicalPath :
                     DeclaredRepositorySourcePath(context, input)))
             .ToHashSet(StringComparer.Ordinal);
