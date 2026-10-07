@@ -32,6 +32,12 @@ public sealed class FreshCheckExecutionTests
     public Task NonGitAllScopeFreshCheckRunsRequiredContextsWithLocalUnreviewedTrustAndNoGitRevision()
         => RunCase(false, false, policyScope: "all", local: true);
 
+    [Theory]
+    [InlineData("artifacts")]
+    [InlineData("intermediate")]
+    public Task LocalColdFreshCheckAcceptsEvaluatedCustomOutputWithoutRebaseliningAuthoredInputs(string outputLayout)
+        => RunCase(false, false, policyScope: "all", local: true, outputLayout: outputLayout);
+
     [Fact]
     public Task FailedTestsRetainUsableBoundPartialMetricsWithoutCompletedOrReusableSuccess()
         => RunCase(true, false, policyScope: "all", local: true, partial: true);
@@ -73,10 +79,14 @@ public sealed class FreshCheckExecutionTests
             policyScope: scope, granularity: granularity);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
+        if (outputLayout is not null)
+            fixture.Write("Directory.Build.props", outputLayout == "artifacts"
+                ? "<Project><PropertyGroup><UseArtifactsOutput>true</UseArtifactsOutput><ArtifactsPath>$(MSBuildThisFileDirectory)artifacts</ArtifactsPath></PropertyGroup></Project>"
+                : "<Project><PropertyGroup><BaseIntermediateOutputPath>$(MSBuildProjectDirectory)/compiler-cache/</BaseIntermediateOutputPath></PropertyGroup></Project>");
         const string counter = """
             <Target Name="CountActualCompile" BeforeTargets="CoreCompile" Condition="'$(DesignTimeBuild)' != 'true'">
             <WriteLinesToFile File="$(MSBuildProjectDirectory)/build-count.txt" Lines="once" Overwrite="false" /></Target>
