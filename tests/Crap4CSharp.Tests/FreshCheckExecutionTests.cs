@@ -45,6 +45,10 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, false, policyScope: "all", local: true, staleRawOutput: true);
 
     [Fact]
+    public Task FailedTestsRetainActualOutcomesWhenTestReplacesResultWithConsumerBytes()
+        => RunCase(false, false, policyScope: "all", local: true, staleRawOutput: true, replaceRawOutput: true);
+
+    [Fact]
     public Task ValidatedFreshBuildFailureReplacesPriorPassButNeverNewlySelectedConsumerInput()
         => RunCase(false, false, policyScope: "all", local: true, staleOutput: true);
 
@@ -69,7 +73,7 @@ public sealed class FreshCheckExecutionTests
             policyScope: scope, granularity: granularity);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -307,6 +311,18 @@ public sealed class FreshCheckExecutionTests
                         Assert.Equal(99, Library.Value);
                     } }
                     """);
+                if (replaceRawOutput)
+                {
+                    File.WriteAllText(testPath, """
+                        using Xunit;
+                        public class Once { [Fact] public void Test() {
+                            var result = System.IO.Path.GetFullPath("../../../../result.json", System.AppContext.BaseDirectory);
+                            System.IO.File.WriteAllText(result, "owned consumer bytes written during failed test");
+                            Assert.Equal(99, Library.Value);
+                        } }
+                        """);
+                    saved = System.Text.Encoding.UTF8.GetBytes("owned consumer bytes written during failed test");
+                }
                 var retryArgs = publicArgs.Where((_, index) => index != Array.IndexOf(publicArgs, "--artifact-output") &&
                     index != Array.IndexOf(publicArgs, "--artifact-output") + 1).ToArray();
                 var text = new StringWriter(); var diagnostic = new StringWriter();
@@ -314,6 +330,9 @@ public sealed class FreshCheckExecutionTests
                 using var failed = JsonDocument.Parse(text.ToString());
                 Assert.Contains(failed.RootElement.GetProperty("run").GetProperty("testOutcomes").EnumerateArray(),
                     o => o.GetProperty("exitCode").GetInt32() == 1);
+                Assert.False(failed.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("completed").GetBoolean());
+                Assert.DoesNotContain(failed.RootElement.GetProperty("run").GetProperty("artifacts").EnumerateArray(),
+                    a => a.GetProperty("kind").GetString() == "manifest");
                 Assert.Equal(saved, File.ReadAllBytes(resultPath));
                 Assert.Contains(failed.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
                     c => c.GetProperty("reason").GetString() == "output.notWritten");
