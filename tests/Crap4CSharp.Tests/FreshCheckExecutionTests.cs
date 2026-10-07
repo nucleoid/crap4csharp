@@ -92,8 +92,12 @@ public sealed class FreshCheckExecutionTests
         => RunCase(true, false, policyScope: "all", local: true, partial: true, partialExclusion: exclusion,
             partialExpectedExcluded: excluded);
 
+    [Fact]
+    public Task ColdOrdinaryConsumerMeasuresCompositeBoundariesWithoutDroppingProofOrRepeatingTests()
+        => RunCase(false, true, policyScope: "all", local: true, measure: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -132,7 +136,7 @@ public sealed class FreshCheckExecutionTests
                 (outputMutation == "source" ? "Authored.cs" : "Rules.json") +
                 "\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); ") +
             (partialDrift ? "var p = System.IO.Path.GetFullPath(\"../../../../Library/Code.cs\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); " : "") +
-            (priorBuild ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
+            (priorBuild || measure ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
             "Assert.Equal(" + (failing ? "99" : "42") + ", " + (emptyEligible ? "42" : hasGenerated ? "Extra.Value" : "Library.Value") + "); } }");
         fixture.Write("policy.json", """
             {"schemaVersion":"repository-policy-v1","mode":"strict","productionProjects":["Library/Library.csproj"],
@@ -176,12 +180,29 @@ public sealed class FreshCheckExecutionTests
         else Assert.Empty(Directory.GetDirectories(fixture.Path, "obj", SearchOption.AllDirectories));
         if (coordinatorOnly)
         {
-            var request = new FreshCheckRequest("Tests/Tests.csproj", "policy.json", "HEAD", null, null, "worktree", "method",
+            // Measure only these API boundaries, not guessed internal build/test phases.
+            var timings = new Dictionary<string, double>(StringComparer.Ordinal);
+            async Task<T> MeasureAsync<T>(string name, Func<Task<T>> operation)
+            {
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                var value = await operation();
+                timings.Add(name, clock.Elapsed.TotalMilliseconds);
+                return value;
+            }
+            T Measure<T>(string name, Func<T> operation)
+            {
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                var value = operation();
+                timings.Add(name, clock.Elapsed.TotalMilliseconds);
+                return value;
+            }
+            var request = new FreshCheckRequest("Tests/Tests.csproj", "policy.json", local ? null : "HEAD", local ? "all" : null, null, "worktree", "method",
                 null, "bundle", false, false, null, new PolicyOverrides(), TimeSpan.FromMinutes(3));
-            var preflight = await FreshCheckPreflightLoader.LoadAsync(request, fixture.Path, token);
-            var evidence = await FreshCheckExecution.RunAsync(preflight, token);
+            var preflight = await MeasureAsync("trustedPreflight", () => FreshCheckPreflightLoader.LoadAsync(request, fixture.Path, token));
+            var evidence = await MeasureAsync("executionComposite", () => FreshCheckExecution.RunAsync(preflight, token));
             Assert.Equal(2, evidence.Compiler.Observations.Count);
             Assert.Single(evidence.Tests); Assert.Single(evidence.Tests.Outcomes);
+            FreshCapturedBundle? measuredCapture = null;
             if (failing)
             {
                 Assert.NotEqual(0, evidence.Tests[0].Process.ExitCode);
@@ -232,7 +253,8 @@ public sealed class FreshCheckExecutionTests
             {
                 Assert.Equal(0, evidence.Tests[0].Process.ExitCode); Assert.Null(evidence.Tests.Failure);
                 Assert.NotNull(evidence.Coverage); Assert.Single(evidence.SafeChildren);
-                var captured = await FreshManifestCapture.CaptureAsync(evidence, token);
+                var captured = await MeasureAsync("captureWithRegates", () => FreshManifestCapture.CaptureAsync(evidence, token));
+                measuredCapture = captured;
                 var sourceInputs = captured.Manifest.Contexts.Single().Inputs.Where(i => i.Role is "source" or "compiler-source").ToArray();
                 Assert.Equal(evidence.Compiler.FinalGraph.GraphContexts.Single(b => !b.IsTestProject).Context.CompilerDocuments.Count, sourceInputs.Length);
                 var capturedPe = captured.Manifest.Artifacts.Single(a => a.Kind == "assembly");
@@ -250,22 +272,36 @@ public sealed class FreshCheckExecutionTests
                 var alias = await Assert.ThrowsAsync<PolicyException>(() => FreshManifestCapture.PublishAsync(evidence, captured,
                     Path.Combine(fixture.Path, "Library", "Code.cs"), token));
                 Assert.Equal("output.aliasesPolicyInput", alias.Code);
-                var manifest = await FreshManifestCapture.PublishAsync(evidence, captured,
-                    Path.Combine(evidence.PrivateDirectory, "safe-export"), token);
+                var manifest = await MeasureAsync("privatePublishWithRegate", () => FreshManifestCapture.PublishAsync(evidence, captured,
+                    Path.Combine(evidence.PrivateDirectory, "safe-export"), token));
                 if (!OperatingSystem.IsWindows()) Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
                     File.GetUnixFileMode(Path.GetDirectoryName(manifest)!));
-                var bundle = ArtifactBundle.Load(manifest, evidence.PrivateDirectory);
+                var bundle = Measure("bundleLoad", () => ArtifactBundle.Load(manifest, evidence.PrivateDirectory));
                 Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(bundle.Manifest, bundle.Bytes).Status);
-                var replay = AnalyzeCommand.Replay(bundle, fixture.Path, DateTimeOffset.UtcNow, TimeSpan.Zero, token, allSources: true);
+                var replay = Measure("capturedReplay", () => AnalyzeCommand.Replay(bundle, fixture.Path, DateTimeOffset.UtcNow, TimeSpan.Zero, token, allSources: true));
                 Assert.Equal(0, replay.Run.ExitCode);
                 Assert.Equal("captured", replay.Evaluation.Provenance!.Status);
-                var policy = FreshPolicyEvaluation.Evaluate(preflight, bundle.Manifest, replay);
+                var policy = Measure("purePolicy", () => FreshPolicyEvaluation.Evaluate(preflight, bundle.Manifest, replay));
                 Assert.Equal(0, policy.Evaluation.ExitCode);
                 Assert.Equal(2, FreshPolicyEvaluation.Evaluate(preflight with
                     { Policy = preflight.Policy with { Threshold = .5 } }, bundle.Manifest, replay).Evaluation.ExitCode);
                 Assert.Equal("captured", replay.Evaluation.Provenance.Status); // pure policy is not execution attestation
             }
-            Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));
+            if (measure)
+            {
+                await MeasureAsync("finalRegate", async () => { await FreshManifestCapture.RegateAsync(evidence, token); return true; });
+                var published = await MeasureAsync("requestedPublishWithRegate", () => FreshManifestCapture.PublishAsync(evidence,
+                    measuredCapture!, "bundle", token));
+                Assert.True(File.Exists(published));
+                Assert.Equal(0, AnalyzeCommand.Replay(ArtifactBundle.Load(published, fixture.Path), fixture.Path,
+                    DateTimeOffset.UtcNow, TimeSpan.Zero, token, allSources: true).Run.ExitCode);
+                Assert.Equal(new[] { "trustedPreflight", "executionComposite", "captureWithRegates", "privatePublishWithRegate",
+                    "bundleLoad", "capturedReplay", "purePolicy", "finalRegate", "requestedPublishWithRegate" }, timings.Keys);
+                Assert.All(timings.Values, milliseconds => Assert.True(double.IsFinite(milliseconds) && milliseconds >= 0));
+                Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "bin", "Debug", "net10.0", "test-count.txt")));
+                Console.WriteLine("FRESH_COMPOSITE_TIMINGS " + JsonSerializer.Serialize(timings));
+            }
+            else Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));
             Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library", "build-count.txt")));
             Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "build-count.txt")));
             foreach (var (path, bytes) in original) Assert.Equal(bytes, File.ReadAllBytes(path));
