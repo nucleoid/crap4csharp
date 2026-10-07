@@ -279,6 +279,31 @@ public sealed class FreshCheckExecutionTests
                 CompletedTestPlanRecipe.Validate(captured.Bytes[planArtifact.Locator].ToArray(), currentPlan,
                     fixture.Path, selectedRoot, token);
                 Assert.False(captured.Manifest.Contexts.Single().ReuseRecipeComplete); // plan alone never enables reuse
+                var requiredInventory = captured.Manifest.Artifacts.Single(a => a.Kind == "required-test-inventory");
+                using (var saved = JsonDocument.Parse(captured.Bytes[requiredInventory.Locator].AsMemory()))
+                {
+                    var required = saved.RootElement.GetProperty("tests").EnumerateArray().ToArray();
+                    Assert.Equal(currentPlan.Tests.Select(t => t.GraphId), required.Select(t => t.GetProperty("graphId").GetString()));
+                    foreach (var item in required)
+                    {
+                        var graphId = item.GetProperty("graphId").GetString()!;
+                        var binding = currentGraph.GraphContexts.Single(b => b.GraphId == graphId);
+                        var requiredTrx = captured.Manifest.Artifacts.Single(a => a.Id == item.GetProperty("trx").GetString());
+                        var requiredPe = captured.Manifest.Artifacts.Single(a => a.Id == item.GetProperty("assembly").GetString());
+                        var requiredPdb = captured.Manifest.Artifacts.Single(a => a.Id == item.GetProperty("pdb").GetString());
+                        var requiredChild = captured.Manifest.Artifacts.Single(a => a.Id == item.GetProperty("child").GetString());
+                        Assert.Equal("required-test-result", requiredTrx.Kind);
+                        Assert.Equal("required-test-assembly", requiredPe.Kind);
+                        Assert.Equal("required-test-pdb", requiredPdb.Kind);
+                        Assert.Equal("required-test-child", requiredChild.Kind);
+                        Assert.Equal(1, TestResultBinding.ValidateDocument(captured.Bytes[requiredTrx.Locator], binding.Context.EvaluatedTargetPath!, token));
+                        TestChildEvidenceExport.ValidateSaved(captured.Bytes[requiredChild.Locator], graphId, token);
+                        var testBuild = ArtifactEvidenceInspector.InspectBuild(captured.Bytes[requiredPe.Locator], captured.Bytes[requiredPdb.Locator]);
+                        Assert.Equal(item.GetProperty("mvid").GetString(), testBuild.Mvid);
+                        Assert.Equal(item.GetProperty("moduleIdentity").GetString(), testBuild.ModuleIdentity);
+                    }
+                    Assert.False(saved.RootElement.GetProperty("reusableRecipe").GetBoolean());
+                }
 
                 var sourceInputs = captured.Manifest.Contexts.Single().Inputs.Where(i => i.Role is "source" or "compiler-source").ToArray();
                 Assert.Equal(evidence.Compiler.FinalGraph.GraphContexts.Single(b => !b.IsTestProject).Context.CompilerDocuments.Count, sourceInputs.Length);
