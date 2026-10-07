@@ -463,7 +463,7 @@ internal static partial class MsBuildProjectLoader
             authoredInputs, compileInputs,
             new[] { "IntermediateOutputPath", "BaseIntermediateOutputPath" }
                 .Select(project.GetPropertyValue).Where(value => !string.IsNullOrWhiteSpace(value))
-                .Select(value => Path.GetFullPath(value, Path.GetDirectoryName(projectPath)!))
+                .Select(EvaluatedOutputPath)
                 .Distinct(PathComparer).ToArray(),
             EvaluatedPath("TargetPath"), EvaluatedPath("IntermediateOutputPath"),
             string.Equals(project.GetPropertyValue("ProduceReferenceAssembly"), "true", StringComparison.OrdinalIgnoreCase)
@@ -472,8 +472,16 @@ internal static partial class MsBuildProjectLoader
         string? EvaluatedPath(string name)
         {
             var value = project.GetPropertyValue(name);
-            return string.IsNullOrWhiteSpace(value) ? null : Path.TrimEndingDirectorySeparator(
-                Path.GetFullPath(value, Path.GetDirectoryName(projectPath)!));
+            return string.IsNullOrWhiteSpace(value) ? null : Path.TrimEndingDirectorySeparator(EvaluatedOutputPath(value));
+        }
+
+        string EvaluatedOutputPath(string value)
+        {
+            // SDK/MSBuild output properties accept Windows separators even on Unix
+            // (solution mappings supply obj\Configuration). Resolve that evaluated
+            // property with SDK path semantics before filesystem containment checks;
+            // do not change graph globals, captured authored paths or alias guards.
+            return Path.GetFullPath(value.Replace('\\', Path.DirectorySeparatorChar), Path.GetDirectoryName(projectPath)!);
         }
     }
 
