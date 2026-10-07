@@ -229,7 +229,11 @@ internal static class App
                         IncludeTests: options.IncludeTests, IncludeGenerated: options.IncludeGenerated), options.Timeout);
                 freshResult = await FreshCheckCommand.RunAsync(request, workingDirectory, startedAt, cancellationToken);
             }
-            cancellationToken.ThrowIfCancellationRequested();
+            // Fresh execution has already materialized the graceful cancellation
+            // terminal, including actual completed/interrupted/not-run contexts.
+            // Do not replace it with a generic exception terminal and lose evidence.
+            // Early fresh failures and nonfresh paths still use exception handling.
+            if (freshResult is null) cancellationToken.ThrowIfCancellationRequested();
             if (options.Command == "check" && options.Output is not null)
                 OutputDestinationSafety.RejectExistingConsumerFile(options.Output, workingDirectory);
             var result = freshResult ?? (options.Command == "check"
