@@ -41,6 +41,10 @@ public sealed class FreshCheckExecutionTests
         => RunCase(true, false, policyScope: "all", local: true, partialDrift: true);
 
     [Fact]
+    public Task FailedTestsCannotOverwritePriorResultNewlySelectedAsConsumerInputDuringTest()
+        => RunCase(false, false, policyScope: "all", local: true, staleRawOutput: true);
+
+    [Fact]
     public Task ValidatedFreshBuildFailureReplacesPriorPassButNeverNewlySelectedConsumerInput()
         => RunCase(false, false, policyScope: "all", local: true, staleOutput: true);
 
@@ -65,7 +69,7 @@ public sealed class FreshCheckExecutionTests
             policyScope: scope, granularity: granularity);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -228,7 +232,7 @@ public sealed class FreshCheckExecutionTests
         string[] baseArgs = local ? [] : ["--base", "HEAD"];
         string[] publicArgs = ["check", "--project", "Tests/Tests.csproj", "--policy", "policy.json", .. baseArgs,
             "--artifact-output", "bundle", "--format", "json", "--timeout-seconds", "180", "--granularity", granularity, "--scope", policyScope];
-        if (staleOutput) publicArgs = [.. publicArgs, "--output", "result.json"];
+        if (staleOutput || staleRawOutput) publicArgs = [.. publicArgs, "--output", "result.json"];
         if (includeGenerated) publicArgs = [.. publicArgs, "--include-generated"];
         var exit = await global::App.RunAsync(publicArgs, fixture.Path, output, errors, token);
         using var terminal = JsonDocument.Parse(output.ToString());
@@ -287,6 +291,33 @@ public sealed class FreshCheckExecutionTests
                 Assert.Equal("local-unreviewed", terminal.RootElement.GetProperty("evaluation").GetProperty("policyTrust").GetProperty("trust").GetString());
                 Assert.Contains(terminal.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
                     c => c.GetProperty("name").GetString() == "testExecution" && c.GetProperty("status").GetString() == "pass");
+            }
+            if (staleRawOutput)
+            {
+                var resultPath = Path.Combine(fixture.Path, "result.json");
+                var saved = File.ReadAllBytes(resultPath);
+                var testPath = Path.Combine(fixture.Path, "Tests/Tests.cs");
+                File.WriteAllText(testPath, """
+                    using Xunit;
+                    public class Once { [Fact] public void Test() {
+                        var project = System.IO.Path.GetFullPath("../../../../Library/Library.csproj", System.AppContext.BaseDirectory);
+                        var original = System.IO.File.ReadAllText(project);
+                        System.IO.File.WriteAllText(project, original.Replace("</Project>",
+                            "<ItemGroup><AdditionalFiles Include=\"../result.json\" /></ItemGroup></Project>"));
+                        Assert.Equal(99, Library.Value);
+                    } }
+                    """);
+                var retryArgs = publicArgs.Where((_, index) => index != Array.IndexOf(publicArgs, "--artifact-output") &&
+                    index != Array.IndexOf(publicArgs, "--artifact-output") + 1).ToArray();
+                var text = new StringWriter(); var diagnostic = new StringWriter();
+                Assert.Equal(1, await global::App.RunAsync(retryArgs, fixture.Path, text, diagnostic, token));
+                using var failed = JsonDocument.Parse(text.ToString());
+                Assert.Contains(failed.RootElement.GetProperty("run").GetProperty("testOutcomes").EnumerateArray(),
+                    o => o.GetProperty("exitCode").GetInt32() == 1);
+                Assert.Equal(saved, File.ReadAllBytes(resultPath));
+                Assert.Contains(failed.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
+                    c => c.GetProperty("reason").GetString() == "output.notWritten");
+                return;
             }
             if (staleOutput)
             {
