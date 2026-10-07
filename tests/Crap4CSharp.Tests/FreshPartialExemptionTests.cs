@@ -9,10 +9,19 @@ public sealed class FreshPartialExemptionTests
 {
     [Fact]
     public async Task RealFailedAsyncTestsHonorOnlyExactReviewedUnsupportedExemptions()
+        => await RunCase(false);
+
+    [Fact]
+    public async Task RealFailedLambdaTestsRequireExactReviewedAnonymousMemberCount()
+        => await RunCase(true);
+
+    private static async Task RunCase(bool duplicateLambdas)
     {
-        using var fixture = TestDirectory.Create("crap4csharp-failed-async-exemption");
+        using var fixture = TestDirectory.Create(duplicateLambdas ? "crap4csharp-failed-lambda-exemption" : "crap4csharp-failed-async-exemption");
         var token = TestContext.Current.CancellationToken;
-        const string source = "public static class Library { public static async System.Threading.Tasks.Task<int> Value() { var value = await System.Threading.Tasks.Task.FromResult(42); return value; } }";
+        var source = duplicateLambdas
+            ? "public static class Library { public static int Value() { System.Func<int,int> a = x => x + 1; System.Func<int,int> b = x => x + 1; return a(41) + b(0); } }"
+            : "public static class Library { public static async System.Threading.Tasks.Task<int> Value() { var value = await System.Threading.Tasks.Task.FromResult(42); return value; } }";
         const string counter = "<Target Name=\"CountCompile\" BeforeTargets=\"CoreCompile\" Condition=\"'$(DesignTimeBuild)' != 'true'\"><WriteLinesToFile File=\"$(MSBuildProjectDirectory)/build-count.txt\" Lines=\"once\" Overwrite=\"false\" /></Target>";
         fixture.Write("Library/Library.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>" + counter + "</Project>");
         fixture.Write("Library/Code.cs", source);
@@ -24,7 +33,7 @@ public sealed class FreshPartialExemptionTests
             <PackageReference Include="coverlet.collector" Version="6.0.4" />
             <ProjectReference Include="../Library/Library.csproj" /></ItemGroup>COUNTER</Project>
             """.Replace("COUNTER", counter, StringComparison.Ordinal));
-        fixture.Write("Tests/Tests.cs", "public class Once { [Xunit.Fact] public async System.Threading.Tasks.Task Test() { System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); Xunit.Assert.Equal(99, await Library.Value()); } }");
+        fixture.Write("Tests/Tests.cs", ("public class Once { [Xunit.Fact] public async System.Threading.Tasks.Task Test() { System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); Xunit.Assert.Equal(99, await Library.Value()); } }").Replace("await Library.Value()", duplicateLambdas ? "await System.Threading.Tasks.Task.FromResult(Library.Value())" : "await Library.Value()", StringComparison.Ordinal));
         const string policy = """
             {"schemaVersion":"repository-policy-v1","mode":"strict","productionProjects":["Library/Library.csproj"],
             "testProjects":["Tests/Tests.csproj"],"configuration":"Debug","targetFrameworks":["net10.0"],"scope":"all",
@@ -64,17 +73,28 @@ public sealed class FreshPartialExemptionTests
             return document;
         }
         using var probe = await Check();
-        var callable = Assert.Single(probe.RootElement.GetProperty("evaluation").GetProperty("callables").EnumerateArray(),
-            c => c.GetProperty("coverageReason").GetString() == CoverageReasonCodes.UnsupportedGeneratedMapping);
+        var reason = duplicateLambdas ? CoverageReasonCodes.AmbiguousCallableOwnership : CoverageReasonCodes.UnsupportedGeneratedMapping;
+        var candidates = probe.RootElement.GetProperty("evaluation").GetProperty("callables").EnumerateArray()
+            .Where(c => c.GetProperty("coverageReason").GetString() == reason &&
+                (!duplicateLambdas || c.GetProperty("kind").GetString() == "Lambda")).ToArray();
+        Assert.Equal(duplicateLambdas ? 2 : 1, candidates.Length);
+        if (duplicateLambdas)
+        {
+            Assert.All(candidates, c => Assert.Equal("Lambda", c.GetProperty("kind").GetString()));
+            Assert.Single(candidates.Select(c => c.GetProperty("callableId").GetString()).Distinct());
+            Assert.Single(candidates.Select(c => c.GetProperty("bodyChecksum").GetString()).Distinct());
+        }
+        var callable = candidates[0];
         var callableId = callable.GetProperty("callableId").GetString();
         var entry = new JsonObject
         {
             ["ruleset"] = callable.GetProperty("ruleset").GetString(), ["contextId"] = callable.GetProperty("contextId").GetString(),
             ["targetFramework"] = "net10.0", ["callableId"] = callableId,
-            ["bodyChecksum"] = callable.GetProperty("bodyChecksum").GetString(), ["reasonCode"] = CoverageReasonCodes.UnsupportedGeneratedMapping,
-            ["justification"] = "Reviewed actual async collector mapping limitation", ["reviewReference"] = "fixture-review",
+            ["bodyChecksum"] = callable.GetProperty("bodyChecksum").GetString(), ["reasonCode"] = reason,
+            ["justification"] = duplicateLambdas ? "Reviewed exact duplicate anonymous bodies" : "Reviewed actual async collector mapping limitation", ["reviewReference"] = "fixture-review",
             ["familyIds"] = JsonNode.Parse(callable.GetProperty("familyIds").GetRawText())
         };
+        if (duplicateLambdas) entry["memberCount"] = 2;
         var waiver = new JsonObject { ["version"] = CallableExemptions.Version, ["entries"] = new JsonArray(entry) };
         var approvedBytes = waiver.ToJsonString();
         fixture.Write("policy.json", policy.Replace("\"exemptionFiles\":[]", "\"exemptionFiles\":[\"exemptions.json\"]", StringComparison.Ordinal));
@@ -85,8 +105,40 @@ public sealed class FreshPartialExemptionTests
             var evaluation = approved.RootElement.GetProperty("evaluation");
             Assert.Contains(evaluation.GetProperty("callableExemptions").EnumerateArray(),
                 e => e.GetProperty("callableId").GetString() == callableId && e.GetProperty("status").GetString() == "exempted-unsupported");
-            Assert.Empty(evaluation.GetProperty("exemptionErrors").EnumerateArray());
+            if (duplicateLambdas)
+            {
+                // Exempting the two anonymous members does not waive the
+                // same-line parent's independently ambiguous coverage.
+                Assert.Equal([reason], evaluation.GetProperty("exemptionErrors").EnumerateArray()
+                    .Select(e => e.GetString()!).ToArray());
+                Assert.Contains(evaluation.GetProperty("callables").EnumerateArray(),
+                    c => c.GetProperty("kind").GetString() != "Lambda" &&
+                        c.GetProperty("coverageReason").GetString() == reason);
+            }
+            else Assert.Empty(evaluation.GetProperty("exemptionErrors").EnumerateArray());
             Assert.NotEmpty(evaluation.GetProperty("metrics").EnumerateArray());
+        }
+        if (duplicateLambdas)
+        {
+            // Reviewed count is evidence, not permission to widen anonymous debt.
+            entry["memberCount"] = 1;
+            fixture.Write("exemptions.json", waiver.ToJsonString());
+            await Git("add", "exemptions.json"); await Git("commit", "-qm", "adverse anonymous count");
+            using (var count = await Check())
+            {
+                Assert.Empty(count.RootElement.GetProperty("evaluation").GetProperty("metrics").EnumerateArray());
+                Assert.Contains("exemption.ambiguityWidened", count.RootElement.GetRawText(), StringComparison.Ordinal);
+            }
+            entry["memberCount"] = 2;
+            fixture.Write("exemptions.json", approvedBytes);
+            await Git("add", "exemptions.json"); await Git("commit", "-qm", "restore reviewed anonymous count");
+            fixture.Write("Library/Code.cs", source.Replace("return a(41)", "System.Func<int,int> c = x => x + 1; return c(0) + a(41)", StringComparison.Ordinal));
+            using (var widened = await Check())
+            {
+                Assert.Empty(widened.RootElement.GetProperty("evaluation").GetProperty("metrics").EnumerateArray());
+                Assert.Contains("exemption.ambiguityWidened", widened.RootElement.GetRawText(), StringComparison.Ordinal);
+            }
+            fixture.Write("Library/Code.cs", source);
         }
         // Immutable base trust ignores a pre-existing worktree waiver edit: only
         // reviewed bytes may affect findings, and failed tests still run once.
@@ -100,7 +152,7 @@ public sealed class FreshPartialExemptionTests
         }
         fixture.Write("exemptions.json", approvedBytes);
         // A body edit invalidates the old identity but does not erase actual failed-test outcomes.
-        fixture.Write("Library/Code.cs", source.Replace("42", "43", StringComparison.Ordinal));
+        fixture.Write("Library/Code.cs", duplicateLambdas ? source.Replace("x + 1", "x + 2", StringComparison.Ordinal) : source.Replace("42", "43", StringComparison.Ordinal));
         using (var changed = await Check())
             Assert.Contains(changed.RootElement.GetProperty("evaluation").GetProperty("callableExemptions").EnumerateArray(),
                 e => e.GetProperty("status").GetString() == "stale-ignored");
