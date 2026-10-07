@@ -64,6 +64,8 @@ public sealed class FreshCheckPreflightTests
         Assert.Equal(1, await global::App.RunAsync(arguments.ToArray(), fixture.Path, output, errors, token));
         using var terminal = JsonDocument.Parse(output.ToString());
         Assert.Equal(expected, terminal.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("reason").GetString());
+        Assert.DoesNotContain(terminal.RootElement.GetProperty("run").GetProperty("artifacts").EnumerateArray(),
+            a => a.GetProperty("kind").GetString() == "private-diagnostics");
         Assert.Equal(beforePolicy, File.ReadAllBytes(policy)); Assert.Equal(beforeProject, File.ReadAllBytes(project));
         Assert.Empty(Directory.GetDirectories(fixture.Path, "obj", SearchOption.AllDirectories));
         Assert.Empty(Directory.GetDirectories(fixture.Path, "bin", SearchOption.AllDirectories));

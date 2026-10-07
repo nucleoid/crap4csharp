@@ -39,6 +39,8 @@ public sealed class FreshDeadlineTests
         Assert.Equal(1, exit);
         using var result = JsonDocument.Parse(output.ToString());
         var run = result.RootElement.GetProperty("run");
+        Assert.DoesNotContain(run.GetProperty("artifacts").EnumerateArray(),
+            a => a.GetProperty("kind").GetString() == "private-diagnostics");
         Assert.Equal(userCancellation ? "run.cancelled" : "run.timedOut",
             result.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("reason").GetString());
         Assert.Equal(userCancellation, run.GetProperty("cancellation").GetProperty("cancelled").GetBoolean());

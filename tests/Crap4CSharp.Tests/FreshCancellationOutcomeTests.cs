@@ -84,6 +84,12 @@ public sealed class FreshCancellationOutcomeTests
             Assert.False(a.GetProperty("complete").GetBoolean()); Assert.False(a.GetProperty("reusable").GetBoolean());
             Assert.NotEqual("manifest", a.GetProperty("kind").GetString());
         });
+        var diagnostics = Assert.Single(run.GetProperty("artifacts").EnumerateArray(),
+            a => a.GetProperty("kind").GetString() == "private-diagnostics");
+        var privateRoot = diagnostics.GetProperty("path").GetString()!;
+        Assert.True(Directory.Exists(privateRoot));
+        Assert.Contains(run.GetProperty("diagnosticLocations").EnumerateArray(), p => p.GetString() == privateRoot);
+        Assert.NotEmpty(Directory.GetFiles(privateRoot, "compiler.binlog", SearchOption.AllDirectories));
         Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));
         Assert.Equal(before, File.ReadAllBytes(source));
     }

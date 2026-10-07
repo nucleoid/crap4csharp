@@ -10,7 +10,7 @@ internal sealed record FreshExecutionEvidence(FreshCheckPreflight Preflight, Che
 internal static class FreshCheckExecution
 {
     internal static async Task<FreshExecutionEvidence> RunAsync(FreshCheckPreflight preflight, CancellationToken cancellationToken,
-        Action<FreshFailureOutputProof>? retainFailureOutputProof = null)
+        Action<FreshFailureOutputProof>? retainFailureOutputProof = null, Action<string>? retainPrivateDirectory = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var priorBundle = preflight.Request.NoBuild
@@ -51,6 +51,9 @@ internal static class FreshCheckExecution
         var priorObservations = priorBundle is null ? null : FreshPriorBuild.Load(priorBundle, plan.PreparedGraph, preflight.Root, token);
         var owned = Directory.CreateTempSubdirectory("crap4csharp-fresh-private-").FullName;
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(owned, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        // Record the invocation-owned location before any build/test/capture can
+        // fail. Raw diagnostic bytes stay here, never in a safe replay bundle.
+        retainPrivateDirectory?.Invoke(owned);
         var bound = await CompilerGraphExecution.RunBoundAsync(request, plan.PreparedGraph, async (node, ct) =>
         {
             if (priorObservations is not null) return priorObservations[node.Id];

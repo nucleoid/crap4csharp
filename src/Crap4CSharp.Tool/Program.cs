@@ -215,6 +215,7 @@ internal static class App
         var stopwatch = Stopwatch.StartNew();
         ModernOptions? options = null;
         FreshFailureOutputProof? failureOutputProof = null;
+        string? privateDiagnostics = null;
         try
         {
             options = ParseModern(args, out options);
@@ -229,7 +230,7 @@ internal static class App
                         Configuration: options.Configuration, ExemptionFile: options.Exemptions,
                         IncludeTests: options.IncludeTests, IncludeGenerated: options.IncludeGenerated), options.Timeout);
                 freshResult = await FreshCheckCommand.RunAsync(request, workingDirectory, startedAt, cancellationToken,
-                    proof => failureOutputProof = proof);
+                    proof => failureOutputProof = proof, directory => privateDiagnostics = directory);
             }
             // Fresh execution has already materialized the graceful cancellation
             // terminal, including actual completed/interrupted/not-run contexts.
@@ -252,6 +253,7 @@ internal static class App
                 : options.Ruleset == ComplexityRules.OrdinaryMethodsV1
                 ? await AnalyzeLegacyCapturedInputsAsync(options, workingDirectory, startedAt, stopwatch, cancellationToken)
                 : AnalyzeCapturedInputs(options, workingDirectory, startedAt, stopwatch));
+            result = AttachPrivateDiagnostics(result, privateDiagnostics);
             var writeResult = true;
             if (freshResult is not null && result.Run.ExitCode == 1 && options.Output is not null)
             {
@@ -310,7 +312,8 @@ internal static class App
                 ComplexityRules.OrdinaryMethodsV1 => ComplexityRules.OrdinaryMethodsV1,
                 _ => ComplexityRules.CallablesV1
             };
-            var result = BuildCallableFailure(args[0], ruleset, reason, startedAt, stopwatch.Elapsed);
+            var result = AttachPrivateDiagnostics(
+                BuildCallableFailure(args[0], ruleset, reason, startedAt, stopwatch.Elapsed), privateDiagnostics);
             var format = options?.Format ?? (HasJsonIntent(args) ? "json" : "human");
             var destination = options?.Output ?? PreDetectValue(args, "--output");
             var mayWrite = false;
@@ -390,6 +393,20 @@ internal static class App
             await error.WriteLineAsync($"error: {exception.Message}");
             return 1;
         }
+    }
+
+    private static ResultDocument AttachPrivateDiagnostics(ResultDocument result, string? directory)
+    {
+        if (directory is null) return result;
+        // Only the exact allocation callback supplies this locator. It is not
+        // inferred from consumer argv, existing directories or an earlier run.
+        // Diagnostics are explicitly retained until user-directed cleanup and do
+        // not attest completed/reusable evidence, even on successful execution.
+        return result with { Run = result.Run with
+        {
+            DiagnosticLocations = result.Run.DiagnosticLocations.Concat([directory]).Distinct(StringComparer.Ordinal).ToArray(),
+            Artifacts = result.Run.Artifacts.Concat([new RunArtifact("private-diagnostics", directory, "retained", false, false)]).ToArray()
+        } };
     }
 
     private static ModernOptions ParseModern(string[] args, out ModernOptions? parsedCheck)
@@ -798,6 +815,8 @@ internal static class App
         foreach (var error in result.Evaluation.ExemptionErrors ?? [])
             output.WriteLine($"  exemption error: {error}");
         output.WriteLine($"Decision: {result.Evaluation.Decision.PolicyDecision} ({result.Evaluation.Decision.Reason}); exit={result.Run.ExitCode}");
+        foreach (var artifact in result.Run.Artifacts.Where(a => a.Kind == "private-diagnostics"))
+            output.WriteLine($"Private diagnostics (may contain secrets; retained until user cleanup): {artifact.Path}");
     }
 
     private static Options Parse(string[] args)

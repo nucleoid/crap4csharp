@@ -240,6 +240,7 @@ public sealed class FreshCheckExecutionTests
         if (includeGenerated) publicArgs = [.. publicArgs, "--include-generated"];
         var exit = await global::App.RunAsync(publicArgs, fixture.Path, output, errors, token);
         using var terminal = JsonDocument.Parse(output.ToString());
+        AssertRetainedPrivateDiagnostics(terminal.RootElement, requireBuildLog: true);
         if (failing)
         {
             Assert.Equal(1, exit);
@@ -328,6 +329,7 @@ public sealed class FreshCheckExecutionTests
                 var text = new StringWriter(); var diagnostic = new StringWriter();
                 Assert.Equal(1, await global::App.RunAsync(retryArgs, fixture.Path, text, diagnostic, token));
                 using var failed = JsonDocument.Parse(text.ToString());
+                AssertRetainedPrivateDiagnostics(failed.RootElement, requireBuildLog: true);
                 Assert.Contains(failed.RootElement.GetProperty("run").GetProperty("testOutcomes").EnumerateArray(),
                     o => o.GetProperty("exitCode").GetInt32() == 1);
                 Assert.False(failed.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("completed").GetBoolean());
@@ -349,13 +351,15 @@ public sealed class FreshCheckExecutionTests
                 File.WriteAllText(projectPath, failureProject);
                 var retryArgs = publicArgs.Where((_, index) => index != Array.IndexOf(publicArgs, "--artifact-output") &&
                     index != Array.IndexOf(publicArgs, "--artifact-output") + 1).ToArray();
-                async Task<string> Retry()
+                async Task<string> Retry(bool allocatedDiagnostics = true)
                 {
                     var text = new StringWriter(); var diagnostic = new StringWriter();
                     Assert.Equal(1, await global::App.RunAsync(retryArgs, fixture.Path, text, diagnostic, token));
                     using var failed = JsonDocument.Parse(text.ToString());
                     Assert.False(failed.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("completed").GetBoolean());
-                    AssertRetainedPrivateDiagnostics(failed.RootElement, requireBuildLog: true);
+                    if (allocatedDiagnostics) AssertRetainedPrivateDiagnostics(failed.RootElement, requireBuildLog: true);
+                    else Assert.DoesNotContain(failed.RootElement.GetProperty("run").GetProperty("artifacts").EnumerateArray(),
+                        a => a.GetProperty("kind").GetString() == "private-diagnostics");
                     return text.ToString();
                 }
                 var failedText = await Retry();
@@ -368,7 +372,9 @@ public sealed class FreshCheckExecutionTests
                 var saved = File.ReadAllBytes(resultPath);
                 File.WriteAllText(projectPath, failureProject.Replace("</Project>",
                     "<ItemGroup><AdditionalFiles Include=\"../result.json\" /></ItemGroup></Project>", StringComparison.Ordinal));
-                var aliasText = await Retry();
+                // This selected consumer-input alias is refused before private
+                // execution storage is allocated, so no locator may be invented.
+                var aliasText = await Retry(allocatedDiagnostics: false);
                 Assert.Equal(saved, File.ReadAllBytes(resultPath));
                 using var aliasResult = JsonDocument.Parse(aliasText);
                 Assert.Contains(aliasResult.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
@@ -498,7 +504,7 @@ public sealed class FreshCheckExecutionTests
         Assert.Equal("retained", artifact.GetProperty("retention").GetString());
         Assert.False(artifact.GetProperty("complete").GetBoolean());
         Assert.False(artifact.GetProperty("reusable").GetBoolean());
-        Assert.Contains(run.GetProperty("logLocations").EnumerateArray(), p => p.GetString() == path);
+        Assert.Contains(run.GetProperty("diagnosticLocations").EnumerateArray(), p => p.GetString() == path);
         if (!OperatingSystem.IsWindows())
             Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, File.GetUnixFileMode(path));
         if (requireBuildLog)
