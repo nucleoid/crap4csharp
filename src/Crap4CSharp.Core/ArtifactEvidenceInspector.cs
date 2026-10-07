@@ -162,7 +162,7 @@ public static class ArtifactEvidenceInspector
             var root = document.Root?.Name.LocalName;
             return root switch
             {
-                "CoverageSession" => new("opencover", "sequence-point",
+                "CoverageSession" => new("opencover", OpenCoverCoordinates(document),
                     document.Descendants().Where(element => element.Name.LocalName == "Module")
                         .Select(module => module.Elements().FirstOrDefault(element =>
                             element.Name.LocalName is "ModuleName" or "FullName")?.Value)
@@ -178,6 +178,18 @@ public static class ArtifactEvidenceInspector
         }
         catch (XmlException exception)
         { throw new InvalidDataException("Captured coverage XML is malformed.", exception); }
+    }
+
+    private static string OpenCoverCoordinates(XDocument document)
+    {
+        var points = document.Descendants().Where(e => e.Name.LocalName == "SequencePoint").ToArray();
+        // OpenCover is a container, not proof of columns/IL offsets. The supported
+        // private line projection removes synthesized writer columns before capture.
+        return points.Length > 0 && points.All(p => p.Attribute("sc") is null && p.Attribute("ec") is null &&
+            p.Attribute("el") is null && p.Attribute("offset") is null &&
+            int.TryParse(p.Attribute("sl")?.Value, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var line) && line > 0)
+            ? "line" : "sequence-point";
     }
 
     public static bool CoverageMatchesBuild(ImmutableArray<byte> bytes, string logicalPath,

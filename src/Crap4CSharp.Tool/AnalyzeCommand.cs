@@ -42,6 +42,13 @@ internal static class AnalyzeCommand
                     return CapturedSource.Create(input.LogicalPath, bytes.AsSpan());
                 }).ToArray();
                 var parseOptions = ParseOptions(context.ParseOptions!);
+                var compilerTrees = context.Inputs.Where(i => i.Role is "source" or "compiler-source").Select(input =>
+                {
+                    if (!bundle.Bytes.TryGetValue(input.Locator, out var content))
+                        throw new InvalidDataException("Captured compiler source is missing.");
+                    var captured = CapturedSource.Create(input.LogicalPath, content.AsSpan());
+                    return CSharpSyntaxTree.ParseText(captured.Text, parseOptions, input.LogicalPath);
+                }).ToArray();
                 var pathPolicy = PathPolicy(context.PathPolicy!);
                 var references = context.Inputs.Where(input => input.Role == "reference")
                     .OrderBy(input => input.LogicalPath, StringComparer.Ordinal).Select(input =>
@@ -69,7 +76,7 @@ internal static class AnalyzeCommand
                     partitions.Add(sources.Length == 0
                         ? EmptyPartition(partitionId, context)
                         : manifest.Producer.ComplexityRuleset == ComplexityRules.CallablesV1
-                            ? EvaluateCallables(partitionId, context, build, sources, coverage, references, parseOptions, pathPolicy, threshold)
+                            ? EvaluateCallables(partitionId, context, build, sources, coverage, references, parseOptions, pathPolicy, threshold, compilerTrees)
                             : EvaluateOrdinary(partitionId, context, build, sources, coverage, parseOptions, pathPolicy,
                                 threshold, provenance, capturedEvaluation.Policy.AllowMissingCoverage, cancellationToken));
                 }
@@ -157,12 +164,12 @@ internal static class AnalyzeCommand
     private static ReplayPartition EvaluateCallables(string contextId, ManifestContext manifestContext,
         ManifestBuild build, IReadOnlyList<CapturedSource> sources, IReadOnlyList<CapturedCoverage> coverage,
         IReadOnlyList<MetadataReference> references, CSharpParseOptions parseOptions,
-        CapturedPathPolicy pathPolicy, double threshold)
+        CapturedPathPolicy pathPolicy, double threshold, IReadOnlyList<SyntaxTree> compilerTrees)
     {
         var context = new CallableAnalysisContext(manifestContext.Project, manifestContext.TargetFramework,
             manifestContext.Configuration, manifestContext.Platform, contextId, parseOptions);
         var inventory = CallableInventory.Merge(sources.Select(source =>
-            CallableInventory.Analyze(source.Text, source.LogicalPath, context, references)).ToArray());
+            CallableInventory.Analyze(source.Text, source.LogicalPath, context, references, compilerTrees)).ToArray());
         var sourcePaths = sources.Select(source => source.LogicalPath).ToArray();
         var reports = coverage.SelectMany(report => CapturedLogicalPathResolver.ResolveMethods(
                 CoverageReader.Read(report.Bytes.AsSpan(), report.LogicalPath), sourcePaths, pathPolicy))

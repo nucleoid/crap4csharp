@@ -75,7 +75,7 @@ public sealed record CallableInventoryResult(
 public static class CallableInventory
 {
     public static CallableInventoryResult Analyze(string text, string logicalPath, CallableAnalysisContext context,
-        IEnumerable<MetadataReference>? references = null)
+        IEnumerable<MetadataReference>? references = null, IEnumerable<SyntaxTree>? additionalTrees = null)
     {
         ArgumentNullException.ThrowIfNull(text);
         ArgumentException.ThrowIfNullOrWhiteSpace(logicalPath);
@@ -84,7 +84,11 @@ public static class CallableInventory
         var errors = tree.GetDiagnostics().Where(item => item.Severity == DiagnosticSeverity.Error).ToArray();
         if (errors.Length > 0) throw new InvalidDataException(errors[0].ToString());
         var root = tree.GetCompilationUnitRoot();
-        var semanticModel = CSharpCompilation.Create("Crap4CSharp.CallableInventory", [tree], references ?? [])
+        var auxiliary = (additionalTrees ?? []).Where(t => t.FilePath != logicalPath).ToArray();
+        foreach (var other in auxiliary)
+            if (other.GetDiagnostics().Any(d => d.Severity == DiagnosticSeverity.Error))
+                throw new InvalidDataException("Captured compiler-source closure has syntax errors.");
+        var semanticModel = CSharpCompilation.Create("Crap4CSharp.CallableInventory", [tree, .. auxiliary], references ?? [])
             .GetSemanticModel(tree);
         var contentIdentity = ProjectAnalysisContext.ContentHash(text);
         var candidates = Discover(root, tree).OrderBy(item => item.Span.Start).ThenByDescending(item => item.Span.Length)

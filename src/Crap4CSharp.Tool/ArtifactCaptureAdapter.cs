@@ -11,7 +11,12 @@ internal static class ArtifactCaptureAdapter
 
     public static string PublishNew(RunManifest manifest,
         IReadOnlyDictionary<string, ImmutableArray<byte>> artifacts, string destination)
+        => PublishNewCancellable(manifest, artifacts, destination, CancellationToken.None);
+
+    internal static string PublishNewCancellable(RunManifest manifest,
+        IReadOnlyDictionary<string, ImmutableArray<byte>> artifacts, string destination, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (artifacts.Keys.Any(locator => string.Equals(locator.Replace('\\', '/'), "manifest.json",
                 StringComparison.OrdinalIgnoreCase)))
             throw new InvalidDataException("The bundle entry name 'manifest.json' is reserved.");
@@ -21,7 +26,7 @@ internal static class ArtifactCaptureAdapter
             .ToHashSet(StringComparer.Ordinal);
         if (!declared.SetEquals(artifacts.Keys))
             throw new InvalidDataException("Published artifact bytes must exactly match declared bundle locators.");
-        var verification = ProvenanceVerifier.VerifyCapture(manifest, artifacts);
+        var verification = ProvenanceVerifier.VerifyCaptureCancellable(manifest, artifacts, null, cancellationToken);
         if (verification.Status == ProvenanceStatus.Invalid)
             throw new InvalidDataException($"Cannot publish invalid capture: {string.Join(", ", verification.Reasons)}");
         var target = Path.GetFullPath(destination);
@@ -31,16 +36,23 @@ internal static class ArtifactCaptureAdapter
         Directory.CreateDirectory(parent);
         var staging = Path.Combine(parent, $".{Path.GetFileName(target)}.{Guid.NewGuid():N}.incomplete");
         Directory.CreateDirectory(staging);
+        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(staging, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         foreach (var pair in artifacts.OrderBy(pair => pair.Key, StringComparer.Ordinal))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var locator = CanonicalIdentity.NormalizeLogicalPath(pair.Key);
             var path = Path.GetFullPath(locator.Replace('/', Path.DirectorySeparatorChar), staging);
             EnsureContained(staging, path);
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-            stream.Write(pair.Value.AsSpan());
+            for (var offset = 0; offset < pair.Value.Length; offset += 64 * 1024)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                stream.Write(pair.Value.AsSpan(offset, Math.Min(64 * 1024, pair.Value.Length - offset)));
+            }
             stream.Flush(true);
         }
+        cancellationToken.ThrowIfCancellationRequested();
         var manifestPath = Path.Combine(staging, "manifest.json");
         var manifestBytes = new System.Text.UTF8Encoding(false).GetBytes(JsonSerializer.Serialize(manifest, Json) + "\n");
         using (var stream = new FileStream(manifestPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
@@ -49,9 +61,10 @@ internal static class ArtifactCaptureAdapter
             stream.Flush(true);
         }
         var staged = ArtifactBundle.Load(manifestPath, staging);
-        var stagedVerification = ProvenanceVerifier.VerifyCapture(staged.Manifest, staged.Bytes);
+        var stagedVerification = ProvenanceVerifier.VerifyCaptureCancellable(staged.Manifest, staged.Bytes, null, cancellationToken);
         if (stagedVerification.Status == ProvenanceStatus.Invalid)
             throw new InvalidDataException($"Staged capture verification failed: {string.Join(", ", stagedVerification.Reasons)}");
+        cancellationToken.ThrowIfCancellationRequested();
         Directory.Move(staging, target);
         return Path.Combine(target, "manifest.json");
     }

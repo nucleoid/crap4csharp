@@ -93,7 +93,7 @@ internal static class FreshCheckExecution
                 throw new PolicyException("policy.testContextMismatch", "Prepared test-project inventory differs from trusted required test membership.");
     }
 
-    private static void ProtectPreparedDestinations(FreshCheckPreflight preflight, ProjectContextLoadResult graph)
+    internal static void ProtectPreparedDestinations(FreshCheckPreflight preflight, ProjectContextLoadResult graph)
     {
         var contexts = graph.GraphContexts.Select(b => b.Context).ToArray();
         FreshCheckPreflightLoader.ValidateDestinations(preflight.Request, preflight.Root,

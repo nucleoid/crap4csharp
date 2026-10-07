@@ -25,8 +25,11 @@ public sealed class FreshCheckExecutionTests
             <Target Name="CountActualCompile" BeforeTargets="CoreCompile" Condition="'$(DesignTimeBuild)' != 'true'">
             <WriteLinesToFile File="$(MSBuildProjectDirectory)/build-count.txt" Lines="once" Overwrite="false" /></Target>
             """;
-        fixture.Write("Library/Library.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>" + counter + "</Project>");
+        const string privateCanary = "fresh-private-property-never-export-7264c8e";
+        fixture.Write("Library/Library.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework>" +
+            (coordinatorOnly ? "<PrivateCanary>" + privateCanary + "</PrivateCanary>" : "") + "</PropertyGroup>" + counter + "</Project>");
         fixture.Write("Library/Code.cs", "public static class Library { public static int Value => 42; }");
+        if (coordinatorOnly) fixture.Write("Library/NoRuntime.cs", "#if NOT_DEFINED\npublic class Inactive {}\n#endif\n");
         fixture.Write("Tests/Tests.csproj", """
             <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><IsPackable>false</IsPackable></PropertyGroup>
             <ItemGroup><PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" PrivateAssets="all" />
@@ -68,6 +71,33 @@ public sealed class FreshCheckExecutionTests
             {
                 Assert.Equal(0, evidence.Tests[0].Process.ExitCode); Assert.Null(evidence.Tests.Failure);
                 Assert.NotNull(evidence.Coverage); Assert.Single(evidence.SafeChildren);
+                var captured = await FreshManifestCapture.CaptureAsync(evidence, token);
+                var sourceInputs = captured.Manifest.Contexts.Single().Inputs.Where(i => i.Role is "source" or "compiler-source").ToArray();
+                Assert.Equal(evidence.Compiler.FinalGraph.GraphContexts.Single(b => !b.IsTestProject).Context.CompilerDocuments.Count, sourceInputs.Length);
+                var capturedPe = captured.Manifest.Artifacts.Single(a => a.Kind == "assembly");
+                var capturedPdb = captured.Manifest.Artifacts.Single(a => a.Kind == "pdb");
+                var actual = ArtifactEvidenceInspector.InspectBuild(captured.Bytes[capturedPe.Locator], captured.Bytes[capturedPdb.Locator]);
+                Assert.Equal(actual.Documents.Count, sourceInputs.Count(i => i.Role == "source"));
+                Assert.Equal(sourceInputs.Length - actual.Documents.Count, sourceInputs.Count(i => i.Role == "compiler-source"));
+                Assert.False(captured.Manifest.Contexts.Single().ReuseRecipeComplete);
+                Assert.Contains(captured.Manifest.Artifacts, a => a.Kind == "test-child-build");
+                Assert.DoesNotContain(captured.Manifest.Artifacts, a => a.Kind.Contains("binlog", StringComparison.Ordinal));
+                Assert.All(captured.Bytes.Values, b => Assert.True(b.AsSpan().IndexOf(System.Text.Encoding.UTF8.GetBytes(privateCanary)) < 0));
+                Assert.Contains(captured.Manifest.Artifacts, a => a.Kind == "compiler-input-closure");
+                Assert.Contains(captured.Manifest.Artifacts, a => a.Kind == "test-compiler-input-closure");
+                Assert.Contains(captured.Manifest.Artifacts, a => a.Kind == "test-compiler-source");
+                var alias = await Assert.ThrowsAsync<PolicyException>(() => FreshManifestCapture.PublishAsync(evidence, captured,
+                    Path.Combine(fixture.Path, "Library", "Code.cs"), token));
+                Assert.Equal("output.aliasesPolicyInput", alias.Code);
+                var manifest = await FreshManifestCapture.PublishAsync(evidence, captured,
+                    Path.Combine(evidence.PrivateDirectory, "safe-export"), token);
+                if (!OperatingSystem.IsWindows()) Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
+                    File.GetUnixFileMode(Path.GetDirectoryName(manifest)!));
+                var bundle = ArtifactBundle.Load(manifest, evidence.PrivateDirectory);
+                Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(bundle.Manifest, bundle.Bytes).Status);
+                var replay = AnalyzeCommand.Replay(bundle, fixture.Path, DateTimeOffset.UtcNow, TimeSpan.Zero, token, allSources: true);
+                Assert.Equal(0, replay.Run.ExitCode);
+                Assert.Equal("captured", replay.Evaluation.Provenance!.Status);
             }
             Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));
             Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library", "build-count.txt")));
