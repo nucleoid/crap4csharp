@@ -279,7 +279,9 @@ internal static partial class MsBuildProjectLoader
                 {
                     if (reference is AnalyzerFileReference fileReference)
                         fileReference.AnalyzerLoadFailed += (_, args) => analyzerLoadFailures.Add(args.Message);
-                    _ = reference.GetAnalyzers(LanguageNames.CSharp);
+                    // GetGenerators performs generator-role discovery without instantiating
+                    // ordinary DiagnosticAnalyzers. Analyzer constructor/load warnings must
+                    // not become source-generator binding failures in shared loading.
                     generators.AddRange(reference.GetGenerators(LanguageNames.CSharp));
                 }
             }
@@ -291,10 +293,6 @@ internal static partial class MsBuildProjectLoader
                 throw new ProjectContextException("context.generatedSourceUnavailable", string.Join(Environment.NewLine, analyzerLoadFailures));
             var compilation = await project.GetCompilationAsync(cancellationToken)
                 ?? throw new ProjectContextException("context.generatedSourceUnavailable", "Compilation was unavailable while inspecting generator binding.");
-            var generatorFailures = compilation.GetDiagnostics(cancellationToken).Where(diagnostic =>
-                diagnostic.Id is "CS8032" or "CS8034" or "CS8784" or "CS8785" && diagnostic.Severity != DiagnosticSeverity.Hidden).ToArray();
-            if (generatorFailures.Length > 0)
-                throw new ProjectContextException("context.generatedSourceUnavailable", string.Join(Environment.NewLine, generatorFailures.Select(value => value.ToString())));
             var extraTrees = compilation.SyntaxTrees.Where(tree => string.IsNullOrWhiteSpace(tree.FilePath) ||
                 !documentPaths.Contains(Path.GetFullPath(tree.FilePath))).Take(32769).ToArray();
             if (extraTrees.Length > 32768)

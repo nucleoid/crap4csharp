@@ -54,10 +54,27 @@ public sealed class GeneratorBindingTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task UnresolvedPotentialGeneratorRemainsRefused(bool includeGenerated)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-unresolved-generator");
+        var project = fixture.Write("App/App.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup><ItemGroup><Analyzer Include=\"../Missing.dll\" /></ItemGroup></Project>");
+        fixture.Write("App/Code.cs", "public class Code {}");
+        var request = new ProjectContextLoadRequest(project, "Release", "AnyCPU", [], false, includeGenerated, TimeSpan.FromMinutes(2));
+        Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken)).ExitCode);
+        var loaded = await ProjectContextLoader.LoadGraphAsync(request, TestContext.Current.CancellationToken);
+        Assert.False(loaded.Success);
+        Assert.Equal("context.generatedSourceUnavailable", loaded.FailureReason);
+    }
+
+    [Theory]
     [InlineData(false, "emit")]
     [InlineData(true, "emit")]
     [InlineData(false, "throw")]
     [InlineData(true, "throw")]
+    [InlineData(false, "constructor")]
+    [InlineData(true, "constructor")]
     [InlineData(false, "empty")]
     [InlineData(true, "empty")]
     public async Task ActualGeneratorIsInspectedIndependentlyOfPublicInclusion(bool includeGenerated, string behavior)
@@ -70,6 +87,8 @@ public sealed class GeneratorBindingTests
             _ => ""
         };
         var generatorSource = "using Microsoft.CodeAnalysis; [Generator] public sealed class FixtureGenerator : ISourceGenerator { public void Initialize(GeneratorInitializationContext context) {} public void Execute(GeneratorExecutionContext context) { " + action + " } }";
+        if (behavior == "constructor") generatorSource = generatorSource.Replace(
+            "public void Initialize", "public FixtureGenerator() => throw new System.InvalidOperationException(\"generator constructor failed\"); public void Initialize", StringComparison.Ordinal);
         var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator)
             .Append(typeof(ISourceGenerator).Assembly.Location).Distinct().Select(p => MetadataReference.CreateFromFile(p));
         var compilation = CSharpCompilation.Create("FixtureGenerator",
@@ -88,7 +107,7 @@ public sealed class GeneratorBindingTests
         var request = new ProjectContextLoadRequest(project, "Release", "AnyCPU", [], false, includeGenerated, TimeSpan.FromMinutes(2));
         Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken)).ExitCode);
         var loaded = await ProjectContextLoader.LoadGraphAsync(request, TestContext.Current.CancellationToken);
-        if (behavior == "throw")
+        if (behavior is "throw" or "constructor")
         {
             Assert.False(loaded.Success);
             Assert.Equal("context.generatedSourceUnavailable", loaded.FailureReason);
