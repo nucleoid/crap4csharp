@@ -98,6 +98,11 @@ public sealed class FreshCheckExecutionTests
                 var replay = AnalyzeCommand.Replay(bundle, fixture.Path, DateTimeOffset.UtcNow, TimeSpan.Zero, token, allSources: true);
                 Assert.Equal(0, replay.Run.ExitCode);
                 Assert.Equal("captured", replay.Evaluation.Provenance!.Status);
+                var policy = FreshPolicyEvaluation.Evaluate(preflight, bundle.Manifest, replay);
+                Assert.Equal(0, policy.Evaluation.ExitCode);
+                Assert.Equal(2, FreshPolicyEvaluation.Evaluate(preflight with
+                    { Policy = preflight.Policy with { Threshold = .5 } }, bundle.Manifest, replay).Evaluation.ExitCode);
+                Assert.Equal("captured", replay.Evaluation.Provenance.Status); // pure policy is not execution attestation
             }
             Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));
             Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library", "build-count.txt")));

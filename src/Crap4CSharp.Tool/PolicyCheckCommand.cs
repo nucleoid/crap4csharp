@@ -276,7 +276,7 @@ internal static class PolicyCheckCommand
             throw new PolicyException("exemption.malformed", "Trusted exemption contains missing, duplicate, or unknown keys.");
     }
 
-    private static FindingResult ToFinding(PolicyFinding finding, ResultDocument result, double threshold)
+    internal static FindingResult ToFinding(PolicyFinding finding, ResultDocument result, double threshold)
     {
         var family = (result.Evaluation.Families ?? []).FirstOrDefault(item => item.FamilyId == finding.EntityKey);
         var callable = (result.Evaluation.Callables ?? []).FirstOrDefault(item =>

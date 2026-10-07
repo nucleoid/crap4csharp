@@ -41,6 +41,42 @@ public sealed class FreshPolicyEvaluationTests
         Assert.Equal(2, decision.Evaluation.ExitCode);
     }
 
+    [Fact]
+    public void SelectedChildSelectsItsFamilyEvenWhenRootIsOutsideChangedRange()
+    {
+        var (preflight, manifest, replay) = Fixture("incremental", "method");
+        var callables = replay.Evaluation.Callables!.Select(c => c with { FamilyIds = ["family"] }).ToArray();
+        var family = new CallableFamilyMetric("family", "cold", CallableFamilyEvaluator.Rule, ComplexityRules.CallablesV1,
+            12, 1, 2, 2, 12, true, ["cold", "changed"], [], [])
+            { MemberObservationIds = callables.Select(c => c.ObservationId).ToArray() };
+        var result = FreshPolicyEvaluation.Evaluate(preflight, manifest, replay with
+            { Evaluation = replay.Evaluation with { Callables = callables, Families = [family] } });
+        Assert.True(result.Observations.Single(o => o.Kind == "family").Selected);
+        Assert.Contains(result.Findings, f => f.EntityKey == "family" && f.Decision == "fail");
+        Assert.Equal(2, result.Evaluation.ExitCode);
+    }
+
+    [Fact]
+    public void ReplayPassCannotHideSelectedUnknownCoverage()
+    {
+        var (preflight, manifest, replay) = Fixture("incremental", "method");
+        var callables = replay.Evaluation.Callables!.Select(c => c.CallableId == "changed" ? c with
+            { Coverage = null, Crap = null, CoverageStatus = "unknown", CoverageReason = CoverageReasonCodes.NoMatchingMethod } : c).ToArray();
+        var result = FreshPolicyEvaluation.Evaluate(preflight, manifest, replay with
+            { Evaluation = replay.Evaluation with { Callables = callables } });
+        Assert.Equal(1, result.Evaluation.ExitCode);
+        Assert.Contains(CoverageReasonCodes.NoMatchingMethod, result.Evaluation.OperationalReasons);
+    }
+
+    [Fact]
+    public void ScopeRevisionMismatchFailsRatherThanEvaluatingStaleSelection()
+    {
+        var (preflight, manifest, replay) = Fixture("strict", "method");
+        var error = Assert.Throws<PolicyException>(() => FreshPolicyEvaluation.Evaluate(preflight,
+            manifest with { Revision = manifest.Revision with { ScopeHead = "other" } }, replay));
+        Assert.Equal("provenance.scopeRevisionMismatch", error.Code);
+    }
+
     private static (FreshCheckPreflight, RunManifest, ResultDocument) Fixture(string mode, string granularity)
     {
         var text = "{\"schemaVersion\":\"repository-policy-v1\",\"mode\":\"" + mode + "\",\"productionProjects\":[\"App/App.csproj\"],\"testProjects\":[\"Tests/Tests.csproj\"],\"configuration\":\"Debug\",\"targetFrameworks\":[\"net10.0\"],\"scope\":\"base\",\"threshold\":8,\"missingCoverage\":\"fail\",\"requiredChecks\":[\"tests\",\"coverage\",\"crap\"],\"exclusions\":[],\"ruleset\":\"callables-v1\"" +
