@@ -218,6 +218,7 @@ internal static class App
         ModernOptions? options = null;
         FreshFailureOutputProof? failureOutputProof = null;
         string? privateDiagnostics = null;
+        Func<Task>? terminalProof = null;
         try
         {
             options = ParseModern(args, out options);
@@ -248,7 +249,8 @@ internal static class App
                 OutputDestinationSafety.RejectExistingConsumerFile(options.Output, workingDirectory);
             var result = freshResult ?? (options.Command == "check"
                 ? await PolicyCheckCommand.RunAsync(options.ReuseArtifacts!, options.Policy!, options.Base!,
-                    workingDirectory, options.Output, options.Timeout, startedAt, stopwatch.Elapsed, cancellationToken)
+                    workingDirectory, options.Output, options.Timeout, startedAt, stopwatch.Elapsed, cancellationToken,
+                    proof => terminalProof = proof)
                 : options.ReuseArtifacts is not null
                 ? AnalyzeCommand.Replay(options.ReuseArtifacts, workingDirectory, options.Output,
                     startedAt, stopwatch.Elapsed, cancellationToken)
@@ -285,6 +287,10 @@ internal static class App
             var json = ResultWriter.Serialize(result);
             // Invocation-local deterministic acceptance seam; null changes no normal behavior.
             if (beforeTerminalPublication is not null) await beforeTerminalPublication(cancellationToken);
+            // A complete saved check must still match ALL required test/compiler/
+            // physical/trust/ORIGINAL revision inputs at the actual outer writer.
+            // On refusal, discard the serialized success and emit only failure.
+            if (terminalProof is not null) await terminalProof();
             if (options.Output is not null && writeResult)
             {
                 var inputs = options.Inputs.Concat(options.Coverage)

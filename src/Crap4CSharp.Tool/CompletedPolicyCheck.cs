@@ -6,7 +6,7 @@ internal static class CompletedPolicyCheck
 {
     internal static async Task<ResultDocument> RunAsync(ArtifactBundle bundle, string policyPath, string baseRef,
         string root, string? outputPath, TimeSpan timeout, DateTimeOffset startedAt, TimeSpan duration,
-        CancellationToken token)
+        CancellationToken token, Action<Func<Task>>? retainTerminalProof = null)
     {
         async Task<(FreshCheckPreflight Preflight, ProvenanceResult Proof)> ObserveAsync()
         {
@@ -79,6 +79,15 @@ internal static class CompletedPolicyCheck
         // current trust bytes, and ORIGINAL captured revision before acceptance.
         await ObserveAsync();
         token.ThrowIfCancellationRequested();
+        // Retain this invocation's ORIGINAL bundle and independently current
+        // acquisition recipe. The outer writer invokes it after serialization,
+        // immediately before publishing; never bootstrap from warm outputs or
+        // replace the original captured revision with a new baseline.
+        retainTerminalProof?.Invoke(async () =>
+        {
+            await ObserveAsync();
+            token.ThrowIfCancellationRequested();
+        });
         return result;
     }
 }

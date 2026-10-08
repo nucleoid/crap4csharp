@@ -5,7 +5,7 @@ internal static class PolicyCheckCommand
 {
     public static async Task<ResultDocument> RunAsync(string manifestPath, string policyPath, string baseRef,
         string workingDirectory, string? outputPath, TimeSpan timeout, DateTimeOffset startedAt, TimeSpan duration,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, Action<Func<Task>>? retainTerminalProof = null)
     {
         var root = Path.GetFullPath(workingDirectory);
         var bundle = ArtifactBundle.Load(manifestPath, root);
@@ -13,7 +13,7 @@ internal static class PolicyCheckCommand
         if (outputPath is not null) bundle.RejectOutputAlias(outputPath, root);
         if (bundle.Manifest.Contexts[0].CurrentRevalidation!.Provider == CompletedRevalidationDeclaration.Provider)
             return await CompletedPolicyCheck.RunAsync(bundle, policyPath, baseRef, root, outputPath,
-                timeout, startedAt, duration, cancellationToken);
+                timeout, startedAt, duration, cancellationToken, retainTerminalProof);
         ValidateTrustedRevision(bundle.Manifest);
         var trusted = TrustedPolicyLoader.LoadFromBase(baseRef, policyPath, repositoryRoot: root,
             timeout: timeout, cancellationToken: cancellationToken);
