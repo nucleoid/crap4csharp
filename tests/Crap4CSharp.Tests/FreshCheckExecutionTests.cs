@@ -172,6 +172,11 @@ public sealed class FreshCheckExecutionTests
     public Task BundleAwareCurrentEvidenceAcceptsIndependentlyAcquiredCurrentPreflight(bool local)
         => RunCase(false, true, policyScope: "all", local: local, standaloneTest: true, bundleEvidence: true, newPreflight: true);
 
+    [Fact]
+    public Task BundleAwareCurrentEvidenceAcceptsOriginalLocalMembershipWithCustomOutputs()
+        => RunCase(false, true, policyScope: "all", local: true, standaloneTest: true,
+            outputLayout: "artifacts", bundleEvidence: true, newPreflight: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
         bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false)
     {
