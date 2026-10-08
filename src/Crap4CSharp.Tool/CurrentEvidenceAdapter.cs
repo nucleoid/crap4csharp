@@ -191,9 +191,12 @@ internal static class CurrentEvidenceAdapter
         var hashes = bundle.Manifest.Contexts.ToDictionary(context => context.Id,
             context => ManifestIdentity.ContextHash(context, ManifestIdentity.SourceSetHash(context),
                 ManifestIdentity.InputClosureHash(context)), StringComparer.Ordinal);
-        // These ORIGINAL current preflight identities were just independently
-        // regated; never copy a captured revision to manufacture a match.
-        var state = preflight.GitSnapshot is { } git ? FreshGitProof.Identity(git) :
+        // Independently observed current preflight may include proven build outputs
+        // absent from the captured ORIGINAL pre-build selection. Normalize only the
+        // regated evaluated output footprint, preserving HEAD/base/index and all
+        // outside-output changes. Never copy or rewrite the captured revision hash.
+        var state = preflight.GitSnapshot is { } git
+            ? FreshGitProof.Identity(git, SavedCompletedProof.OutputFootprint(compiler)) :
             FreshLocalProof.Identity(preflight.LocalSnapshot ?? throw new InvalidDataException("Current local snapshot is missing."));
         compiler.RetainedProof!.ValidateCurrent(token);
         token.ThrowIfCancellationRequested();

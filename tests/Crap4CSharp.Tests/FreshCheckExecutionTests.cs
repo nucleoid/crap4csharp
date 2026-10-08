@@ -444,8 +444,20 @@ public sealed class FreshCheckExecutionTests
                     Assert.True(observed.MembershipRecipeRevalidated);
                     Assert.Equal(bundle.Manifest.Contexts.Count, observed.ContextHashes.Count);
                     Assert.Contains(observed.Inputs, input => input.Role == "reference");
-                    Assert.Equal(ProvenanceStatus.Verified,
-                        ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, observed, false).Status);
+                    var currentVerification = ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, observed, false);
+                    Assert.True(currentVerification.Status == ProvenanceStatus.Verified,
+                        string.Join(", ", currentVerification.Reasons));
+                    Assert.Equal(bundle.Manifest.Revision.StateHash, observed.StateHash);
+                    if (newPreflight && !local)
+                    {
+                        var identity = typeof(App).Assembly.GetType("FreshGitProof")!.GetMethod("Identity",
+                            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+                        var raw = (string)identity.Invoke(null, [observationPreflight.GitSnapshot, null])!;
+                        // Actual generated output records differ, but the complete logical index is unchanged.
+                        Assert.NotEqual(bundle.Manifest.Revision.StateHash, raw);
+                        Assert.Equal(preflight.GitSnapshot!.Revision.IndexIdentity,
+                            observationPreflight.GitSnapshot!.Revision.IndexIdentity);
+                    }
                     // A private complete observation cannot relabel a historical incomplete recipe.
                     Assert.False(ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, observed, false).Reusable);
                     Assert.Equal(ProvenanceStatus.Invalid,
@@ -467,8 +479,48 @@ public sealed class FreshCheckExecutionTests
                         await Assert.ThrowsAnyAsync<Exception>(() => Observe(token));
                     }
                     finally { File.WriteAllBytes(sourcePath, sourceBytes); File.SetLastWriteTimeUtc(sourcePath, sourceTime); }
+                    if (newPreflight && !local)
+                    {
+                        // Restore owned fixture stat-cache state without changing logical index entries.
+                        Assert.Equal(0, (await ProcessRunner.RunAsync("git", ["update-index", "--refresh", "--", "Independent/Tests.cs"],
+                            fixture.Path, TimeSpan.FromSeconds(30), token)).ExitCode);
+                        var stage = await ProcessRunner.RunAsync("git", ["ls-files", "--stage", "-z", "--"],
+                            fixture.Path, TimeSpan.FromSeconds(30), token);
+                        Assert.Equal(0, stage.ExitCode);
+                        Assert.Equal(observationPreflight.GitSnapshot!.Revision.IndexIdentity,
+                            "sha256:" + CanonicalIdentity.Sha256(System.Text.Encoding.UTF8.GetBytes(stage.StandardOutput)));
+                    }
                     Assert.Equal(ProvenanceStatus.Verified,
                         ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, await Observe(token), false).Status);
+                    if (newPreflight)
+                    {
+                        var membership = Path.Combine(fixture.Path, "AddedAfterAcquisition.resx");
+                        Assert.False(File.Exists(membership));
+                        try
+                        {
+                            File.WriteAllText(membership, "<root />");
+                            var refused = await Record.ExceptionAsync(() => Observe(token));
+                            Assert.Equal(local ? "provenance.localWorkspaceChanged" : "provenance.gitStateChanged",
+                                Assert.IsType<PolicyException>(refused).Code);
+                        }
+                        finally { File.Delete(membership); }
+                        if (!local)
+                        {
+                            var indexPath = Path.Combine(fixture.Path, ".git", "index");
+                            var indexBytes = File.ReadAllBytes(indexPath); var indexTime = File.GetLastWriteTimeUtc(indexPath);
+                            try
+                            {
+                                Assert.Equal(0, (await ProcessRunner.RunAsync("git", ["update-index", "--chmod=+x", "Independent/Tests.cs"],
+                                    fixture.Path, TimeSpan.FromSeconds(30), token)).ExitCode);
+                                Assert.Equal(sourceBytes, File.ReadAllBytes(sourcePath));
+                                var refused = await Record.ExceptionAsync(() => Observe(token));
+                                Assert.Equal("provenance.gitStateChanged", Assert.IsType<PolicyException>(refused).Code);
+                            }
+                            finally { File.WriteAllBytes(indexPath, indexBytes); File.SetLastWriteTimeUtc(indexPath, indexTime); }
+                        }
+                        Assert.Equal(ProvenanceStatus.Verified,
+                            ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, await Observe(token), false).Status);
+                    }
                     using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
                     await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Observe(cancelled.Token));
                     foreach (var required in currentPlan.Tests)

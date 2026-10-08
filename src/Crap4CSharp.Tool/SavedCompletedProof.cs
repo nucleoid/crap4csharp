@@ -38,14 +38,7 @@ internal static class SavedCompletedProof
         var final = await LoadPlanAsync();
         CompletedTestPlanRecipe.Validate(bytes.ToArray(), final, root, selected, token);
         await compiler.RetainedProof!.ValidateFinalAsync(token);
-        var outputs = compiler.FinalGraph.GraphContexts.SelectMany(b =>
-            new[] { b.Context.EvaluatedIntermediateDirectory!, Path.GetDirectoryName(b.Context.EvaluatedTargetPath!)! }
-                .Concat(b.Context.PhaseInputs.Where(i => i.Role == "restoreAssets").Select(i => Path.GetDirectoryName(i.Path)!)))
-            .Distinct(PathIdentityPolicy.Current.Comparer).ToArray();
-        if (outputs.Any(directory => compiler.FinalGraph.BuildGraph.Any(node => node.ProjectPath.StartsWith(
-            Path.TrimEndingDirectorySeparator(directory) + Path.DirectorySeparatorChar,
-            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))))
-            throw new PolicyException("provenance.gitOutputFootprintUnsupported", "Generated output footprint must not contain consumer project inputs.");
+        var outputs = OutputFootprint(compiler);
         await FreshGitProof.ValidateAsync(preflight, token, outputs);
         compiler.RetainedProof.ValidateCurrent(token);
         token.ThrowIfCancellationRequested();
@@ -58,5 +51,20 @@ internal static class SavedCompletedProof
             token.ThrowIfCancellationRequested();
             return CheckExecutionPlan.Create(runners, graph, token);
         }
+    }
+
+    // Use only after the complete saved proof has independently regated the graph.
+    // The same finite evaluated footprint governs stability and revision comparison.
+    internal static IReadOnlyList<string> OutputFootprint(CompilerGraphPhaseResult compiler)
+    {
+        var outputs = compiler.FinalGraph.GraphContexts.SelectMany(b =>
+            new[] { b.Context.EvaluatedIntermediateDirectory!, Path.GetDirectoryName(b.Context.EvaluatedTargetPath!)! }
+                .Concat(b.Context.PhaseInputs.Where(i => i.Role == "restoreAssets").Select(i => Path.GetDirectoryName(i.Path)!)))
+            .Distinct(PathIdentityPolicy.Current.Comparer).ToArray();
+        if (outputs.Any(directory => compiler.FinalGraph.BuildGraph.Any(node => node.ProjectPath.StartsWith(
+            Path.TrimEndingDirectorySeparator(directory) + Path.DirectorySeparatorChar,
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))))
+            throw new PolicyException("provenance.gitOutputFootprintUnsupported", "Generated output footprint must not contain consumer project inputs.");
+        return outputs;
     }
 }
