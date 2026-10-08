@@ -11,6 +11,9 @@ internal static class PolicyCheckCommand
         var bundle = ArtifactBundle.Load(manifestPath, root);
         CurrentEvidenceAdapter.ValidateSupportedRecipes(bundle.Manifest);
         if (outputPath is not null) bundle.RejectOutputAlias(outputPath, root);
+        if (bundle.Manifest.Contexts[0].CurrentRevalidation!.Provider == CompletedRevalidationDeclaration.Provider)
+            return await CompletedPolicyCheck.RunAsync(bundle, policyPath, baseRef, root, outputPath,
+                timeout, startedAt, duration, cancellationToken);
         ValidateTrustedRevision(bundle.Manifest);
         var trusted = TrustedPolicyLoader.LoadFromBase(baseRef, policyPath, repositoryRoot: root,
             timeout: timeout, cancellationToken: cancellationToken);
