@@ -223,6 +223,14 @@ public sealed class FreshCheckExecutionTests
             publicCompleteConsumer: "check", outerTerminalDrift: true);
 
     [Theory]
+    [InlineData("destination")]
+    [InlineData("cancellation")]
+    public Task CompletePublicCheckRefusesLateDestinationOrCancellationWithoutNewLaunches(string mutation)
+        => RunCase(false, true, policyScope: "all", local: false, standaloneTest: true,
+            bundleEvidence: true, newPreflight: true, completeProviderDispatch: true,
+            publicCompleteConsumer: "check", outerTerminalDrift: true, outerTerminalMutation: mutation);
+
+    [Theory]
     [InlineData("check", true, false)]
     [InlineData("baseline", true, false)]
     [InlineData("check", false, true)]
@@ -309,7 +317,7 @@ public sealed class FreshCheckExecutionTests
     }
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -690,20 +698,31 @@ public sealed class FreshCheckExecutionTests
                             var lateOutput = Path.Combine(evidence.PrivateDirectory, "late-result.json");
                             Assert.False(File.Exists(lateOutput));
                             var callbacks = 0;
+                            using var lateCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+                            var destinationMarker = Path.Combine(lateOutput, "owned-marker.txt");
                             try
                             {
                                 var lateText = new StringWriter(); var lateErrors = new StringWriter();
                                 var lateExit = await global::App.RunAsync(
                                     publicArguments.Concat(new[] { "--output", lateOutput }).ToArray(), fixture.Path,
-                                    lateText, lateErrors, token, beforeTerminalPublication: ct =>
+                                    lateText, lateErrors, lateCancellation.Token, beforeTerminalPublication: ct =>
                                     {
                                         ct.ThrowIfCancellationRequested();
                                         callbacks++;
-                                        var changed = File.ReadAllText(driftPath).Replace("42", "43", StringComparison.Ordinal);
-                                        File.WriteAllText(driftPath, changed);
-                                        File.SetLastWriteTimeUtc(driftPath, originalTime);
-                                        Assert.False(originalBytes.AsSpan().SequenceEqual(File.ReadAllBytes(driftPath)));
-                                        Assert.Equal(originalTime, File.GetLastWriteTimeUtc(driftPath));
+                                        if (outerTerminalMutation == "destination")
+                                        {
+                                            Directory.CreateDirectory(lateOutput);
+                                            File.WriteAllText(destinationMarker, "preserve-owned-marker");
+                                        }
+                                        else if (outerTerminalMutation == "cancellation") lateCancellation.Cancel();
+                                        else
+                                        {
+                                            var changed = File.ReadAllText(driftPath).Replace("42", "43", StringComparison.Ordinal);
+                                            File.WriteAllText(driftPath, changed);
+                                            File.SetLastWriteTimeUtc(driftPath, originalTime);
+                                            Assert.False(originalBytes.AsSpan().SequenceEqual(File.ReadAllBytes(driftPath)));
+                                            Assert.Equal(originalTime, File.GetLastWriteTimeUtc(driftPath));
+                                        }
                                         return Task.CompletedTask;
                                     });
                                 Assert.Equal(1, callbacks);
@@ -714,6 +733,15 @@ public sealed class FreshCheckExecutionTests
                                 Assert.Equal(1, lateJson.RootElement.GetProperty("run").GetProperty("exitCode").GetInt32());
                                 Assert.False(lateJson.RootElement.GetProperty("evaluation")
                                     .GetProperty("decision").GetProperty("completed").GetBoolean());
+                                if (outerTerminalMutation == "destination")
+                                {
+                                    Assert.True(Directory.Exists(lateOutput));
+                                    Assert.Equal("preserve-owned-marker", File.ReadAllText(destinationMarker));
+                                    Assert.Single(Directory.GetFileSystemEntries(lateOutput));
+                                }
+                                if (outerTerminalMutation == "cancellation")
+                                    Assert.Contains(lateJson.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
+                                        c => c.GetProperty("reason").GetString() == "run.cancelled");
                                 if (File.Exists(lateOutput))
                                 {
                                     using var written = JsonDocument.Parse(File.ReadAllText(lateOutput));
@@ -727,6 +755,8 @@ public sealed class FreshCheckExecutionTests
                                 File.WriteAllBytes(driftPath, originalBytes);
                                 File.SetLastWriteTimeUtc(driftPath, originalTime);
                                 if (File.Exists(lateOutput)) File.Delete(lateOutput);
+                                if (File.Exists(destinationMarker)) File.Delete(destinationMarker);
+                                if (Directory.Exists(lateOutput)) Directory.Delete(lateOutput);
                             }
                             Assert.Equal(originalBytes, File.ReadAllBytes(driftPath));
                             Assert.Equal(originalTime, File.GetLastWriteTimeUtc(driftPath));
