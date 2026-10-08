@@ -128,6 +128,13 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, false, emptyEligible: empty, includeGenerated: generated,
             policyScope: "all", local: local, completedReuse: true, standaloneTest: true, savedResults: true);
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task OrdinaryDefaultSolutionRetainsTwoRequiredContextsAndAllCompletedPublicConsumers(bool local)
+        => RunCase(false, false, policyScope: "all", local: local, completedReuse: true,
+            standaloneTest: true, savedResults: true, defaultSolution: true);
+
     [Fact]
     public Task CaptureRetainsRequiredTestWithoutReachableScoredProduction()
         => RunCase(false, true, standaloneTest: true);
@@ -349,7 +356,7 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, false, policyScope: "all", standaloneTest: true, savedResults: true, freshTerminalCancellation: true, freshTerminalDeadline: true);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -425,7 +432,9 @@ public sealed class FreshCheckExecutionTests
                 .Replace("<ProjectReference Include=\"../Library/Library.csproj\" />", sharedCoverage ? "<ProjectReference Include=\"../Library/Library.csproj\" />" : "", StringComparison.Ordinal));
             fixture.Write("Independent/Tests.cs", "using Xunit; public class IndependentTests { [Fact] public void Test() { " +
                 (savedResults || savedCoverage || bundleEvidence || promotionMeasure ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") + (sharedCoverage ? "Assert.Equal(42, Library.Value); } }" : "Assert.Equal(42, 42); } }"));
-            fixture.Write("Root.slnx", "<Solution><Configurations><Platform Name=\"AnyCPU\" /></Configurations><Project Path=\"Tests/Tests.csproj\" /><Project Path=\"Independent/Independent.csproj\" /></Solution>");
+            fixture.Write("Root.slnx", defaultSolution
+                ? "<Solution><Project Path=\"Tests/Tests.csproj\" /><Project Path=\"Independent/Independent.csproj\" /></Solution>"
+                : "<Solution><Configurations><Platform Name=\"AnyCPU\" /></Configurations><Project Path=\"Tests/Tests.csproj\" /><Project Path=\"Independent/Independent.csproj\" /></Solution>");
             var policyPath = Path.Combine(fixture.Path, "policy.json");
             File.WriteAllText(policyPath, File.ReadAllText(policyPath).Replace("\"testProjects\":[\"Tests/Tests.csproj\"]",
                 "\"testProjects\":[\"Tests/Tests.csproj\",\"Independent/Independent.csproj\"]", StringComparison.Ordinal));
@@ -1720,6 +1729,7 @@ public sealed class FreshCheckExecutionTests
                 return Task.CompletedTask;
             } : null);
         using var terminal = JsonDocument.Parse(output.ToString());
+        if (defaultSolution) Assert.True(exit == 0, errors + Environment.NewLine + output);
         AssertRetainedPrivateDiagnostics(terminal.RootElement, requireBuildLog: true);
         if (freshTerminalCancellation)
         {
