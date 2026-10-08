@@ -142,8 +142,12 @@ public sealed class FreshCheckExecutionTests
     public Task SavedEligibilityContextsBindActualSemanticEmptyAndGeneratedInclusiveCompilerEvidence(bool empty, bool generated)
         => RunCase(false, true, emptyEligible: empty, includeGenerated: generated, contextOnly: true);
 
+    [Fact]
+    public Task SavedCompleteBoundaryRechecksTwoRequiredContextsAndRejectsBetweenGateDrift()
+        => RunCase(false, true, standaloneTest: true, savedCoverage: true, compositeProof: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -394,6 +398,41 @@ public sealed class FreshCheckExecutionTests
                     File.GetUnixFileMode(Path.GetDirectoryName(manifest)!));
                 var bundle = Measure("bundleLoad", () => ArtifactBundle.Load(manifest, evidence.PrivateDirectory));
                 Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(bundle.Manifest, bundle.Bytes).Status);
+                if (compositeProof)
+                {
+                    var gate = typeof(App).Assembly.GetType("SavedCompletedProof")?.GetMethod("ValidateAsync",
+                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                    Assert.NotNull(gate);
+                    async Task Agree(Func<CancellationToken, Task>? mutate = null)
+                    {
+                        try { await (Task)gate.Invoke(null, [bundle, preflight, token, mutate])!; }
+                        catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
+                        { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); }
+                    }
+                    await Agree();
+                    var sourcePath = Path.Combine(fixture.Path, "Independent", "Tests.cs");
+                    var originalBytes = File.ReadAllBytes(sourcePath); var originalTime = File.GetLastWriteTimeUtc(sourcePath);
+                    try
+                    {
+                        var refused = await Record.ExceptionAsync(() => Agree(ct =>
+                        {
+                            ct.ThrowIfCancellationRequested();
+                            File.WriteAllText(sourcePath, File.ReadAllText(sourcePath).Replace("42", "43", StringComparison.Ordinal));
+                            File.SetLastWriteTimeUtc(sourcePath, originalTime);
+                            return Task.CompletedTask;
+                        }));
+                        Assert.True(refused is ProjectContextException or PolicyException, refused?.ToString() ?? "Drift incorrectly accepted");
+                        Assert.Equal(originalTime, File.GetLastWriteTimeUtc(sourcePath));
+                        Assert.False(originalBytes.AsSpan().SequenceEqual(File.ReadAllBytes(sourcePath)));
+                    }
+                    finally { File.WriteAllBytes(sourcePath, originalBytes); File.SetLastWriteTimeUtc(sourcePath, originalTime); }
+                    await Agree();
+                    foreach (var required in currentPlan.Tests)
+                    {
+                        var context = currentGraph.GraphContexts.Single(b => b.GraphId == required.GraphId).Context;
+                        Assert.Single(File.ReadAllLines(Path.Combine(Path.GetDirectoryName(context.EvaluatedTargetPath!)!, "test-count.txt")));
+                    }
+                }
                 if (contextOnly)
                 {
                     var imported = FreshPriorBuild.Load(bundle, currentPlan.PreparedGraph, fixture.Path, token);
