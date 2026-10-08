@@ -115,6 +115,86 @@ public sealed class SavedLocalMembershipTests
         Assert.DoesNotContain("compiler-cache/project.assets.json", normalized.Keys);
     }
 
+    [Theory]
+    [InlineData("none")]
+    [InlineData("missing")]
+    [InlineData("duplicate")]
+    [InlineData("id")]
+    [InlineData("kind")]
+    [InlineData("format")]
+    [InlineData("context")]
+    [InlineData("build")]
+    [InlineData("execution")]
+    [InlineData("coordinate")]
+    [InlineData("missing-bytes")]
+    [InlineData("length")]
+    [InlineData("hash")]
+    [InlineData("bytes")]
+    [InlineData("coherent-other-original")]
+    [InlineData("revision-kind")]
+    public async Task OriginalRecipeArtifactDeclarationIsRequiredAndBoundToOriginalRevision(string mutation)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-saved-local-declaration");
+        fixture.Write("App/App.csproj", "<Project />"); fixture.Write("Tests/Tests.csproj", "<Project />");
+        fixture.Write("policy.json", """
+            {"schemaVersion":"repository-policy-v1","mode":"strict","productionProjects":["App/App.csproj"],
+             "testProjects":["Tests/Tests.csproj"],"configuration":"Debug","targetFrameworks":["net10.0"],
+             "scope":"all","threshold":999,"missingCoverage":"fail","requiredChecks":["tests","coverage","crap"],
+             "exclusions":[],"ruleset":"callables-v1","exemptionFiles":[]}
+            """);
+        var token = TestContext.Current.CancellationToken;
+        var preflight = await FreshCheckPreflightLoader.LoadAsync(new("App/App.csproj", "policy.json", null, "all", null,
+            "worktree", "method", null, null, false, false, null, new PolicyOverrides(), TimeSpan.FromSeconds(30)), fixture.Path, token);
+        var original = preflight.LocalSnapshot!;
+        var state = FreshLocalProof.Identity(original);
+        var bytes = SavedLocalMembership.Capture(original, token);
+        var artifact = new ManifestArtifact(SavedLocalMembership.Kind, SavedLocalMembership.Kind, "membership.json",
+            bytes.Length, CanonicalIdentity.Sha256(bytes), null, null, null, "json", null);
+        var contents = new Dictionary<string, System.Collections.Immutable.ImmutableArray<byte>>(StringComparer.Ordinal)
+            { [artifact.Locator] = System.Collections.Immutable.ImmutableArray.Create(bytes) };
+        var revision = new ManifestRevision("none", "repository", "workspace", null, null, null) { StateHash = state };
+        var artifacts = new[] { artifact };
+        switch (mutation)
+        {
+            case "missing": artifacts = []; break;
+            case "duplicate": artifacts = [artifact, artifact with { Id = "duplicate" }]; break;
+            case "id": artifacts = [artifact with { Id = "other" }]; break;
+            case "kind": artifacts = [artifact with { Kind = "other" }]; break;
+            case "format": artifacts = [artifact with { Format = "xml" }]; break;
+            case "context": artifacts = [artifact with { ContextId = "context" }]; break;
+            case "build": artifacts = [artifact with { BuildId = "build" }]; break;
+            case "execution": artifacts = [artifact with { ExecutionId = "execution" }]; break;
+            case "coordinate": artifacts = [artifact with { CoordinateKind = "line" }]; break;
+            case "missing-bytes": contents.Clear(); break;
+            case "length": artifacts = [artifact with { Length = bytes.Length + 1 }]; break;
+            case "hash": artifacts = [artifact with { Sha256 = new string('b', 64) }]; break;
+            case "bytes": contents[artifact.Locator] = System.Collections.Immutable.ImmutableArray.Create(System.Text.Encoding.UTF8.GetBytes("{}")); break;
+            case "coherent-other-original":
+                var other = new Dictionary<string, string>(original, StringComparer.Ordinal) { ["other.json"] = Hash };
+                var replacement = SavedLocalMembership.Capture(other, token);
+                contents[artifact.Locator] = System.Collections.Immutable.ImmutableArray.Create(replacement);
+                artifacts = [artifact with { Length = replacement.Length, Sha256 = CanonicalIdentity.Sha256(replacement) }];
+                break;
+            case "revision-kind": revision = revision with { Kind = "git" }; break;
+        }
+        // Minimal declaration fixture intentionally does not attest compiler/test evidence.
+        // Observe is called directly ONLY to exercise its distinct artifact-boundary contract.
+        var manifest = ManifestIdentity.Seal(new RunManifest("run-manifest-v1", "canonical-sha256-v1",
+            new("Crap4CSharp", "1", "callables-v1", "context", "coverage", "path"),
+            new("complete", true, true, []), revision, [], [], [], [], artifacts,
+            new("scope", "policy", null, null), null));
+        var bundle = new ArtifactBundle(manifest, contents, Path.Combine(fixture.Path, "manifest.json"), fixture.Path, []);
+        if (mutation == "none")
+        {
+            Assert.Equal(state, SavedLocalMembership.Observe(bundle, preflight, [], token));
+            using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+            Assert.ThrowsAny<OperationCanceledException>(() => SavedLocalMembership.Observe(bundle, preflight, [], cancelled.Token));
+        }
+        else Assert.Equal("provenance.savedLocalMembershipUnproven", Assert.Throws<PolicyException>(() =>
+            SavedLocalMembership.Observe(bundle, preflight, [], token)).Code);
+        Assert.Equal(state, FreshLocalProof.Identity(original));
+    }
+
     [Fact]
     public void OriginalRecipeHonorsCancellationBeforeCaptureOrParse()
     {
