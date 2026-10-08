@@ -217,6 +217,17 @@ public sealed class FreshCheckExecutionTests
             bundleEvidence: true, newPreflight: true, completeProviderDispatch: true, publicCompleteConsumer: consumer);
 
     [Theory]
+    [InlineData("check", true, false)]
+    [InlineData("baseline", true, false)]
+    [InlineData("check", false, true)]
+    [InlineData("baseline", false, true)]
+    public Task CompletePublicConsumersRetainSemanticEmptyAndGeneratedInclusiveTwoRequiredContexts(
+        string consumer, bool empty, bool generated)
+        => RunCase(false, true, emptyEligible: empty, includeGenerated: generated,
+            policyScope: "all", standaloneTest: true, bundleEvidence: true, newPreflight: true,
+            completeProviderDispatch: true, publicCompleteConsumer: consumer);
+
+    [Theory]
     [InlineData(false, "method")]
     [InlineData(true, "file")]
     public Task CompletedSelectorsPreserveActualTwoRequiredContextCapture(bool local, string granularity)
@@ -625,6 +636,19 @@ public sealed class FreshCheckExecutionTests
                             Assert.Equal("verified", evaluation.GetProperty("provenance").GetProperty("status").GetString());
                             Assert.True(evaluation.GetProperty("decision").GetProperty("completed").GetBoolean());
                             Assert.Equal("pass", evaluation.GetProperty("decision").GetProperty("policyDecision").GetString());
+                            if (emptyEligible)
+                            {
+                                var checks = evaluation.GetProperty("checks").EnumerateArray().ToArray();
+                                Assert.Contains(checks, c => c.GetProperty("name").GetString() == "coverage" &&
+                                    c.GetProperty("status").GetString() == "notApplicable");
+                                Assert.Contains(checks, c => c.GetProperty("name").GetString() == "crap" &&
+                                    c.GetProperty("status").GetString() == "notApplicable");
+                            }
+                            if (includeGenerated)
+                                Assert.Contains(evaluation.GetProperty("callables").EnumerateArray(), c =>
+                                    c.GetProperty("semanticSignature").GetString()?.Contains("Extra", StringComparison.Ordinal) == true &&
+                                    c.GetProperty("applicability").GetString() == "applicable" &&
+                                    c.GetProperty("coverage").ValueKind != JsonValueKind.Null);
                         }
                         else
                         {
