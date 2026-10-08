@@ -216,8 +216,15 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, true, policyScope: "all", standaloneTest: true,
             bundleEvidence: true, newPreflight: true, completeProviderDispatch: true, publicCompleteConsumer: consumer);
 
+    [Theory]
+    [InlineData(false, "method")]
+    [InlineData(true, "file")]
+    public Task CompletedSelectorsPreserveActualTwoRequiredContextCapture(bool local, string granularity)
+        => RunCase(false, true, policyScope: "all", local: local, granularity: granularity, standaloneTest: true,
+            bundleEvidence: true, newPreflight: true, completeProviderDispatch: true, completedSelectors: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -332,7 +339,7 @@ public sealed class FreshCheckExecutionTests
                 timings.Add(name, clock.Elapsed.TotalMilliseconds);
                 return value;
             }
-            var request = new FreshCheckRequest(standaloneTest ? "Root.slnx" : "Tests/Tests.csproj", "policy.json", local ? null : "HEAD", local || newPreflight ? "all" : null, null, "worktree", "method",
+            var request = new FreshCheckRequest(standaloneTest ? "Root.slnx" : "Tests/Tests.csproj", "policy.json", local ? null : "HEAD", local || newPreflight ? "all" : null, null, "worktree", granularity,
                 null, "bundle", false, false, null, new PolicyOverrides(IncludeGenerated: includeGenerated ? true : null), TimeSpan.FromMinutes(3));
             var preflight = await MeasureAsync("trustedPreflight", () => FreshCheckPreflightLoader.LoadAsync(request, fixture.Path, token));
             var evidence = await MeasureAsync("executionComposite", () => FreshCheckExecution.RunAsync(preflight, token));
@@ -415,6 +422,21 @@ public sealed class FreshCheckExecutionTests
                 }
                 measuredCapture = captured;
                 var planArtifact = captured.Manifest.Artifacts.Single(a => a.Kind == CompletedTestPlanRecipe.Kind);
+                if (completedSelectors)
+                {
+                    var selectorType = typeof(App).Assembly.GetType("CompletedReuseSelectors");
+                    Assert.NotNull(selectorType);
+                    var readSelectors = selectorType.GetMethod("Read", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                    Assert.NotNull(readSelectors);
+                    var scopeArtifact = captured.Manifest.Artifacts.Single(a => a.Kind == "scope");
+                    var selectors = readSelectors.Invoke(null, [captured.Bytes[scopeArtifact.Locator].ToArray(),
+                        captured.Bytes[planArtifact.Locator].ToArray(), token]);
+                    Assert.NotNull(selectors);
+                    Assert.Equal(policyScope, selectorType.GetProperty("Scope")!.GetValue(selectors));
+                    Assert.Equal(granularity, selectorType.GetProperty("Granularity")!.GetValue(selectors));
+                    Assert.Equal(false, selectorType.GetProperty("IncludeTests")!.GetValue(selectors));
+                    Assert.Equal(includeGenerated, selectorType.GetProperty("IncludeGenerated")!.GetValue(selectors));
+                }
                 var selectedRoot = ProjectTargetSelector.Select(fixture.Path, request.Project);
                 Assert.Equal(selectedRoot, CompletedTestPlanRecipe.ResolveSelectedRoot(
                     captured.Bytes[planArtifact.Locator].ToArray(), fixture.Path, token));
