@@ -148,6 +148,12 @@ public sealed class FreshCheckExecutionTests
     public Task SavedCompleteBoundaryRechecksTwoRequiredContextsAndRejectsBetweenGateDrift(bool shared)
         => RunCase(false, true, standaloneTest: true, savedCoverage: true, sharedCoverage: shared, compositeProof: true);
 
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public Task SavedCompleteBoundaryRetainsSemanticEmptyAndGeneratedInclusiveEvidence(bool empty, bool generated)
+        => RunCase(false, true, emptyEligible: empty, includeGenerated: generated, contextOnly: true, compositeProof: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
         bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false)
     {
@@ -412,7 +418,8 @@ public sealed class FreshCheckExecutionTests
                         { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); }
                     }
                     await Agree();
-                    var sourcePath = Path.Combine(fixture.Path, "Independent", "Tests.cs");
+                    var mutationProject = standaloneTest ? "Independent" : "Tests";
+                    var sourcePath = Path.Combine(fixture.Path, mutationProject, "Tests.cs");
                     var originalBytes = File.ReadAllBytes(sourcePath); var originalTime = File.GetLastWriteTimeUtc(sourcePath);
                     var callbacks = 0;
                     try
@@ -433,6 +440,16 @@ public sealed class FreshCheckExecutionTests
                         Assert.False(originalBytes.AsSpan().SequenceEqual(File.ReadAllBytes(sourcePath)));
                     }
                     finally { File.WriteAllBytes(sourcePath, originalBytes); File.SetLastWriteTimeUtc(sourcePath, originalTime); }
+                    // Restore this owned fixture's Git stat cache as well as bytes/time. Read-only
+                    // diff-index otherwise retains an excluded Tests.cs M record after the mutation.
+                    // Refresh cannot change the ORIGINAL logical staged entries; prove that explicitly.
+                    Assert.Equal(0, (await ProcessRunner.RunAsync("git", ["update-index", "--refresh", "--", mutationProject + "/Tests.cs"],
+                        fixture.Path, TimeSpan.FromSeconds(30), token)).ExitCode);
+                    var restoredStage = await ProcessRunner.RunAsync("git", ["ls-files", "--stage", "-z", "--"],
+                        fixture.Path, TimeSpan.FromSeconds(30), token);
+                    Assert.Equal(0, restoredStage.ExitCode);
+                    Assert.Equal(preflight.GitSnapshot!.Revision.IndexIdentity,
+                        "sha256:" + CanonicalIdentity.Sha256(System.Text.Encoding.UTF8.GetBytes(restoredStage.StandardOutput)));
                     // A staged mode-only change leaves physical inputs and HEAD-to-worktree changes
                     // unchanged, but must still fail the ORIGINAL index identity comparison.
                     var indexPath = Path.Combine(fixture.Path, ".git", "index");
@@ -443,7 +460,7 @@ public sealed class FreshCheckExecutionTests
                         var refused = await Record.ExceptionAsync(() => Agree(async ct =>
                         {
                             callbacks++;
-                            Assert.Equal(0, (await ProcessRunner.RunAsync("git", ["update-index", "--chmod=+x", "Independent/Tests.cs"],
+                            Assert.Equal(0, (await ProcessRunner.RunAsync("git", ["update-index", "--chmod=+x", mutationProject + "/Tests.cs"],
                                 fixture.Path, TimeSpan.FromSeconds(30), ct)).ExitCode);
                             Assert.Equal(originalBytes, File.ReadAllBytes(sourcePath));
                         }));
