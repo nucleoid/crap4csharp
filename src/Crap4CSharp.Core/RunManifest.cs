@@ -306,6 +306,26 @@ public static class ProvenanceVerifier
             reasons.Order(StringComparer.Ordinal).Distinct(StringComparer.Ordinal).ToArray());
     }
 
+    // Representation compatibility only: capture remains nonreusable and the actual
+    // semantic/compiler/test checks below are still mandatory.
+    private static bool CompleteSemanticEmptyDeclaration(ManifestContext context)
+    {
+        var recipe = context.CurrentRevalidation;
+        if (recipe is null || recipe.Provider != "finite-sdk-completed-tests-v1" ||
+            recipe.Project != context.Project || recipe.References is null || recipe.References.Count != 0)
+            return false;
+        static bool Canonical(string? path)
+        {
+            if (string.IsNullOrEmpty(path) || Path.IsPathRooted(path) || path.Contains('\\') ||
+                path.Contains(':') || path.Split('/').Any(part => part is "" or "." or "..")) return false;
+            try { return CanonicalIdentity.NormalizeLogicalPath(path) == path; }
+            catch (ArgumentException) { return false; }
+        }
+        return Canonical(recipe.Project) && Canonical(recipe.AssemblyPath) && Canonical(recipe.PdbPath) &&
+            recipe.AssemblyPath != recipe.PdbPath && recipe.AssemblyPath != recipe.Project &&
+            recipe.PdbPath != recipe.Project;
+    }
+
     private static List<string> StructuralReasons(RunManifest manifest,
         IReadOnlyDictionary<string, ImmutableArray<byte>> artifactBytes, string? requiredRuleset,
         CancellationToken cancellationToken)
@@ -369,7 +389,7 @@ public static class ProvenanceVerifier
                 (contextCoverage.Length == 0 || context.Inputs.All(input => input.Role != "source")))
                 reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
             if (context.CoverageApplicability == "semantic-empty" &&
-                (contextCoverage.Length != 0 || context.ReuseRecipeComplete))
+                (contextCoverage.Length != 0 || context.ReuseRecipeComplete && !CompleteSemanticEmptyDeclaration(context)))
                 reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
             if (context.Inputs.Where(input => input.Role == "source").Any(input =>
                     !string.Equals(input.Encoding, "utf-8", StringComparison.OrdinalIgnoreCase)))

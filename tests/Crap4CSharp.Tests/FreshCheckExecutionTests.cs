@@ -249,6 +249,59 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, true, policyScope: "all", standaloneTest: true,
             bundleEvidence: true, newPreflight: true, completeProviderDispatch: true, publicCompleteConsumer: "baseline");
 
+    private static void ValidateCompleteEmptyCapture(FreshCapturedBundle captured)
+    {
+        var context = Assert.Single(captured.Manifest.Contexts);
+        Assert.Equal("semantic-empty", context.CoverageApplicability);
+        Assert.True(context.ReuseRecipeComplete);
+        Assert.DoesNotContain(captured.Manifest.Artifacts, a => a.Kind == "coverage");
+        var positive = ProvenanceVerifier.VerifyCapture(captured.Manifest, captured.Bytes);
+        Assert.Equal(ProvenanceStatus.Captured, positive.Status);
+        Assert.False(positive.Reusable);
+        void Reject(ManifestContext changed)
+        {
+            var manifest = ManifestIdentity.Seal(captured.Manifest with { Contexts = [changed], ManifestHash = null });
+            var result = ProvenanceVerifier.VerifyCapture(manifest, captured.Bytes);
+            Assert.Equal(ProvenanceStatus.Invalid, result.Status);
+            Assert.Contains(ProvenanceReasonCodes.ActualBindingIncomplete, result.Reasons);
+        }
+        var recipe = context.CurrentRevalidation!;
+        Reject(context with { CurrentRevalidation = null });
+        foreach (var provider in new[] { "foreign", "sdk-project-context-output-v1", "" })
+            Reject(context with { CurrentRevalidation = recipe with { Provider = provider } });
+        Reject(context with { CurrentRevalidation = recipe with { Project = "Other/Other.csproj" } });
+        Reject(context with { CurrentRevalidation = recipe with { References = [new("ref.dll", "ref.dll")] } });
+        foreach (var path in new[] { "", "../out.dll", "/out.dll", "C:/out.dll", "out\\out.dll", "out//out.dll" })
+        {
+            Reject(context with { CurrentRevalidation = recipe with { AssemblyPath = path } });
+            Reject(context with { CurrentRevalidation = recipe with { PdbPath = path } });
+        }
+        Reject(context with { CurrentRevalidation = recipe with { PdbPath = recipe.AssemblyPath } });
+        Reject(context with { CurrentRevalidation = recipe with { AssemblyPath = recipe.Project } });
+        Reject(context with { CurrentRevalidation = recipe with { PdbPath = recipe.Project } });
+        var historical = ManifestIdentity.Seal(captured.Manifest with
+        {
+            Contexts = [context with { ReuseRecipeComplete = false, CurrentRevalidation = null }], ManifestHash = null
+        });
+        var historicalResult = ProvenanceVerifier.VerifyCapture(historical, captured.Bytes);
+        Assert.Equal(ProvenanceStatus.Captured, historicalResult.Status);
+        Assert.False(historicalResult.Reusable);
+        // Reclassifying existing real assembly bytes as coverage cannot waive the absolute empty coverage ban.
+        var assembly = Assert.Single(captured.Manifest.Artifacts, a => a.Kind == "assembly");
+        var unexpectedCoverage = ManifestIdentity.Seal(captured.Manifest with
+        {
+            Artifacts = [.. captured.Manifest.Artifacts, assembly with
+            {
+                Id = "unexpected-empty-coverage", Kind = "coverage", Format = "opencover",
+                CoordinateKind = "line", ExecutionId = captured.Manifest.Executions[0].Id
+            }], ManifestHash = null
+        });
+        Assert.Contains(ProvenanceReasonCodes.ActualBindingIncomplete,
+            ProvenanceVerifier.VerifyCapture(unexpectedCoverage, captured.Bytes).Reasons);
+        // Existing genuine hidden executable compiler-source adversary remains later in RunCase:
+        // coherently resealed metadata must still refuse SemanticEligibility.ValidateEmptyCaptured.
+    }
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
         bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false)
     {
@@ -552,6 +605,7 @@ public sealed class FreshCheckExecutionTests
                     await Assert.ThrowsAsync<PolicyException>(() => CurrentEvidenceAdapter.CaptureSupportedAsync(
                         captured.Manifest, fixture.Path, request.Timeout, token));
                 }
+                if (emptyEligible && completeProviderDispatch) ValidateCompleteEmptyCapture(captured);
                 var manifest = await MeasureAsync("privatePublishWithRegate", () => FreshManifestCapture.PublishAsync(evidence, captured,
                     inWorkspaceBundle ? Path.Combine(fixture.Path, "bundle") : Path.Combine(evidence.PrivateDirectory, "safe-export"), token));
                 if (!OperatingSystem.IsWindows()) Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
