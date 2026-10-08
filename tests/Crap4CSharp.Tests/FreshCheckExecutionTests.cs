@@ -187,6 +187,11 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, true, policyScope: "all", local: true, standaloneTest: true,
             bundleEvidence: true, newPreflight: true, inWorkspaceBundle: true);
 
+    [Fact]
+    public Task BundleAwareCurrentEvidenceAcceptsOriginalGitRevisionWithExportedInWorkspaceBundle()
+        => RunCase(false, true, policyScope: "all", standaloneTest: true,
+            bundleEvidence: true, newPreflight: true, inWorkspaceBundle: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
         bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false)
     {
@@ -596,9 +601,10 @@ public sealed class FreshCheckExecutionTests
                             File.AppendAllText(bundle.ManifestPath, " ");
                             File.SetLastWriteTimeUtc(bundle.ManifestPath, manifestTime);
                             var refused = await Record.ExceptionAsync(() => Observe(token));
-                            // This mutation follows acquisition, so the retained workspace
-                            // guard rejects it before bundle-footprint projection.
-                            Assert.Equal("provenance.localWorkspaceChanged", Assert.IsType<PolicyException>(refused).Code);
+                            // Local membership observes JSON before projection; Git selection
+                            // filters it, so the exact loaded-bundle byte gate rejects instead.
+                            Assert.Equal(local ? "provenance.localWorkspaceChanged" : "provenance.savedBundleFootprintUnproven",
+                                Assert.IsType<PolicyException>(refused).Code);
                         }
                         finally { File.WriteAllBytes(bundle.ManifestPath, manifestBytes); File.SetLastWriteTimeUtc(bundle.ManifestPath, manifestTime); }
                         Assert.Equal(ProvenanceStatus.Verified,
