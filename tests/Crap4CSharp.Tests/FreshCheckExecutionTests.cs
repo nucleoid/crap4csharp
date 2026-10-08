@@ -320,8 +320,12 @@ public sealed class FreshCheckExecutionTests
     public Task FreshLateCancellationRetainsBothActualSuccessfulRequiredContextsWithoutReusableTerminal()
         => RunCase(false, false, policyScope: "all", standaloneTest: true, savedResults: true, freshTerminalCancellation: true);
 
+    [Fact]
+    public Task FreshLateDeadlineRefusalRetainsBothActualSuccessfulRequiredContextsWithoutReusableTerminal()
+        => RunCase(false, false, policyScope: "all", standaloneTest: true, savedResults: true, freshTerminalCancellation: true, freshTerminalDeadline: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -1569,6 +1573,8 @@ public sealed class FreshCheckExecutionTests
                 lateFreshCallbacks++;
                 // Both real required tests and full publication proof have returned;
                 // cancel only at the invocation-local post-serialization seam.
+                if (freshTerminalDeadline)
+                    throw new ProcessTimeoutException("Fresh check", TimeSpan.FromSeconds(600));
                 lateFreshCancellation.Cancel();
                 return Task.CompletedTask;
             } : null);
@@ -1579,8 +1585,8 @@ public sealed class FreshCheckExecutionTests
             Assert.Equal(1, lateFreshCallbacks);
             Assert.Equal(1, exit);
             var run = terminal.RootElement.GetProperty("run");
-            Assert.True(run.GetProperty("cancellation").GetProperty("cancelled").GetBoolean());
-            Assert.False(run.GetProperty("cancellation").GetProperty("timedOut").GetBoolean());
+            Assert.Equal(!freshTerminalDeadline, run.GetProperty("cancellation").GetProperty("cancelled").GetBoolean());
+            Assert.Equal(freshTerminalDeadline, run.GetProperty("cancellation").GetProperty("timedOut").GetBoolean());
             var outcomes = run.GetProperty("testOutcomes").EnumerateArray().ToArray();
             Assert.Equal(2, outcomes.Length);
             Assert.All(outcomes, outcome =>
@@ -1589,7 +1595,8 @@ public sealed class FreshCheckExecutionTests
                 Assert.Equal(0, outcome.GetProperty("exitCode").GetInt32());
             });
             var evaluation = terminal.RootElement.GetProperty("evaluation");
-            Assert.Equal("run.cancelled", evaluation.GetProperty("decision").GetProperty("reason").GetString());
+            Assert.Equal(freshTerminalDeadline ? "run.timedOut" : "run.cancelled",
+                evaluation.GetProperty("decision").GetProperty("reason").GetString());
             Assert.False(evaluation.GetProperty("decision").GetProperty("completed").GetBoolean());
             Assert.Equal("invalid", evaluation.GetProperty("provenance").GetProperty("status").GetString());
             Assert.Empty(evaluation.GetProperty("metrics").EnumerateArray());
