@@ -550,6 +550,25 @@ public sealed class FreshCheckExecutionTests
                                 ? "policy.requiredContextMissing" : "policy.testContextMismatch", Assert.IsType<PolicyException>(refused).Code);
                         }
                         observationPreflight = originalPreflight;
+                        // Final rediscovery owes the same current policy gate, even
+                        // when every saved plan/compiler/result byte still matches.
+                        foreach (var removeIndependent in new[] { false, true })
+                        {
+                            var currentRequired = originalPreflight.Policy.TestProjects.ToList();
+                            var finalPreflight = originalPreflight with { Policy = originalPreflight.Policy with { TestProjects = currentRequired } };
+                            var callbacks = 0;
+                            var refused = await Record.ExceptionAsync(() => SavedCompletedProof.ValidateAsync(bundle, finalPreflight, token, ct =>
+                            {
+                                ct.ThrowIfCancellationRequested(); callbacks++;
+                                if (removeIndependent) currentRequired.RemoveAll(p => PathIdentityPolicy.Current.Comparer.Equals(
+                                    Path.GetFullPath(p, fixture.Path), requiredIndependent.ProjectPath));
+                                else currentRequired.Add("Missing/Missing.csproj");
+                                return Task.CompletedTask;
+                            }));
+                            Assert.Equal(1, callbacks);
+                            Assert.Equal(removeIndependent ? "policy.testContextMismatch" : "policy.requiredContextMissing",
+                                Assert.IsType<PolicyException>(refused).Code);
+                        }
                         Assert.Equal(ProvenanceStatus.Verified,
                             ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, await Observe(token), true).Status);
                     }

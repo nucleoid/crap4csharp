@@ -103,7 +103,7 @@ internal static class FreshCheckExecution
         if (!result.Success) throw new ProjectContextException(result.FailureReason ?? "context.loadFailed", string.Join(" | ", result.Diagnostics));
     }
 
-    private static void RequirePolicyTargets(FreshCheckPreflight preflight, ProjectContextLoadResult graph)
+    internal static void RequirePolicyTargets(FreshCheckPreflight preflight, ProjectContextLoadResult graph)
     {
         var paths = PathIdentityPolicy.Current.Comparer;
         foreach (var project in preflight.Policy.ProductionProjects.Concat(preflight.Policy.TestProjects))

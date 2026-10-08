@@ -49,6 +49,10 @@ internal static class SavedCompletedProof
         async Task<CheckExecutionPlan> LoadPlanAsync()
         {
             var graph = await ProjectContextLoader.LoadGraphAsync(request, token);
+            // Bind independently current required policy membership on BOTH
+            // intermediate and final discovery, including nonreaching tests.
+            // Production-linked saved executions are not the required schedule.
+            FreshCheckExecution.RequirePolicyTargets(preflight, graph);
             var runners = await ProjectContextLoader.DiscoverTestRunnersAsync(request, token);
             token.ThrowIfCancellationRequested();
             return CheckExecutionPlan.Create(runners, graph, token);
