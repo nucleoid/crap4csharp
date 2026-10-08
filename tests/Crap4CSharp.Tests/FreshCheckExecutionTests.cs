@@ -158,8 +158,12 @@ public sealed class FreshCheckExecutionTests
     public Task SavedCompleteLocalBoundaryRetainsOriginalMembershipAcrossTwoRequiredContexts()
         => RunCase(false, true, policyScope: "all", local: true, standaloneTest: true, savedCoverage: true, compositeProof: true);
 
+    [Fact]
+    public Task SavedCompleteBoundaryRechecksExcludedRunnerAndPhysicalOutputsAfterIntermediateGates()
+        => RunCase(false, true, policyScope: "all", local: true, standaloneTest: true, savedCoverage: true, compositeProof: true, physicalComposite: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -503,6 +507,69 @@ public sealed class FreshCheckExecutionTests
                     finally { File.WriteAllBytes(indexPath, originalIndex); File.SetLastWriteTimeUtc(indexPath, indexTime); }
                     await Agree();
                     Assert.Equal(originalIndex, File.ReadAllBytes(indexPath));
+                    }
+                    if (physicalComposite)
+                    {
+                        Assert.Equal(2, currentPlan.Tests.Count);
+                        var excluded = currentGraph.GraphContexts.Single(b => Path.GetFileName(b.Context.ResolvedProjectPath) == "Independent.csproj");
+                        var production = currentGraph.GraphContexts.Single(b => !b.IsTestProject);
+                        var productionObservation = evidence.Compiler.Observations.Single(o => o.ProjectPath == production.Context.ResolvedProjectPath);
+                        var runnerPath = excluded.Context.ResolvedProjectPath!;
+                        var runnerBytes = File.ReadAllBytes(runnerPath);
+                        var runnerTime = File.GetLastWriteTimeUtc(runnerPath);
+                        var beforeRunner = callbacks;
+                        try
+                        {
+                            var refused = await Record.ExceptionAsync(() => Agree(ct =>
+                            {
+                                ct.ThrowIfCancellationRequested(); callbacks++;
+                                File.WriteAllText(runnerPath, File.ReadAllText(runnerPath).Replace("</PropertyGroup>",
+                                    "<TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport></PropertyGroup>", StringComparison.Ordinal));
+                                File.SetLastWriteTimeUtc(runnerPath, runnerTime);
+                                return Task.CompletedTask;
+                            }));
+                            Assert.Equal(beforeRunner + 1, callbacks);
+                            // Runner discovery independently refuses the modified required graph.
+                            Assert.Equal("test.planInvalid", Assert.IsType<ProjectContextException>(refused).Reason);
+                            Assert.Equal(runnerTime, File.GetLastWriteTimeUtc(runnerPath));
+                        }
+                        finally { File.WriteAllBytes(runnerPath, runnerBytes); File.SetLastWriteTimeUtc(runnerPath, runnerTime); }
+                        await Agree();
+                        var physicalOutputs = new[]
+                        {
+                            (Path: excluded.Context.EvaluatedTargetPath!, Reason: "compiler.outputsUnproven"),
+                            (Path: Path.ChangeExtension(excluded.Context.EvaluatedTargetPath!, ".pdb"), Reason: "compiler.outputsUnproven"),
+                            (Path: productionObservation.ReferenceAssembly!.Path, Reason: "compiler.referenceOutputUnproven"),
+                            (Path: production.Context.EvaluatedReferenceAssemblyPath!, Reason: "compiler.referenceOutputUnproven")
+                        };
+                        Assert.Equal(4, physicalOutputs.Select(o => o.Path).Distinct(PathIdentityPolicy.Current.Comparer).Count());
+                        foreach (var physicalOutput in physicalOutputs)
+                        {
+                            var path = physicalOutput.Path;
+                            Assert.StartsWith(fixture.Path + Path.DirectorySeparatorChar, path, StringComparison.Ordinal);
+                            var bytesBefore = File.ReadAllBytes(path); var timeBefore = File.GetLastWriteTimeUtc(path);
+                            Assert.NotEmpty(bytesBefore);
+                            var beforeMutation = callbacks;
+                            try
+                            {
+                                var refused = await Record.ExceptionAsync(() => Agree(ct =>
+                                {
+                                    ct.ThrowIfCancellationRequested(); callbacks++;
+                                    var changed = bytesBefore.ToArray(); changed[^1] ^= 1;
+                                    File.WriteAllBytes(path, changed); File.SetLastWriteTimeUtc(path, timeBefore);
+                                    return Task.CompletedTask;
+                                }));
+                                Assert.Equal(beforeMutation + 1, callbacks);
+                                Assert.Equal(physicalOutput.Reason, Assert.IsType<ProjectContextException>(refused).Reason);
+                                Assert.Equal(bytesBefore.Length, new FileInfo(path).Length);
+                                Assert.Equal(timeBefore, File.GetLastWriteTimeUtc(path));
+                                Assert.False(bytesBefore.AsSpan().SequenceEqual(File.ReadAllBytes(path)));
+                            }
+                            finally { File.WriteAllBytes(path, bytesBefore); File.SetLastWriteTimeUtc(path, timeBefore); }
+                            await Agree();
+                            Assert.Equal(bytesBefore, File.ReadAllBytes(path));
+                        }
+                        Assert.Equal(beforeRunner + 5, callbacks);
                     }
                     foreach (var required in currentPlan.Tests)
                     {
