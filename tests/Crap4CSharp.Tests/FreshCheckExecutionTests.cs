@@ -106,6 +106,11 @@ public sealed class FreshCheckExecutionTests
             promotionMeasure: true, promotionDrift: true);
 
     [Fact]
+    public Task FreshCompletePublicationRejectsAfterIntermediateTimestampDriftAndRestoresOriginalOnceExecution()
+        => RunCase(false, true, policyScope: "all", local: true, measure: true, standaloneTest: true,
+            promotionMeasure: true, promotionDrift: true, promotionIntermediateDrift: true);
+
+    [Fact]
     public Task PublicStrictMetricViolationRetainsSuccessfulOnceTestsAndCompleteReusableReplay()
         => RunCase(false, false, policyScope: "all", local: true, thresholdViolation: true);
 
@@ -334,7 +339,7 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, false, policyScope: "all", standaloneTest: true, savedResults: true, freshTerminalCancellation: true, freshTerminalDeadline: true);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -1600,20 +1605,41 @@ public sealed class FreshCheckExecutionTests
                             ("physical-bundle-manifest", finalBundle.ManifestPath,
                                 bytes => [.. bytes, (byte)' '])
                         };
+                        async Task<Exception?> RefuseMutationAsync(Action mutate)
+                        {
+                            if (!promotionIntermediateDrift)
+                            {
+                                mutate();
+                                return await Record.ExceptionAsync(() => FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token));
+                            }
+                            var reachedIntermediate = false;
+                            var refusal = await Record.ExceptionAsync(() => FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token,
+                                _ =>
+                                {
+                                    Assert.False(reachedIntermediate);
+                                    reachedIntermediate = true;
+                                    mutate();
+                                    return Task.CompletedTask;
+                                }));
+                            Assert.True(reachedIntermediate, "Mutation must follow successful intermediate complete proof.");
+                            return refusal;
+                        }
                         foreach (var mutation in mutations)
                         {
                             var originalBytes = File.ReadAllBytes(mutation.Path);
                             var originalTime = File.GetLastWriteTimeUtc(mutation.Path);
                             try
                             {
-                                File.WriteAllBytes(mutation.Path, mutation.Change(originalBytes));
-                                File.SetLastWriteTimeUtc(mutation.Path, originalTime);
-                                Assert.Equal(originalTime, File.GetLastWriteTimeUtc(mutation.Path));
-                                Assert.NotEqual(originalBytes, File.ReadAllBytes(mutation.Path));
-                                var refused = await Record.ExceptionAsync(() => FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token));
+                                var refused = await RefuseMutationAsync(() =>
+                                {
+                                    File.WriteAllBytes(mutation.Path, mutation.Change(originalBytes));
+                                    File.SetLastWriteTimeUtc(mutation.Path, originalTime);
+                                    Assert.Equal(originalTime, File.GetLastWriteTimeUtc(mutation.Path));
+                                    Assert.NotEqual(originalBytes, File.ReadAllBytes(mutation.Path));
+                                });
                                 Assert.True(refused is PolicyException or ProjectContextException or InvalidDataException,
                                     mutation.Role + ": " + refused);
-                                Console.WriteLine("FRESH_PROMOTION_DRIFT_REFUSED " + mutation.Role + " " + refused!.GetType().Name);
+                                Console.WriteLine((promotionIntermediateDrift ? "FRESH_INTERMEDIATE_DRIFT_REFUSED " : "FRESH_PROMOTION_DRIFT_REFUSED ") + mutation.Role + " " + refused!.GetType().Name);
                             }
                             finally
                             {
@@ -1625,14 +1651,14 @@ public sealed class FreshCheckExecutionTests
                         Assert.False(File.Exists(added));
                         try
                         {
-                            File.WriteAllText(added, "<root />");
-                            var refused = await Assert.ThrowsAsync<PolicyException>(() =>
-                                FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token));
-                            // The fresh public boundary wraps an unverified original
-                            // workspace identity as a promotion refusal, not the
-                            // saved-only validator's inner workspace exception.
-                            Assert.Equal("check.completedPromotionUnproven", refused.Code);
-                            Console.WriteLine("FRESH_PROMOTION_DRIFT_REFUSED original-local-membership " + refused.Code);
+                            var refusal = await RefuseMutationAsync(() => File.WriteAllText(added, "<root />"));
+                            var refused = Assert.IsType<PolicyException>(refusal);
+                            // Before acquisition the fresh boundary wraps an
+                            // unverified original identity. After intermediate
+                            // proof the final saved validator rejects live drift.
+                            Assert.Equal(promotionIntermediateDrift ? "provenance.localWorkspaceChanged" :
+                                "check.completedPromotionUnproven", refused.Code);
+                            Console.WriteLine((promotionIntermediateDrift ? "FRESH_INTERMEDIATE_DRIFT_REFUSED " : "FRESH_PROMOTION_DRIFT_REFUSED ") + "original-local-membership " + refused.Code);
                         }
                         finally { File.Delete(added); }
                         var restored = await FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token);
