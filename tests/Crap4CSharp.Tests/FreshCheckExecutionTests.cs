@@ -192,8 +192,13 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, true, policyScope: "all", standaloneTest: true,
             bundleEvidence: true, newPreflight: true, inWorkspaceBundle: true);
 
+    [Fact]
+    public Task SavedCompletedTrustedPolicyBindsIndependentlyLoadedPolicyAndRejectsResealedBundleSubstitution()
+        => RunCase(false, true, policyScope: "all", local: true, standaloneTest: true,
+            bundleEvidence: true, newPreflight: true, trustedPolicyBinding: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -367,6 +372,28 @@ public sealed class FreshCheckExecutionTests
                 Assert.Equal(0, evidence.Tests[0].Process.ExitCode); Assert.Null(evidence.Tests.Failure);
                 Assert.NotNull(evidence.Coverage); Assert.Equal(standaloneTest ? 2 : 1, evidence.SafeChildren.Count);
                 var captured = await MeasureAsync("captureWithRegates", () => FreshManifestCapture.CaptureAsync(evidence, token));
+                if (contextAgreement || trustedPolicyBinding)
+                {
+                    var trustedValidator = typeof(App).Assembly.GetType("CompletedTrustedPolicy")?.GetMethod("Validate",
+                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                    Assert.NotNull(trustedValidator);
+                    void ValidateTrusted(byte[] independentPolicy, IReadOnlyDictionary<string, byte[]> independentExemptions)
+                    {
+                        try { trustedValidator.Invoke(null, [captured.Manifest.Artifacts, captured.Bytes,
+                            independentPolicy, independentExemptions, token]); }
+                        catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
+                        { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); }
+                    }
+                    ValidateTrusted(preflight.Trusted.Policy.CanonicalBytes, preflight.Trusted.ExemptionBytes);
+                    Assert.Equal("provenance.trustedPolicyMismatch", Assert.Throws<PolicyException>(() =>
+                        ValidateTrusted("{}"u8.ToArray(), preflight.Trusted.ExemptionBytes)).Code);
+                    var unexpectedExemptions = preflight.Trusted.ExemptionBytes.ToDictionary(item => item.Key,
+                        item => item.Value, StringComparer.Ordinal);
+                    unexpectedExemptions.Add("unexpected/exemptions.json", "{}"u8.ToArray());
+                    Assert.Equal("provenance.trustedPolicyMismatch", Assert.Throws<PolicyException>(() =>
+                        ValidateTrusted(preflight.Trusted.Policy.CanonicalBytes, unexpectedExemptions)).Code);
+                    ValidateTrusted(preflight.Trusted.Policy.CanonicalBytes, preflight.Trusted.ExemptionBytes);
+                }
                 measuredCapture = captured;
                 var planArtifact = captured.Manifest.Artifacts.Single(a => a.Kind == CompletedTestPlanRecipe.Kind);
                 var selectedRoot = ProjectTargetSelector.Select(fixture.Path, request.Project);
@@ -461,6 +488,32 @@ public sealed class FreshCheckExecutionTests
                         { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw; }
                     }
                     var observed = await Observe(token);
+                    if (trustedPolicyBinding)
+                    {
+                        var originalBundle = bundle;
+                        var originalPolicy = bundle.Manifest.Artifacts.Single(a => a.Kind == "trusted-policy");
+                        var changedBytes = "{}"u8.ToArray();
+                        var substitutedBytes = bundle.Bytes.ToDictionary(item => item.Key, item => item.Value,
+                            StringComparer.Ordinal);
+                        substitutedBytes[originalPolicy.Locator] = System.Collections.Immutable.ImmutableArray.Create(changedBytes);
+                        bundle = bundle with
+                        {
+                            Manifest = ManifestIdentity.Seal(bundle.Manifest with
+                            {
+                                Artifacts = bundle.Manifest.Artifacts.Select(a => a.Id == originalPolicy.Id
+                                    ? a with { Length = changedBytes.Length, Sha256 = CanonicalIdentity.Sha256(changedBytes) }
+                                    : a).ToArray(), ManifestHash = null
+                            }),
+                            Bytes = substitutedBytes
+                        };
+                        try
+                        {
+                            Assert.Equal("provenance.trustedPolicyMismatch", (await Assert.ThrowsAsync<PolicyException>(
+                                () => Observe(token))).Code);
+                        }
+                        finally { bundle = originalBundle; }
+                        observed = await Observe(token);
+                    }
                     Assert.True(observed.MembershipRecipeRevalidated);
                     Assert.Equal(bundle.Manifest.Contexts.Count, observed.ContextHashes.Count);
                     Assert.Contains(observed.Inputs, input => input.Role == "reference");

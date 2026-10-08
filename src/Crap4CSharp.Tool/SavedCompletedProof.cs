@@ -9,6 +9,8 @@ internal static class SavedCompletedProof
         Func<CancellationToken, Task>? beforeFinalValidation = null)
     {
         token.ThrowIfCancellationRequested();
+        CompletedTrustedPolicy.Validate(bundle.Manifest.Artifacts, bundle.Bytes,
+            preflight.Trusted.Policy.CanonicalBytes, preflight.Trusted.ExemptionBytes, token);
         var root = preflight.Root;
         var recipe = bundle.Manifest.Artifacts.Single(a => a.Kind == CompletedTestPlanRecipe.Kind);
         if (recipe.ContextId is not null || recipe.BuildId is not null || recipe.ExecutionId is not null ||
