@@ -97,6 +97,10 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, true, policyScope: "all", local: true, measure: true);
 
     [Fact]
+    public Task TwoRequiredContextsMeasureCompletePromotionAndBothFinalIndependentProofsWithoutRepeatingExecution()
+        => RunCase(false, true, policyScope: "all", local: true, measure: true, standaloneTest: true, promotionMeasure: true);
+
+    [Fact]
     public Task PublicStrictMetricViolationRetainsSuccessfulOnceTestsAndCompleteReusableReplay()
         => RunCase(false, false, policyScope: "all", local: true, thresholdViolation: true);
 
@@ -325,7 +329,7 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, false, policyScope: "all", standaloneTest: true, savedResults: true, freshTerminalCancellation: true, freshTerminalDeadline: true);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -400,7 +404,7 @@ public sealed class FreshCheckExecutionTests
             fixture.Write("Independent/Independent.csproj", File.ReadAllText(Path.Combine(fixture.Path, "Tests/Tests.csproj"))
                 .Replace("<ProjectReference Include=\"../Library/Library.csproj\" />", sharedCoverage ? "<ProjectReference Include=\"../Library/Library.csproj\" />" : "", StringComparison.Ordinal));
             fixture.Write("Independent/Tests.cs", "using Xunit; public class IndependentTests { [Fact] public void Test() { " +
-                (savedResults || savedCoverage || bundleEvidence ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") + (sharedCoverage ? "Assert.Equal(42, Library.Value); } }" : "Assert.Equal(42, 42); } }"));
+                (savedResults || savedCoverage || bundleEvidence || promotionMeasure ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") + (sharedCoverage ? "Assert.Equal(42, Library.Value); } }" : "Assert.Equal(42, 42); } }"));
             fixture.Write("Root.slnx", "<Solution><Configurations><Platform Name=\"AnyCPU\" /></Configurations><Project Path=\"Tests/Tests.csproj\" /><Project Path=\"Independent/Independent.csproj\" /></Solution>");
             var policyPath = Path.Combine(fixture.Path, "policy.json");
             File.WriteAllText(policyPath, File.ReadAllText(policyPath).Replace("\"testProjects\":[\"Tests/Tests.csproj\"]",
@@ -1539,14 +1543,39 @@ public sealed class FreshCheckExecutionTests
             }
             if (measure)
             {
+                // Diagnostic timings retain every actual gate. This is not an
+                // elapsed product deadline acceptance or permission to extend it.
+                if (promotionMeasure)
+                    measuredCapture = await MeasureAsync("promotionWithIndependentCurrentProof", () =>
+                        FreshCompletedCapture.PromoteAsync(evidence, measuredCapture!, token));
                 await MeasureAsync("finalRegate", async () => { await FreshManifestCapture.RegateAsync(evidence, token); return true; });
                 var published = await MeasureAsync("requestedPublishWithRegate", () => FreshManifestCapture.PublishAsync(evidence,
                     measuredCapture!, "bundle", token));
                 Assert.True(File.Exists(published));
                 Assert.Equal(0, AnalyzeCommand.Replay(ArtifactBundle.Load(published, fixture.Path), fixture.Path,
                     DateTimeOffset.UtcNow, TimeSpan.Zero, token, allSources: true).Run.ExitCode);
-                Assert.Equal(new[] { "trustedPreflight", "executionComposite", "captureWithRegates", "privatePublishWithRegate",
-                    "bundleLoad", "capturedReplay", "purePolicy", "finalRegate", "requestedPublishWithRegate" }, timings.Keys);
+                if (promotionMeasure)
+                {
+                    var finalBundle = ArtifactBundle.Load(published, fixture.Path);
+                    var finalProof = await MeasureAsync("finalIndependentCurrentProof", () =>
+                        FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token));
+                    var outerProof = await MeasureAsync("outerIndependentCurrentProof", () =>
+                        FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token));
+                    Assert.True(finalProof.Reusable); Assert.True(outerProof.Reusable);
+                    Assert.Equal(2, evidence.Tests.Count);
+                    Assert.All(evidence.Tests.Outcomes, outcome =>
+                    { Assert.Equal("completed", outcome.State); Assert.Equal(0, outcome.Process!.ExitCode); });
+                    Assert.Equal("once", File.ReadAllText(Path.Combine(fixture.Path, "Independent/build-count.txt")).Trim());
+                    var independent = evidence.Compiler.FinalGraph.GraphContexts.Single(b =>
+                        Path.GetFileName(b.ProjectPath) == "Independent.csproj");
+                    Assert.Single(File.ReadAllLines(Path.Combine(Path.GetDirectoryName(independent.Context.EvaluatedTargetPath!)!, "test-count.txt")));
+                }
+                var expectedTimings = new List<string> { "trustedPreflight", "executionComposite", "captureWithRegates", "privatePublishWithRegate",
+                    "bundleLoad", "capturedReplay", "purePolicy" };
+                if (promotionMeasure) expectedTimings.Add("promotionWithIndependentCurrentProof");
+                expectedTimings.AddRange(["finalRegate", "requestedPublishWithRegate"]);
+                if (promotionMeasure) expectedTimings.AddRange(["finalIndependentCurrentProof", "outerIndependentCurrentProof"]);
+                Assert.Equal(expectedTimings, timings.Keys);
                 Assert.All(timings.Values, milliseconds => Assert.True(double.IsFinite(milliseconds) && milliseconds >= 0));
                 Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "bin", "Debug", "net10.0", "test-count.txt")));
                 Console.WriteLine("FRESH_COMPOSITE_TIMINGS " + JsonSerializer.Serialize(timings));
