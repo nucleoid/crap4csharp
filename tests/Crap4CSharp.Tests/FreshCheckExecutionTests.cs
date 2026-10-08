@@ -1653,11 +1653,10 @@ public sealed class FreshCheckExecutionTests
                         {
                             var refusal = await RefuseMutationAsync(() => File.WriteAllText(added, "<root />"));
                             var refused = Assert.IsType<PolicyException>(refusal);
-                            // Before acquisition the fresh boundary wraps an
-                            // unverified original identity. After intermediate
-                            // proof the final saved validator rejects live drift.
-                            Assert.Equal(promotionIntermediateDrift ? "provenance.localWorkspaceChanged" :
-                                "check.completedPromotionUnproven", refused.Code);
+                            // Both retained boundaries reject original local
+                            // membership drift before projecting verified current
+                            // evidence; no outer promotion wrapper is required.
+                            Assert.Equal("provenance.localWorkspaceChanged", refused.Code);
                             Console.WriteLine((promotionIntermediateDrift ? "FRESH_INTERMEDIATE_DRIFT_REFUSED " : "FRESH_PROMOTION_DRIFT_REFUSED ") + "original-local-membership " + refused.Code);
                         }
                         finally { File.Delete(added); }

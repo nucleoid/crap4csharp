@@ -182,9 +182,17 @@ internal static class CurrentEvidenceAdapter
     // A private observation does not advertise a reusable recipe. The complete
     // validator independently recomputes every declaration before projection.
     internal static async Task<CurrentEvidence> CaptureCompletedAsync(ArtifactBundle bundle,
-        FreshCheckPreflight preflight, CancellationToken token)
+        FreshCheckPreflight preflight, CancellationToken token,
+        Func<CancellationToken, Task>? beforeFinalValidation = null)
     {
-        var compiler = await SavedCompletedProof.ValidateAsync(bundle, preflight, token);
+        var compiler = await SavedCompletedProof.ValidateAsync(bundle, preflight, token, beforeFinalValidation);
+        return ProjectCompleted(bundle, preflight, compiler, token);
+    }
+
+    // Projection only: caller must first independently validate the complete proof.
+    internal static CurrentEvidence ProjectCompleted(ArtifactBundle bundle, FreshCheckPreflight preflight,
+        CompilerGraphPhaseResult compiler, CancellationToken token)
+    {
         var paths = new HashSet<string>(PathIdentityPolicy.Current.Comparer);
         foreach (var binding in compiler.FinalGraph.GraphContexts)
         {

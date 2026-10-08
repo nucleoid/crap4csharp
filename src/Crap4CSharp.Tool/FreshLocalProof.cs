@@ -80,12 +80,17 @@ internal static class FreshLocalProof
     }
 
     internal static void Validate(FreshCheckPreflight preflight, CancellationToken token,
-        IReadOnlyList<string>? provenOutputDirectories = null)
+        IReadOnlyList<string>? provenOutputDirectories = null, IReadOnlySet<string>? provenBundleFiles = null)
     {
         if (preflight.Trusted.Trust != "local-unreviewed" || preflight.Policy.Scope != "all" ||
             preflight.Request.BaseRef is not null || preflight.Scope is not null || preflight.LocalSnapshot is null)
             throw new PolicyException("provenance.localSnapshotUnsupported", "Local fresh binding requires explicit all-scope local policy and no Git selection.");
-        var authored = NormalizeCurrent(preflight, preflight.LocalSnapshot, Capture(preflight.Root, token),
+        // Omit only NEW exact loaded bundle files after independent footprint proof.
+        // Original entries remain immutable, including entries inside outputs/bundles.
+        var live = Capture(preflight.Root, token).Where(entry => preflight.LocalSnapshot.ContainsKey(entry.Key) ||
+            !(provenBundleFiles?.Contains(Path.GetFullPath(entry.Key, preflight.Root)) ?? false))
+            .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+        var authored = NormalizeCurrent(preflight, preflight.LocalSnapshot, live,
             provenOutputDirectories, token);
         if (Identity(preflight.LocalSnapshot) != Identity(authored))
             throw new PolicyException("provenance.localWorkspaceChanged", "Local authored workspace membership or content changed after preflight.");

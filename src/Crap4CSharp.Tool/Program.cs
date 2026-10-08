@@ -219,6 +219,7 @@ internal static class App
         FreshFailureOutputProof? failureOutputProof = null;
         string? privateDiagnostics = null;
         Func<Task>? terminalProof = null;
+        Func<Exception, ResultDocument>? freshTerminalFailure = null;
         try
         {
             options = ParseModern(args, out options);
@@ -233,7 +234,8 @@ internal static class App
                         Configuration: options.Configuration, ExemptionFile: options.Exemptions,
                         IncludeTests: options.IncludeTests, IncludeGenerated: options.IncludeGenerated), options.Timeout);
                 freshResult = await FreshCheckCommand.RunAsync(request, workingDirectory, startedAt, cancellationToken,
-                    proof => failureOutputProof = proof, directory => privateDiagnostics = directory);
+                    proof => failureOutputProof = proof, directory => privateDiagnostics = directory,
+                    proof => terminalProof = proof, refusal => freshTerminalFailure = refusal);
             }
             // Fresh execution has already materialized the graceful cancellation
             // terminal, including actual completed/interrupted/not-run contexts.
@@ -323,6 +325,7 @@ internal static class App
                 _ => ComplexityRules.CallablesV1
             };
             var result = AttachPrivateDiagnostics(
+                freshTerminalFailure?.Invoke(exception) ??
                 BuildCallableFailure(args[0], ruleset, reason, startedAt, stopwatch.Elapsed), privateDiagnostics);
             var format = options?.Format ?? (HasJsonIntent(args) ? "json" : "human");
             var destination = options?.Output ?? PreDetectValue(args, "--output");

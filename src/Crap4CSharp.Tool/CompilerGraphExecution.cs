@@ -380,6 +380,12 @@ internal sealed class CompilerRetainedProof
         token.ThrowIfCancellationRequested();
         var current = await reload(request, token);
         token.ThrowIfCancellationRequested();
+        ValidateAgainstCurrentGraph(current, token);
+    }
+
+    internal void ValidateAgainstCurrentGraph(ProjectContextLoadResult current, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
         CompilerGraphExecution.ValidateFinalGraph(graph, current);
         Validate(current, token);
     }

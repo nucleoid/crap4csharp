@@ -4,6 +4,15 @@ using Crap4CSharp.Core;
 // inferred from exit zero, filenames, prior completed contexts or a failing TRX.
 internal static class FreshFailureResult
 {
+    internal static ResultDocument Refuse(FreshExecutionEvidence evidence, Exception error,
+        DateTimeOffset started, TimeSpan duration, bool deadlineExpired = false)
+    {
+        // Preserve raw child results and ordering; invalidate only their aggregate
+        // acceptance after capture, promotion or terminal-publication refusal.
+        var refused = new TestExecutionRun(evidence.Tests.ToArray(), evidence.Tests.Outcomes, error);
+        return Create(evidence with { Tests = refused, Coverage = null }, started, duration, deadlineExpired);
+    }
+
     internal static ResultDocument Create(FreshExecutionEvidence evidence, DateTimeOffset started, TimeSpan duration, bool deadlineExpired = false)
     {
         var tests = evidence.Tests;
