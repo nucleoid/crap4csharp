@@ -166,8 +166,14 @@ public sealed class FreshCheckExecutionTests
     public Task BundleAwareCurrentEvidenceRetainsAllRequiredInputsAndOutputsWithoutNewLaunches()
         => RunCase(false, true, policyScope: "all", local: true, standaloneTest: true, bundleEvidence: true);
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task BundleAwareCurrentEvidenceAcceptsIndependentlyAcquiredCurrentPreflight(bool local)
+        => RunCase(false, true, policyScope: "all", local: local, standaloneTest: true, bundleEvidence: true, newPreflight: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -282,7 +288,7 @@ public sealed class FreshCheckExecutionTests
                 timings.Add(name, clock.Elapsed.TotalMilliseconds);
                 return value;
             }
-            var request = new FreshCheckRequest(standaloneTest ? "Root.slnx" : "Tests/Tests.csproj", "policy.json", local ? null : "HEAD", local ? "all" : null, null, "worktree", "method",
+            var request = new FreshCheckRequest(standaloneTest ? "Root.slnx" : "Tests/Tests.csproj", "policy.json", local ? null : "HEAD", local || newPreflight ? "all" : null, null, "worktree", "method",
                 null, "bundle", false, false, null, new PolicyOverrides(IncludeGenerated: includeGenerated ? true : null), TimeSpan.FromMinutes(3));
             var preflight = await MeasureAsync("trustedPreflight", () => FreshCheckPreflightLoader.LoadAsync(request, fixture.Path, token));
             var evidence = await MeasureAsync("executionComposite", () => FreshCheckExecution.RunAsync(preflight, token));
@@ -420,12 +426,17 @@ public sealed class FreshCheckExecutionTests
                 Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(bundle.Manifest, bundle.Bytes).Status);
                 if (bundleEvidence)
                 {
+                    // A new public invocation cannot retain the original pre-build snapshot.
+                    // Acquire independently from actual current disk; never copy captured revision.
+                    var observationPreflight = newPreflight
+                        ? await FreshCheckPreflightLoader.LoadAsync(request, fixture.Path, token)
+                        : preflight;
                     var adapter = typeof(App).Assembly.GetType("CurrentEvidenceAdapter")?.GetMethod("CaptureCompletedAsync",
                         System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
                     Assert.NotNull(adapter);
                     async Task<CurrentEvidence> Observe(CancellationToken ct)
                     {
-                        try { return await (Task<CurrentEvidence>)adapter.Invoke(null, [bundle, preflight, ct])!; }
+                        try { return await (Task<CurrentEvidence>)adapter.Invoke(null, [bundle, observationPreflight, ct])!; }
                         catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
                         { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw; }
                     }
