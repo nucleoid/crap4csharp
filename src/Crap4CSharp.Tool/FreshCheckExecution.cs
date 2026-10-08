@@ -22,7 +22,8 @@ internal static class FreshCheckExecution
         deadline.CancelAfter(preflight.Request.Timeout);
         var token = deadline.Token;
         var selected = ProjectTargetSelector.Select(preflight.Root, preflight.Request.Project);
-        var request = new ProjectContextLoadRequest(selected, preflight.Policy.Configuration, "AnyCPU",
+        var platform = await FreshProjectPlatform.ResolveAsync(selected, preflight.Policy.Configuration, token);
+        var request = new ProjectContextLoadRequest(selected, preflight.Policy.Configuration, platform,
             preflight.Policy.TargetFrameworks.ToArray(), preflight.Request.Overrides.IncludeTests ?? false,
             preflight.Request.Overrides.IncludeGenerated ?? false, preflight.Request.Timeout);
         var metadata = await ProjectContextLoader.DiscoverAsync(request, token);

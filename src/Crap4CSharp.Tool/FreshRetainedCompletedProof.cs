@@ -30,7 +30,8 @@ internal static class FreshRetainedCompletedProof
             !PathIdentityPolicy.Current.Comparer.Equals(selected,
                 CompletedTestPlanRecipe.ResolveSelectedRoot(bytes.ToArray(), root, token))) throw Refuse();
         var originalRecipe = CompletedTestPlanRecipe.Capture(execution.Plan, root, selected, token);
-        var request = new ProjectContextLoadRequest(selected, preflight.Policy.Configuration, "AnyCPU",
+        var platform = await FreshProjectPlatform.ResolveAsync(selected, preflight.Policy.Configuration, token);
+        var request = new ProjectContextLoadRequest(selected, preflight.Policy.Configuration, platform,
             preflight.Policy.TargetFrameworks.ToArray(), preflight.Request.Overrides.IncludeTests ?? false,
             preflight.Request.Overrides.IncludeGenerated ?? false, preflight.Request.Timeout);
         var intermediate = await LoadPlanAsync();

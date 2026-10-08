@@ -22,7 +22,8 @@ internal static class SavedCompletedProof
         if (!PathIdentityPolicy.Current.Comparer.Equals(selected,
             CompletedTestPlanRecipe.ResolveSelectedRoot(bytes.ToArray(), root, token)))
             throw new PolicyException("provenance.savedCompletedProofUnproven", "Saved selected root differs from the original current selection.");
-        var request = new ProjectContextLoadRequest(selected, preflight.Policy.Configuration, "AnyCPU",
+        var platform = await FreshProjectPlatform.ResolveAsync(selected, preflight.Policy.Configuration, token);
+        var request = new ProjectContextLoadRequest(selected, preflight.Policy.Configuration, platform,
             preflight.Policy.TargetFrameworks.ToArray(), preflight.Request.Overrides.IncludeTests ?? false,
             preflight.Request.Overrides.IncludeGenerated ?? false, preflight.Request.Timeout);
         var plan = await LoadPlanAsync();

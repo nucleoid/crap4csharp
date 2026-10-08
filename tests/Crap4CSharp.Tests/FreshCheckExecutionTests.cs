@@ -135,6 +135,13 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, false, policyScope: "all", local: local, completedReuse: true,
             standaloneTest: true, savedResults: true, defaultSolution: true);
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task ExplicitAnyCpuSolutionSpellingRetainsTwoRequiredContextsAndAllCompletedPublicConsumers(bool local)
+        => RunCase(false, false, policyScope: "all", local: local, completedReuse: true,
+            standaloneTest: true, savedResults: true);
+
     [Fact]
     public Task CaptureRetainsRequiredTestWithoutReachableScoredProduction()
         => RunCase(false, true, standaloneTest: true);
