@@ -223,8 +223,18 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, true, policyScope: "all", local: local, granularity: granularity, standaloneTest: true,
             bundleEvidence: true, newPreflight: true, completeProviderDispatch: true, completedSelectors: true);
 
+    [Theory]
+    [InlineData(false, false, "method")]
+    [InlineData(false, true, "file")]
+    [InlineData(true, true, "file")]
+    public Task CompletedCurrentPreflightReconstructsRootPolicySelectorsAndOriginalIdentityWithoutNewLaunches(
+        bool local, bool baselineLocal, string granularity)
+        => RunCase(false, true, policyScope: "all", local: local, granularity: granularity, standaloneTest: true,
+            bundleEvidence: true, newPreflight: true, completeProviderDispatch: true, completedSelectors: true,
+            reconstructedPreflight: true, baselineLocal: baselineLocal);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -536,9 +546,37 @@ public sealed class FreshCheckExecutionTests
                 {
                     // A new public invocation cannot retain the original pre-build snapshot.
                     // Acquire independently from actual current disk; never copy captured revision.
-                    var observationPreflight = newPreflight
-                        ? await FreshCheckPreflightLoader.LoadAsync(inWorkspaceBundle ? request with { ArtifactOutput = null } : request, fixture.Path, token)
-                        : preflight;
+                    async Task<FreshCheckPreflight> AcquireCurrentPreflight()
+                    {
+                        if (!reconstructedPreflight)
+                            return await FreshCheckPreflightLoader.LoadAsync(inWorkspaceBundle ? request with { ArtifactOutput = null } : request,
+                                fixture.Path, token);
+                        var loader = typeof(App).Assembly.GetType("CompletedReusePreflight")?.GetMethod("LoadAsync",
+                            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                        Assert.NotNull(loader);
+                        FreshCheckPreflight current;
+                        try { current = await (Task<FreshCheckPreflight>)loader.Invoke(null,
+                            [bundle, fixture.Path, "policy.json", baselineLocal ? null : "HEAD", baselineLocal, null, request.Timeout, token])!; }
+                        catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
+                        { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw; }
+                        Assert.Equal(fixture.Path, current.Root);
+                        Assert.Equal(selectedRoot, current.Request.Project);
+                        Assert.Equal(granularity, current.Request.Granularity);
+                        Assert.True(current.Request.NoRestore); Assert.False(current.Request.NoBuild);
+                        Assert.Null(current.Request.ArtifactOutput); Assert.Null(current.Request.BuildArtifacts);
+                        Assert.Equal(baselineLocal ? "local-unreviewed" : preflight.Trusted.Trust, current.Trusted.Trust);
+                        Assert.Equal(baselineLocal ? "none" : preflight.Trusted.Revision, current.Trusted.Revision);
+                        Assert.Equal(preflight.Trusted.Policy.CanonicalBytes, current.Trusted.Policy.CanonicalBytes);
+                        Assert.Equal(local, current.GitSnapshot is null);
+                        Assert.Equal(local, current.LocalSnapshot is not null);
+                        var scopeValidator = typeof(App).Assembly.GetType("CompletedReusePreflight")!.GetMethod("ValidateScope",
+                            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+                        try { scopeValidator.Invoke(null, [bundle, current]); }
+                        catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
+                        { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); }
+                        return current;
+                    }
+                    var observationPreflight = newPreflight ? await AcquireCurrentPreflight() : preflight;
                     var adapter = typeof(App).Assembly.GetType("CurrentEvidenceAdapter")?.GetMethod("CaptureCompletedAsync",
                         System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
                     Assert.NotNull(adapter);
@@ -752,7 +790,7 @@ public sealed class FreshCheckExecutionTests
                         // cannot rebaseline the ORIGINAL manifest's membership or logical index.
                         async Task RefuseOriginalRevisionAsync()
                         {
-                            observationPreflight = await FreshCheckPreflightLoader.LoadAsync(inWorkspaceBundle ? request with { ArtifactOutput = null } : request, fixture.Path, token);
+                            observationPreflight = await AcquireCurrentPreflight();
                             var changed = await Observe(token);
                             Assert.True(changed.MembershipRecipeRevalidated);
                             Assert.NotEqual(bundle.Manifest.Revision.StateHash, changed.StateHash);
@@ -783,7 +821,7 @@ public sealed class FreshCheckExecutionTests
                             }
                             finally { File.WriteAllBytes(indexPath, indexBytes); File.SetLastWriteTimeUtc(indexPath, indexTime); }
                         }
-                        observationPreflight = await FreshCheckPreflightLoader.LoadAsync(inWorkspaceBundle ? request with { ArtifactOutput = null } : request, fixture.Path, token);
+                        observationPreflight = await AcquireCurrentPreflight();
                         Assert.Equal(ProvenanceStatus.Verified,
                             ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, await Observe(token), false).Status);
                     }

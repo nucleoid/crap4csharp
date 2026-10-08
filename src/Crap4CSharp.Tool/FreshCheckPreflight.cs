@@ -78,6 +78,23 @@ internal static class FreshCheckPreflightLoader
         return new(root, request, trusted, policy, scope) { GitSnapshot = gitSnapshot };
     }
 
+    // Baseline trust remains local. The optional immutable base selects only
+    // separately observed Git identity, never reviewed policy or saved state.
+    internal static async Task<FreshCheckPreflight> LoadLocalIdentityAsync(FreshCheckRequest request,
+        string workingDirectory, string? identityBase, CancellationToken token)
+    {
+        if (request.BaseRef is not null || request.Scope != "all")
+            throw new PolicyException("baseline.fullScopeRequired", "Local-trust identity observation requires explicit all scope.");
+        var local = await LoadAsync(request, workingDirectory, token);
+        if (identityBase is null) return local;
+        var git = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Base, identityBase),
+            local.Root, request.Timeout, token);
+        if (!PathIdentityPolicy.Current.Comparer.Equals(git.RepositoryRoot, local.Root))
+            throw new PolicyException("provenance.completedPreflightUnsupported", "Current Git root differs from selected local root.");
+        token.ThrowIfCancellationRequested();
+        return local with { Request = request with { BaseRef = identityBase }, GitSnapshot = git, LocalSnapshot = null };
+    }
+
     internal static void ValidateDestinations(FreshCheckRequest request, string root, IEnumerable<string> protectedPaths)
     {
         var paths = PathIdentityPolicy.Current.Comparer;
