@@ -136,8 +136,14 @@ public sealed class FreshCheckExecutionTests
     public Task SavedSharedCompilerContextsRetainEveryExcludedRequiredTestInput()
         => RunCase(false, true, standaloneTest: true, savedCoverage: true, sharedCoverage: true, contextAgreement: true);
 
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public Task SavedEligibilityContextsBindActualSemanticEmptyAndGeneratedInclusiveCompilerEvidence(bool empty, bool generated)
+        => RunCase(false, true, emptyEligible: empty, includeGenerated: generated, contextOnly: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -176,7 +182,7 @@ public sealed class FreshCheckExecutionTests
                 (outputMutation == "source" ? "Authored.cs" : "Rules.json") +
                 "\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); ") +
             (partialDrift ? "var p = System.IO.Path.GetFullPath(\"../../../../Library/Code.cs\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); " : "") +
-            (priorBuild || measure || thresholdViolation || completedReuse || savedResults || savedCoverage ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
+            (priorBuild || measure || thresholdViolation || completedReuse || savedResults || savedCoverage || contextOnly ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
             "Assert.Equal(" + (failing ? "99" : "42") + ", " + (emptyEligible ? "42" : hasGenerated ? "Extra.Value" : "Library.Value") + "); } }");
         fixture.Write("policy.json", """
             {"schemaVersion":"repository-policy-v1","mode":"strict","productionProjects":["Library/Library.csproj"],
@@ -253,7 +259,7 @@ public sealed class FreshCheckExecutionTests
                 return value;
             }
             var request = new FreshCheckRequest(standaloneTest ? "Root.slnx" : "Tests/Tests.csproj", "policy.json", local ? null : "HEAD", local ? "all" : null, null, "worktree", "method",
-                null, "bundle", false, false, null, new PolicyOverrides(), TimeSpan.FromMinutes(3));
+                null, "bundle", false, false, null, new PolicyOverrides(IncludeGenerated: includeGenerated ? true : null), TimeSpan.FromMinutes(3));
             var preflight = await MeasureAsync("trustedPreflight", () => FreshCheckPreflightLoader.LoadAsync(request, fixture.Path, token));
             var evidence = await MeasureAsync("executionComposite", () => FreshCheckExecution.RunAsync(preflight, token));
             Assert.Equal(standaloneTest ? 3 : 2, evidence.Compiler.Observations.Count);
@@ -317,7 +323,7 @@ public sealed class FreshCheckExecutionTests
                 Assert.Equal(selectedRoot, CompletedTestPlanRecipe.ResolveSelectedRoot(
                     captured.Bytes[planArtifact.Locator].ToArray(), fixture.Path, token));
                 var reloadRequest = new ProjectContextLoadRequest(selectedRoot, preflight.Policy.Configuration, "AnyCPU",
-                    preflight.Policy.TargetFrameworks.ToArray(), false, false, request.Timeout);
+                    preflight.Policy.TargetFrameworks.ToArray(), false, includeGenerated, request.Timeout);
                 var currentGraph = await ProjectContextLoader.LoadGraphAsync(reloadRequest, token);
                 var currentRunners = await ProjectContextLoader.DiscoverTestRunnersAsync(reloadRequest, token);
                 Assert.True(currentGraph.Success); Assert.True(currentRunners.Success);
@@ -388,6 +394,18 @@ public sealed class FreshCheckExecutionTests
                     File.GetUnixFileMode(Path.GetDirectoryName(manifest)!));
                 var bundle = Measure("bundleLoad", () => ArtifactBundle.Load(manifest, evidence.PrivateDirectory));
                 Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(bundle.Manifest, bundle.Bytes).Status);
+                if (contextOnly)
+                {
+                    var imported = FreshPriorBuild.Load(bundle, currentPlan.PreparedGraph, fixture.Path, token);
+                    var currentCompiler = await CompilerGraphExecution.RunBoundAsync(reloadRequest, currentPlan.PreparedGraph,
+                        (node, cancellation) => { cancellation.ThrowIfCancellationRequested(); return Task.FromResult(imported[node.Id]); }, token);
+                    ValidateEligibilityContexts(bundle, currentCompiler, fixture.Path, emptyEligible, includeGenerated, token);
+                    foreach (var required in currentPlan.Tests)
+                    {
+                        var context = currentCompiler.FinalGraph.GraphContexts.Single(b => b.GraphId == required.GraphId).Context;
+                        Assert.Single(File.ReadAllLines(Path.Combine(Path.GetDirectoryName(context.EvaluatedTargetPath!)!, "test-count.txt")));
+                    }
+                }
                 if (savedCoverage)
                 {
                     var method = typeof(CoverageGraphBinding).GetMethod("ValidateSavedNormalized",
@@ -675,7 +693,7 @@ public sealed class FreshCheckExecutionTests
                 Assert.Equal("captured", replay.Evaluation.Provenance!.Status);
                 var policy = Measure("purePolicy", () => FreshPolicyEvaluation.Evaluate(preflight, bundle.Manifest, replay));
                 Assert.Equal(0, policy.Evaluation.ExitCode);
-                Assert.Equal(2, FreshPolicyEvaluation.Evaluate(preflight with
+                Assert.Equal(emptyEligible ? 0 : 2, FreshPolicyEvaluation.Evaluate(preflight with
                     { Policy = preflight.Policy with { Threshold = .5 } }, bundle.Manifest, replay).Evaluation.ExitCode);
                 Assert.Equal("captured", replay.Evaluation.Provenance.Status); // pure policy is not execution attestation
             }
@@ -1063,4 +1081,67 @@ public sealed class FreshCheckExecutionTests
         if (requireBuildLog)
             Assert.NotEmpty(Directory.GetFiles(path, "compiler.binlog", SearchOption.AllDirectories));
     }
+    private static void ValidateEligibilityContexts(ArtifactBundle bundle, CompilerGraphPhaseResult compiler,
+        string root, bool empty, bool generated, CancellationToken token)
+    {
+        var gate = typeof(App).Assembly.GetType("Crap4CSharp.Core.SavedCompilerContexts")?.GetMethod("Validate",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(gate);
+        void Agree(ArtifactBundle candidate)
+        {
+            try { gate.Invoke(null, [candidate, compiler, root, token]); }
+            catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
+            { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); }
+        }
+        void Refuse(ArtifactBundle candidate)
+            => Assert.Equal("provenance.savedCompilerContextsUnproven", Assert.Throws<PolicyException>(() => Agree(candidate)).Code);
+        void Reject(ManifestContext changed)
+            => Refuse(bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Contexts = [changed] }) });
+        Agree(bundle);
+        var context = Assert.Single(bundle.Manifest.Contexts);
+        Assert.Equal(empty ? "semantic-empty" : null, context.CoverageApplicability);
+        Assert.Equal(generated, context.IncludeGenerated);
+        Assert.False(context.ReuseRecipeComplete);
+        var replay = AnalyzeCommand.Replay(bundle, root, DateTimeOffset.UtcNow, TimeSpan.Zero, token, allSources: true);
+        Assert.Equal(0, replay.Run.ExitCode);
+        if (empty) Assert.DoesNotContain(replay.Evaluation.Callables!, c => c.Applicability == "applicable");
+        else Assert.Contains(replay.Evaluation.Callables!, c => c.SemanticSignature?.Contains("Extra", StringComparison.Ordinal) == true && c.Coverage is not null);
+        Reject(context with { CoverageApplicability = empty ? null : "semantic-empty" });
+        Reject(context with { IncludeGenerated = !generated });
+        var source = context.Inputs.First(i => i.Role == "source" && !i.Generated);
+        foreach (var changed in new[] { source with { Encoding = "utf-16" }, source with { LogicalPath = "foreign.cs" },
+            source with { Generated = true }, source with { Role = "compiler-source" } })
+            Reject(context with { Inputs = context.Inputs.Select(i => i == source ? changed : i).ToArray() });
+        var reference = context.Inputs.First(i => i.Role == "reference");
+        var otherReference = context.Inputs.First(i => i.Role == "reference" && i.Sha256 != reference.Sha256);
+        Reject(context with { Inputs = context.Inputs.Where(i => i != reference).ToArray() });
+        Reject(context with { Inputs = context.Inputs.Select(i => i == reference ? otherReference with { LogicalPath = reference.LogicalPath } : i).ToArray() });
+        foreach (var artifact in bundle.Manifest.Artifacts.Where(a => a.Kind is "compiler-input-closure" or "test-compiler-input-closure" or "test-compiler-source" or "test-compiler-reference").GroupBy(a => a.Kind).Select(g => g.First()))
+        {
+            var bytes = bundle.Bytes[artifact.Locator].ToArray();
+            if (artifact.Kind.EndsWith("closure", StringComparison.Ordinal))
+            {
+                var node = System.Text.Json.Nodes.JsonNode.Parse(bytes)!;
+                var entries = (System.Text.Json.Nodes.JsonArray)(node[artifact.Kind == "compiler-input-closure" ? "metadata" : "inputs"]!);
+                Assert.NotEmpty(entries); entries.RemoveAt(entries.Count - 1);
+                bytes = System.Text.Encoding.UTF8.GetBytes(node.ToJsonString());
+            }
+            else bytes[^1] ^= 1;
+            var altered = System.Collections.Immutable.ImmutableArray.Create(bytes);
+            var hash = CanonicalIdentity.Sha256(altered.AsSpan()); var locator = "inputs/" + hash + ".bin";
+            Refuse(bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Artifacts = bundle.Manifest.Artifacts.Select(a =>
+                a.Id == artifact.Id ? a with { Locator = locator, Length = altered.Length, Sha256 = hash } : a).ToArray() }),
+                Bytes = new Dictionary<string, System.Collections.Immutable.ImmutableArray<byte>>(bundle.Bytes) { [locator] = altered } });
+        }
+        var path = compiler.FinalGraph.GraphContexts.First(b => b.IsTestProject).Context.CompilerDocuments.First(d => !d.IsGenerated).ResolvedPath!;
+        var original = File.ReadAllBytes(path); var timestamp = File.GetLastWriteTimeUtc(path);
+        try
+        {
+            File.AppendAllText(path, "\n// preserved timestamp drift"); File.SetLastWriteTimeUtc(path, timestamp);
+            Refuse(bundle);
+        }
+        finally { File.WriteAllBytes(path, original); File.SetLastWriteTimeUtc(path, timestamp); }
+        Agree(bundle);
+    }
+
 }
