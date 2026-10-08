@@ -154,6 +154,10 @@ public sealed class FreshCheckExecutionTests
     public Task SavedCompleteBoundaryRetainsSemanticEmptyAndGeneratedInclusiveEvidence(bool empty, bool generated)
         => RunCase(false, true, emptyEligible: empty, includeGenerated: generated, contextOnly: true, compositeProof: true);
 
+    [Fact]
+    public Task SavedCompleteLocalBoundaryRetainsOriginalMembershipAcrossTwoRequiredContexts()
+        => RunCase(false, true, policyScope: "all", local: true, standaloneTest: true, savedCoverage: true, compositeProof: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
         bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false)
     {
@@ -440,6 +444,34 @@ public sealed class FreshCheckExecutionTests
                         Assert.False(originalBytes.AsSpan().SequenceEqual(File.ReadAllBytes(sourcePath)));
                     }
                     finally { File.WriteAllBytes(sourcePath, originalBytes); File.SetLastWriteTimeUtc(sourcePath, originalTime); }
+                    if (local)
+                    {
+                        Assert.False(Directory.Exists(Path.Combine(fixture.Path, ".git")));
+                        Assert.NotNull(preflight.LocalSnapshot);
+                        Assert.Null(preflight.GitSnapshot);
+                        // This owned resource is outside every compiler/output closure. Only
+                        // comparison with the ORIGINAL authored membership can reject it.
+                        var resource = Path.Combine(fixture.Path, "AddedAfterIntermediate.resx");
+                        Assert.False(File.Exists(resource));
+                        try
+                        {
+                            var refused = await Record.ExceptionAsync(() => Agree(ct =>
+                            {
+                                ct.ThrowIfCancellationRequested();
+                                callbacks++;
+                                File.WriteAllText(resource, "<root />");
+                                return Task.CompletedTask;
+                            }));
+                            Assert.Equal(2, callbacks);
+                            Assert.Equal("provenance.localWorkspaceChanged", Assert.IsType<PolicyException>(refused).Code);
+                            Assert.True(File.Exists(resource));
+                        }
+                        finally { File.Delete(resource); }
+                        await Agree();
+                        Assert.False(Directory.Exists(Path.Combine(fixture.Path, ".git")));
+                    }
+                    else
+                    {
                     // Restore this owned fixture's Git stat cache as well as bytes/time. Read-only
                     // diff-index otherwise retains an excluded Tests.cs M record after the mutation.
                     // Refresh cannot change the ORIGINAL logical staged entries; prove that explicitly.
@@ -471,6 +503,7 @@ public sealed class FreshCheckExecutionTests
                     finally { File.WriteAllBytes(indexPath, originalIndex); File.SetLastWriteTimeUtc(indexPath, indexTime); }
                     await Agree();
                     Assert.Equal(originalIndex, File.ReadAllBytes(indexPath));
+                    }
                     foreach (var required in currentPlan.Tests)
                     {
                         var context = currentGraph.GraphContexts.Single(b => b.GraphId == required.GraphId).Context;
