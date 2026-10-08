@@ -209,8 +209,15 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, true, policyScope: "all", local: true, standaloneTest: true,
             bundleEvidence: true, newPreflight: true, completeProviderDispatch: true, policyMembership: true);
 
+    [Theory]
+    [InlineData("check")]
+    [InlineData("baseline")]
+    public Task CompleteActualBundleWorksThroughBothPublicConsumersWithoutRepeatingRequiredTests(string consumer)
+        => RunCase(false, true, policyScope: "all", standaloneTest: true,
+            bundleEvidence: true, newPreflight: true, completeProviderDispatch: true, publicCompleteConsumer: consumer);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -525,6 +532,42 @@ public sealed class FreshCheckExecutionTests
                         { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw; }
                     }
                     var observed = await Observe(token);
+                    if (publicCompleteConsumer is not null)
+                    {
+                        // First independently prove this actual complete bundle. A
+                        // public refusal below is consumer wiring, not invented
+                        // successful tests or an incomplete capture declaration.
+                        Assert.Equal(ProvenanceStatus.Verified,
+                            ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, observed, true).Status);
+                        var publicOutput = new StringWriter(); var publicErrors = new StringWriter();
+                        var publicArguments = publicCompleteConsumer == "check"
+                            ? new[] { "check", "--reuse-artifacts", manifest, "--policy", "policy.json", "--base", "HEAD", "--format", "json" }
+                            : new[] { "baseline", "create", "--reuse-artifacts", manifest, "--policy", "policy.json", "--output", "candidate.json" };
+                        var consumerExit = await global::App.RunAsync(publicArguments, fixture.Path,
+                            publicOutput, publicErrors, token);
+                        foreach (var binding in currentGraph.GraphContexts)
+                            Assert.Single(File.ReadAllLines(Path.Combine(Path.GetDirectoryName(binding.ProjectPath)!, "build-count.txt")));
+                        foreach (var required in currentPlan.Tests)
+                        {
+                            var binding = currentGraph.GraphContexts.Single(b => b.GraphId == required.GraphId);
+                            Assert.Single(File.ReadAllLines(Path.Combine(Path.GetDirectoryName(binding.Context.EvaluatedTargetPath!)!, "test-count.txt")));
+                        }
+                        Assert.True(consumerExit == 0, publicErrors + Environment.NewLine + publicOutput);
+                        using var publicJson = JsonDocument.Parse(publicOutput.ToString());
+                        if (publicCompleteConsumer == "check")
+                        {
+                            var evaluation = publicJson.RootElement.GetProperty("evaluation");
+                            Assert.Equal("verified", evaluation.GetProperty("provenance").GetProperty("status").GetString());
+                            Assert.True(evaluation.GetProperty("decision").GetProperty("completed").GetBoolean());
+                            Assert.Equal("pass", evaluation.GetProperty("decision").GetProperty("policyDecision").GetString());
+                        }
+                        else
+                        {
+                            Assert.Equal("local-unreviewed", publicJson.RootElement.GetProperty("trust").GetString());
+                            Assert.False(publicJson.RootElement.GetProperty("approved").GetBoolean());
+                            Assert.True(File.Exists(Path.Combine(fixture.Path, "candidate.json")));
+                        }
+                    }
                     if (policyMembership)
                     {
                         Assert.Equal(2, currentPlan.Tests.Count);
