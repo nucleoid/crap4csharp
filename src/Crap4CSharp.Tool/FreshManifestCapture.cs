@@ -44,6 +44,9 @@ internal static class FreshManifestCapture
             var relative = Path.GetRelativePath(preflight.Root, physical).Replace('\\', '/');
             return CanonicalIdentity.NormalizeLogicalPath(relative);
         }
+        if (preflight.GitSnapshot is null)
+            Artifact(SavedLocalMembership.Kind, SavedLocalMembership.Kind, ImmutableArray.Create(
+                SavedLocalMembership.Capture(preflight.LocalSnapshot ?? throw Refuse(), cancellation)), format: "json");
         Artifact("prior-compiler-graph", FreshPriorBuild.Kind, FreshPriorBuild.Capture(execution, cancellation));
         Artifact("completed-test-plan", CompletedTestPlanRecipe.Kind, ImmutableArray.Create(
             CompletedTestPlanRecipe.Capture(execution.Plan, preflight.Root,

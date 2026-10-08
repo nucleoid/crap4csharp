@@ -197,7 +197,7 @@ internal static class CurrentEvidenceAdapter
         // outside-output changes. Never copy or rewrite the captured revision hash.
         var state = preflight.GitSnapshot is { } git
             ? FreshGitProof.Identity(git, SavedCompletedProof.OutputFootprint(compiler)) :
-            FreshLocalProof.Identity(preflight.LocalSnapshot ?? throw new InvalidDataException("Current local snapshot is missing."));
+            SavedLocalMembership.Observe(bundle, preflight, SavedCompletedProof.OutputFootprint(compiler), token);
         compiler.RetainedProof!.ValidateCurrent(token);
         token.ThrowIfCancellationRequested();
         return new(CanonicalIdentity.Tuple("fresh-repository", preflight.Root),

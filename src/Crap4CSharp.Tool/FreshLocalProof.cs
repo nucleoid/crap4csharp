@@ -48,12 +48,11 @@ internal static class FreshLocalProof
     internal static string Identity(IReadOnlyDictionary<string, string> values) => CanonicalIdentity.Set(
         "fresh-local-authored-membership-v1", values.Select(p => CanonicalIdentity.Tuple("authored-input", p.Key, p.Value)));
 
-    internal static void Validate(FreshCheckPreflight preflight, CancellationToken token,
-        IReadOnlyList<string>? provenOutputDirectories = null)
+    internal static IReadOnlyDictionary<string, string> NormalizeCurrent(FreshCheckPreflight preflight,
+        IReadOnlyDictionary<string, string> original, IReadOnlyDictionary<string, string> current,
+        IReadOnlyList<string>? provenOutputDirectories, CancellationToken token)
     {
-        if (preflight.Trusted.Trust != "local-unreviewed" || preflight.Policy.Scope != "all" ||
-            preflight.Request.BaseRef is not null || preflight.Scope is not null || preflight.LocalSnapshot is null)
-            throw new PolicyException("provenance.localSnapshotUnsupported", "Local fresh binding requires explicit all-scope local policy and no Git selection.");
+        token.ThrowIfCancellationRequested();
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         bool Beneath(string path, string directory)
         {
@@ -68,15 +67,26 @@ internal static class FreshLocalProof
             preflight.Policy.ProductionProjects.Concat(preflight.Policy.TestProjects).Any(project =>
                 Beneath(Path.GetFullPath(project, preflight.Root), directory))))
             throw new PolicyException("provenance.localSnapshotUnsupported", "Evaluated output footprint must not contain the workspace or required project inputs.");
-        var current = Capture(preflight.Root, token);
-        // Never filter the original snapshot: even a file beneath a subsequently
-        // evaluated output directory remains an immutable preflight input. Only
-        // NEW entries in the independently regated compiler output footprint are
-        // expected build transitions. Compiler phase proof separately binds all
-        // actual sources/imports/configuration/references, including those outputs.
-        var authored = current.Where(entry => preflight.LocalSnapshot.ContainsKey(entry.Key) || !outputs.Any(directory =>
-            Beneath(Path.GetFullPath(entry.Key, preflight.Root), directory)))
-            .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+        // Every ORIGINAL entry is immutable, including entries beneath proven outputs.
+        // Only NEW entries under independently regated outputs are omitted.
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var entry in current)
+        {
+            token.ThrowIfCancellationRequested();
+            if (original.ContainsKey(entry.Key) || !outputs.Any(directory =>
+                Beneath(Path.GetFullPath(entry.Key, preflight.Root), directory))) values.Add(entry.Key, entry.Value);
+        }
+        return values;
+    }
+
+    internal static void Validate(FreshCheckPreflight preflight, CancellationToken token,
+        IReadOnlyList<string>? provenOutputDirectories = null)
+    {
+        if (preflight.Trusted.Trust != "local-unreviewed" || preflight.Policy.Scope != "all" ||
+            preflight.Request.BaseRef is not null || preflight.Scope is not null || preflight.LocalSnapshot is null)
+            throw new PolicyException("provenance.localSnapshotUnsupported", "Local fresh binding requires explicit all-scope local policy and no Git selection.");
+        var authored = NormalizeCurrent(preflight, preflight.LocalSnapshot, Capture(preflight.Root, token),
+            provenOutputDirectories, token);
         if (Identity(preflight.LocalSnapshot) != Identity(authored))
             throw new PolicyException("provenance.localWorkspaceChanged", "Local authored workspace membership or content changed after preflight.");
         foreach (var input in preflight.Trusted.ContentHashes)
