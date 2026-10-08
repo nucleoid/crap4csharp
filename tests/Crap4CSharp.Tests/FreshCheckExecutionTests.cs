@@ -101,6 +101,11 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, true, policyScope: "all", local: true, measure: true, standaloneTest: true, promotionMeasure: true);
 
     [Fact]
+    public Task FreshCompletePublicationRejectsPreservedTimestampGraphRunnerExcludedSourceAndPhysicalDriftWithoutNewExecution()
+        => RunCase(false, true, policyScope: "all", local: true, measure: true, standaloneTest: true,
+            promotionMeasure: true, promotionDrift: true);
+
+    [Fact]
     public Task PublicStrictMetricViolationRetainsSuccessfulOnceTestsAndCompleteReusableReplay()
         => RunCase(false, false, policyScope: "all", local: true, thresholdViolation: true);
 
@@ -329,7 +334,7 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, false, policyScope: "all", standaloneTest: true, savedResults: true, freshTerminalCancellation: true, freshTerminalDeadline: true);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -1562,6 +1567,78 @@ public sealed class FreshCheckExecutionTests
                     var outerProof = await MeasureAsync("outerIndependentCurrentProof", () =>
                         FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token));
                     Assert.True(finalProof.Reusable); Assert.True(outerProof.Reusable);
+                    if (promotionDrift)
+                    {
+                        // Mutate only this invocation's owned consumer files, AFTER
+                        // the real completed bundle and both independent gates exist.
+                        // Equal length and restored mtime must never stand in for bytes.
+                        var independentBinding = evidence.Compiler.FinalGraph.GraphContexts.Single(b =>
+                            Path.GetFileName(b.ProjectPath) == "Independent.csproj");
+                        var productionBinding = evidence.Compiler.FinalGraph.GraphContexts.Single(b =>
+                            Path.GetFileName(b.ProjectPath) == "Library.csproj");
+                        static byte[] FlipLast(byte[] bytes)
+                        {
+                            var changed = bytes.ToArray(); changed[^1] ^= 1; return changed;
+                        }
+                        static byte[] ReplaceText(byte[] bytes, string oldText, string newText)
+                        {
+                            var text = System.Text.Encoding.UTF8.GetString(bytes);
+                            Assert.Contains(oldText, text, StringComparison.Ordinal);
+                            return System.Text.Encoding.UTF8.GetBytes(text.Replace(oldText, newText, StringComparison.Ordinal));
+                        }
+                        var mutations = new (string Role, string Path, Func<byte[], byte[]> Change)[]
+                        {
+                            ("excluded-required-source", Path.Combine(fixture.Path, "Independent", "Tests.cs"),
+                                bytes => ReplaceText(bytes, "42", "43")),
+                            ("graph-parse-context", productionBinding.ProjectPath,
+                                bytes => ReplaceText(bytes, "</PropertyGroup>", "<DefineConstants>PROOF_DRIFT</DefineConstants></PropertyGroup>")),
+                            ("required-runner", independentBinding.ProjectPath,
+                                bytes => ReplaceText(bytes, "</PropertyGroup>", "<IsTestProject>false</IsTestProject></PropertyGroup>")),
+                            ("excluded-required-pe", independentBinding.Context.EvaluatedTargetPath!, FlipLast),
+                            ("excluded-required-pdb", Path.ChangeExtension(independentBinding.Context.EvaluatedTargetPath!, ".pdb"), FlipLast),
+                            ("production-reference", productionBinding.Context.EvaluatedReferenceAssemblyPath!, FlipLast),
+                            ("physical-bundle-manifest", finalBundle.ManifestPath,
+                                bytes => [.. bytes, (byte)' '])
+                        };
+                        foreach (var mutation in mutations)
+                        {
+                            var originalBytes = File.ReadAllBytes(mutation.Path);
+                            var originalTime = File.GetLastWriteTimeUtc(mutation.Path);
+                            try
+                            {
+                                File.WriteAllBytes(mutation.Path, mutation.Change(originalBytes));
+                                File.SetLastWriteTimeUtc(mutation.Path, originalTime);
+                                Assert.Equal(originalTime, File.GetLastWriteTimeUtc(mutation.Path));
+                                Assert.NotEqual(originalBytes, File.ReadAllBytes(mutation.Path));
+                                var refused = await Record.ExceptionAsync(() => FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token));
+                                Assert.True(refused is PolicyException or ProjectContextException or InvalidDataException,
+                                    mutation.Role + ": " + refused);
+                                Console.WriteLine("FRESH_PROMOTION_DRIFT_REFUSED " + mutation.Role + " " + refused!.GetType().Name);
+                            }
+                            finally
+                            {
+                                File.WriteAllBytes(mutation.Path, originalBytes);
+                                File.SetLastWriteTimeUtc(mutation.Path, originalTime);
+                            }
+                        }
+                        var added = Path.Combine(fixture.Path, "AddedAfterFreshProof.resx");
+                        Assert.False(File.Exists(added));
+                        try
+                        {
+                            File.WriteAllText(added, "<root />");
+                            var refused = await Assert.ThrowsAsync<PolicyException>(() =>
+                                FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token));
+                            // The fresh public boundary wraps an unverified original
+                            // workspace identity as a promotion refusal, not the
+                            // saved-only validator's inner workspace exception.
+                            Assert.Equal("check.completedPromotionUnproven", refused.Code);
+                            Console.WriteLine("FRESH_PROMOTION_DRIFT_REFUSED original-local-membership " + refused.Code);
+                        }
+                        finally { File.Delete(added); }
+                        var restored = await FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token);
+                        Assert.Equal(ProvenanceStatus.Verified, restored.Status); Assert.True(restored.Reusable);
+                        Assert.All(evidence.Tests.Outcomes, outcome => Assert.Equal("completed", outcome.State));
+                    }
                     Assert.Equal(2, evidence.Tests.Count);
                     Assert.All(evidence.Tests.Outcomes, outcome =>
                     { Assert.Equal("completed", outcome.State); Assert.Equal(0, outcome.Process!.ExitCode); });
