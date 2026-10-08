@@ -182,8 +182,13 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, true, policyScope: "all", local: true, standaloneTest: true,
             outputLayout: "intermediate", bundleEvidence: true, newPreflight: true);
 
+    [Fact]
+    public Task BundleAwareCurrentEvidenceAcceptsOriginalLocalRevisionWithExportedInWorkspaceBundle()
+        => RunCase(false, true, policyScope: "all", local: true, standaloneTest: true,
+            bundleEvidence: true, newPreflight: true, inWorkspaceBundle: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -429,7 +434,7 @@ public sealed class FreshCheckExecutionTests
                     Path.Combine(fixture.Path, "Library", "Code.cs"), token));
                 Assert.Equal("output.aliasesPolicyInput", alias.Code);
                 var manifest = await MeasureAsync("privatePublishWithRegate", () => FreshManifestCapture.PublishAsync(evidence, captured,
-                    Path.Combine(evidence.PrivateDirectory, "safe-export"), token));
+                    inWorkspaceBundle ? Path.Combine(fixture.Path, "bundle") : Path.Combine(evidence.PrivateDirectory, "safe-export"), token));
                 if (!OperatingSystem.IsWindows()) Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
                     File.GetUnixFileMode(Path.GetDirectoryName(manifest)!));
                 var bundle = Measure("bundleLoad", () => ArtifactBundle.Load(manifest, evidence.PrivateDirectory));
@@ -439,7 +444,7 @@ public sealed class FreshCheckExecutionTests
                     // A new public invocation cannot retain the original pre-build snapshot.
                     // Acquire independently from actual current disk; never copy captured revision.
                     var observationPreflight = newPreflight
-                        ? await FreshCheckPreflightLoader.LoadAsync(request, fixture.Path, token)
+                        ? await FreshCheckPreflightLoader.LoadAsync(inWorkspaceBundle ? request with { ArtifactOutput = null } : request, fixture.Path, token)
                         : preflight;
                     var adapter = typeof(App).Assembly.GetType("CurrentEvidenceAdapter")?.GetMethod("CaptureCompletedAsync",
                         System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
