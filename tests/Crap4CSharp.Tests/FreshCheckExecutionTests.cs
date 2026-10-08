@@ -233,6 +233,11 @@ public sealed class FreshCheckExecutionTests
             bundleEvidence: true, newPreflight: true, completeProviderDispatch: true, completedSelectors: true,
             reconstructedPreflight: true, baselineLocal: baselineLocal);
 
+    [Fact]
+    public Task CompleteActualBundleCreatesLocalUnreviewedBaselineWithoutRepeatingRequiredTests()
+        => RunCase(false, true, policyScope: "all", standaloneTest: true,
+            bundleEvidence: true, newPreflight: true, completeProviderDispatch: true, publicCompleteConsumer: "baseline");
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
         bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false)
     {
@@ -625,7 +630,15 @@ public sealed class FreshCheckExecutionTests
                         {
                             Assert.Equal("local-unreviewed", publicJson.RootElement.GetProperty("trust").GetString());
                             Assert.False(publicJson.RootElement.GetProperty("approved").GetBoolean());
-                            Assert.True(File.Exists(Path.Combine(fixture.Path, "candidate.json")));
+                            var candidatePath = Path.Combine(fixture.Path, "candidate.json");
+                            Assert.True(File.Exists(candidatePath));
+                            using var candidateJson = JsonDocument.Parse(File.ReadAllText(candidatePath));
+                            Assert.Equal(JsonValueKind.Object, candidateJson.RootElement.ValueKind);
+                            // The candidate is a new owned consumer output, not an input
+                            // waived by the ORIGINAL captured workspace identity. Remove
+                            // only this fixture-created file before later drift controls.
+                            File.Delete(candidatePath);
+                            Assert.False(File.Exists(candidatePath));
                         }
                     }
                     if (policyMembership)

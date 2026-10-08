@@ -34,7 +34,8 @@ internal static class BaselineCommand
             var compatibilityHash = TrustedPolicyLoader.BoundCompatibilityHash(parsedPolicy, exemptionBytes);
             var bundle = ArtifactBundle.Load(options.Manifest, root);
             CurrentEvidenceAdapter.ValidateSupportedRecipes(bundle.Manifest);
-            PolicyCheckCommand.ValidateGeneratedInventory(bundle.Manifest);
+            var complete = bundle.Manifest.Contexts[0].CurrentRevalidation!.Provider == CompletedRevalidationDeclaration.Provider;
+            if (!complete) PolicyCheckCommand.ValidateGeneratedInventory(bundle.Manifest);
             bundle.RejectOutputAlias(options.Output, root);
             var outputPath = Path.GetFullPath(options.Output, root);
             RejectPolicyOrSourceAlias(outputPath, root, policyPath, bundle.Manifest);
@@ -43,9 +44,9 @@ internal static class BaselineCommand
             if (Directory.Exists(outputPath)) throw new IOException("Baseline output is a directory.");
             if (bundle.Manifest.Producer.ComplexityRuleset != parsedPolicy.Policy.Ruleset)
                 throw new BaselineException("baseline.rulesetMismatch", "Captured ruleset does not match policy.");
-            if (bundle.Manifest.EvaluationInputs.PolicyHash != parsedPolicy.Hash)
+            if (!complete && bundle.Manifest.EvaluationInputs.PolicyHash != parsedPolicy.Hash)
                 throw new BaselineException("baseline.policyMismatch", "Captured evidence was not evaluated under the supplied policy bytes.");
-            ValidatePolicyCoverage(bundle.Manifest, parsedPolicy.Policy);
+            if (!complete) ValidatePolicyCoverage(bundle.Manifest, parsedPolicy.Policy);
             var structural = ProvenanceVerifier.VerifyCaptureCancellable(bundle.Manifest, bundle.Bytes,
                 parsedPolicy.Policy.Ruleset, cancellationToken);
             if (structural.Status == ProvenanceStatus.Invalid)
@@ -55,17 +56,28 @@ internal static class BaselineCommand
                     execution.SkippedTests != 0 || execution.TotalTests <= 0 || execution.PassedTests != execution.TotalTests))
                 throw new InvalidDataException(ProvenanceReasonCodes.TestExecutionIncomplete);
 
-            var current = await CurrentEvidenceAdapter.CaptureSupportedAsync(bundle.Manifest, root,
-                options.Timeout, cancellationToken);
+            async Task<CurrentEvidence> ObserveCompleteAsync()
+            {
+                var preflight = await CompletedReusePreflight.LoadAsync(bundle, root, policyPath, null,
+                    true, null, options.Timeout, cancellationToken);
+                if (!preflight.Trusted.Policy.CanonicalBytes.AsSpan().SequenceEqual(parsedPolicy.CanonicalBytes))
+                    throw new BaselineException("baseline.policyMismatch", "Current policy differs from candidate evaluation policy.");
+                CompletedTrustedPolicy.Validate(bundle.Manifest.Artifacts, bundle.Bytes,
+                    parsedPolicy.CanonicalBytes, exemptionBytes, cancellationToken);
+                CompletedReusePreflight.ValidateScope(bundle, preflight);
+                return await CurrentEvidenceAdapter.CaptureSupportedAsync(bundle, preflight, cancellationToken);
+            }
+            var current = complete ? await ObserveCompleteAsync() :
+                await CurrentEvidenceAdapter.CaptureSupportedAsync(bundle.Manifest, root, options.Timeout, cancellationToken);
             RejectCurrentOrOverlayAlias(outputPath, root, parsedPolicy, current);
-            var provenance = ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, current, false,
+            var provenance = ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, current, complete,
                 parsedPolicy.Policy.Ruleset);
             if (provenance.Status != ProvenanceStatus.Verified)
                 throw new InvalidDataException(string.Join(", ", provenance.Reasons));
             var replay = AnalyzeCommand.Replay(bundle, root, DateTimeOffset.UtcNow,
                 TimeSpan.Zero, cancellationToken, allSources: true);
             var captured = CapturedEvaluationInputs.Read(bundle);
-            ValidateCompleteScope(bundle.Manifest, captured.Scope);
+            if (!complete) ValidateCompleteScope(bundle.Manifest, captured.Scope);
             var selected = (replay.Evaluation.Callables ?? []).ToDictionary(item => item.ObservationId,
                 _ => true, StringComparer.Ordinal);
             var observations = PolicyCheckCommand.PolicyObservations(replay, bundle.Manifest,
@@ -83,6 +95,19 @@ internal static class BaselineCommand
                 SourceIdentity(bundle.Manifest), bundle.Manifest.Revision.Head ?? "none",
                 parsedPolicy.Policy.Threshold, observations.Where(item => !item.IdentityAmbiguous));
             var candidateBytes = BaselineDocument.Serialize(candidate);
+            if (complete)
+            {
+                // A new acquisition rechecks current policy, all required contexts,
+                // and ORIGINAL captured identity after pure candidate generation.
+                var finalCurrent = await ObserveCompleteAsync();
+                var finalProof = ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, finalCurrent, true,
+                    parsedPolicy.Policy.Ruleset);
+                if (finalProof.Status != ProvenanceStatus.Verified)
+                    throw new InvalidDataException(string.Join(", ", finalProof.Reasons));
+                bundle.RejectOutputAlias(options.Output, root);
+                RejectCurrentOrOverlayAlias(outputPath, root, parsedPolicy, finalCurrent);
+                OutputDestinationSafety.RejectExistingConsumerFile(options.Output, root, baseline: true);
+            }
             await WriteCandidateAsync(outputPath, candidateBytes, options.Overwrite, cancellationToken);
             var summary = new
             {
