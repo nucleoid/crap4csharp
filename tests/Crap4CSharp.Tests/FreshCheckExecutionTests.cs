@@ -97,7 +97,7 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, true, policyScope: "all", local: true, measure: true);
 
     [Fact]
-    public Task PublicStrictMetricViolationRetainsSuccessfulOnceTestsAndCompleteNonReusableReplay()
+    public Task PublicStrictMetricViolationRetainsSuccessfulOnceTestsAndCompleteReusableReplay()
         => RunCase(false, false, policyScope: "all", local: true, thresholdViolation: true);
 
     [Fact]
@@ -316,8 +316,12 @@ public sealed class FreshCheckExecutionTests
         // coherently resealed metadata must still refuse SemanticEligibility.ValidateEmptyCaptured.
     }
 
+    [Fact]
+    public Task FreshLateCancellationRetainsBothActualSuccessfulRequiredContextsWithoutReusableTerminal()
+        => RunCase(false, false, policyScope: "all", standaloneTest: true, savedResults: true, freshTerminalCancellation: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -1551,13 +1555,55 @@ public sealed class FreshCheckExecutionTests
         }
         var output = new StringWriter(); var errors = new StringWriter();
         string[] baseArgs = local ? [] : ["--base", "HEAD"];
-        string[] publicArgs = ["check", "--project", "Tests/Tests.csproj", "--policy", "policy.json", .. baseArgs,
-            "--artifact-output", "bundle", "--format", "json", "--timeout-seconds", "180", "--granularity", granularity, "--scope", policyScope];
+        string[] publicArgs = ["check", "--project", freshTerminalCancellation ? "Root.slnx" : "Tests/Tests.csproj", "--policy", "policy.json", .. baseArgs,
+            "--artifact-output", "bundle", "--format", "json", "--timeout-seconds", completedReuse || freshTerminalCancellation ? "600" : "180", "--granularity", granularity, "--scope", policyScope];
         if (staleOutput || staleRawOutput) publicArgs = [.. publicArgs, "--output", "result.json"];
         if (includeGenerated) publicArgs = [.. publicArgs, "--include-generated"];
-        var exit = await global::App.RunAsync(publicArgs, fixture.Path, output, errors, token);
+        using var lateFreshCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var lateFreshCallbacks = 0;
+        var exit = await global::App.RunAsync(publicArgs, fixture.Path, output, errors,
+            freshTerminalCancellation ? lateFreshCancellation.Token : token,
+            beforeTerminalPublication: freshTerminalCancellation ? ct =>
+            {
+                ct.ThrowIfCancellationRequested();
+                lateFreshCallbacks++;
+                // Both real required tests and full publication proof have returned;
+                // cancel only at the invocation-local post-serialization seam.
+                lateFreshCancellation.Cancel();
+                return Task.CompletedTask;
+            } : null);
         using var terminal = JsonDocument.Parse(output.ToString());
         AssertRetainedPrivateDiagnostics(terminal.RootElement, requireBuildLog: true);
+        if (freshTerminalCancellation)
+        {
+            Assert.Equal(1, lateFreshCallbacks);
+            Assert.Equal(1, exit);
+            var run = terminal.RootElement.GetProperty("run");
+            Assert.True(run.GetProperty("cancellation").GetProperty("cancelled").GetBoolean());
+            Assert.False(run.GetProperty("cancellation").GetProperty("timedOut").GetBoolean());
+            var outcomes = run.GetProperty("testOutcomes").EnumerateArray().ToArray();
+            Assert.Equal(2, outcomes.Length);
+            Assert.All(outcomes, outcome =>
+            {
+                Assert.Equal("completed", outcome.GetProperty("status").GetString());
+                Assert.Equal(0, outcome.GetProperty("exitCode").GetInt32());
+            });
+            var evaluation = terminal.RootElement.GetProperty("evaluation");
+            Assert.Equal("run.cancelled", evaluation.GetProperty("decision").GetProperty("reason").GetString());
+            Assert.False(evaluation.GetProperty("decision").GetProperty("completed").GetBoolean());
+            Assert.Equal("invalid", evaluation.GetProperty("provenance").GetProperty("status").GetString());
+            Assert.Empty(evaluation.GetProperty("metrics").EnumerateArray());
+            Assert.DoesNotContain(run.GetProperty("artifacts").EnumerateArray(), artifact =>
+                artifact.GetProperty("kind").GetString() == "manifest" ||
+                artifact.GetProperty("complete").GetBoolean() || artifact.GetProperty("reusable").GetBoolean());
+            foreach (var project in new[] { "Library", "Tests", "Independent" })
+                Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, project, "build-count.txt")));
+            foreach (var project in new[] { "Tests", "Independent" })
+                Assert.Single(File.ReadAllLines(Assert.Single(Directory.GetFiles(
+                    Path.Combine(fixture.Path, project, "bin"), "test-count.txt", SearchOption.AllDirectories))));
+            foreach (var (path, bytes) in original) Assert.Equal(bytes, File.ReadAllBytes(path));
+            return;
+        }
         if (outputMutation is not null)
         {
             Assert.Equal(1, exit);
@@ -1623,7 +1669,7 @@ public sealed class FreshCheckExecutionTests
                 var manifest = Assert.Single(terminal.RootElement.GetProperty("run").GetProperty("artifacts").EnumerateArray(),
                     a => a.GetProperty("kind").GetString() == "manifest");
                 Assert.True(manifest.GetProperty("complete").GetBoolean());
-                Assert.False(manifest.GetProperty("reusable").GetBoolean());
+                Assert.True(manifest.GetProperty("reusable").GetBoolean());
                 Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "bin", "Debug", "net10.0", "test-count.txt")));
                 var replay = AnalyzeCommand.Replay(bundle, fixture.Path, DateTimeOffset.UnixEpoch, TimeSpan.Zero, token, allSources: true);
                 Assert.Equal(2, replay.Run.ExitCode);
@@ -1766,6 +1812,22 @@ public sealed class FreshCheckExecutionTests
                 Assert.Single(File.ReadAllLines(testCounter));
                 var locator = Assert.Single(terminal.RootElement.GetProperty("run").GetProperty("artifacts").EnumerateArray(),
                     a => a.GetProperty("kind").GetString() == "manifest").GetProperty("path").GetString()!;
+                Assert.True(terminal.RootElement.GetProperty("evaluation").GetProperty("provenance").GetProperty("reusable").GetBoolean());
+                Assert.True(Assert.Single(terminal.RootElement.GetProperty("run").GetProperty("artifacts").EnumerateArray(),
+                    a => a.GetProperty("kind").GetString() == "manifest").GetProperty("reusable").GetBoolean());
+                Assert.All(bundle.Manifest.Contexts, context =>
+                {
+                    Assert.True(context.ReuseRecipeComplete);
+                    Assert.NotNull(context.CurrentRevalidation);
+                    Assert.Equal("finite-sdk-completed-tests-v1", context.CurrentRevalidation.Provider);
+                });
+                var analyzeOutput = new StringWriter(); var analyzeErrors = new StringWriter();
+                Assert.Equal(0, await global::App.RunAsync(["analyze", "--reuse-artifacts", locator, "--format", "json"],
+                    fixture.Path, analyzeOutput, analyzeErrors, token));
+                using var analyzed = JsonDocument.Parse(analyzeOutput.ToString());
+                Assert.Equal("captured", analyzed.RootElement.GetProperty("evaluation").GetProperty("provenance").GetProperty("status").GetString());
+                Assert.Equal(terminal.RootElement.GetProperty("evaluation").GetProperty("metrics").GetRawText(),
+                    analyzed.RootElement.GetProperty("evaluation").GetProperty("metrics").GetRawText());
                 var reusedOutput = new StringWriter(); var reusedErrors = new StringWriter();
                 var reusedExit = await global::App.RunAsync(["check", "--reuse-artifacts", locator, "--policy", "policy.json",
                     "--base", "HEAD", "--format", "json"], fixture.Path, reusedOutput, reusedErrors, token);
@@ -1784,6 +1846,20 @@ public sealed class FreshCheckExecutionTests
                     reusedEvaluation.GetProperty("decision").GetProperty("policyDecision").GetString());
                 Assert.True(reusedEvaluation.GetProperty("decision").GetProperty("completed").GetBoolean());
                 Assert.Equal("verified", reusedEvaluation.GetProperty("provenance").GetProperty("status").GetString());
+                Assert.True(reusedEvaluation.GetProperty("provenance").GetProperty("reusable").GetBoolean());
+                var baselineOutput = new StringWriter(); var baselineErrors = new StringWriter();
+                Assert.Equal(0, await global::App.RunAsync(["baseline", "create", "--reuse-artifacts", locator,
+                    "--policy", "policy.json", "--output", "candidate.json"], fixture.Path, baselineOutput, baselineErrors, token));
+                using var baselineJson = JsonDocument.Parse(baselineOutput.ToString());
+                Assert.Equal("local-unreviewed", baselineJson.RootElement.GetProperty("trust").GetString());
+                Assert.False(baselineJson.RootElement.GetProperty("approved").GetBoolean());
+                using var candidateJson = JsonDocument.Parse(File.ReadAllText(Path.Combine(fixture.Path, "candidate.json")));
+                Assert.Equal(JsonValueKind.Object, candidateJson.RootElement.ValueKind);
+                // Remove only this fixture-created candidate; its membership is not waived.
+                File.Delete(Path.Combine(fixture.Path, "candidate.json"));
+                Assert.Single(File.ReadAllLines(testCounter));
+                Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library", "build-count.txt")));
+                Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "build-count.txt")));
             }
             if (priorBuild)
             {
