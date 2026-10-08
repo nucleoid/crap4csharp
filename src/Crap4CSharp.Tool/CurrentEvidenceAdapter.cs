@@ -159,6 +159,49 @@ internal static class CurrentEvidenceAdapter
             ProtectedPaths = protectedPaths.Order(StringComparer.Ordinal).ToArray() };
     }
 
+    // A private observation does not advertise a reusable recipe. The complete
+    // validator independently recomputes every declaration before projection.
+    internal static async Task<CurrentEvidence> CaptureCompletedAsync(ArtifactBundle bundle,
+        FreshCheckPreflight preflight, CancellationToken token)
+    {
+        var compiler = await SavedCompletedProof.ValidateAsync(bundle, preflight, token);
+        var paths = new HashSet<string>(PathIdentityPolicy.Current.Comparer);
+        foreach (var binding in compiler.FinalGraph.GraphContexts)
+        {
+            token.ThrowIfCancellationRequested();
+            var context = binding.Context;
+            paths.Add(binding.ProjectPath);
+            foreach (var path in context.ProtectedPaths.Concat(context.PhaseInputs.Select(input => input.Path))
+                .Concat(context.CompilerDocuments.Select(document => document.ResolvedPath!))
+                .Concat(new[] { context.EvaluatedTargetPath!, Path.ChangeExtension(context.EvaluatedTargetPath!, ".pdb"),
+                    context.EvaluatedReferenceAssemblyPath! }).Where(path => !string.IsNullOrEmpty(path)))
+                paths.Add(Path.GetFullPath(path));
+        }
+        foreach (var observation in compiler.Observations)
+        {
+            paths.Add(observation.Assembly!.Path);
+            paths.Add(observation.Pdb!.Path);
+            foreach (var path in observation.Parameters.Single(parameter => parameter.Name == "References").Items)
+                paths.Add(Path.GetFullPath(path));
+        }
+        var inputs = bundle.Manifest.Contexts.SelectMany(context => context.Inputs).Where(input => !input.Generated)
+            .GroupBy(input => input.Role + "\n" + (input.RepositoryPath ?? input.LogicalPath), StringComparer.Ordinal)
+            .Select(group => group.First()).Select(input => new CurrentInputEvidence(input.Role, input.LogicalPath,
+                input.Length, input.Sha256) { RepositoryPath = input.RepositoryPath }).ToArray();
+        var hashes = bundle.Manifest.Contexts.ToDictionary(context => context.Id,
+            context => ManifestIdentity.ContextHash(context, ManifestIdentity.SourceSetHash(context),
+                ManifestIdentity.InputClosureHash(context)), StringComparer.Ordinal);
+        // These ORIGINAL current preflight identities were just independently
+        // regated; never copy a captured revision to manufacture a match.
+        var state = preflight.GitSnapshot is { } git ? FreshGitProof.Identity(git) :
+            FreshLocalProof.Identity(preflight.LocalSnapshot ?? throw new InvalidDataException("Current local snapshot is missing."));
+        compiler.RetainedProof!.ValidateCurrent(token);
+        token.ThrowIfCancellationRequested();
+        return new(CanonicalIdentity.Tuple("fresh-repository", preflight.Root),
+            CanonicalIdentity.Tuple("fresh-workspace", preflight.Root), preflight.GitSnapshot?.Revision.CurrentHead,
+            inputs, hashes, true, state) { ProtectedPaths = paths.Order(StringComparer.Ordinal).ToArray() };
+    }
+
     private static string NormalizeRecipePath(string value)
     {
         if (Path.IsPathRooted(value) || value.Contains('\\') || value.Split('/').Any(part => part is "" or "." or ".."))
