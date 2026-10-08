@@ -3,7 +3,7 @@ using Crap4CSharp.Core;
 
 internal static class PolicyCheckCommand
 {
-    public static async Task<ResultDocument> RunAsync(string manifestPath, string policyPath, string baseRef,
+    public static async Task<ResultDocument> RunAsync(string manifestPath, string policyPath, string? baseRef,
         string workingDirectory, string? outputPath, TimeSpan timeout, DateTimeOffset startedAt, TimeSpan duration,
         CancellationToken cancellationToken, Action<Func<Task>>? retainTerminalProof = null)
     {
@@ -14,6 +14,7 @@ internal static class PolicyCheckCommand
         if (bundle.Manifest.Contexts[0].CurrentRevalidation!.Provider == CompletedRevalidationDeclaration.Provider)
             return await CompletedPolicyCheck.RunAsync(bundle, policyPath, baseRef, root, outputPath,
                 timeout, startedAt, duration, cancellationToken, retainTerminalProof);
+        if (baseRef is null) throw new ArgumentException("Legacy reused check requires --base.");
         ValidateTrustedRevision(bundle.Manifest);
         var trusted = TrustedPolicyLoader.LoadFromBase(baseRef, policyPath, repositoryRoot: root,
             timeout: timeout, cancellationToken: cancellationToken);

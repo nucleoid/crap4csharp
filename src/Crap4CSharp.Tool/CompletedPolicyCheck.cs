@@ -4,7 +4,7 @@ using Crap4CSharp.Core;
 // legacy manifest-only route has separate, deliberately unchanged semantics.
 internal static class CompletedPolicyCheck
 {
-    internal static async Task<ResultDocument> RunAsync(ArtifactBundle bundle, string policyPath, string baseRef,
+    internal static async Task<ResultDocument> RunAsync(ArtifactBundle bundle, string policyPath, string? baseRef,
         string root, string? outputPath, TimeSpan timeout, DateTimeOffset startedAt, TimeSpan duration,
         CancellationToken token, Action<Func<Task>>? retainTerminalProof = null)
     {
@@ -44,7 +44,7 @@ internal static class CompletedPolicyCheck
             : decision.Evaluation.ExitCode == 2 ? "crap.thresholdExceeded" : complete ? "crap.withinThreshold" : "crap.analysisIncomplete";
         var checks = new CheckResult[]
         {
-            new("policyTrust", "pass", "policy.baseTrusted", true),
+            new("policyTrust", "pass", preflight.Trusted.Trust == "local-unreviewed" ? "policy.localUnreviewed" : "policy.baseTrusted", true),
             new("provenance", "pass", "provenance.currentWorkspaceMatch", true),
             new("testExecution", "pass", "tests.capturedSuccessful", policy.RequiredChecks.Contains("tests")),
             new("coverage", semanticEmpty ? "notApplicable" : decision.Evaluation.OperationalReasons.Count == 0 ? "pass" : "operationalError",

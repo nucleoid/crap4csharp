@@ -573,8 +573,8 @@ internal static class App
                 options.Exemptions is not null || options.Project is not null || options.AllowMissingCoverage ||
                 seen.Contains("--ruleset") || seen.Contains("--threshold"))
                 throw new ArgumentException("--reuse-artifacts cannot be combined with live source, project, coverage, mapping, case, syntax-only, or exemption inputs.");
-            if (options.Command == "check" && (options.Policy is null || options.Base is null))
-                throw new ArgumentException("check --reuse-artifacts requires --policy and --base.");
+            if (options.Command == "check" && options.Policy is null)
+                throw new ArgumentException("check --reuse-artifacts requires --policy; Git evidence additionally requires --base.");
             if (options.Command == "analyze" && (options.Policy is not null || options.Base is not null))
                 throw new ArgumentException("--policy and --base are available only with check.");
         }

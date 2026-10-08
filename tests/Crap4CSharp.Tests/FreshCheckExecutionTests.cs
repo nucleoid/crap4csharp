@@ -1976,6 +1976,15 @@ public sealed class FreshCheckExecutionTests
                 Assert.Equal("captured", analyzed.RootElement.GetProperty("evaluation").GetProperty("provenance").GetProperty("status").GetString());
                 Assert.Equal(terminal.RootElement.GetProperty("evaluation").GetProperty("metrics").GetRawText(),
                     analyzed.RootElement.GetProperty("evaluation").GetProperty("metrics").GetRawText());
+                if (!local)
+                {
+                    var noBaseOutput = new StringWriter(); var noBaseErrors = new StringWriter();
+                    Assert.Equal(1, await global::App.RunAsync(["check", "--reuse-artifacts", locator,
+                        "--policy", "policy.json", "--format", "json"], fixture.Path, noBaseOutput, noBaseErrors, token));
+                    using var noBase = JsonDocument.Parse(noBaseOutput.ToString());
+                    Assert.Equal("operationalError", noBase.RootElement.GetProperty("run").GetProperty("status").GetString());
+                    Assert.Single(File.ReadAllLines(testCounter));
+                }
                 var reusedOutput = new StringWriter(); var reusedErrors = new StringWriter();
                 var reusedExit = await global::App.RunAsync(["check", "--reuse-artifacts", locator, "--policy", "policy.json",
                     .. baseArgs, "--format", "json"], fixture.Path, reusedOutput, reusedErrors, token);
@@ -1995,6 +2004,11 @@ public sealed class FreshCheckExecutionTests
                 Assert.True(reusedEvaluation.GetProperty("decision").GetProperty("completed").GetBoolean());
                 Assert.Equal("verified", reusedEvaluation.GetProperty("provenance").GetProperty("status").GetString());
                 Assert.True(reusedEvaluation.GetProperty("provenance").GetProperty("reusable").GetBoolean());
+                if (local)
+                {
+                    Assert.Equal("local-unreviewed", reusedEvaluation.GetProperty("policyTrust").GetProperty("trust").GetString());
+                    Assert.Equal("none", reusedEvaluation.GetProperty("policyTrust").GetProperty("revision").GetString());
+                }
                 if (standaloneTest)
                 {
                     var outcomes = terminal.RootElement.GetProperty("run").GetProperty("testOutcomes").EnumerateArray().ToArray();

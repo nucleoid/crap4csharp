@@ -27,19 +27,20 @@ internal static class CompletedReusePreflight
             if (!Commit(identityBase) || !Commit(bundle.Manifest.Revision.Head) || !Commit(bundle.Manifest.Revision.ScopeHead)) throw Refuse();
             if (!baselineLocal && explicitBase is null) throw Refuse();
         }
-        else if (bundle.Manifest.Revision.Kind == "none" && baselineLocal && selectors.Scope == "all")
+        else if (bundle.Manifest.Revision.Kind == "none" && explicitBase is null && selectors.Scope == "all")
             identityBase = null;
         else throw Refuse();
+        var localTrust = baselineLocal || bundle.Manifest.Revision.Kind == "none";
         var request = new FreshCheckRequest(selectedRoot, policyPath, baselineLocal ? null : explicitBase,
             selectors.Scope, null, "worktree", selectors.Granularity, baselineLocal ? null : output, null, true, false, null,
             new PolicyOverrides(Threshold: captured.Policy.Threshold,
                 IncludeTests: selectors.IncludeTests ? true : null,
                 IncludeGenerated: selectors.IncludeGenerated ? true : null), timeout);
-        var preflight = baselineLocal
+        var preflight = localTrust
             ? await FreshCheckPreflightLoader.LoadLocalIdentityAsync(request, root, identityBase, token)
             : await FreshCheckPreflightLoader.LoadAsync(request, root, token);
         if (!PathIdentityPolicy.Current.Comparer.Equals(preflight.Root, root)) throw Refuse();
-        if (baselineLocal)
+        if (localTrust)
         {
             if (preflight.Trusted.Trust != "local-unreviewed" || preflight.Trusted.Revision != "none" ||
                 preflight.Policy.Mode != RepositoryPolicyMode.Strict || preflight.Policy.Scope != "all") throw Refuse();
