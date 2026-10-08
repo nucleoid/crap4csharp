@@ -521,6 +521,47 @@ public sealed class FreshCheckExecutionTests
                         Assert.Equal(ProvenanceStatus.Verified,
                             ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, await Observe(token), false).Status);
                     }
+                    if (newPreflight)
+                    {
+                        // Drift predates this consumer's acquisition: stability of its NEW snapshot
+                        // cannot rebaseline the ORIGINAL manifest's membership or logical index.
+                        async Task RefuseOriginalRevisionAsync()
+                        {
+                            observationPreflight = await FreshCheckPreflightLoader.LoadAsync(request, fixture.Path, token);
+                            var changed = await Observe(token);
+                            Assert.True(changed.MembershipRecipeRevalidated);
+                            Assert.NotEqual(bundle.Manifest.Revision.StateHash, changed.StateHash);
+                            var verification = ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, changed, false);
+                            Assert.Equal(ProvenanceStatus.Invalid, verification.Status);
+                            Assert.Contains(ProvenanceReasonCodes.WorkspaceChanged, verification.Reasons);
+                        }
+                        var membership = Path.Combine(fixture.Path, "AddedBeforeAcquisition.resx");
+                        Assert.False(File.Exists(membership));
+                        try
+                        {
+                            File.WriteAllText(membership, "<root />");
+                            await RefuseOriginalRevisionAsync();
+                        }
+                        finally { File.Delete(membership); }
+                        if (!local)
+                        {
+                            var indexPath = Path.Combine(fixture.Path, ".git", "index");
+                            var indexBytes = File.ReadAllBytes(indexPath); var indexTime = File.GetLastWriteTimeUtc(indexPath);
+                            try
+                            {
+                                Assert.Equal(0, (await ProcessRunner.RunAsync("git", ["update-index", "--chmod=+x", "Independent/Tests.cs"],
+                                    fixture.Path, TimeSpan.FromSeconds(30), token)).ExitCode);
+                                Assert.Equal(sourceBytes, File.ReadAllBytes(sourcePath));
+                                await RefuseOriginalRevisionAsync();
+                                Assert.NotEqual(preflight.GitSnapshot!.Revision.IndexIdentity,
+                                    observationPreflight.GitSnapshot!.Revision.IndexIdentity);
+                            }
+                            finally { File.WriteAllBytes(indexPath, indexBytes); File.SetLastWriteTimeUtc(indexPath, indexTime); }
+                        }
+                        observationPreflight = await FreshCheckPreflightLoader.LoadAsync(request, fixture.Path, token);
+                        Assert.Equal(ProvenanceStatus.Verified,
+                            ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, await Observe(token), false).Status);
+                    }
                     using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
                     await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Observe(cancelled.Token));
                     foreach (var required in currentPlan.Tests)
