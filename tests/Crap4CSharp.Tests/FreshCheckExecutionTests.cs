@@ -216,6 +216,12 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, true, policyScope: "all", standaloneTest: true,
             bundleEvidence: true, newPreflight: true, completeProviderDispatch: true, publicCompleteConsumer: consumer);
 
+    [Fact]
+    public Task CompletePublicCheckRejectsExcludedTestSourceDriftAfterOuterSerializationWithoutNewLaunches()
+        => RunCase(false, true, policyScope: "all", local: false, standaloneTest: true,
+            bundleEvidence: true, newPreflight: true, completeProviderDispatch: true,
+            publicCompleteConsumer: "check", outerTerminalDrift: true);
+
     [Theory]
     [InlineData("check", true, false)]
     [InlineData("baseline", true, false)]
@@ -303,7 +309,7 @@ public sealed class FreshCheckExecutionTests
     }
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -673,6 +679,66 @@ public sealed class FreshCheckExecutionTests
                         var publicArguments = publicCompleteConsumer == "check"
                             ? new[] { "check", "--reuse-artifacts", manifest, "--policy", "policy.json", "--base", "HEAD", "--format", "json" }
                             : new[] { "baseline", "create", "--reuse-artifacts", manifest, "--policy", "policy.json", "--output", "candidate.json" };
+                        if (outerTerminalDrift)
+                        {
+                            Assert.Equal("check", publicCompleteConsumer);
+                            Assert.Equal(2, currentPlan.Tests.Count);
+                            var driftPath = Path.Combine(fixture.Path, "Independent", "Tests.cs");
+                            Assert.Contains(driftPath, observed.ProtectedPaths);
+                            var originalBytes = File.ReadAllBytes(driftPath);
+                            var originalTime = File.GetLastWriteTimeUtc(driftPath);
+                            var lateOutput = Path.Combine(evidence.PrivateDirectory, "late-result.json");
+                            Assert.False(File.Exists(lateOutput));
+                            var callbacks = 0;
+                            try
+                            {
+                                var lateText = new StringWriter(); var lateErrors = new StringWriter();
+                                var lateExit = await global::App.RunAsync(
+                                    publicArguments.Concat(new[] { "--output", lateOutput }).ToArray(), fixture.Path,
+                                    lateText, lateErrors, token, beforeTerminalPublication: ct =>
+                                    {
+                                        ct.ThrowIfCancellationRequested();
+                                        callbacks++;
+                                        var changed = File.ReadAllText(driftPath).Replace("42", "43", StringComparison.Ordinal);
+                                        File.WriteAllText(driftPath, changed);
+                                        File.SetLastWriteTimeUtc(driftPath, originalTime);
+                                        Assert.False(originalBytes.AsSpan().SequenceEqual(File.ReadAllBytes(driftPath)));
+                                        Assert.Equal(originalTime, File.GetLastWriteTimeUtc(driftPath));
+                                        return Task.CompletedTask;
+                                    });
+                                Assert.Equal(1, callbacks);
+                                // The intended RED is refusal after REAL complete current proof,
+                                // not a guessed diagnostic code or a fixture setup failure.
+                                Assert.True(lateExit == 1, lateErrors + Environment.NewLine + lateText);
+                                using var lateJson = JsonDocument.Parse(lateText.ToString());
+                                Assert.Equal(1, lateJson.RootElement.GetProperty("run").GetProperty("exitCode").GetInt32());
+                                Assert.False(lateJson.RootElement.GetProperty("evaluation")
+                                    .GetProperty("decision").GetProperty("completed").GetBoolean());
+                                if (File.Exists(lateOutput))
+                                {
+                                    using var written = JsonDocument.Parse(File.ReadAllText(lateOutput));
+                                    Assert.Equal(1, written.RootElement.GetProperty("run").GetProperty("exitCode").GetInt32());
+                                    Assert.False(written.RootElement.GetProperty("evaluation")
+                                        .GetProperty("decision").GetProperty("completed").GetBoolean());
+                                }
+                            }
+                            finally
+                            {
+                                File.WriteAllBytes(driftPath, originalBytes);
+                                File.SetLastWriteTimeUtc(driftPath, originalTime);
+                                if (File.Exists(lateOutput)) File.Delete(lateOutput);
+                            }
+                            Assert.Equal(originalBytes, File.ReadAllBytes(driftPath));
+                            Assert.Equal(originalTime, File.GetLastWriteTimeUtc(driftPath));
+                            // Refresh only fixture-owned Git stat data, preserving ORIGINAL logical entries.
+                            Assert.Equal(0, (await ProcessRunner.RunAsync("git", ["update-index", "--refresh", "--", "Independent/Tests.cs"],
+                                fixture.Path, TimeSpan.FromSeconds(30), token)).ExitCode);
+                            var restoredStage = await ProcessRunner.RunAsync("git", ["ls-files", "--stage", "-z", "--"],
+                                fixture.Path, TimeSpan.FromSeconds(30), token);
+                            Assert.Equal(0, restoredStage.ExitCode);
+                            Assert.Equal(observationPreflight.GitSnapshot!.Revision.IndexIdentity,
+                                "sha256:" + CanonicalIdentity.Sha256(System.Text.Encoding.UTF8.GetBytes(restoredStage.StandardOutput)));
+                        }
                         var consumerExit = await global::App.RunAsync(publicArguments, fixture.Path,
                             publicOutput, publicErrors, token);
                         foreach (var binding in currentGraph.GraphContexts)

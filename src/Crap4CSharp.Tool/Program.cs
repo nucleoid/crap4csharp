@@ -100,13 +100,14 @@ internal static class App
         """;
 
     public static async Task<int> RunAsync(string[] args, string workingDirectory, TextWriter output, TextWriter error,
-        CancellationToken cancellationToken, ProcessExecutor? processExecutor = null)
+        CancellationToken cancellationToken, ProcessExecutor? processExecutor = null,
+        Func<CancellationToken, Task>? beforeTerminalPublication = null)
     {
         if (args.Any(arg => arg is "--help" or "-h")) { await output.WriteLineAsync(Help); return 0; }
         if (args.Length > 0 && args[0] == "baseline")
             return await BaselineCommand.RunAsync(args, workingDirectory, output, error, cancellationToken);
         if (args.Length > 0 && args[0] is "analyze" or "check")
-            return await RunCallableCommandAsync(args, workingDirectory, output, error, cancellationToken);
+            return await RunCallableCommandAsync(args, workingDirectory, output, error, cancellationToken, beforeTerminalPublication);
 
         var startedAt = DateTimeOffset.UtcNow;
         var stopwatch = Stopwatch.StartNew();
@@ -209,7 +210,8 @@ internal static class App
     }
 
     private static async Task<int> RunCallableCommandAsync(string[] args, string workingDirectory,
-        TextWriter output, TextWriter error, CancellationToken cancellationToken)
+        TextWriter output, TextWriter error, CancellationToken cancellationToken,
+        Func<CancellationToken, Task>? beforeTerminalPublication)
     {
         var startedAt = DateTimeOffset.UtcNow;
         var stopwatch = Stopwatch.StartNew();
@@ -281,6 +283,8 @@ internal static class App
             result = result with { Run = result.Run with
                 { FinishedAt = startedAt + duration, DurationMilliseconds = duration.TotalMilliseconds } };
             var json = ResultWriter.Serialize(result);
+            // Invocation-local deterministic acceptance seam; null changes no normal behavior.
+            if (beforeTerminalPublication is not null) await beforeTerminalPublication(cancellationToken);
             if (options.Output is not null && writeResult)
             {
                 var inputs = options.Inputs.Concat(options.Coverage)
