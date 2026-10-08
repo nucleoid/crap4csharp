@@ -542,7 +542,7 @@ public sealed class FreshCheckExecutionTests
                         // cannot rebaseline the ORIGINAL manifest's membership or logical index.
                         async Task RefuseOriginalRevisionAsync()
                         {
-                            observationPreflight = await FreshCheckPreflightLoader.LoadAsync(request, fixture.Path, token);
+                            observationPreflight = await FreshCheckPreflightLoader.LoadAsync(inWorkspaceBundle ? request with { ArtifactOutput = null } : request, fixture.Path, token);
                             var changed = await Observe(token);
                             Assert.True(changed.MembershipRecipeRevalidated);
                             Assert.NotEqual(bundle.Manifest.Revision.StateHash, changed.StateHash);
@@ -573,7 +573,34 @@ public sealed class FreshCheckExecutionTests
                             }
                             finally { File.WriteAllBytes(indexPath, indexBytes); File.SetLastWriteTimeUtc(indexPath, indexTime); }
                         }
-                        observationPreflight = await FreshCheckPreflightLoader.LoadAsync(request, fixture.Path, token);
+                        observationPreflight = await FreshCheckPreflightLoader.LoadAsync(inWorkspaceBundle ? request with { ArtifactOutput = null } : request, fixture.Path, token);
+                        Assert.Equal(ProvenanceStatus.Verified,
+                            ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, await Observe(token), false).Status);
+                    }
+                    if (inWorkspaceBundle)
+                    {
+                        var extra = Path.Combine(bundle.BundleRoot, "AddedAdjacent.json");
+                        try
+                        {
+                            File.WriteAllText(extra, "{}");
+                            observationPreflight = await FreshCheckPreflightLoader.LoadAsync(request with { ArtifactOutput = null }, fixture.Path, token);
+                            var refused = await Record.ExceptionAsync(() => Observe(token));
+                            Assert.Equal("provenance.savedBundleFootprintUnproven", Assert.IsType<PolicyException>(refused).Code);
+                        }
+                        finally { File.Delete(extra); }
+                        observationPreflight = await FreshCheckPreflightLoader.LoadAsync(request with { ArtifactOutput = null }, fixture.Path, token);
+                        var manifestBytes = File.ReadAllBytes(bundle.ManifestPath);
+                        var manifestTime = File.GetLastWriteTimeUtc(bundle.ManifestPath);
+                        try
+                        {
+                            File.AppendAllText(bundle.ManifestPath, " ");
+                            File.SetLastWriteTimeUtc(bundle.ManifestPath, manifestTime);
+                            var refused = await Record.ExceptionAsync(() => Observe(token));
+                            // This mutation follows acquisition, so the retained workspace
+                            // guard rejects it before bundle-footprint projection.
+                            Assert.Equal("provenance.localWorkspaceChanged", Assert.IsType<PolicyException>(refused).Code);
+                        }
+                        finally { File.WriteAllBytes(bundle.ManifestPath, manifestBytes); File.SetLastWriteTimeUtc(bundle.ManifestPath, manifestTime); }
                         Assert.Equal(ProvenanceStatus.Verified,
                             ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, await Observe(token), false).Status);
                     }
@@ -1065,7 +1092,7 @@ public sealed class FreshCheckExecutionTests
                 Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "bin", "Debug", "net10.0", "test-count.txt")));
                 Console.WriteLine("FRESH_COMPOSITE_TIMINGS " + JsonSerializer.Serialize(timings));
             }
-            else Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));
+            else Assert.Equal(inWorkspaceBundle, Directory.Exists(Path.Combine(fixture.Path, "bundle")));
             Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library", "build-count.txt")));
             Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "build-count.txt")));
             foreach (var (path, bytes) in original) Assert.Equal(bytes, File.ReadAllBytes(path));

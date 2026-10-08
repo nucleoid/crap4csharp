@@ -7,6 +7,8 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
     IReadOnlyDictionary<string, ImmutableArray<byte>> Bytes, string ManifestPath,
     string BundleRoot, IReadOnlyList<string> ResolvedInputs)
 {
+    internal string? LoadedManifestSha256 { get; init; }
+
     internal const int MaxManifestBytes = 4 * 1024 * 1024;
     internal const int MaxArtifactBytes = 100 * 1024 * 1024;
     internal const long MaxBundleBytes = 512L * 1024 * 1024;
@@ -83,7 +85,8 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
             resolved.Add(path);
         }
         return new ArtifactBundle(manifest, bytes, fullManifest, root,
-            resolved.Order(StringComparer.Ordinal).ToArray());
+            resolved.Order(StringComparer.Ordinal).ToArray())
+            { LoadedManifestSha256 = CanonicalIdentity.Sha256(manifestBytes) };
     }
 
     public void RejectOutputAlias(string output, string workingDirectory)

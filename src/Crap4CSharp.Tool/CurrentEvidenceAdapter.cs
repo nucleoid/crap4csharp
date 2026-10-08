@@ -195,10 +195,12 @@ internal static class CurrentEvidenceAdapter
         // absent from the captured ORIGINAL pre-build selection. Normalize only the
         // regated evaluated output footprint, preserving HEAD/base/index and all
         // outside-output changes. Never copy or rewrite the captured revision hash.
+        var bundleFiles = SavedBundleFootprint.Validate(bundle, preflight.Root, paths.ToArray(), token);
         var state = preflight.GitSnapshot is { } git
             ? FreshGitProof.Identity(git, SavedCompletedProof.OutputFootprint(compiler)) :
-            SavedLocalMembership.Observe(bundle, preflight, SavedCompletedProof.OutputFootprint(compiler), token);
+            SavedLocalMembership.Observe(bundle, preflight, SavedCompletedProof.OutputFootprint(compiler), token, bundleFiles);
         compiler.RetainedProof!.ValidateCurrent(token);
+        _ = SavedBundleFootprint.Validate(bundle, preflight.Root, paths.ToArray(), token);
         token.ThrowIfCancellationRequested();
         return new(CanonicalIdentity.Tuple("fresh-repository", preflight.Root),
             CanonicalIdentity.Tuple("fresh-workspace", preflight.Root), preflight.GitSnapshot?.Revision.CurrentHead,

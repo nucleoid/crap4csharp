@@ -53,7 +53,8 @@ internal static class SavedLocalMembership
 
     // Caller must first complete ALL independently current compiler/test/coverage gates.
     internal static string Observe(ArtifactBundle bundle, FreshCheckPreflight preflight,
-        IReadOnlyList<string> provenOutputs, CancellationToken token)
+        IReadOnlyList<string> provenOutputs, CancellationToken token,
+        IReadOnlySet<string>? provenBundleFiles = null)
     {
         token.ThrowIfCancellationRequested();
         var artifacts = bundle.Manifest.Artifacts.Where(a => a.Kind == Kind).ToArray();
@@ -64,8 +65,13 @@ internal static class SavedLocalMembership
             !bundle.Bytes.TryGetValue(artifact.Locator, out var bytes) || bytes.Length != artifact.Length ||
             CanonicalIdentity.Sha256(bytes.AsSpan()) != artifact.Sha256) throw Refuse();
         var original = Parse(bytes.ToArray(), bundle.Manifest.Revision.StateHash, token);
+        var current = preflight.LocalSnapshot ?? throw Refuse();
+        // Original entries are never omitted, even inside a verified loaded bundle.
+        var normalized = current.Where(entry => original.ContainsKey(entry.Key) ||
+            !(provenBundleFiles?.Contains(Path.GetFullPath(entry.Key, preflight.Root)) ?? false))
+            .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
         return FreshLocalProof.Identity(FreshLocalProof.NormalizeCurrent(preflight, original,
-            preflight.LocalSnapshot ?? throw Refuse(), provenOutputs, token));
+            normalized, provenOutputs, token));
     }
 
     private static void Fields(JsonElement value, params string[] names)
