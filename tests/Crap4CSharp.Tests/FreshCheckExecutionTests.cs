@@ -197,8 +197,15 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, true, policyScope: "all", local: true, standaloneTest: true,
             bundleEvidence: true, newPreflight: true, trustedPolicyBinding: true);
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task CompleteBundleProviderDispatchRequiresActualTwoTestContextProof(bool local)
+        => RunCase(false, true, policyScope: "all", local: local, standaloneTest: true,
+            bundleEvidence: true, newPreflight: true, trustedPolicyBinding: true, completeProviderDispatch: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -465,6 +472,26 @@ public sealed class FreshCheckExecutionTests
                 var alias = await Assert.ThrowsAsync<PolicyException>(() => FreshManifestCapture.PublishAsync(evidence, captured,
                     Path.Combine(fixture.Path, "Library", "Code.cs"), token));
                 Assert.Equal("output.aliasesPolicyInput", alias.Code);
+                if (completeProviderDispatch)
+                {
+                    // This explicit adapter acceptance supplies declarations from the
+                    // independently evaluated actual graph; automatic public capture
+                    // promotion remains a separate, not-yet-enabled feature.
+                    captured = captured with { Manifest = ManifestIdentity.Seal(captured.Manifest with
+                    {
+                        Contexts = captured.Manifest.Contexts.Select(context =>
+                        {
+                            var binding = currentGraph.GraphContexts.Single(b => b.GraphId == context.Id);
+                            string Relative(string path) => Path.GetRelativePath(fixture.Path, path).Replace('\\', '/');
+                            return context with { ReuseRecipeComplete = true, CurrentRevalidation = new(
+                                "finite-sdk-completed-tests-v1", Relative(binding.ProjectPath),
+                                Relative(binding.Context.EvaluatedTargetPath!),
+                                Relative(Path.ChangeExtension(binding.Context.EvaluatedTargetPath!, ".pdb"))) };
+                        }).ToArray(), ManifestHash = null
+                    }) };
+                    await Assert.ThrowsAsync<PolicyException>(() => CurrentEvidenceAdapter.CaptureSupportedAsync(
+                        captured.Manifest, fixture.Path, request.Timeout, token));
+                }
                 var manifest = await MeasureAsync("privatePublishWithRegate", () => FreshManifestCapture.PublishAsync(evidence, captured,
                     inWorkspaceBundle ? Path.Combine(fixture.Path, "bundle") : Path.Combine(evidence.PrivateDirectory, "safe-export"), token));
                 if (!OperatingSystem.IsWindows()) Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
@@ -483,7 +510,12 @@ public sealed class FreshCheckExecutionTests
                     Assert.NotNull(adapter);
                     async Task<CurrentEvidence> Observe(CancellationToken ct)
                     {
-                        try { return await (Task<CurrentEvidence>)adapter.Invoke(null, [bundle, observationPreflight, ct])!; }
+                        try
+                        {
+                            return completeProviderDispatch
+                                ? await CurrentEvidenceAdapter.CaptureSupportedAsync(bundle, observationPreflight, ct)
+                                : await (Task<CurrentEvidence>)adapter.Invoke(null, [bundle, observationPreflight, ct])!;
+                        }
                         catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
                         { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw; }
                     }
@@ -531,9 +563,12 @@ public sealed class FreshCheckExecutionTests
                         Assert.Equal(preflight.GitSnapshot!.Revision.IndexIdentity,
                             observationPreflight.GitSnapshot!.Revision.IndexIdentity);
                     }
-                    // A private complete observation cannot relabel a historical incomplete recipe.
-                    Assert.False(ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, observed, false).Reusable);
-                    Assert.Equal(ProvenanceStatus.Invalid,
+                    // Complete dispatch validates its explicit independent declaration;
+                    // private observation of a historical incomplete recipe cannot
+                    // relabel that recipe or promote it to completed reuse.
+                    Assert.Equal(completeProviderDispatch,
+                        ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, observed, false).Reusable);
+                    Assert.Equal(completeProviderDispatch ? ProvenanceStatus.Verified : ProvenanceStatus.Invalid,
                         ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, observed, true).Status);
                     foreach (var binding in currentGraph.GraphContexts)
                     {

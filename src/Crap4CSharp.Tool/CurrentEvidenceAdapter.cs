@@ -7,9 +7,11 @@ internal static class CurrentEvidenceAdapter
 
     internal static void ValidateSupportedRecipes(RunManifest manifest)
     {
-        if (manifest.Contexts.Count == 0 || manifest.Contexts.Any(context =>
+        var provider = manifest.Contexts.FirstOrDefault()?.CurrentRevalidation?.Provider;
+        if (provider is not (SupportedRecipeProvider or CompletedRevalidationDeclaration.Provider) ||
+            manifest.Contexts.Count == 0 || manifest.Contexts.Any(context =>
             !context.ReuseRecipeComplete || context.CurrentRevalidation is null ||
-            context.CurrentRevalidation.Provider != SupportedRecipeProvider))
+            context.CurrentRevalidation.Provider != provider))
             throw new PolicyException("provenance.revalidationRecipeUnsupported",
                 "Current evidence reuse requires a complete supported current-revalidation recipe for every context. Capture new evidence; historical bundles remain available for offline analyze.");
     }
@@ -61,6 +63,12 @@ internal static class CurrentEvidenceAdapter
         TimeSpan timeout, CancellationToken cancellationToken)
     {
         ValidateSupportedRecipes(manifest);
+        // A manifest-only call must never interpret complete-provider hash-only
+        // metadata as the legacy recipe. Its actual bundle and current preflight
+        // are mandatory inputs to the independent complete proof.
+        if (manifest.Contexts.Any(context => context.CurrentRevalidation!.Provider != SupportedRecipeProvider))
+            throw new PolicyException("provenance.revalidationRecipeUnsupported",
+                "Completed evidence revalidation requires the actual bundle and independently acquired current preflight.");
         var basic = Capture(manifest, workspaceRoot, gitTimeout: timeout);
         var root = Path.GetFullPath(workspaceRoot);
         var hashes = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -157,6 +165,18 @@ internal static class CurrentEvidenceAdapter
         return basic with { Inputs = verifiedInputs.Values.OrderBy(input => input.LogicalPath, StringComparer.Ordinal).ToArray(),
             ContextHashes = hashes, MembershipRecipeRevalidated = true,
             ProtectedPaths = protectedPaths.Order(StringComparer.Ordinal).ToArray() };
+    }
+
+    // Shared bundle-aware entry point. Provider declarations only select a gate;
+    // they cannot manufacture its successful current/compiler/test observation.
+    internal static Task<CurrentEvidence> CaptureSupportedAsync(ArtifactBundle bundle,
+        FreshCheckPreflight preflight, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        ValidateSupportedRecipes(bundle.Manifest);
+        return bundle.Manifest.Contexts[0].CurrentRevalidation!.Provider == CompletedRevalidationDeclaration.Provider
+            ? CaptureCompletedAsync(bundle, preflight, token)
+            : CaptureSupportedAsync(bundle.Manifest, preflight.Root, preflight.Request.Timeout, token);
     }
 
     // A private observation does not advertise a reusable recipe. The complete
