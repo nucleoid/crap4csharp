@@ -142,9 +142,11 @@ public sealed class FreshCheckExecutionTests
     public Task SavedEligibilityContextsBindActualSemanticEmptyAndGeneratedInclusiveCompilerEvidence(bool empty, bool generated)
         => RunCase(false, true, emptyEligible: empty, includeGenerated: generated, contextOnly: true);
 
-    [Fact]
-    public Task SavedCompleteBoundaryRechecksTwoRequiredContextsAndRejectsBetweenGateDrift()
-        => RunCase(false, true, standaloneTest: true, savedCoverage: true, compositeProof: true);
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task SavedCompleteBoundaryRechecksTwoRequiredContextsAndRejectsBetweenGateDrift(bool shared)
+        => RunCase(false, true, standaloneTest: true, savedCoverage: true, sharedCoverage: shared, compositeProof: true);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
         bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false)
@@ -412,21 +414,46 @@ public sealed class FreshCheckExecutionTests
                     await Agree();
                     var sourcePath = Path.Combine(fixture.Path, "Independent", "Tests.cs");
                     var originalBytes = File.ReadAllBytes(sourcePath); var originalTime = File.GetLastWriteTimeUtc(sourcePath);
+                    var callbacks = 0;
                     try
                     {
                         var refused = await Record.ExceptionAsync(() => Agree(ct =>
                         {
                             ct.ThrowIfCancellationRequested();
+                            callbacks++;
                             File.WriteAllText(sourcePath, File.ReadAllText(sourcePath).Replace("42", "43", StringComparison.Ordinal));
                             File.SetLastWriteTimeUtc(sourcePath, originalTime);
                             return Task.CompletedTask;
                         }));
-                        Assert.True(refused is ProjectContextException or PolicyException, refused?.ToString() ?? "Drift incorrectly accepted");
+                        Assert.Equal(1, callbacks); // mutation reached after all intermediate agreement gates
+                        // The independently reloaded context hashes authored source bytes, so the final
+                        // saved-plan comparison rejects this drift before the retained physical guard.
+                        Assert.Equal("provenance.completedTestPlanMismatch", Assert.IsType<PolicyException>(refused).Code);
                         Assert.Equal(originalTime, File.GetLastWriteTimeUtc(sourcePath));
                         Assert.False(originalBytes.AsSpan().SequenceEqual(File.ReadAllBytes(sourcePath)));
                     }
                     finally { File.WriteAllBytes(sourcePath, originalBytes); File.SetLastWriteTimeUtc(sourcePath, originalTime); }
+                    // A staged mode-only change leaves physical inputs and HEAD-to-worktree changes
+                    // unchanged, but must still fail the ORIGINAL index identity comparison.
+                    var indexPath = Path.Combine(fixture.Path, ".git", "index");
+                    var originalIndex = File.ReadAllBytes(indexPath);
+                    var indexTime = File.GetLastWriteTimeUtc(indexPath);
+                    try
+                    {
+                        var refused = await Record.ExceptionAsync(() => Agree(async ct =>
+                        {
+                            callbacks++;
+                            Assert.Equal(0, (await ProcessRunner.RunAsync("git", ["update-index", "--chmod=+x", "Independent/Tests.cs"],
+                                fixture.Path, TimeSpan.FromSeconds(30), ct)).ExitCode);
+                            Assert.Equal(originalBytes, File.ReadAllBytes(sourcePath));
+                        }));
+                        Assert.Equal(2, callbacks);
+                        Assert.Equal("provenance.gitStateChanged", Assert.IsType<PolicyException>(refused).Code);
+                        Assert.False(originalIndex.AsSpan().SequenceEqual(File.ReadAllBytes(indexPath)));
+                    }
+                    finally { File.WriteAllBytes(indexPath, originalIndex); File.SetLastWriteTimeUtc(indexPath, indexTime); }
                     await Agree();
+                    Assert.Equal(originalIndex, File.ReadAllBytes(indexPath));
                     foreach (var required in currentPlan.Tests)
                     {
                         var context = currentGraph.GraphContexts.Single(b => b.GraphId == required.GraphId).Context;
