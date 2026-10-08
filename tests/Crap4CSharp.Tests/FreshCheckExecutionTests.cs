@@ -118,6 +118,16 @@ public sealed class FreshCheckExecutionTests
     public Task CompletedFreshEvidenceReusesRequiredTestsWithoutRestoreCompileOrTestAndPreservesDecisions()
         => RunCase(false, false, policyScope: "all", completedReuse: true);
 
+    [Theory]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, true)]
+    public Task AutomaticFreshPromotionRetainsTwoRequiredContextsAndGeneratedOrSemanticEmptyPublicConsumerParity(
+        bool local, bool empty, bool generated)
+        => RunCase(false, false, emptyEligible: empty, includeGenerated: generated,
+            policyScope: "all", local: local, completedReuse: true, standaloneTest: true, savedResults: true);
+
     [Fact]
     public Task CaptureRetainsRequiredTestWithoutReachableScoredProduction()
         => RunCase(false, true, standaloneTest: true);
@@ -1690,7 +1700,7 @@ public sealed class FreshCheckExecutionTests
         }
         var output = new StringWriter(); var errors = new StringWriter();
         string[] baseArgs = local ? [] : ["--base", "HEAD"];
-        string[] publicArgs = ["check", "--project", freshTerminalCancellation ? "Root.slnx" : "Tests/Tests.csproj", "--policy", "policy.json", .. baseArgs,
+        string[] publicArgs = ["check", "--project", standaloneTest ? "Root.slnx" : "Tests/Tests.csproj", "--policy", "policy.json", .. baseArgs,
             "--artifact-output", "bundle", "--format", "json", "--timeout-seconds", completedReuse || freshTerminalCancellation ? "600" : "180", "--granularity", granularity, "--scope", policyScope];
         if (staleOutput || staleRawOutput) publicArgs = [.. publicArgs, "--output", "result.json"];
         if (includeGenerated) publicArgs = [.. publicArgs, "--include-generated"];
@@ -1968,7 +1978,7 @@ public sealed class FreshCheckExecutionTests
                     analyzed.RootElement.GetProperty("evaluation").GetProperty("metrics").GetRawText());
                 var reusedOutput = new StringWriter(); var reusedErrors = new StringWriter();
                 var reusedExit = await global::App.RunAsync(["check", "--reuse-artifacts", locator, "--policy", "policy.json",
-                    "--base", "HEAD", "--format", "json"], fixture.Path, reusedOutput, reusedErrors, token);
+                    .. baseArgs, "--format", "json"], fixture.Path, reusedOutput, reusedErrors, token);
                 // A reused check must never silently fall back to fresh consumer execution,
                 // including when the currently supported recipe refuses this real capture.
                 Assert.Single(File.ReadAllLines(testCounter));
@@ -1985,6 +1995,19 @@ public sealed class FreshCheckExecutionTests
                 Assert.True(reusedEvaluation.GetProperty("decision").GetProperty("completed").GetBoolean());
                 Assert.Equal("verified", reusedEvaluation.GetProperty("provenance").GetProperty("status").GetString());
                 Assert.True(reusedEvaluation.GetProperty("provenance").GetProperty("reusable").GetBoolean());
+                if (standaloneTest)
+                {
+                    var outcomes = terminal.RootElement.GetProperty("run").GetProperty("testOutcomes").EnumerateArray().ToArray();
+                    Assert.Equal(2, outcomes.Length);
+                    Assert.All(outcomes, outcome =>
+                    {
+                        Assert.Equal("completed", outcome.GetProperty("status").GetString());
+                        Assert.Equal(0, outcome.GetProperty("exitCode").GetInt32());
+                    });
+                    Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Independent", "build-count.txt")));
+                    var independentCounter = Assert.Single(Directory.GetFiles(Path.Combine(fixture.Path, "Independent", "bin"), "test-count.txt", SearchOption.AllDirectories));
+                    Assert.Single(File.ReadAllLines(independentCounter));
+                }
                 var baselineOutput = new StringWriter(); var baselineErrors = new StringWriter();
                 Assert.Equal(0, await global::App.RunAsync(["baseline", "create", "--reuse-artifacts", locator,
                     "--policy", "policy.json", "--output", "candidate.json"], fixture.Path, baselineOutput, baselineErrors, token));
@@ -2099,6 +2122,13 @@ public sealed class FreshCheckExecutionTests
         }
         Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library", "build-count.txt")));
         Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "build-count.txt")));
+        if (standaloneTest)
+        {
+            Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Independent", "build-count.txt")));
+            foreach (var project in new[] { "Tests", "Independent" })
+                Assert.Single(File.ReadAllLines(Assert.Single(Directory.GetFiles(
+                    Path.Combine(fixture.Path, project, "bin"), "test-count.txt", SearchOption.AllDirectories))));
+        }
         if (partialDrift)
         {
             var path = Path.Combine(fixture.Path, "Library", "Code.cs");
