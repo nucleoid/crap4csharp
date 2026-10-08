@@ -162,8 +162,12 @@ public sealed class FreshCheckExecutionTests
     public Task SavedCompleteBoundaryRechecksExcludedRunnerAndPhysicalOutputsAfterIntermediateGates()
         => RunCase(false, true, policyScope: "all", local: true, standaloneTest: true, savedCoverage: true, compositeProof: true, physicalComposite: true);
 
+    [Fact]
+    public Task BundleAwareCurrentEvidenceRetainsAllRequiredInputsAndOutputsWithoutNewLaunches()
+        => RunCase(false, true, policyScope: "all", local: true, standaloneTest: true, bundleEvidence: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -202,7 +206,7 @@ public sealed class FreshCheckExecutionTests
                 (outputMutation == "source" ? "Authored.cs" : "Rules.json") +
                 "\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); ") +
             (partialDrift ? "var p = System.IO.Path.GetFullPath(\"../../../../Library/Code.cs\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); " : "") +
-            (priorBuild || measure || thresholdViolation || completedReuse || savedResults || savedCoverage || contextOnly ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
+            (priorBuild || measure || thresholdViolation || completedReuse || savedResults || savedCoverage || contextOnly || bundleEvidence ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
             "Assert.Equal(" + (failing ? "99" : "42") + ", " + (emptyEligible ? "42" : hasGenerated ? "Extra.Value" : "Library.Value") + "); } }");
         fixture.Write("policy.json", """
             {"schemaVersion":"repository-policy-v1","mode":"strict","productionProjects":["Library/Library.csproj"],
@@ -238,7 +242,7 @@ public sealed class FreshCheckExecutionTests
             fixture.Write("Independent/Independent.csproj", File.ReadAllText(Path.Combine(fixture.Path, "Tests/Tests.csproj"))
                 .Replace("<ProjectReference Include=\"../Library/Library.csproj\" />", sharedCoverage ? "<ProjectReference Include=\"../Library/Library.csproj\" />" : "", StringComparison.Ordinal));
             fixture.Write("Independent/Tests.cs", "using Xunit; public class IndependentTests { [Fact] public void Test() { " +
-                (savedResults || savedCoverage ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") + (sharedCoverage ? "Assert.Equal(42, Library.Value); } }" : "Assert.Equal(42, 42); } }"));
+                (savedResults || savedCoverage || bundleEvidence ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") + (sharedCoverage ? "Assert.Equal(42, Library.Value); } }" : "Assert.Equal(42, 42); } }"));
             fixture.Write("Root.slnx", "<Solution><Configurations><Platform Name=\"AnyCPU\" /></Configurations><Project Path=\"Tests/Tests.csproj\" /><Project Path=\"Independent/Independent.csproj\" /></Solution>");
             var policyPath = Path.Combine(fixture.Path, "policy.json");
             File.WriteAllText(policyPath, File.ReadAllText(policyPath).Replace("\"testProjects\":[\"Tests/Tests.csproj\"]",
@@ -414,6 +418,54 @@ public sealed class FreshCheckExecutionTests
                     File.GetUnixFileMode(Path.GetDirectoryName(manifest)!));
                 var bundle = Measure("bundleLoad", () => ArtifactBundle.Load(manifest, evidence.PrivateDirectory));
                 Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(bundle.Manifest, bundle.Bytes).Status);
+                if (bundleEvidence)
+                {
+                    var adapter = typeof(App).Assembly.GetType("CurrentEvidenceAdapter")?.GetMethod("CaptureCompletedAsync",
+                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                    Assert.NotNull(adapter);
+                    async Task<CurrentEvidence> Observe(CancellationToken ct)
+                    {
+                        try { return await (Task<CurrentEvidence>)adapter.Invoke(null, [bundle, preflight, ct])!; }
+                        catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
+                        { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw; }
+                    }
+                    var observed = await Observe(token);
+                    Assert.True(observed.MembershipRecipeRevalidated);
+                    Assert.Equal(bundle.Manifest.Contexts.Count, observed.ContextHashes.Count);
+                    Assert.Contains(observed.Inputs, input => input.Role == "reference");
+                    Assert.Equal(ProvenanceStatus.Verified,
+                        ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, observed, false).Status);
+                    // A private complete observation cannot relabel a historical incomplete recipe.
+                    Assert.False(ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, observed, false).Reusable);
+                    Assert.Equal(ProvenanceStatus.Invalid,
+                        ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, observed, true).Status);
+                    foreach (var binding in currentGraph.GraphContexts)
+                    {
+                        Assert.Contains(binding.Context.ResolvedProjectPath!, observed.ProtectedPaths);
+                        Assert.Contains(binding.Context.EvaluatedTargetPath!, observed.ProtectedPaths);
+                        Assert.Contains(Path.ChangeExtension(binding.Context.EvaluatedTargetPath!, ".pdb"), observed.ProtectedPaths);
+                        foreach (var document in binding.Context.CompilerDocuments)
+                            Assert.Contains(document.ResolvedPath!, observed.ProtectedPaths);
+                    }
+                    var sourcePath = Path.Combine(fixture.Path, "Independent", "Tests.cs");
+                    var sourceBytes = File.ReadAllBytes(sourcePath); var sourceTime = File.GetLastWriteTimeUtc(sourcePath);
+                    try
+                    {
+                        File.WriteAllText(sourcePath, File.ReadAllText(sourcePath).Replace("42", "43", StringComparison.Ordinal));
+                        File.SetLastWriteTimeUtc(sourcePath, sourceTime);
+                        await Assert.ThrowsAnyAsync<Exception>(() => Observe(token));
+                    }
+                    finally { File.WriteAllBytes(sourcePath, sourceBytes); File.SetLastWriteTimeUtc(sourcePath, sourceTime); }
+                    Assert.Equal(ProvenanceStatus.Verified,
+                        ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, await Observe(token), false).Status);
+                    using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+                    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Observe(cancelled.Token));
+                    foreach (var required in currentPlan.Tests)
+                    {
+                        var context = currentGraph.GraphContexts.Single(b => b.GraphId == required.GraphId).Context;
+                        Assert.Single(File.ReadAllLines(Path.Combine(Path.GetDirectoryName(context.EvaluatedTargetPath!)!, "test-count.txt")));
+                    }
+                }
                 if (compositeProof)
                 {
                     var gate = typeof(App).Assembly.GetType("SavedCompletedProof")?.GetMethod("ValidateAsync",
