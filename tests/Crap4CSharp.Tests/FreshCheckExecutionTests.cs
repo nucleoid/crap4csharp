@@ -204,8 +204,13 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, true, policyScope: "all", local: local, standaloneTest: true,
             bundleEvidence: true, newPreflight: true, trustedPolicyBinding: true, completeProviderDispatch: true);
 
+    [Fact]
+    public Task CompleteProviderRequiresCurrentPolicyMembershipIncludingNonReachingRequiredTest()
+        => RunCase(false, true, policyScope: "all", local: true, standaloneTest: true,
+            bundleEvidence: true, newPreflight: true, completeProviderDispatch: true, policyMembership: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -520,6 +525,34 @@ public sealed class FreshCheckExecutionTests
                         { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw; }
                     }
                     var observed = await Observe(token);
+                    if (policyMembership)
+                    {
+                        Assert.Equal(2, currentPlan.Tests.Count);
+                        // The effective independently current policy is separate from the
+                        // canonical saved policy bytes. Reuse must bind BOTH, including
+                        // required tests that have no production-linked execution.
+                        var originalPreflight = observationPreflight;
+                        var requiredIndependent = currentGraph.GraphContexts.Single(b => b.IsTestProject &&
+                            !captured.Manifest.Executions.Any(e => PathIdentityPolicy.Current.Comparer.Equals(
+                                Path.GetFullPath(e.TestProject, fixture.Path), b.ProjectPath)));
+                        Assert.Contains(originalPreflight.Policy.TestProjects, p =>
+                            PathIdentityPolicy.Current.Comparer.Equals(Path.GetFullPath(p, fixture.Path), requiredIndependent.ProjectPath));
+                        foreach (var changedPolicy in new[]
+                        {
+                            originalPreflight.Policy with { TestProjects = originalPreflight.Policy.TestProjects.Append("Missing/Missing.csproj").ToArray() },
+                            originalPreflight.Policy with { TestProjects = originalPreflight.Policy.TestProjects.Where(p =>
+                                !PathIdentityPolicy.Current.Comparer.Equals(Path.GetFullPath(p, fixture.Path), requiredIndependent.ProjectPath)).ToArray() }
+                        })
+                        {
+                            observationPreflight = originalPreflight with { Policy = changedPolicy };
+                            var refused = await Record.ExceptionAsync(() => Observe(token));
+                            Assert.Equal(changedPolicy.TestProjects.Count > originalPreflight.Policy.TestProjects.Count
+                                ? "policy.requiredContextMissing" : "policy.testContextMismatch", Assert.IsType<PolicyException>(refused).Code);
+                        }
+                        observationPreflight = originalPreflight;
+                        Assert.Equal(ProvenanceStatus.Verified,
+                            ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, await Observe(token), true).Status);
+                    }
                     if (trustedPolicyBinding)
                     {
                         var originalBundle = bundle;
