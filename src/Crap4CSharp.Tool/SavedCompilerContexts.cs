@@ -71,6 +71,9 @@ internal static class SavedCompilerContexts
                     continue;
                 }
                 var saved = bundle.Manifest.Contexts.Single(c => c.Id == binding.GraphId);
+                if (saved.CurrentRevalidation is not null || saved.ReuseRecipeComplete)
+                    CompletedRevalidationDeclaration.Validate(saved, Logical(binding.ProjectPath),
+                        Logical(current.EvaluatedTargetPath!), Logical(Path.ChangeExtension(current.EvaluatedTargetPath!, ".pdb")));
                 var pe = Read(observation.Assembly!.Path); var pdb = Read(observation.Pdb!.Path);
                 CompilerOutputBinding.Match(observation.Assembly, pe); CompilerOutputBinding.Match(observation.Pdb, pdb);
                 var inspected = ArtifactEvidenceInspector.InspectBuild(pe, pdb);

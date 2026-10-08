@@ -823,6 +823,21 @@ public sealed class FreshCheckExecutionTests
                                 Agree(bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Contexts = [changed] }) })).Code);
                         Agree(bundle);
                         var savedContext = bundle.Manifest.Contexts.Single();
+                        var scoredBinding = currentCompiler.FinalGraph.GraphContexts.Single(b => b.GraphId == savedContext.Id);
+                        string EvaluatedPath(string path) => Path.GetRelativePath(fixture.Path, path).Replace('\\', '/');
+                        var declared = savedContext with { ReuseRecipeComplete = true, CurrentRevalidation = new(
+                            "finite-sdk-completed-tests-v1", EvaluatedPath(scoredBinding.ProjectPath),
+                            EvaluatedPath(scoredBinding.Context.EvaluatedTargetPath!),
+                            EvaluatedPath(Path.ChangeExtension(scoredBinding.Context.EvaluatedTargetPath!, ".pdb"))) };
+                        Agree(bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Contexts = [declared] }) });
+                        Reject(declared with { CurrentRevalidation = declared.CurrentRevalidation! with { Provider = "foreign" } });
+                        Reject(declared with { CurrentRevalidation = declared.CurrentRevalidation! with { Project = "Other/Other.csproj" } });
+                        Reject(declared with { CurrentRevalidation = declared.CurrentRevalidation! with { AssemblyPath = "Other/Other.dll" } });
+                        Reject(declared with { CurrentRevalidation = declared.CurrentRevalidation! with { PdbPath = "Other/Other.pdb" } });
+                        Reject(declared with { CurrentRevalidation = declared.CurrentRevalidation! with { References = [new("references/saved.dll", "Other.dll")] } });
+                        Reject(declared with { ReuseRecipeComplete = false });
+                        Reject(declared with { CurrentRevalidation = null });
+                        Agree(bundle);
                         var source = savedContext.Inputs.First(i => i.Role == "source" && !i.Generated);
                         Reject(savedContext with { Inputs = savedContext.Inputs.Where(i => i != source).ToArray() });
                         Reject(savedContext with { Inputs = savedContext.Inputs.Select(i => i == source ? i with { Generated = true } : i).ToArray() });
