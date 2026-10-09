@@ -25,7 +25,7 @@ public sealed class CompletedProofTimingTests
     public void NumericWorkerObservationsRoundTripOnlyInPrivateTransport()
     {
         var result = new ProjectContextLoadResult(true, [], [])
-        { WorkerTimings = [new("worker.compilation", 12.5)] };
+        { WorkerTimings = [new("worker.compilation", 12.5), new("worker.projectSdk", 2.5)] };
         var transport = JsonSerializer.Serialize(result, ProjectContextLoader.JsonOptions);
         var copy = JsonSerializer.Deserialize<ProjectContextLoadResult>(transport, ProjectContextLoader.JsonOptions)!;
         Assert.Equal(result.WorkerTimings, copy.WorkerTimings);
@@ -42,5 +42,10 @@ public sealed class CompletedProofTimingTests
         Assert.Equal(new CompletedProofTiming.Span("owned.worker.workspace", 1), Assert.Single(timing.Spans));
         timing.ImportWorker("owned", Enumerable.Repeat(new CompletedProofTiming.Span("worker.graph", 0), 5000).ToArray());
         Assert.Equal(4097, timing.Spans.Count);
+        timing.ImportWorker("owned", [new("worker.projectSdk", 2.5),
+            new("worker.projectSdk", double.NaN), new("worker.projectSdk", double.PositiveInfinity),
+            new("worker.projectSdk", -1), new("worker.projectSdk/private-path", 1)]);
+        Assert.Equal(4098, timing.Spans.Count);
+        Assert.Equal(new CompletedProofTiming.Span("owned.worker.projectSdk", 2.5), timing.Spans[^1]);
     }
 }

@@ -12,7 +12,7 @@ internal sealed class CompletedProofTiming
     {
         // Transport observations are diagnostics only: bound and filter, never alter a verdict.
         foreach (var span in observations.Take(4096))
-            if (span.Phase is "worker.discovery" or "worker.graph" or "worker.nodeMetadata" or
+            if (span.Phase is "worker.discovery" or "worker.graph" or "worker.projectSdk" or "worker.nodeMetadata" or
                 "worker.runnerMetadata" or "worker.contextMetadata" or "worker.workspace" or
                 "worker.documents" or "worker.compilation" or "worker.context" &&
                 double.IsFinite(span.Milliseconds) && span.Milliseconds >= 0)

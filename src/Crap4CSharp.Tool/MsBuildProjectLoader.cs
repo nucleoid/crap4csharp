@@ -619,8 +619,10 @@ internal static partial class MsBuildProjectLoader
             ["DOTNET_HOST_PATH"] = request.DotNetHostPath,
             ["PATH"] = request.DotNetRoot + Path.PathSeparator + (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
         };
-        var result = await ProcessRunner.RunWithEnvironmentAsync(request.DotNetHostPath, ["--version"], Path.GetDirectoryName(projectPath)!,
-            request.Timeout, cancellationToken, environment);
+        ProcessResult result;
+        using (request.Timing?.Start("worker.projectSdk"))
+            result = await ProcessRunner.RunWithEnvironmentAsync(request.DotNetHostPath, ["--version"], Path.GetDirectoryName(projectPath)!,
+                request.Timeout, cancellationToken, environment);
         if (result.ExitCode != 0 || !result.StandardOutput.Trim().Equals(request.SdkVersion, StringComparison.Ordinal))
             throw new ProjectContextException("context.sdkMismatch",
                 $"Project {projectPath} resolves SDK {result.StandardOutput.Trim()}, but the selected target resolved {request.SdkVersion}.");

@@ -6,10 +6,11 @@ internal static class FreshCheckCommand
     internal static async Task<ResultDocument> RunAsync(FreshCheckRequest request, string root, DateTimeOffset started,
         CancellationToken cancellation, Action<FreshFailureOutputProof>? retainFailureOutputProof = null,
         Action<string>? retainPrivateDirectory = null, Action<Func<Task>>? retainTerminalProof = null,
-        Action<Func<Exception, ResultDocument>>? retainTerminalFailure = null)
+        Action<Func<Exception, ResultDocument>>? retainTerminalFailure = null, CompletedProofTiming? timing = null)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         deadline.CancelAfter(request.Timeout);
+        using var totalTiming = timing?.Start("public.innerTotal");
         var elapsed = Stopwatch.StartNew();
         FreshExecutionEvidence? retainedEvidence = null;
         try
@@ -18,7 +19,7 @@ internal static class FreshCheckCommand
                 {
                     retainedEvidence = evidence;
                     retainTerminalFailure?.Invoke(error => FreshFailureResult.Refuse(evidence, error, started, elapsed.Elapsed));
-                });
+                }, timing);
         }
         catch (Exception error) when (retainedEvidence is not null && App.IsHandled(error))
         {
@@ -32,13 +33,17 @@ internal static class FreshCheckCommand
     }
 
     private static async Task<ResultDocument> RunCoreAsync(FreshCheckRequest request, string root,
-        DateTimeOffset started, Stopwatch elapsed, CancellationToken cancellation, CancellationTokenSource deadline, Action<FreshFailureOutputProof>? retainFailureOutputProof, Action<string>? retainPrivateDirectory, Action<Func<Task>>? retainTerminalProof, Action<FreshExecutionEvidence> retainEvidence)
+        DateTimeOffset started, Stopwatch elapsed, CancellationToken cancellation, CancellationTokenSource deadline, Action<FreshFailureOutputProof>? retainFailureOutputProof, Action<string>? retainPrivateDirectory, Action<Func<Task>>? retainTerminalProof, Action<FreshExecutionEvidence> retainEvidence, CompletedProofTiming? timing)
     {
         var token = deadline.Token;
-        var preflight = await FreshCheckPreflightLoader.LoadAsync(request, root, token);
+        FreshCheckPreflight preflight;
+        using (timing?.Start("public.preflight"))
+            preflight = await FreshCheckPreflightLoader.LoadAsync(request, root, token);
         // Trusted generated eligibility is retained in hash-bound capture/replay
         // metadata without relabeling physical generated inputs as authored.
-        var evidence = await FreshCheckExecution.RunAsync(preflight, token, retainFailureOutputProof, retainPrivateDirectory);
+        FreshExecutionEvidence evidence;
+        using (timing?.Start("public.execution"))
+            evidence = await FreshCheckExecution.RunAsync(preflight, token, retainFailureOutputProof, retainPrivateDirectory);
         retainEvidence(evidence);
         if (evidence.Tests.Failure is not null || evidence.Tests.Count != evidence.Plan.Tests.Count || evidence.Tests.Any(t => t.Process.ExitCode != 0))
         {
@@ -49,23 +54,35 @@ internal static class FreshCheckCommand
             if (token.IsCancellationRequested) return failure;
             return await FreshPartialAnalysis.AttachAsync(evidence, failure, token);
         }
-        var captured = await FreshManifestCapture.CaptureAsync(evidence, token);
+        FreshCapturedBundle captured;
+        using (timing?.Start("public.capture"))
+            captured = await FreshManifestCapture.CaptureAsync(evidence, token, timing);
         // Local current reconstruction is explicitly strict/all; other supported
         // fresh local modes retain captured-only semantics rather than inventing
         // a Git-reviewed or unsupported reusable recipe.
         var promote = preflight.GitSnapshot is not null ||
             preflight.Policy.Mode == RepositoryPolicyMode.Strict && preflight.Policy.Scope == "all";
-        if (promote) captured = await FreshCompletedCapture.PromoteAsync(evidence, captured, token);
-        var privateManifest = await FreshManifestCapture.PublishAsync(evidence, captured,
-            Path.Combine(evidence.PrivateDirectory, "evaluation-bundle"), token);
+        if (promote)
+            using (timing?.Start("public.promotion"))
+                captured = await FreshCompletedCapture.PromoteAsync(evidence, captured, token, timing);
+        string privateManifest;
+        using (timing?.Start("public.privatePublish"))
+            privateManifest = await FreshManifestCapture.PublishAsync(evidence, captured,
+                Path.Combine(evidence.PrivateDirectory, "evaluation-bundle"), token, timing, "public.privatePublish");
         var bundle = ArtifactBundle.Load(privateManifest, evidence.PrivateDirectory);
-        var replay = AnalyzeCommand.Replay(bundle, preflight.Root, started, elapsed.Elapsed, token,
-            allSources: true, thresholdOverride: preflight.Policy.Threshold);
-        var policy = FreshPolicyEvaluation.Evaluate(preflight, bundle.Manifest, replay);
-        await FreshManifestCapture.RegateAsync(evidence, token);
+        ResultDocument replay;
+        using (timing?.Start("public.replay"))
+            replay = AnalyzeCommand.Replay(bundle, preflight.Root, started, elapsed.Elapsed, token,
+                allSources: true, thresholdOverride: preflight.Policy.Threshold);
+        FreshPolicyDecision policy;
+        using (timing?.Start("public.policy"))
+            policy = FreshPolicyEvaluation.Evaluate(preflight, bundle.Manifest, replay);
+        using (timing?.Start("public.preExportRegate"))
+            await FreshManifestCapture.RegateAsync(evidence, token, timing, "public.preExportRegate");
         var manifest = privateManifest;
         if (request.ArtifactOutput is not null && policy.Evaluation.ExitCode != 1)
-            manifest = await FreshManifestCapture.PublishAsync(evidence, captured, request.ArtifactOutput, token);
+            using (timing?.Start("public.exportPublish"))
+                manifest = await FreshManifestCapture.PublishAsync(evidence, captured, request.ArtifactOutput, token, timing, "public.exportPublish");
         // Publication already guarded the new bundle before its atomic move. An
         // invocation-owned published directory is now expected to exist; retain the
         // final result-file guards without reclassifying our own bundle as ambient.
@@ -78,7 +95,8 @@ internal static class FreshCheckCommand
             // Bind the actual final exported footprint, not the private prospective
             // footprint. No original fresh membership waiver after export.
             var finalBundle = ArtifactBundle.Load(manifest, preflight.Root);
-            completedProof = await FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token);
+            using (timing?.Start("public.finalProof"))
+                completedProof = await FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token, timing: timing);
             retainTerminalProof?.Invoke(async () =>
             {
                 // The inner deadline source is disposed on return. Recreate only
@@ -88,7 +106,11 @@ internal static class FreshCheckCommand
                 if (remaining <= TimeSpan.Zero) throw new ProcessTimeoutException("Fresh check", request.Timeout);
                 using var finalDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
                 finalDeadline.CancelAfter(remaining);
-                try { await FreshCompletedCapture.ValidateAsync(evidence, finalBundle, finalDeadline.Token); }
+                try
+                {
+                    using (timing?.Start("public.outerProof"))
+                        await FreshCompletedCapture.ValidateAsync(evidence, finalBundle, finalDeadline.Token, timing: timing);
+                }
                 catch (OperationCanceledException) when (!cancellation.IsCancellationRequested && finalDeadline.IsCancellationRequested)
                 { throw new ProcessTimeoutException("Fresh check", request.Timeout); }
             });

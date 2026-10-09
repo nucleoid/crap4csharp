@@ -9,12 +9,14 @@ internal sealed record FreshCapturedBundle(RunManifest Manifest, IReadOnlyDictio
 // inferred warm builds, runtime-load attestation or reusable membership recipe.
 internal static class FreshManifestCapture
 {
-    internal static async Task<FreshCapturedBundle> CaptureAsync(FreshExecutionEvidence execution, CancellationToken cancellation)
+    internal static async Task<FreshCapturedBundle> CaptureAsync(FreshExecutionEvidence execution, CancellationToken cancellation,
+        CompletedProofTiming? timing = null)
     {
         var preflight = execution.Preflight;
         if (execution.Coverage is null || execution.Tests.Failure is not null || execution.Compiler.RetainedProof is null)
             throw Refuse();
-        await RegateAsync(execution, cancellation);
+        using (timing?.Start("public.capture.initialRegate"))
+            await RegateAsync(execution, cancellation, timing, "public.capture.initialRegate");
         var graph = execution.Compiler.FinalGraph;
         var bindings = graph.GraphContexts.ToDictionary(b => b.GraphId, StringComparer.Ordinal);
         var observations = execution.Compiler.Observations.ToDictionary(o => o.ProjectPath, PathIdentityPolicy.Current.Comparer);
@@ -269,9 +271,13 @@ internal static class FreshManifestCapture
                 { StateHash = stateHash },
             [new("workspace", "workspace", OperatingSystem.IsWindows() ? "insensitive" : "sensitive")], contexts, builds, executions, artifacts,
             new(CanonicalIdentity.Sha256(scopeBytes.AsSpan()), CanonicalIdentity.Sha256(policyBytes.AsSpan()), null, null), null));
-        await RegateAsync(execution, cancellation);
-        var valid = ProvenanceVerifier.VerifyCaptureCancellable(manifest, bytes, preflight.Policy.Ruleset, cancellation);
-        if (valid.Status != ProvenanceStatus.Captured) throw new PolicyException("check.captureUnproven", string.Join(", ", valid.Reasons));
+        using (timing?.Start("public.capture.finalRegate"))
+            await RegateAsync(execution, cancellation, timing, "public.capture.finalRegate");
+        using (timing?.Start("public.capture.verifyCapture"))
+        {
+            var valid = ProvenanceVerifier.VerifyCaptureCancellable(manifest, bytes, preflight.Policy.Ruleset, cancellation);
+            if (valid.Status != ProvenanceStatus.Captured) throw new PolicyException("check.captureUnproven", string.Join(", ", valid.Reasons));
+        }
         return new(manifest, bytes);
     }
 
@@ -279,8 +285,9 @@ internal static class FreshManifestCapture
         string destination, CancellationToken cancellation, CompletedProofTiming? timing = null,
         string timingPrefix = "publication")
     {
-        if (ProvenanceVerifier.VerifyCaptureCancellable(captured.Manifest, captured.Bytes,
-            execution.Preflight.Policy.Ruleset, cancellation).Status != ProvenanceStatus.Captured) throw Refuse();
+        using (timing?.Start(timingPrefix + ".verifyCapture"))
+            if (ProvenanceVerifier.VerifyCaptureCancellable(captured.Manifest, captured.Bytes,
+                execution.Preflight.Policy.Ruleset, cancellation).Status != ProvenanceStatus.Captured) throw Refuse();
         var request = execution.Preflight.Request with { ArtifactOutput = destination };
         var preflight = execution.Preflight with { Request = request };
         FreshCheckPreflightLoader.ValidateDestinations(request, preflight.Root,
@@ -289,8 +296,9 @@ internal static class FreshManifestCapture
         await RegateAsync(execution, cancellation, timing, timingPrefix + ".regate");
         FreshCheckExecution.ProtectPreparedDestinations(preflight, execution.Compiler.FinalGraph);
         cancellation.ThrowIfCancellationRequested();
-        return ArtifactCaptureAdapter.PublishNewCancellable(captured.Manifest, captured.Bytes,
-            Path.GetFullPath(destination, preflight.Root), cancellation);
+        using (timing?.Start(timingPrefix + ".publishAdapter"))
+            return ArtifactCaptureAdapter.PublishNewCancellable(captured.Manifest, captured.Bytes,
+                Path.GetFullPath(destination, preflight.Root), cancellation);
     }
 
     internal static async Task RegateAsync(FreshExecutionEvidence execution, CancellationToken cancellation,

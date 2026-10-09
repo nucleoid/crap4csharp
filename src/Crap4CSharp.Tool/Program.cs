@@ -101,13 +101,13 @@ internal static class App
 
     public static async Task<int> RunAsync(string[] args, string workingDirectory, TextWriter output, TextWriter error,
         CancellationToken cancellationToken, ProcessExecutor? processExecutor = null,
-        Func<CancellationToken, Task>? beforeTerminalPublication = null)
+        Func<CancellationToken, Task>? beforeTerminalPublication = null, CompletedProofTiming? freshTiming = null)
     {
         if (args.Any(arg => arg is "--help" or "-h")) { await output.WriteLineAsync(Help); return 0; }
         if (args.Length > 0 && args[0] == "baseline")
             return await BaselineCommand.RunAsync(args, workingDirectory, output, error, cancellationToken);
         if (args.Length > 0 && args[0] is "analyze" or "check")
-            return await RunCallableCommandAsync(args, workingDirectory, output, error, cancellationToken, beforeTerminalPublication);
+            return await RunCallableCommandAsync(args, workingDirectory, output, error, cancellationToken, beforeTerminalPublication, freshTiming);
 
         var startedAt = DateTimeOffset.UtcNow;
         var stopwatch = Stopwatch.StartNew();
@@ -211,7 +211,7 @@ internal static class App
 
     private static async Task<int> RunCallableCommandAsync(string[] args, string workingDirectory,
         TextWriter output, TextWriter error, CancellationToken cancellationToken,
-        Func<CancellationToken, Task>? beforeTerminalPublication)
+        Func<CancellationToken, Task>? beforeTerminalPublication, CompletedProofTiming? freshTiming)
     {
         var startedAt = DateTimeOffset.UtcNow;
         var stopwatch = Stopwatch.StartNew();
@@ -235,7 +235,7 @@ internal static class App
                         IncludeTests: options.IncludeTests, IncludeGenerated: options.IncludeGenerated), options.Timeout);
                 freshResult = await FreshCheckCommand.RunAsync(request, workingDirectory, startedAt, cancellationToken,
                     proof => failureOutputProof = proof, directory => privateDiagnostics = directory,
-                    proof => terminalProof = proof, refusal => freshTerminalFailure = refusal);
+                    proof => terminalProof = proof, refusal => freshTerminalFailure = refusal, freshTiming);
             }
             // Fresh execution has already materialized the graceful cancellation
             // terminal, including actual completed/interrupted/not-run contexts.

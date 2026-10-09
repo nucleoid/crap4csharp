@@ -22,7 +22,7 @@ public sealed class FreshCheckExecutionTests
     [InlineData(false)]
     [InlineData(true)]
     public Task NoChangedIncrementalScopeStillExecutesRequiredTestsAndReportsCrapNAOnlyAfterSuccess(bool failing)
-        => RunCase(failing, false, scopedEmpty: true);
+        => RunCase(failing, false, scopedEmpty: true, publicTiming: true);
 
     [Fact]
     public Task SemanticEmptyProductionStillRunsRequiredTestsAndReportsExplicitNA()
@@ -36,7 +36,7 @@ public sealed class FreshCheckExecutionTests
     [InlineData("artifacts")]
     [InlineData("intermediate")]
     public Task LocalColdFreshCheckAcceptsEvaluatedCustomOutputWithoutRebaseliningAuthoredInputs(string outputLayout)
-        => RunCase(false, false, policyScope: "all", local: true, outputLayout: outputLayout);
+        => RunCase(false, false, policyScope: "all", local: true, outputLayout: outputLayout, publicTiming: true);
 
     [Theory]
     [InlineData("source")]
@@ -370,7 +370,7 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, false, policyScope: "all", standaloneTest: true, savedResults: true, freshTerminalCancellation: true, freshTerminalDeadline: true);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -1826,6 +1826,8 @@ public sealed class FreshCheckExecutionTests
         if (includeGenerated) publicArgs = [.. publicArgs, "--include-generated"];
         using var lateFreshCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
         var lateFreshCallbacks = 0;
+        var actualTiming = publicTiming ? new CompletedProofTiming() : null;
+        var actualStart = System.Diagnostics.Stopwatch.StartNew();
         var exit = await global::App.RunAsync(publicArgs, fixture.Path, output, errors,
             freshTerminalCancellation ? lateFreshCancellation.Token : token,
             beforeTerminalPublication: freshTerminalCancellation ? ct =>
@@ -1838,7 +1840,13 @@ public sealed class FreshCheckExecutionTests
                     throw new ProcessTimeoutException("Fresh check", TimeSpan.FromSeconds(600));
                 lateFreshCancellation.Cancel();
                 return Task.CompletedTask;
-            } : null);
+            } : null, freshTiming: actualTiming);
+        if (actualTiming is not null)
+        {
+            Assert.All(actualTiming.Spans, span => Assert.True(double.IsFinite(span.Milliseconds) && span.Milliseconds >= 0));
+            Console.WriteLine("STRICT_PUBLIC_TIMING " + JsonSerializer.Serialize(new
+                { outputLayout, exit, wallMilliseconds = actualStart.Elapsed.TotalMilliseconds, spans = actualTiming.Spans }));
+        }
         using var terminal = JsonDocument.Parse(output.ToString());
         if (defaultSolution) Assert.True(exit == 0, errors + Environment.NewLine + output);
         AssertRetainedPrivateDiagnostics(terminal.RootElement, requireBuildLog: true);
