@@ -6,7 +6,8 @@ internal static class FreshRetainedCompletedProof
 {
     internal static async Task<CurrentEvidence> ValidateAsync(FreshExecutionEvidence execution,
         ArtifactBundle bundle, FreshCheckPreflight preflight, CancellationToken token,
-        Func<CancellationToken, Task>? beforeFinalValidation = null)
+        Func<CancellationToken, Task>? beforeFinalValidation = null,
+        CompletedProofTiming? timing = null)
     {
         token.ThrowIfCancellationRequested();
         if (execution.Coverage is null || execution.Tests.Failure is not null ||
@@ -34,21 +35,27 @@ internal static class FreshRetainedCompletedProof
         var request = new ProjectContextLoadRequest(selected, preflight.Policy.Configuration, platform,
             preflight.Policy.TargetFrameworks.ToArray(), preflight.Request.Overrides.IncludeTests ?? false,
             preflight.Request.Overrides.IncludeGenerated ?? false, preflight.Request.Timeout);
-        var intermediate = await LoadPlanAsync();
+        var intermediate = await LoadPlanAsync("intermediate");
         var compiler = execution.Compiler with { FinalGraph = intermediate.PreparedGraph };
-        ValidateSaved(compiler, intermediate);
+        using (timing?.Start("intermediate.saved")) ValidateSaved(compiler, intermediate);
         if (beforeFinalValidation is not null) await beforeFinalValidation(token);
         // Independently CURRENT runners first, graph last. Both saved and original
         // immutable once-executed schedules must agree; no rebaselining snapshots.
-        var final = await LoadPlanAsync();
+        var final = await LoadPlanAsync("final");
         compiler = execution.Compiler with { FinalGraph = final.PreparedGraph };
-        ValidateSaved(compiler, final);
+        using (timing?.Start("final.saved")) ValidateSaved(compiler, final);
         var outputs = SavedCompletedProof.OutputFootprint(compiler);
-        if (execution.Preflight.GitSnapshot is not null)
-            await FreshGitProof.ValidateAsync(execution.Preflight, token, outputs);
-        await FreshGitProof.ValidateAsync(preflight, token, outputs);
-        var current = CurrentEvidenceAdapter.ProjectCompleted(bundle, preflight, compiler, token);
-        var bundleFiles = SavedBundleFootprint.Validate(bundle, root, current.ProtectedPaths, token);
+        using (timing?.Start("revision.originalGit"))
+            if (execution.Preflight.GitSnapshot is not null)
+                await FreshGitProof.ValidateAsync(execution.Preflight, token, outputs);
+        using (timing?.Start("revision.current"))
+            await FreshGitProof.ValidateAsync(preflight, token, outputs);
+        CurrentEvidence current;
+        using (timing?.Start("projection"))
+            current = CurrentEvidenceAdapter.ProjectCompleted(bundle, preflight, compiler, token);
+        IReadOnlySet<string> bundleFiles;
+        using (timing?.Start("physical.bundleIntermediate"))
+            bundleFiles = SavedBundleFootprint.Validate(bundle, root, current.ProtectedPaths, token);
         if (execution.Preflight.GitSnapshot is null)
         {
             // Manifest ORIGINAL membership must equal the retained invocation,
@@ -56,18 +63,25 @@ internal static class FreshRetainedCompletedProof
             if (execution.Preflight.LocalSnapshot is null || bundle.Manifest.Revision.Kind != "none" ||
                 FreshLocalProof.Identity(execution.Preflight.LocalSnapshot) != bundle.Manifest.Revision.StateHash)
                 throw Refuse();
-            FreshLocalProof.Validate(execution.Preflight, token, outputs, bundleFiles);
+            using (timing?.Start("revision.originalLocal"))
+                FreshLocalProof.Validate(execution.Preflight, token, outputs, bundleFiles);
         }
         // No await or user callback after the final original/physical snapshot gates.
-        retained.ValidateAgainstCurrentGraph(final.PreparedGraph, token);
-        _ = SavedBundleFootprint.Validate(bundle, root, current.ProtectedPaths, token);
+        using (timing?.Start("physical.originalFinal"))
+            retained.ValidateAgainstCurrentGraph(final.PreparedGraph, token);
+        using (timing?.Start("physical.bundleFinal"))
+            _ = SavedBundleFootprint.Validate(bundle, root, current.ProtectedPaths, token);
         token.ThrowIfCancellationRequested();
         return current;
 
-        async Task<CheckExecutionPlan> LoadPlanAsync()
+        async Task<CheckExecutionPlan> LoadPlanAsync(string boundary)
         {
-            var runners = await ProjectContextLoader.DiscoverTestRunnersAsync(request, token);
-            var graph = await ProjectContextLoader.LoadGraphAsync(request, token);
+            ProjectContextLoadResult runners;
+            using (timing?.Start(boundary + ".runners"))
+                runners = await ProjectContextLoader.DiscoverTestRunnersAsync(request, token);
+            ProjectContextLoadResult graph;
+            using (timing?.Start(boundary + ".graph"))
+                graph = await ProjectContextLoader.LoadGraphAsync(request, token);
             FreshCheckExecution.RequirePolicyTargets(preflight, graph);
             FreshCheckExecution.RequirePolicyTargets(execution.Preflight, graph);
             var plan = CheckExecutionPlan.Create(runners, graph, token);

@@ -6,9 +6,10 @@ using Crap4CSharp.Core;
 internal static class FreshCompletedCapture
 {
     internal static async Task<FreshCapturedBundle> PromoteAsync(FreshExecutionEvidence execution,
-        FreshCapturedBundle captured, CancellationToken token)
+        FreshCapturedBundle captured, CancellationToken token, CompletedProofTiming? timing = null)
     {
-        await FreshManifestCapture.RegateAsync(execution, token);
+        using (timing?.Start("promotion.originalRegate"))
+            await FreshManifestCapture.RegateAsync(execution, token);
         var root = execution.Preflight.Root;
         string Relative(string physical)
         {
@@ -36,27 +37,34 @@ internal static class FreshCompletedCapture
             }).ToArray(), ManifestHash = null
         });
         var prospective = captured with { Manifest = manifest };
-        var path = await FreshManifestCapture.PublishAsync(execution, prospective,
-            Path.Combine(execution.PrivateDirectory, "prospective-completed-bundle"), token);
-        await ValidateAsync(execution, ArtifactBundle.Load(path, execution.PrivateDirectory), token);
+        string path;
+        using (timing?.Start("promotion.prospectivePublish"))
+            path = await FreshManifestCapture.PublishAsync(execution, prospective,
+                Path.Combine(execution.PrivateDirectory, "prospective-completed-bundle"), token);
+        ArtifactBundle bundle;
+        using (timing?.Start("promotion.physicalLoad"))
+            bundle = ArtifactBundle.Load(path, execution.PrivateDirectory);
+        await ValidateAsync(execution, bundle, token, timing: timing);
         return prospective;
     }
 
     internal static async Task<ProvenanceResult> ValidateAsync(FreshExecutionEvidence execution,
         ArtifactBundle bundle, CancellationToken token,
-        Func<CancellationToken, Task>? beforeFinalValidation = null)
+        Func<CancellationToken, Task>? beforeFinalValidation = null, CompletedProofTiming? timing = null)
     {
         token.ThrowIfCancellationRequested();
         var original = execution.Preflight;
         var local = original.GitSnapshot is null;
-        var preflight = await CompletedReusePreflight.LoadAsync(bundle, original.Root,
-            original.Request.PolicyPath, local ? null : original.Trusted.Revision,
-            local, null, original.Request.Timeout, token);
+        FreshCheckPreflight preflight;
+        using (timing?.Start("current.preflight"))
+            preflight = await CompletedReusePreflight.LoadAsync(bundle, original.Root,
+                original.Request.PolicyPath, local ? null : original.Trusted.Revision,
+                local, null, original.Request.Timeout, token);
         CompletedReusePreflight.ValidateScope(bundle, preflight);
         // Only this live invocation may reuse its original retained compiler proof.
         // Saved-only public consumers continue through the full generic validator.
         var current = await FreshRetainedCompletedProof.ValidateAsync(execution, bundle, preflight, token,
-            beforeFinalValidation);
+            beforeFinalValidation, timing);
         var proof = ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, current, true,
             original.Policy.Ruleset);
         if (proof.Status != ProvenanceStatus.Verified || !proof.Reusable) throw Refuse();

@@ -1581,9 +1581,10 @@ public sealed class FreshCheckExecutionTests
             {
                 // Diagnostic timings retain every actual gate. This is not an
                 // elapsed product deadline acceptance or permission to extend it.
+                var promotionTiming = new CompletedProofTiming();
                 if (promotionMeasure)
                     measuredCapture = await MeasureAsync("promotionWithIndependentCurrentProof", () =>
-                        FreshCompletedCapture.PromoteAsync(evidence, measuredCapture!, token));
+                        FreshCompletedCapture.PromoteAsync(evidence, measuredCapture!, token, promotionTiming));
                 await MeasureAsync("finalRegate", async () => { await FreshManifestCapture.RegateAsync(evidence, token); return true; });
                 var published = await MeasureAsync("requestedPublishWithRegate", () => FreshManifestCapture.PublishAsync(evidence,
                     measuredCapture!, "bundle", token));
@@ -1593,11 +1594,37 @@ public sealed class FreshCheckExecutionTests
                 if (promotionMeasure)
                 {
                     var finalBundle = ArtifactBundle.Load(published, fixture.Path);
+                    var finalTiming = new CompletedProofTiming();
+                    var outerTiming = new CompletedProofTiming();
                     var finalProof = await MeasureAsync("finalIndependentCurrentProof", () =>
-                        FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token));
+                        FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token, timing: finalTiming));
                     var outerProof = await MeasureAsync("outerIndependentCurrentProof", () =>
-                        FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token));
+                        FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token, timing: outerTiming));
                     Assert.True(finalProof.Reusable); Assert.True(outerProof.Reusable);
+                    // Same original execution, physical bundle and current observations:
+                    // numeric diagnostics must not affect the complete proof verdict.
+                    var unobservedProof = await FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token);
+                    Assert.Equal(JsonSerializer.Serialize(unobservedProof), JsonSerializer.Serialize(finalProof));
+                    Assert.Equal(JsonSerializer.Serialize(unobservedProof), JsonSerializer.Serialize(outerProof));
+                    if (!promotionDrift)
+                    {
+                        using var cancelled = CancellationTokenSource.CreateLinkedTokenSource(token);
+                        var cancellationTiming = new CompletedProofTiming();
+                        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => FreshCompletedCapture.ValidateAsync(
+                            evidence, finalBundle, cancelled.Token, _ =>
+                            {
+                                cancelled.Cancel();
+                                return Task.CompletedTask;
+                            }, cancellationTiming));
+                        Assert.Contains(cancellationTiming.Spans, span => span.Phase == "intermediate.saved");
+                        Assert.DoesNotContain(cancellationTiming.Spans, span => span.Phase == "final.saved");
+                    }
+                    foreach (var observation in new[] { ("promotion", promotionTiming), ("final", finalTiming), ("outer", outerTiming) })
+                    {
+                        Assert.NotEmpty(observation.Item2.Spans);
+                        Assert.All(observation.Item2.Spans, span => Assert.True(double.IsFinite(span.Milliseconds) && span.Milliseconds >= 0));
+                        Console.WriteLine("NESTED_PROOF_TIMING " + JsonSerializer.Serialize(new { invocation = observation.Item1, spans = observation.Item2.Spans }));
+                    }
                     if (promotionDrift)
                     {
                         // Mutate only this invocation's owned consumer files, AFTER
@@ -1631,12 +1658,14 @@ public sealed class FreshCheckExecutionTests
                             ("physical-bundle-manifest", finalBundle.ManifestPath,
                                 bytes => [.. bytes, (byte)' '])
                         };
-                        async Task<Exception?> RefuseMutationAsync(Action mutate)
+                        async Task<Exception?> RefuseMutationAsync(Action mutate, bool observed = false)
                         {
+                            var refusalTiming = observed ? new CompletedProofTiming() : null;
                             if (!promotionIntermediateDrift)
                             {
                                 mutate();
-                                return await Record.ExceptionAsync(() => FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token));
+                                return await Record.ExceptionAsync(() => FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token,
+                                    timing: refusalTiming));
                             }
                             var reachedIntermediate = false;
                             var refusal = await Record.ExceptionAsync(() => FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token,
@@ -1646,8 +1675,9 @@ public sealed class FreshCheckExecutionTests
                                     reachedIntermediate = true;
                                     mutate();
                                     return Task.CompletedTask;
-                                }));
+                                }, refusalTiming));
                             Assert.True(reachedIntermediate, "Mutation must follow successful intermediate complete proof.");
+                            if (observed) Assert.Contains(refusalTiming!.Spans, span => span.Phase == "intermediate.saved");
                             return refusal;
                         }
                         foreach (var mutation in mutations)
@@ -1656,13 +1686,21 @@ public sealed class FreshCheckExecutionTests
                             var originalTime = File.GetLastWriteTimeUtc(mutation.Path);
                             try
                             {
-                                var refused = await RefuseMutationAsync(() =>
+                                void Mutate()
                                 {
                                     File.WriteAllBytes(mutation.Path, mutation.Change(originalBytes));
                                     File.SetLastWriteTimeUtc(mutation.Path, originalTime);
                                     Assert.Equal(originalTime, File.GetLastWriteTimeUtc(mutation.Path));
                                     Assert.NotEqual(originalBytes, File.ReadAllBytes(mutation.Path));
-                                });
+                                }
+                                var refused = await RefuseMutationAsync(Mutate);
+                                File.WriteAllBytes(mutation.Path, originalBytes);
+                                File.SetLastWriteTimeUtc(mutation.Path, originalTime);
+                                var observedRefusal = await RefuseMutationAsync(Mutate, observed: true);
+                                Assert.NotNull(refused); Assert.NotNull(observedRefusal);
+                                Assert.Equal(refused.GetType(), observedRefusal.GetType());
+                                if (refused is PolicyException policyRefusal)
+                                    Assert.Equal(policyRefusal.Code, Assert.IsType<PolicyException>(observedRefusal).Code);
                                 Assert.True(refused is PolicyException or ProjectContextException or InvalidDataException,
                                     mutation.Role + ": " + refused);
                                 Console.WriteLine((promotionIntermediateDrift ? "FRESH_INTERMEDIATE_DRIFT_REFUSED " : "FRESH_PROMOTION_DRIFT_REFUSED ") + mutation.Role + " " + refused!.GetType().Name);
@@ -1679,6 +1717,9 @@ public sealed class FreshCheckExecutionTests
                         {
                             var refusal = await RefuseMutationAsync(() => File.WriteAllText(added, "<root />"));
                             var refused = Assert.IsType<PolicyException>(refusal);
+                            File.Delete(added);
+                            var observedRefusal = await RefuseMutationAsync(() => File.WriteAllText(added, "<root />"), observed: true);
+                            Assert.Equal(refused.Code, Assert.IsType<PolicyException>(observedRefusal).Code);
                             // Both retained boundaries reject original local
                             // membership drift before projecting verified current
                             // evidence; no outer promotion wrapper is required.
