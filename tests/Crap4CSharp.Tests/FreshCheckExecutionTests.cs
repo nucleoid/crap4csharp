@@ -1346,9 +1346,36 @@ public sealed class FreshCheckExecutionTests
                         Assert.NotNull(gate);
                         void Agree(ArtifactBundle candidate)
                         {
-                            try { gate.Invoke(null, [candidate, currentPlan, currentCompiler, fixture.Path, token]); }
-                            catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
-                            { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); }
+                            // Compare the original fresh three-gate ordering with the
+                            // boundary-owned composite on every real resealed adversary.
+                            // No prevalidated result is accepted by the new entry point.
+                            var original = Record.Exception(() =>
+                            {
+                                SavedRequiredTestResults.Validate(candidate, currentPlan, currentCompiler, fixture.Path, token);
+                                CoverageGraphBinding.ValidateSavedNormalized(candidate, currentPlan, currentCompiler, fixture.Path, token);
+                                try { gate.Invoke(null, [candidate, currentPlan, currentCompiler, fixture.Path, token]); }
+                                catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
+                                { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); }
+                            });
+                            var timing = new CompletedProofTiming();
+                            var composite = Record.Exception(() => SavedProductionExecutions.ValidateFreshBoundary(
+                                candidate, currentPlan, currentCompiler, fixture.Path, token, timing, "comparison"));
+                            Assert.Equal(original?.GetType(), composite?.GetType());
+                            Assert.Equal((original as PolicyException)?.Code, (composite as PolicyException)?.Code);
+                            Assert.Single(timing.Spans, span => span.Phase == "comparison.saved.requiredResults");
+                            if (original is null)
+                            {
+                                Assert.Single(timing.Spans, span => span.Phase == "comparison.saved.coverage");
+                                Assert.Single(timing.Spans, span => span.Phase == "comparison.saved.production");
+                            }
+                            // Preserve this existing generic-provider oracle too: it
+                            // deliberately wraps prerequisite refusal as production.
+                            if (original is not null)
+                            {
+                                try { gate.Invoke(null, [candidate, currentPlan, currentCompiler, fixture.Path, token]); }
+                                catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
+                                { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); }
+                            }
                         }
                         void Reject(RunManifest changed)
                             => Assert.Equal("provenance.savedProductionExecutionsUnproven", Assert.Throws<PolicyException>(() =>
@@ -1618,6 +1645,11 @@ public sealed class FreshCheckExecutionTests
                             }, cancellationTiming));
                         Assert.Contains(cancellationTiming.Spans, span => span.Phase == "intermediate.saved");
                         Assert.DoesNotContain(cancellationTiming.Spans, span => span.Phase == "final.saved");
+                        foreach (var phase in new[] { "requiredResults", "coverage", "production", "compilerContexts", "originalPhysical" })
+                        {
+                            Assert.Single(cancellationTiming.Spans, span => span.Phase == "intermediate.saved." + phase);
+                            Assert.DoesNotContain(cancellationTiming.Spans, span => span.Phase == "final.saved." + phase);
+                        }
                         Assert.Contains(cancellationTiming.Spans, span => span.Phase == "intermediate.graph.loader.worker.compilation");
                         Assert.DoesNotContain(cancellationTiming.Spans, span => span.Phase.StartsWith("final.graph.loader", StringComparison.Ordinal));
                     }
@@ -1627,6 +1659,8 @@ public sealed class FreshCheckExecutionTests
                         Assert.All(observation.Item2.Spans, span => Assert.True(double.IsFinite(span.Milliseconds) && span.Milliseconds >= 0));
                         foreach (var boundary in new[] { "intermediate", "final" })
                         {
+                            foreach (var phase in new[] { "requiredResults", "coverage", "production", "compilerContexts", "originalPhysical" })
+                                Assert.Single(observation.Item2.Spans, span => span.Phase == boundary + ".saved." + phase);
                             foreach (var loader in new[] { "runners", "graph" })
                             {
                                 var prefix = boundary + "." + loader + ".loader.";

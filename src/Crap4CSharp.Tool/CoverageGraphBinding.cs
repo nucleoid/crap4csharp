@@ -262,6 +262,34 @@ internal static class CoverageGraphBinding
         try
         {
             var inventory = SavedRequiredTestResults.Validate(bundle, current, bound, root, token);
+            return ValidateSavedNormalizedCore(bundle, bound, token, inventory);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception error) when (error is PolicyException or ProjectContextException or IOException or
+            UnauthorizedAccessException or ArgumentException or InvalidOperationException or KeyNotFoundException or
+            OverflowException or System.Xml.XmlException) { throw SavedRefuse(); }
+    }
+
+    // Fresh required-results refusal precedes the coverage wrapper, just as in
+    // the original ordered boundary. Own these proofs here; accept no caller proof.
+    internal static (IReadOnlyList<SavedRequiredTest> Required, BoundSavedGraphCoverage Coverage)
+        ValidateFreshRequiredAndNormalized(ArtifactBundle bundle, CheckExecutionPlan current,
+            CompilerGraphPhaseResult bound, string root, CancellationToken token,
+            CompletedProofTiming? timing, string boundary)
+    {
+        IReadOnlyList<SavedRequiredTest> inventory;
+        using (timing?.Start(boundary + ".saved.requiredResults"))
+            inventory = SavedRequiredTestResults.Validate(bundle, current, bound, root, token);
+        using (timing?.Start(boundary + ".saved.coverage"))
+            return (inventory, ValidateSavedNormalizedCore(bundle, bound, token, inventory));
+    }
+
+    private static BoundSavedGraphCoverage ValidateSavedNormalizedCore(ArtifactBundle bundle,
+        CompilerGraphPhaseResult bound, CancellationToken token, IReadOnlyList<SavedRequiredTest> inventory)
+    {
+        token.ThrowIfCancellationRequested();
+        try
+        {
             var nodes = CompilerGraphExecution.ValidateAndFreeze(bound.FinalGraph).ToDictionary(n => n.Id, StringComparer.Ordinal);
             var bindings = bound.FinalGraph.GraphContexts.ToDictionary(b => b.GraphId, StringComparer.Ordinal);
             var observations = bound.Observations.ToDictionary(o => o.ProjectPath, PathIdentityPolicy.Current.Comparer);

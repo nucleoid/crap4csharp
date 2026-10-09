@@ -14,6 +14,35 @@ internal static class SavedProductionExecutions
         {
             var required = SavedRequiredTestResults.Validate(bundle, current, compiler, root, token);
             var coverage = CoverageGraphBinding.ValidateSavedNormalized(bundle, current, compiler, root, token);
+            ValidateCore(bundle, current, compiler, root, token, required, coverage);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception error) when (error is PolicyException or ProjectContextException or IOException or UnauthorizedAccessException or
+            ArgumentException or InvalidOperationException or KeyNotFoundException or OverflowException)
+        { throw Refuse(); }
+    }
+
+    // Own the complete synchronous fresh boundary. No caller can supply a proof
+    // result, and nothing is retained across intermediate/final/outer boundaries.
+    // Preserve the fresh caller's original required-results -> coverage ->
+    // production refusal ordering; the generic saved-only entry point is unchanged.
+    internal static void ValidateFreshBoundary(ArtifactBundle bundle, CheckExecutionPlan current,
+        CompilerGraphPhaseResult compiler, string root, CancellationToken token,
+        CompletedProofTiming? timing = null, string boundary = "fresh")
+    {
+        var proof = CoverageGraphBinding.ValidateFreshRequiredAndNormalized(
+            bundle, current, compiler, root, token, timing, boundary);
+        using (timing?.Start(boundary + ".saved.production"))
+            ValidateCore(bundle, current, compiler, root, token, proof.Required, proof.Coverage);
+    }
+
+    private static void ValidateCore(ArtifactBundle bundle, CheckExecutionPlan current,
+        CompilerGraphPhaseResult compiler, string root, CancellationToken token,
+        IReadOnlyList<SavedRequiredTest> required, BoundSavedGraphCoverage coverage)
+    {
+        token.ThrowIfCancellationRequested();
+        try
+        {
             var nodes = CompilerGraphExecution.ValidateAndFreeze(compiler.FinalGraph).ToDictionary(n => n.Id, StringComparer.Ordinal);
             var bindings = compiler.FinalGraph.GraphContexts.ToDictionary(b => b.GraphId, StringComparer.Ordinal);
             var observed = compiler.Observations.ToDictionary(o => o.ProjectPath, PathIdentityPolicy.Current.Comparer);

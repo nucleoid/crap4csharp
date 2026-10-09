@@ -37,13 +37,13 @@ internal static class FreshRetainedCompletedProof
             preflight.Request.Overrides.IncludeGenerated ?? false, preflight.Request.Timeout);
         var intermediate = await LoadPlanAsync("intermediate");
         var compiler = execution.Compiler with { FinalGraph = intermediate.PreparedGraph };
-        using (timing?.Start("intermediate.saved")) ValidateSaved(compiler, intermediate);
+        using (timing?.Start("intermediate.saved")) ValidateSaved(compiler, intermediate, "intermediate");
         if (beforeFinalValidation is not null) await beforeFinalValidation(token);
         // Independently CURRENT runners first, graph last. Both saved and original
         // immutable once-executed schedules must agree; no rebaselining snapshots.
         var final = await LoadPlanAsync("final");
         compiler = execution.Compiler with { FinalGraph = final.PreparedGraph };
-        using (timing?.Start("final.saved")) ValidateSaved(compiler, final);
+        using (timing?.Start("final.saved")) ValidateSaved(compiler, final, "final");
         var outputs = SavedCompletedProof.OutputFootprint(compiler);
         using (timing?.Start("revision.originalGit"))
             if (execution.Preflight.GitSnapshot is not null)
@@ -92,13 +92,13 @@ internal static class FreshRetainedCompletedProof
             retained.ValidateAgainstCurrentGraph(plan.PreparedGraph, token);
             return plan;
         }
-        void ValidateSaved(CompilerGraphPhaseResult current, CheckExecutionPlan plan)
+        void ValidateSaved(CompilerGraphPhaseResult current, CheckExecutionPlan plan, string boundary)
         {
-            SavedRequiredTestResults.Validate(bundle, plan, current, root, token);
-            CoverageGraphBinding.ValidateSavedNormalized(bundle, plan, current, root, token);
-            SavedProductionExecutions.Validate(bundle, plan, current, root, token);
-            SavedCompilerContexts.Validate(bundle, current, root, token);
-            retained.ValidateAgainstCurrentGraph(current.FinalGraph, token);
+            SavedProductionExecutions.ValidateFreshBoundary(bundle, plan, current, root, token, timing, boundary);
+            using (timing?.Start(boundary + ".saved.compilerContexts"))
+                SavedCompilerContexts.Validate(bundle, current, root, token);
+            using (timing?.Start(boundary + ".saved.originalPhysical"))
+                retained.ValidateAgainstCurrentGraph(current.FinalGraph, token);
         }
     }
     private static PolicyException Refuse() => new("check.retainedCompletedProofUnproven",

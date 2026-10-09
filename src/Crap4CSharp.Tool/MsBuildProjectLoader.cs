@@ -46,6 +46,7 @@ internal static partial class MsBuildProjectLoader
             using (request.Timing?.Start("worker.graph"))
                 graph = await DiscoverGraph(request, projects, diagnostics, excludedProjects, cancellationToken);
             var bindings = new List<ProjectGraphContextBinding>();
+            using var graphWorkspace = new GraphWorkspace(diagnostics);
             foreach (var node in graph.BuildGraph)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -56,7 +57,7 @@ internal static partial class MsBuildProjectLoader
                 EnsurePreparedAssets(metadata, node.ProjectPath);
                 // Required execution contexts are independent of production inventory filtering.
                 var context = await LoadContext(root, node.ProjectPath, node.TargetFramework, selected, diagnostics,
-                    cancellationToken, node.GlobalProperties);
+                    cancellationToken, node.GlobalProperties, metadata, graphWorkspace);
                 bindings.Add(new(node.Id, node.ProjectPath, context, metadata.IsTestProject));
             }
             return new(true, bindings.Select(binding => binding.Context).ToArray(), diagnostics, null, excludedProjects)
@@ -244,15 +245,24 @@ internal static partial class MsBuildProjectLoader
 
     private static async Task<ProjectAnalysisContext> LoadContext(string root, string projectPath, string framework,
         ProjectContextLoadRequest request, List<string> diagnostics, CancellationToken cancellationToken,
-        IReadOnlyDictionary<string, string>? globalProperties = null)
+        IReadOnlyDictionary<string, string>? globalProperties = null, EvaluatedMetadata? evaluatedMetadata = null,
+        GraphWorkspace? graphWorkspace = null)
     {
         using var contextTiming = request.Timing?.Start("worker.context");
         EvaluatedMetadata metadata;
         using (request.Timing?.Start("worker.contextMetadata"))
-            metadata = Evaluate(projectPath, request.Configuration, request.Platform, framework, globalProperties);
+            // Reuse only this exact graph node's evaluation in this worker invocation.
+            // Each independent current load still evaluates every node afresh; differing
+            // mapped globals and all authored snapshots remain isolated and unchanged.
+            metadata = evaluatedMetadata ?? Evaluate(projectPath, request.Configuration, request.Platform, framework, globalProperties);
         EnsurePreparedAssets(metadata, projectPath);
         var beforeInputs = SnapshotInputs(metadata.AuthoredInputs);
-        using var workspace = CreateWorkspace(request.Configuration, request.Platform, framework, diagnostics, out var workspaceDiagnostics, globalProperties);
+        List<WorkspaceDiagnostic> workspaceDiagnostics = [];
+        using var ownedWorkspace = graphWorkspace is null
+            ? CreateWorkspace(request.Configuration, request.Platform, framework, diagnostics, out workspaceDiagnostics, globalProperties)
+            : null;
+        var workspace = ownedWorkspace ?? graphWorkspace!.Acquire(request.Configuration, request.Platform, framework,
+            globalProperties, out workspaceDiagnostics);
         Microsoft.CodeAnalysis.Project project;
         using (request.Timing?.Start("worker.workspace"))
             project = await workspace.OpenProjectAsync(projectPath, cancellationToken: cancellationToken);
@@ -413,15 +423,55 @@ internal static partial class MsBuildProjectLoader
         }
     }
 
-    private static MSBuildWorkspace CreateWorkspace(string configuration, string? platform, string? framework,
-        List<string> diagnostics, out List<WorkspaceDiagnostic> workspaceDiagnostics,
-        IReadOnlyDictionary<string, string>? globalProperties = null)
+    // One owner per independent worker graph load. Reset the complete solution before
+    // every node: no project, compilation, document or acceptance proof is reused.
+    // Retain a workspace only for identical effective globals; dispose on every change.
+    private sealed class GraphWorkspace(List<string> diagnostics) : IDisposable
+    {
+        private MSBuildWorkspace? workspace;
+        private Dictionary<string, string>? properties;
+        private List<WorkspaceDiagnostic> failures = [];
+
+        internal MSBuildWorkspace Acquire(string configuration, string? platform, string framework,
+            IReadOnlyDictionary<string, string>? globals, out List<WorkspaceDiagnostic> workspaceDiagnostics)
+        {
+            var current = WorkspaceProperties(configuration, platform, framework, globals);
+            if (workspace is null || properties is null || properties.Count != current.Count ||
+                current.Any(pair => !properties.TryGetValue(pair.Key, out var value) ||
+                    !string.Equals(value, pair.Value, StringComparison.Ordinal)))
+            {
+                workspace?.Dispose();
+                workspace = CreateWorkspace(configuration, platform, framework, diagnostics, out failures, globals);
+                properties = current;
+            }
+            else
+            {
+                workspace.CloseSolution();
+                failures.Clear();
+            }
+            workspaceDiagnostics = failures;
+            return workspace;
+        }
+
+        public void Dispose() => workspace?.Dispose();
+    }
+
+    private static Dictionary<string, string> WorkspaceProperties(string configuration, string? platform,
+        string? framework, IReadOnlyDictionary<string, string>? globalProperties)
     {
         var properties = globalProperties is null
             ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["Configuration"] = configuration }
             : new Dictionary<string, string>(globalProperties, StringComparer.OrdinalIgnoreCase);
         if (platform is not null) properties["Platform"] = platform;
         if (framework is not null) properties["TargetFramework"] = framework;
+        return properties;
+    }
+
+    private static MSBuildWorkspace CreateWorkspace(string configuration, string? platform, string? framework,
+        List<string> diagnostics, out List<WorkspaceDiagnostic> workspaceDiagnostics,
+        IReadOnlyDictionary<string, string>? globalProperties = null)
+    {
+        var properties = WorkspaceProperties(configuration, platform, framework, globalProperties);
         var workspace = MSBuildWorkspace.Create(properties);
         workspace.SkipUnrecognizedProjects = false;
         workspace.LoadMetadataForReferencedProjects = true;
