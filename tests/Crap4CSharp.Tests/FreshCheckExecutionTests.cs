@@ -100,6 +100,13 @@ public sealed class FreshCheckExecutionTests
     public Task TwoRequiredContextsMeasureCompletePromotionAndBothFinalIndependentProofsWithoutRepeatingExecution()
         => RunCase(false, true, policyScope: "all", local: true, measure: true, standaloneTest: true, promotionMeasure: true);
 
+    [Theory]
+    [InlineData("artifacts")]
+    [InlineData("intermediate")]
+    public Task TwoRequiredContextsMeasureCustomOutputPromotionWithoutChangingPublicDeadline(string outputLayout)
+        => RunCase(false, true, policyScope: "all", local: true, measure: true, standaloneTest: true,
+            promotionMeasure: true, outputLayout: outputLayout);
+
     [Fact]
     public Task FreshCompletePublicationRejectsPreservedTimestampGraphRunnerExcludedSourceAndPhysicalDriftWithoutNewExecution()
         => RunCase(false, true, policyScope: "all", local: true, measure: true, standaloneTest: true,
@@ -1793,7 +1800,9 @@ public sealed class FreshCheckExecutionTests
                 if (promotionMeasure) expectedTimings.AddRange(["finalIndependentCurrentProof", "outerIndependentCurrentProof"]);
                 Assert.Equal(expectedTimings, timings.Keys);
                 Assert.All(timings.Values, milliseconds => Assert.True(double.IsFinite(milliseconds) && milliseconds >= 0));
-                Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "bin", "Debug", "net10.0", "test-count.txt")));
+                var measuredTestContext = evidence.Compiler.FinalGraph.GraphContexts.Single(binding =>
+                    Path.GetFileName(binding.ProjectPath) == "Tests.csproj").Context;
+                Assert.Single(File.ReadAllLines(Path.Combine(Path.GetDirectoryName(measuredTestContext.EvaluatedTargetPath!)!, "test-count.txt")));
                 Console.WriteLine("FRESH_COMPOSITE_TIMINGS " + JsonSerializer.Serialize(timings));
             }
             else Assert.Equal(inWorkspaceBundle, Directory.Exists(Path.Combine(fixture.Path, "bundle")));
