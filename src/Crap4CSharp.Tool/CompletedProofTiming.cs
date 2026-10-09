@@ -14,7 +14,9 @@ internal sealed class CompletedProofTiming
         foreach (var span in observations.Take(4096))
             if (span.Phase is "worker.discovery" or "worker.graph" or "worker.projectSdk" or "worker.nodeMetadata" or
                 "worker.runnerMetadata" or "worker.contextMetadata" or "worker.workspace" or
-                "worker.documents" or "worker.compilation" or "worker.context" &&
+                "worker.documents" or "worker.compilation" or "worker.context" or
+                "worker.authoredBefore" or "worker.authoredAfter" or "worker.trackedInputs" or
+                "worker.generatorDiscovery" or "worker.generatorValidation" &&
                 double.IsFinite(span.Milliseconds) && span.Milliseconds >= 0)
                 spans.Add(new Span(prefix + "." + span.Phase, span.Milliseconds));
     }

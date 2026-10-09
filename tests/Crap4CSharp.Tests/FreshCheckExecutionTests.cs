@@ -1681,7 +1681,8 @@ public sealed class FreshCheckExecutionTests
                                 foreach (var phase in new[] { "sdk", "subprocess", "snapshotBefore", "snapshotAfter", "worker.discovery", "worker.graph", "worker.nodeMetadata" })
                                     Assert.Contains(observation.Item2.Spans, span => span.Phase == prefix + phase);
                             }
-                            foreach (var phase in new[] { "worker.contextMetadata", "worker.workspace", "worker.documents", "worker.compilation", "worker.context" })
+                            foreach (var phase in new[] { "worker.contextMetadata", "worker.workspace", "worker.documents", "worker.compilation", "worker.context",
+                                "worker.authoredBefore", "worker.authoredAfter", "worker.trackedInputs", "worker.generatorDiscovery" })
                                 Assert.Equal(3, observation.Item2.Spans.Count(span => span.Phase == boundary + ".graph.loader." + phase));
                         }
                         Console.WriteLine("NESTED_PROOF_TIMING " + JsonSerializer.Serialize(new { invocation = observation.Item1, spans = observation.Item2.Spans }));

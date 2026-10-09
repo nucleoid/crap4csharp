@@ -47,5 +47,12 @@ public sealed class CompletedProofTimingTests
             new("worker.projectSdk", -1), new("worker.projectSdk/private-path", 1)]);
         Assert.Equal(4098, timing.Spans.Count);
         Assert.Equal(new CompletedProofTiming.Span("owned.worker.projectSdk", 2.5), timing.Spans[^1]);
+        foreach (var phase in new[] { "worker.authoredBefore", "worker.authoredAfter", "worker.trackedInputs", "worker.generatorDiscovery", "worker.generatorValidation" })
+        {
+            var before = timing.Spans.Count;
+            timing.ImportWorker("owned", [new(phase, 1), new(phase, double.NaN), new(phase, double.PositiveInfinity), new(phase, -1), new(phase + "/private-path", 1)]);
+            Assert.Equal(before + 1, timing.Spans.Count);
+            Assert.Equal(new CompletedProofTiming.Span("owned." + phase, 1), timing.Spans[^1]);
+        }
     }
 }

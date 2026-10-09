@@ -256,7 +256,9 @@ internal static partial class MsBuildProjectLoader
             // mapped globals and all authored snapshots remain isolated and unchanged.
             metadata = evaluatedMetadata ?? Evaluate(projectPath, request.Configuration, request.Platform, framework, globalProperties);
         EnsurePreparedAssets(metadata, projectPath);
-        var beforeInputs = SnapshotInputs(metadata.AuthoredInputs);
+        IReadOnlyDictionary<string, string> beforeInputs;
+        using (request.Timing?.Start("worker.authoredBefore"))
+            beforeInputs = SnapshotInputs(metadata.AuthoredInputs);
         List<WorkspaceDiagnostic> workspaceDiagnostics = [];
         using var ownedWorkspace = graphWorkspace is null
             ? CreateWorkspace(request.Configuration, request.Platform, framework, diagnostics, out workspaceDiagnostics, globalProperties)
@@ -273,7 +275,9 @@ internal static partial class MsBuildProjectLoader
         var compilerDocuments = new List<ProjectSourceIdentity>();
         var exclusions = new List<ProjectSourceExclusion>();
         var evaluatedCompileInputs = metadata.CompileInputs.ToHashSet(PathComparer);
-        var trackedInputs = await TrackedInputs(projectPath, request.Timeout, cancellationToken);
+        HashSet<string> trackedInputs;
+        using (request.Timing?.Start("worker.trackedInputs"))
+            trackedInputs = await TrackedInputs(projectPath, request.Timeout, cancellationToken);
         var documentPaths = project.Documents.Where(document => document.FilePath is not null)
             .Select(document => Path.GetFullPath(document.FilePath!)).ToHashSet(PathComparer);
         using (request.Timing?.Start("worker.documents"))
@@ -303,6 +307,7 @@ internal static partial class MsBuildProjectLoader
             var generators = new List<ISourceGenerator>();
             try
             {
+                using (request.Timing?.Start("worker.generatorDiscovery"))
                 foreach (var reference in project.AnalyzerReferences)
                 {
                     if (reference is AnalyzerFileReference fileReference)
@@ -341,7 +346,9 @@ internal static partial class MsBuildProjectLoader
                 }
                 GeneratorDriver driver = CSharpGeneratorDriver.Create(generators, additionalTexts, parseOptions,
                     project.AnalyzerOptions.AnalyzerConfigOptionsProvider);
-                var run = driver.RunGenerators(compilation.RemoveSyntaxTrees(extraTrees), cancellationToken).GetRunResult();
+                GeneratorDriverRunResult run;
+                using (request.Timing?.Start("worker.generatorValidation"))
+                    run = driver.RunGenerators(compilation.RemoveSyntaxTrees(extraTrees), cancellationToken).GetRunResult();
                 if (run.Results.Any(result => result.Exception is not null) ||
                     run.Diagnostics.Any(d => d.Severity == DiagnosticSeverity.Error || d.Id is "CS8784" or "CS8785"))
                     throw new ProjectContextException("context.generatedSourceUnavailable", "A source generator failed during binding inspection.");
@@ -379,7 +386,9 @@ internal static partial class MsBuildProjectLoader
             .Select(a => new ProjectPhaseInput(Path.GetFullPath(a.FullPath), "analyzer", false)));
         var adapter = new ProjectAdapterIdentity(request.SdkVersion ?? "unknown", request.MsBuildVersion ?? "unknown",
             typeof(CSharpCompilation).Assembly.GetName().Version?.ToString() ?? "unknown");
-        var afterInputs = SnapshotInputs(metadata.AuthoredInputs);
+        IReadOnlyDictionary<string, string> afterInputs;
+        using (request.Timing?.Start("worker.authoredAfter"))
+            afterInputs = SnapshotInputs(metadata.AuthoredInputs);
         if (!beforeInputs.OrderBy(pair => pair.Key, StringComparer.Ordinal).SequenceEqual(afterInputs.OrderBy(pair => pair.Key, StringComparer.Ordinal)))
             throw new ProjectContextException("context.inputsMutated", $"Authored inputs changed while loading {projectPath}.");
         return ProjectAnalysisContext.Create(Logical(root, projectPath), project.AssemblyName ?? metadata.AssemblyName,

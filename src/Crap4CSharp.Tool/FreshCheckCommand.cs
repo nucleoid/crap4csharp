@@ -43,7 +43,7 @@ internal static class FreshCheckCommand
         // metadata without relabeling physical generated inputs as authored.
         FreshExecutionEvidence evidence;
         using (timing?.Start("public.execution"))
-            evidence = await FreshCheckExecution.RunAsync(preflight, token, retainFailureOutputProof, retainPrivateDirectory);
+            evidence = await FreshCheckExecution.RunAsync(preflight, token, retainFailureOutputProof, retainPrivateDirectory, timing);
         retainEvidence(evidence);
         if (evidence.Tests.Failure is not null || evidence.Tests.Count != evidence.Plan.Tests.Count || evidence.Tests.Any(t => t.Process.ExitCode != 0))
         {

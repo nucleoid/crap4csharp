@@ -10,7 +10,8 @@ internal sealed record FreshExecutionEvidence(FreshCheckPreflight Preflight, Che
 internal static class FreshCheckExecution
 {
     internal static async Task<FreshExecutionEvidence> RunAsync(FreshCheckPreflight preflight, CancellationToken cancellationToken,
-        Action<FreshFailureOutputProof>? retainFailureOutputProof = null, Action<string>? retainPrivateDirectory = null)
+        Action<FreshFailureOutputProof>? retainFailureOutputProof = null, Action<string>? retainPrivateDirectory = null,
+        CompletedProofTiming? timing = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var priorBundle = preflight.Request.NoBuild
@@ -22,26 +23,39 @@ internal static class FreshCheckExecution
         deadline.CancelAfter(preflight.Request.Timeout);
         var token = deadline.Token;
         var selected = ProjectTargetSelector.Select(preflight.Root, preflight.Request.Project);
-        var platform = await FreshProjectPlatform.ResolveAsync(selected, preflight.Policy.Configuration, token);
+        string? platform;
+        using (timing?.Start("execution.platform"))
+            platform = await FreshProjectPlatform.ResolveAsync(selected, preflight.Policy.Configuration, token);
         var request = new ProjectContextLoadRequest(selected, preflight.Policy.Configuration, platform,
             preflight.Policy.TargetFrameworks.ToArray(), preflight.Request.Overrides.IncludeTests ?? false,
-            preflight.Request.Overrides.IncludeGenerated ?? false, preflight.Request.Timeout);
-        var metadata = await ProjectContextLoader.DiscoverAsync(request, token);
+            preflight.Request.Overrides.IncludeGenerated ?? false, preflight.Request.Timeout)
+        { Timing = timing, CollectTiming = timing is not null, TimingPrefix = "execution.loader" };
+        ProjectContextLoadResult metadata;
+        using (timing?.Start("execution.metadata"))
+            metadata = await ProjectContextLoader.DiscoverAsync(request, token);
         Require(metadata);
-        var graph = await ProjectContextLoader.DiscoverGraphAsync(request, token);
+        ProjectContextLoadResult graph;
+        using (timing?.Start("execution.graph"))
+            graph = await ProjectContextLoader.DiscoverGraphAsync(request, token);
         Require(graph);
         RequirePolicyTargets(preflight, graph);
         FreshCheckPreflightLoader.ValidateDestinations(preflight.Request, preflight.Root,
             graph.BuildGraph.Select(n => n.ProjectPath).Concat(metadata.Metadata.Select(m => m.AssetsFile)));
         if (!preflight.Request.NoRestore && !preflight.Request.NoBuild)
         {
-            var restored = await ProjectBuildPreparation.RestoreAsync(request, token);
+            ProcessResult restored;
+            using (timing?.Start("execution.restore"))
+                restored = await ProjectBuildPreparation.RestoreAsync(request, token);
             if (restored.ExitCode != 0) throw new ProjectContextException("context.restoreFailed", "Explicit selected-root restore failed; raw restore output is not public execution evidence.");
         }
         // Workspace never bootstraps restore or treats warm outputs as compiler evidence.
-        var loaded = await ProjectContextLoader.LoadGraphAsync(request, token);
+        ProjectContextLoadResult loaded;
+        using (timing?.Start("execution.preparedGraph"))
+            loaded = await ProjectContextLoader.LoadGraphAsync(request, token);
         Require(loaded);
-        var runners = await ProjectContextLoader.DiscoverTestRunnersAsync(request, token);
+        ProjectContextLoadResult runners;
+        using (timing?.Start("execution.runners"))
+            runners = await ProjectContextLoader.DiscoverTestRunnersAsync(request, token);
         Require(runners);
         var plan = CheckExecutionPlan.Create(runners, loaded, token);
         RequirePolicyTargets(preflight, plan.PreparedGraph);
@@ -55,15 +69,20 @@ internal static class FreshCheckExecution
         // Record the invocation-owned location before any build/test/capture can
         // fail. Raw diagnostic bytes stay here, never in a safe replay bundle.
         retainPrivateDirectory?.Invoke(owned);
-        var bound = await CompilerGraphExecution.RunBoundAsync(request, plan.PreparedGraph, async (node, ct) =>
+        CompilerGraphPhaseResult bound;
+        using (timing?.Start("execution.boundCompiler"))
+            bound = await CompilerGraphExecution.RunBoundAsync(request, plan.PreparedGraph, async (node, ct) =>
         {
             if (priorObservations is not null) return priorObservations[node.Id];
             var directory = Path.Combine(owned, "build", node.Id);
             Directory.CreateDirectory(directory);
-            return await CompilerEvidence.BuildAsync(node, directory, preflight.Request.Timeout, ct);
+            using (timing?.Start("execution.compilerBuild"))
+                return await CompilerEvidence.BuildAsync(node, directory, preflight.Request.Timeout, ct);
         }, token);
         var testDirectory = Path.Combine(owned, "tests"); Directory.CreateDirectory(testDirectory);
-        var tests = await TestExecutionAdapter.RunVerifiedAsync(plan, bound, testDirectory, preflight.Request.Timeout, token);
+        TestExecutionRun tests;
+        using (timing?.Start("execution.tests"))
+            tests = await TestExecutionAdapter.RunVerifiedAsync(plan, bound, testDirectory, preflight.Request.Timeout, token);
         // Raw failing test outcomes must remain observable. They cannot pass coverage,
         // safe-child success export, or become reusable completed execution evidence.
         if (tests.Failure is not null || tests.Count != plan.Tests.Count || tests.Any(t => t.Process.ExitCode != 0))
@@ -71,7 +90,8 @@ internal static class FreshCheckExecution
                 new Dictionary<string, ImmutableArray<byte>>(StringComparer.Ordinal), owned);
         try
         {
-            await bound.RetainedProof!.ValidateFinalAsync(token);
+            using (timing?.Start("execution.retainedFinal"))
+                await bound.RetainedProof!.ValidateFinalAsync(token);
             var outputFootprint = bound.FinalGraph.GraphContexts.SelectMany(b =>
                 new[] { b.Context.EvaluatedIntermediateDirectory!, Path.GetDirectoryName(b.Context.EvaluatedTargetPath!)! }
                     .Concat(b.Context.PhaseInputs.Where(i => i.Role == "restoreAssets").Select(i => Path.GetDirectoryName(i.Path)!)))
@@ -80,9 +100,14 @@ internal static class FreshCheckExecution
                 Path.TrimEndingDirectorySeparator(directory) + Path.DirectorySeparatorChar,
                 OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))))
                 throw new PolicyException("provenance.gitOutputFootprintUnsupported", "Generated output footprint must not contain consumer project inputs.");
-            await FreshGitProof.ValidateAsync(preflight, token, outputFootprint);
-            var coverage = CoverageGraphBinding.ValidateAggregate(tests, bound, token);
-            var children = tests.ToDictionary(t => t.GraphId,
+            using (timing?.Start("execution.originalRevision"))
+                await FreshGitProof.ValidateAsync(preflight, token, outputFootprint);
+            BoundGraphCoverage coverage;
+            using (timing?.Start("execution.aggregateCoverage"))
+                coverage = CoverageGraphBinding.ValidateAggregate(tests, bound, token);
+            Dictionary<string, ImmutableArray<byte>> children;
+            using (timing?.Start("execution.childExport"))
+                children = tests.ToDictionary(t => t.GraphId,
                 t => TestChildEvidenceExport.Capture(t, tests.Outcomes.Single(o => o.GraphId == t.GraphId), token), StringComparer.Ordinal);
             token.ThrowIfCancellationRequested();
             return new(preflight, plan, bound, tests, coverage, children, owned);
