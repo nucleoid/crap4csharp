@@ -8,11 +8,13 @@ internal static class MsBuildLoaderBootstrap
     public static async Task<int> RunAsync(string requestPath, string responsePath, CancellationToken cancellationToken)
     {
         ProjectContextLoadResult result;
+        CompletedProofTiming? timing = null;
         try
         {
             var request = JsonSerializer.Deserialize<ProjectContextLoadRequest>(
                 await File.ReadAllTextAsync(requestPath, cancellationToken), ProjectContextLoader.JsonOptions)
                 ?? throw new InvalidDataException("Missing loader request.");
+            if (request.CollectTiming) request = request with { Timing = timing = new CompletedProofTiming() };
             if (string.IsNullOrWhiteSpace(request.SdkPath) || !Directory.Exists(request.SdkPath))
                 throw new ProjectContextException("context.sdkResolutionFailed", "The resolved SDK path is unavailable.");
             if (!string.IsNullOrWhiteSpace(request.DotNetRoot)) Environment.SetEnvironmentVariable("DOTNET_ROOT", request.DotNetRoot);
@@ -30,6 +32,7 @@ internal static class MsBuildLoaderBootstrap
             var reason = exception is ProjectContextException context ? context.Reason : "context.loaderFailed";
             result = new ProjectContextLoadResult(false, [], [exception.ToString()], reason);
         }
+        if (timing is not null) result = result with { WorkerTimings = timing.Spans.ToArray() };
         await File.WriteAllTextAsync(responsePath, JsonSerializer.Serialize(result, ProjectContextLoader.JsonOptions), cancellationToken);
         return result.Success ? 0 : 1;
     }

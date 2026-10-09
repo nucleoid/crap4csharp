@@ -13,6 +13,9 @@ public sealed record ProjectContextLoadRequest(
     bool IncludeGenerated,
     TimeSpan Timeout)
 {
+    internal bool CollectTiming { get; init; }
+    internal CompletedProofTiming? Timing { get; init; }
+    internal string TimingPrefix { get; init; } = "loader";
     public bool TestRunnersOnly { get; init; }
     public bool MetadataOnly { get; init; }
     public bool GraphOnly { get; init; }
@@ -33,6 +36,7 @@ public sealed record ProjectContextLoadResult(
 {
     [JsonIgnore]
     public IReadOnlyList<ProjectTestRunnerMetadata> TestRunners { get; init; } = [];
+    internal IReadOnlyList<CompletedProofTiming.Span> WorkerTimings { get; init; } = [];
     public IReadOnlyList<ProjectDiscoveryMetadata> Metadata { get; init; } = [];
     public IReadOnlyList<ProjectBuildGraphNode> BuildGraph { get; init; } = [];
     public IReadOnlyList<ProjectGraphContextBinding> GraphContexts { get; init; } = [];
@@ -103,16 +107,22 @@ public static class ProjectContextLoader
                 info.Type == typeof(ProjectAnalysisContext) ? new[] { nameof(ProjectAnalysisContext.ResolvedProjectPath), nameof(ProjectAnalysisContext.ProtectedPaths),
                     nameof(ProjectAnalysisContext.CompilerDocuments), nameof(ProjectAnalysisContext.GeneratorOnlyTreeCount), nameof(ProjectAnalysisContext.PhaseInputs), nameof(ProjectAnalysisContext.ReferencePaths), nameof(ProjectAnalysisContext.GeneratedTransitionPaths), nameof(ProjectAnalysisContext.EvaluatedTargetPath),
                     nameof(ProjectAnalysisContext.EvaluatedIntermediateDirectory), nameof(ProjectAnalysisContext.EvaluatedReferenceAssemblyPath) } :
-                info.Type == typeof(ProjectContextLoadResult) ? new[] { nameof(ProjectContextLoadResult.TestRunners) } : [];
+                info.Type == typeof(ProjectContextLoadResult) ? new[] { nameof(ProjectContextLoadResult.TestRunners), nameof(ProjectContextLoadResult.WorkerTimings) } :
+                info.Type == typeof(ProjectContextLoadRequest) ? new[] { nameof(ProjectContextLoadRequest.CollectTiming) } : [];
             foreach (var propertyName in propertyNames)
             {
-                var member = info.Type.GetProperty(propertyName)!;
+                var member = info.Type.GetProperty(propertyName,
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)!;
                 var name = JsonNamingPolicy.CamelCase.ConvertName(propertyName);
                 var existing = info.Properties.FirstOrDefault(property => property.Name == name);
                 if (existing is not null) info.Properties.Remove(existing);
                 var property = info.CreateJsonPropertyInfo(member.PropertyType, name);
                 property.Get = member.GetValue;
                 property.Set = member.SetValue;
+                if (propertyName == nameof(ProjectContextLoadRequest.CollectTiming))
+                    property.ShouldSerialize = (_, value) => value is true;
+                if (propertyName == nameof(ProjectContextLoadResult.WorkerTimings))
+                    property.ShouldSerialize = (_, value) => value is IReadOnlyList<CompletedProofTiming.Span> { Count: > 0 };
                 info.Properties.Add(property);
             }
         });
@@ -148,7 +158,8 @@ public static class ProjectContextLoader
         {
             target = ProjectTargetSelector.Select(Path.GetDirectoryName(Path.GetFullPath(request.Target))!, request.Target);
             root = Path.GetDirectoryName(target)!;
-            before = SnapshotAuthoredInputs(root);
+            using (request.Timing?.Start(request.TimingPrefix + ".snapshotBefore"))
+                before = SnapshotAuthoredInputs(root);
         }
         catch (ProjectContextException exception)
         {
@@ -160,7 +171,8 @@ public static class ProjectContextLoader
         ProjectContextSdkResolution sdk;
         try
         {
-            sdk = await resolveSdkAsync(root, request.Timeout, operationToken);
+            using (request.Timing?.Start(request.TimingPrefix + ".sdk"))
+                sdk = await resolveSdkAsync(root, request.Timeout, operationToken);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && overallTimeout.IsCancellationRequested)
         {
@@ -197,15 +209,20 @@ public static class ProjectContextLoader
                 ["DOTNET_HOST_PATH"] = sdk.HostPath,
                 ["PATH"] = sdk.DotNetRoot + Path.PathSeparator + (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
             };
-            var result = await ProcessRunner.RunWithEnvironmentAsync(sdk.HostPath, [assembly, LoaderCommand, requestPath, responsePath],
-                root, request.Timeout, operationToken, environment);
+            ProcessResult result;
+            using (request.Timing?.Start(request.TimingPrefix + ".subprocess"))
+                result = await ProcessRunner.RunWithEnvironmentAsync(sdk.HostPath, [assembly, LoaderCommand, requestPath, responsePath],
+                    root, request.Timeout, operationToken, environment);
             ProjectContextLoadResult loaded;
             if (File.Exists(responsePath))
                 loaded = JsonSerializer.Deserialize<ProjectContextLoadResult>(await File.ReadAllTextAsync(responsePath, operationToken), JsonOptions)
                     ?? new ProjectContextLoadResult(false, [], ["Loader returned an empty response."], "context.protocolInvalid");
             else
                 loaded = new ProjectContextLoadResult(false, [], SplitDiagnostics(result), "context.loaderFailed");
-            var after = SnapshotAuthoredInputs(root);
+            request.Timing?.ImportWorker(request.TimingPrefix, loaded.WorkerTimings);
+            IReadOnlyDictionary<string, string> after;
+            using (request.Timing?.Start(request.TimingPrefix + ".snapshotAfter"))
+                after = SnapshotAuthoredInputs(root);
             // Only new, independently classified generated compiler files are expected loader transitions.
             // Existing input mutation/deletion remains forbidden, including existing generated files.
             var generatedPaths = loaded.Contexts.SelectMany(context =>

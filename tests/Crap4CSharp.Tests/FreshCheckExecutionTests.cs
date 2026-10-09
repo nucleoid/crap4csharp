@@ -1618,11 +1618,24 @@ public sealed class FreshCheckExecutionTests
                             }, cancellationTiming));
                         Assert.Contains(cancellationTiming.Spans, span => span.Phase == "intermediate.saved");
                         Assert.DoesNotContain(cancellationTiming.Spans, span => span.Phase == "final.saved");
+                        Assert.Contains(cancellationTiming.Spans, span => span.Phase == "intermediate.graph.loader.worker.compilation");
+                        Assert.DoesNotContain(cancellationTiming.Spans, span => span.Phase.StartsWith("final.graph.loader", StringComparison.Ordinal));
                     }
                     foreach (var observation in new[] { ("promotion", promotionTiming), ("final", finalTiming), ("outer", outerTiming) })
                     {
                         Assert.NotEmpty(observation.Item2.Spans);
                         Assert.All(observation.Item2.Spans, span => Assert.True(double.IsFinite(span.Milliseconds) && span.Milliseconds >= 0));
+                        foreach (var boundary in new[] { "intermediate", "final" })
+                        {
+                            foreach (var loader in new[] { "runners", "graph" })
+                            {
+                                var prefix = boundary + "." + loader + ".loader.";
+                                foreach (var phase in new[] { "sdk", "subprocess", "snapshotBefore", "snapshotAfter", "worker.discovery", "worker.graph", "worker.nodeMetadata" })
+                                    Assert.Contains(observation.Item2.Spans, span => span.Phase == prefix + phase);
+                            }
+                            foreach (var phase in new[] { "worker.contextMetadata", "worker.workspace", "worker.documents", "worker.compilation", "worker.context" })
+                                Assert.Equal(3, observation.Item2.Spans.Count(span => span.Phase == boundary + ".graph.loader." + phase));
+                        }
                         Console.WriteLine("NESTED_PROOF_TIMING " + JsonSerializer.Serialize(new { invocation = observation.Item1, spans = observation.Item2.Spans }));
                     }
                     if (promotionDrift)

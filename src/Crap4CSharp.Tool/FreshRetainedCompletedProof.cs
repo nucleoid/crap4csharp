@@ -78,10 +78,12 @@ internal static class FreshRetainedCompletedProof
         {
             ProjectContextLoadResult runners;
             using (timing?.Start(boundary + ".runners"))
-                runners = await ProjectContextLoader.DiscoverTestRunnersAsync(request, token);
+                runners = await ProjectContextLoader.DiscoverTestRunnersAsync(request with
+                { CollectTiming = timing is not null, Timing = timing, TimingPrefix = boundary + ".runners.loader" }, token);
             ProjectContextLoadResult graph;
             using (timing?.Start(boundary + ".graph"))
-                graph = await ProjectContextLoader.LoadGraphAsync(request, token);
+                graph = await ProjectContextLoader.LoadGraphAsync(request with
+                { CollectTiming = timing is not null, Timing = timing, TimingPrefix = boundary + ".graph.loader" }, token);
             FreshCheckExecution.RequirePolicyTargets(preflight, graph);
             FreshCheckExecution.RequirePolicyTargets(execution.Preflight, graph);
             var plan = CheckExecutionPlan.Create(runners, graph, token);

@@ -18,29 +18,41 @@ internal static partial class MsBuildProjectLoader
         var diagnostics = new List<string>();
         var root = Path.GetDirectoryName(request.Target)!;
         var excludedProjects = new List<ProjectContextProjectExclusion>();
-        var projects = await DiscoverProjects(request.Target, request.Configuration, request.Platform, diagnostics, excludedProjects, cancellationToken);
+        ProjectSelection[] projects;
+        using (request.Timing?.Start("worker.discovery"))
+            projects = await DiscoverProjects(request.Target, request.Configuration, request.Platform, diagnostics, excludedProjects, cancellationToken);
         if (request.TestRunnersOnly)
         {
-            var graph = await DiscoverGraph(request, projects, diagnostics, excludedProjects, cancellationToken);
+            ProjectContextLoadResult graph;
+            using (request.Timing?.Start("worker.graph"))
+                graph = await DiscoverGraph(request, projects, diagnostics, excludedProjects, cancellationToken);
             var runners = new List<ProjectTestRunnerMetadata>();
             foreach (var node in graph.BuildGraph)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var metadata = Evaluate(node.ProjectPath, node.Configuration, node.Platform, node.TargetFramework, node.GlobalProperties);
+                EvaluatedMetadata metadata;
+                using (request.Timing?.Start("worker.nodeMetadata"))
+                    metadata = Evaluate(node.ProjectPath, node.Configuration, node.Platform, node.TargetFramework, node.GlobalProperties);
                 EnsurePreparedAssets(metadata, node.ProjectPath);
-                if (metadata.IsTestProject) runners.Add(EvaluateTestRunner(node, request.SdkPath!));
+                if (metadata.IsTestProject)
+                    using (request.Timing?.Start("worker.runnerMetadata"))
+                        runners.Add(EvaluateTestRunner(node, request.SdkPath!));
             }
             return new(true, [], diagnostics, null, excludedProjects) { BuildGraph = graph.BuildGraph, TestRunners = runners.ToArray() };
         }
         if (request.LoadGraphContexts)
         {
-            var graph = await DiscoverGraph(request, projects, diagnostics, excludedProjects, cancellationToken);
+            ProjectContextLoadResult graph;
+            using (request.Timing?.Start("worker.graph"))
+                graph = await DiscoverGraph(request, projects, diagnostics, excludedProjects, cancellationToken);
             var bindings = new List<ProjectGraphContextBinding>();
             foreach (var node in graph.BuildGraph)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var selected = request with { Configuration = node.Configuration, Platform = node.Platform };
-                var metadata = Evaluate(node.ProjectPath, node.Configuration, node.Platform, node.TargetFramework, node.GlobalProperties);
+                EvaluatedMetadata metadata;
+                using (request.Timing?.Start("worker.nodeMetadata"))
+                    metadata = Evaluate(node.ProjectPath, node.Configuration, node.Platform, node.TargetFramework, node.GlobalProperties);
                 EnsurePreparedAssets(metadata, node.ProjectPath);
                 // Required execution contexts are independent of production inventory filtering.
                 var context = await LoadContext(root, node.ProjectPath, node.TargetFramework, selected, diagnostics,
@@ -234,11 +246,16 @@ internal static partial class MsBuildProjectLoader
         ProjectContextLoadRequest request, List<string> diagnostics, CancellationToken cancellationToken,
         IReadOnlyDictionary<string, string>? globalProperties = null)
     {
-        var metadata = Evaluate(projectPath, request.Configuration, request.Platform, framework, globalProperties);
+        using var contextTiming = request.Timing?.Start("worker.context");
+        EvaluatedMetadata metadata;
+        using (request.Timing?.Start("worker.contextMetadata"))
+            metadata = Evaluate(projectPath, request.Configuration, request.Platform, framework, globalProperties);
         EnsurePreparedAssets(metadata, projectPath);
         var beforeInputs = SnapshotInputs(metadata.AuthoredInputs);
         using var workspace = CreateWorkspace(request.Configuration, request.Platform, framework, diagnostics, out var workspaceDiagnostics, globalProperties);
-        var project = await workspace.OpenProjectAsync(projectPath, cancellationToken: cancellationToken);
+        Microsoft.CodeAnalysis.Project project;
+        using (request.Timing?.Start("worker.workspace"))
+            project = await workspace.OpenProjectAsync(projectPath, cancellationToken: cancellationToken);
         ThrowOnWorkspaceFailure(workspaceDiagnostics, projectPath);
         if (project.ParseOptions is not CSharpParseOptions parseOptions)
             throw new ProjectContextException("context.parseOptionsUnavailable", $"C# parse options were unavailable for {projectPath}.");
@@ -249,6 +266,7 @@ internal static partial class MsBuildProjectLoader
         var trackedInputs = await TrackedInputs(projectPath, request.Timeout, cancellationToken);
         var documentPaths = project.Documents.Where(document => document.FilePath is not null)
             .Select(document => Path.GetFullPath(document.FilePath!)).ToHashSet(PathComparer);
+        using (request.Timing?.Start("worker.documents"))
         foreach (var document in project.Documents.OrderBy(document => document.FilePath, StringComparer.Ordinal))
         {
             if (document.FilePath is null) throw new ProjectContextException("context.sourcePathUnavailable", $"A document in {projectPath} has no physical path.");
@@ -291,8 +309,10 @@ internal static partial class MsBuildProjectLoader
             }
             if (analyzerLoadFailures.Count > 0)
                 throw new ProjectContextException("context.generatedSourceUnavailable", string.Join(Environment.NewLine, analyzerLoadFailures));
-            var compilation = await project.GetCompilationAsync(cancellationToken)
-                ?? throw new ProjectContextException("context.generatedSourceUnavailable", "Compilation was unavailable while inspecting generator binding.");
+            Compilation compilation;
+            using (request.Timing?.Start("worker.compilation"))
+                compilation = await project.GetCompilationAsync(cancellationToken)
+                    ?? throw new ProjectContextException("context.generatedSourceUnavailable", "Compilation was unavailable while inspecting generator binding.");
             var extraTrees = compilation.SyntaxTrees.Where(tree => string.IsNullOrWhiteSpace(tree.FilePath) ||
                 !documentPaths.Contains(Path.GetFullPath(tree.FilePath))).Take(32769).ToArray();
             if (extraTrees.Length > 32768)
