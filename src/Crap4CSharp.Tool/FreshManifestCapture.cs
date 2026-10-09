@@ -276,7 +276,8 @@ internal static class FreshManifestCapture
     }
 
     internal static async Task<string> PublishAsync(FreshExecutionEvidence execution, FreshCapturedBundle captured,
-        string destination, CancellationToken cancellation)
+        string destination, CancellationToken cancellation, CompletedProofTiming? timing = null,
+        string timingPrefix = "publication")
     {
         if (ProvenanceVerifier.VerifyCaptureCancellable(captured.Manifest, captured.Bytes,
             execution.Preflight.Policy.Ruleset, cancellation).Status != ProvenanceStatus.Captured) throw Refuse();
@@ -285,25 +286,29 @@ internal static class FreshManifestCapture
         FreshCheckPreflightLoader.ValidateDestinations(request, preflight.Root,
             preflight.Trusted.ContentHashes.Keys.Concat(preflight.Policy.ProductionProjects).Concat(preflight.Policy.TestProjects));
         FreshCheckExecution.ProtectPreparedDestinations(preflight, execution.Compiler.FinalGraph);
-        await RegateAsync(execution, cancellation);
+        await RegateAsync(execution, cancellation, timing, timingPrefix + ".regate");
         FreshCheckExecution.ProtectPreparedDestinations(preflight, execution.Compiler.FinalGraph);
         cancellation.ThrowIfCancellationRequested();
         return ArtifactCaptureAdapter.PublishNewCancellable(captured.Manifest, captured.Bytes,
             Path.GetFullPath(destination, preflight.Root), cancellation);
     }
 
-    internal static async Task RegateAsync(FreshExecutionEvidence execution, CancellationToken cancellation)
+    internal static async Task RegateAsync(FreshExecutionEvidence execution, CancellationToken cancellation,
+        CompletedProofTiming? timing = null, string timingPrefix = "regate")
     {
-        await execution.Compiler.RetainedProof!.ValidateFinalAsync(cancellation);
+        await execution.Compiler.RetainedProof!.ValidateFinalAsync(cancellation, timing, timingPrefix + ".compiler");
         var graph = execution.Compiler.FinalGraph;
         var footprint = graph.GraphContexts.SelectMany(b =>
             new[] { b.Context.EvaluatedIntermediateDirectory!, Path.GetDirectoryName(b.Context.EvaluatedTargetPath!)! }
                 .Concat(b.Context.PhaseInputs.Where(i => i.Role == "restoreAssets").Select(i => Path.GetDirectoryName(i.Path)!)))
             .Distinct(PathIdentityPolicy.Current.Comparer).ToArray();
-        await FreshGitProof.ValidateAsync(execution.Preflight, cancellation, footprint);
-        _ = CoverageGraphBinding.ValidateAggregate(execution.Tests, execution.Compiler, cancellation);
-        foreach (var test in execution.Tests)
-            _ = TestChildEvidenceExport.Capture(test, execution.Tests.Outcomes.Single(o => o.GraphId == test.GraphId), cancellation);
+        using (timing?.Start(timingPrefix + ".revision"))
+            await FreshGitProof.ValidateAsync(execution.Preflight, cancellation, footprint);
+        using (timing?.Start(timingPrefix + ".aggregate"))
+            _ = CoverageGraphBinding.ValidateAggregate(execution.Tests, execution.Compiler, cancellation);
+        using (timing?.Start(timingPrefix + ".children"))
+            foreach (var test in execution.Tests)
+                _ = TestChildEvidenceExport.Capture(test, execution.Tests.Outcomes.Single(o => o.GraphId == test.GraphId), cancellation);
     }
 
     private static PolicyException Refuse() => new("check.captureUnproven", "Fresh capture requires complete unchanged accepted compiler/test/coverage evidence.");

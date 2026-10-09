@@ -9,7 +9,7 @@ internal static class FreshCompletedCapture
         FreshCapturedBundle captured, CancellationToken token, CompletedProofTiming? timing = null)
     {
         using (timing?.Start("promotion.originalRegate"))
-            await FreshManifestCapture.RegateAsync(execution, token);
+            await FreshManifestCapture.RegateAsync(execution, token, timing, "promotion.originalRegate");
         var root = execution.Preflight.Root;
         string Relative(string physical)
         {
@@ -40,7 +40,7 @@ internal static class FreshCompletedCapture
         string path;
         using (timing?.Start("promotion.prospectivePublish"))
             path = await FreshManifestCapture.PublishAsync(execution, prospective,
-                Path.Combine(execution.PrivateDirectory, "prospective-completed-bundle"), token);
+                Path.Combine(execution.PrivateDirectory, "prospective-completed-bundle"), token, timing, "promotion.prospectivePublish");
         ArtifactBundle bundle;
         using (timing?.Start("promotion.physicalLoad"))
             bundle = ArtifactBundle.Load(path, execution.PrivateDirectory);

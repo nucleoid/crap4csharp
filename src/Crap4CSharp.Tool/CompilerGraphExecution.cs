@@ -375,12 +375,17 @@ internal sealed class CompilerRetainedProof
 
     internal void ValidateCurrent(CancellationToken token) => Validate(graph, token);
 
-    internal async Task ValidateFinalAsync(CancellationToken token)
+    internal async Task ValidateFinalAsync(CancellationToken token, CompletedProofTiming? timing = null,
+        string timingPrefix = "retained")
     {
         token.ThrowIfCancellationRequested();
-        var current = await reload(request, token);
+        ProjectContextLoadResult current;
+        using (timing?.Start(timingPrefix + ".graph"))
+            current = await reload(timing is null ? request : request with
+                { CollectTiming = true, Timing = timing, TimingPrefix = timingPrefix + ".graph.loader" }, token);
         token.ThrowIfCancellationRequested();
-        ValidateAgainstCurrentGraph(current, token);
+        using (timing?.Start(timingPrefix + ".physical"))
+            ValidateAgainstCurrentGraph(current, token);
     }
 
     internal void ValidateAgainstCurrentGraph(ProjectContextLoadResult current, CancellationToken token)

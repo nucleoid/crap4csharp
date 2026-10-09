@@ -1660,6 +1660,13 @@ public sealed class FreshCheckExecutionTests
                         Assert.Contains(cancellationTiming.Spans, span => span.Phase == "intermediate.graph.loader.worker.compilation");
                         Assert.DoesNotContain(cancellationTiming.Spans, span => span.Phase.StartsWith("final.graph.loader", StringComparison.Ordinal));
                     }
+                    foreach (var prefix in new[] { "promotion.originalRegate", "promotion.prospectivePublish.regate" })
+                    {
+                        foreach (var phase in new[] { "compiler.graph", "compiler.physical", "revision", "aggregate", "children" })
+                            Assert.Single(promotionTiming.Spans, span => span.Phase == prefix + "." + phase);
+                        foreach (var phase in new[] { "sdk", "subprocess", "snapshotBefore", "snapshotAfter", "worker.discovery", "worker.graph", "worker.nodeMetadata", "worker.workspace", "worker.compilation" })
+                            Assert.Contains(promotionTiming.Spans, span => span.Phase == prefix + ".compiler.graph.loader." + phase);
+                    }
                     foreach (var observation in new[] { ("promotion", promotionTiming), ("final", finalTiming), ("outer", outerTiming) })
                     {
                         Assert.NotEmpty(observation.Item2.Spans);
