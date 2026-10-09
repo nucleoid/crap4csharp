@@ -718,7 +718,7 @@ public sealed class FreshCheckExecutionTests
                         {
                             return completeProviderDispatch
                                 ? await CurrentEvidenceAdapter.CaptureSupportedAsync(bundle, observationPreflight, ct)
-                                : await (Task<CurrentEvidence>)adapter.Invoke(null, [bundle, observationPreflight, ct])!;
+                                : await CurrentEvidenceAdapter.CaptureCompletedAsync(bundle, observationPreflight, ct);
                         }
                         catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
                         { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw; }
