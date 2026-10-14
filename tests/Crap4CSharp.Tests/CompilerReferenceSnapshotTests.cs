@@ -257,8 +257,18 @@ public sealed class CompilerReferenceSnapshotTests
     public async Task PreparedSdkReferencesBindIndependentActualCscWithoutConsumerMutation(bool relative)
     {
         using var fixture = TestDirectory.Create("crap4csharp-reference-actual");
+        // SDK references on another Windows drive cannot become relative. Keep
+        // an explicit same-drive reference so the relative case exercises both
+        // forms without replacing any independently captured SDK reference.
+        var referenceDirectory = Path.Combine(fixture.Path, "References");
+        Directory.CreateDirectory(referenceDirectory);
+        File.Copy(typeof(Crap4CSharp.ProvenanceFixture.CompiledEvidence).Assembly.Location,
+            Path.Combine(referenceDirectory, "Crap4CSharp.ProvenanceFixture.dll"));
         var project = fixture.Write("App/App.csproj", """
-            <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>
+            <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+            <ItemGroup><Reference Include="Crap4CSharp.ProvenanceFixture">
+            <HintPath>../References/Crap4CSharp.ProvenanceFixture.dll</HintPath>
+            </Reference></ItemGroup></Project>
             """.Replace("</Project>", relative ? """
                 <Target Name="RelativeCscReferences" BeforeTargets="CoreCompile" Condition="'$(DesignTimeBuild)' != 'true'">
                   <ItemGroup>
