@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory)][ValidateRange(0,63)][int]$ShardIndex,
     [Parameter(Mandatory)][string]$TrxPath,
     [Parameter(Mandatory)][int]$ExitCode,
-    [Parameter(Mandatory)][string]$OutputPath
+    [Parameter(Mandatory)][string]$OutputPath,
+    [string]$RepositoryRoot = (Split-Path $PSScriptRoot -Parent)
 )
 $ErrorActionPreference='Stop'
 # Diagnostic only. No names, arguments, stack traces, paths or raw messages leave this file.
@@ -27,6 +28,12 @@ try {
     $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $counts=@{Passed=0;Failed=0;NotExecuted=0;Other=0}
     $failures=[Collections.Generic.List[object]]::new()
+    $sourceSites = @(Get-ChildItem -LiteralPath (Join-Path $RepositoryRoot 'tests/Crap4CSharp.Tests') -Filter '*.cs' -File | ForEach-Object {
+        $relative = 'tests/Crap4CSharp.Tests/' + $_.Name
+        [pscustomobject]@{ Pattern = [regex]::Escape($relative).Replace('/', '[\\/]');
+            Digest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($relative))).ToLowerInvariant();
+            Lines = @(Get-Content -LiteralPath $_.FullName).Count }
+    })
     foreach($row in $rows){
         $name=$row.GetAttribute('testName')
         if(!$expected.ContainsKey($name) -or !$seen.Add($name)){throw 'Unexpected or duplicate diagnostic case'}
@@ -40,15 +47,25 @@ try {
         $tokens=@(foreach($token in @('run.timedOut','run.cancelled','context.projectLoadFailed','context.assetsUnavailable','context.inputsMutated','compiler.inputsMutated','compiler.referencesUnproven','coverage.unavailable','test.runnerUnsupported')){
             if($message.Contains($token,[StringComparison]::Ordinal)){$token}
         })
+        $stackNode=$row.SelectSingleNode('*[local-name()="Output"]/*[local-name()="ErrorInfo"]/*[local-name()="StackTrace"]')
+        $stack=if($null -eq $stackNode){''}else{[string]$stackNode.InnerText}
+        $sites = @(foreach ($site in $sourceSites) {
+            foreach ($match in [regex]::Matches($stack, '(?m)[\\/]' + $site.Pattern + ':line ([0-9]{1,6})\s*$')) {
+                $line = [int]$match.Groups[1].Value
+                if ($line -ge 1 -and $line -le $site.Lines) {
+                    [ordered]@{sourceDigest=$site.Digest;line=$line}
+                }
+            }
+        }) | Select-Object -First 8
         $failures.Add([ordered]@{caseDigest=(Get-SuiteCaseDigest $case);
             methodDigest=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($method))).ToLowerInvariant();
-            outcome='Failed';observedDiagnosticTokens=$tokens})
+            outcome='Failed';observedDiagnosticTokens=$tokens;observedRepositoryTestSites=@($sites)})
     }
     [ordered]@{schemaVersion='suite-partition-diagnostic-v1';outcome='observed';shardIndex=$ShardIndex;exitCode=$ExitCode;
         expectedCases=$selected.Count;observedCases=$rows.Count;missingCases=$selected.Count-$rows.Count;counts=$counts;
         failures=@($failures);discoverySha256=(Get-FileHash -LiteralPath $DiscoveryPath).Hash.ToLowerInvariant();
         trxSha256=(Get-FileHash -LiteralPath $TrxPath).Hash.ToLowerInvariant();
-        qualification='Diagnostic only. Tokens are observed substrings, not causal classifications. No acceptance, source/runtime identity or complete-suite claim.'}|
+        qualification='Diagnostic only. Tokens and bounded repository test sites are observations, not causal classifications. No acceptance, source/runtime identity or complete-suite claim.'}|
         ConvertTo-Json -Depth 7|Set-Content -LiteralPath $output
 }catch{
     [ordered]@{schemaVersion='suite-partition-diagnostic-v1';outcome='unavailable';shardIndex=$ShardIndex;exitCode=$ExitCode;

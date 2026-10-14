@@ -183,6 +183,7 @@ jobs:
           ./scripts/test-suite-identity.ps1
           ./scripts/test-suite-identity-producer.ps1
           ./scripts/test-suite-partitions.ps1
+          ./scripts/test-suite-partition-diagnostic.ps1
           ./scripts/test-suite-partition-reruns.ps1
           ./scripts/test-suite-discovery.ps1
           ./scripts/test-suite-build-artifacts.ps1
