@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -27,6 +31,14 @@ jobs:
       - name: Export one bound Release runtime
         shell: pwsh
         run: ./scripts/export-suite-build.ps1 -Configuration Release -Commit $env:GITHUB_SHA -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputDirectory artifacts/suite-build
+      - name: Retain sanitized build identity on refusal
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-identity-refusal-${{ matrix.os }}-attempt-${{ github.run_attempt }}
+          path: artifacts/suite-build/identity.json
+          if-no-files-found: warn
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         with:
           name: suite-build-Release-${{ matrix.os }}-attempt-${{ github.run_attempt }}
