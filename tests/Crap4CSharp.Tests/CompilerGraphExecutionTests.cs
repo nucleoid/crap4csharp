@@ -8,6 +8,45 @@ namespace Crap4CSharp.Tests;
 public sealed class CompilerGraphExecutionTests
 {
     [Theory]
+    [InlineData("none")]
+    [InlineData("target-collision")]
+    [InlineData("intermediate-collision")]
+    [InlineData("reference-escape")]
+    public void FrameworkContextsMayShareProjectOnlyWithIndependentlyEvaluatedNoncollidingOutputs(string mutation)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-framework-output-contexts");
+        var project = fixture.Write("App.csproj", "<Project />");
+        var first = Context(project);
+        var second = ProjectAnalysisContext.Create(project, "App", "net9.0", "Release", "AnyCPU", LanguageVersion.Latest,
+            ["FLAVOR_LEFT"], SourceCodeKind.Regular, [], [], new(false, false), new("sdk", "msbuild", "roslyn")) with
+        {
+            ResolvedProjectPath = project,
+            EvaluatedTargetPath = Path.Combine(fixture.Path, "App/bin/Release/net9.0/app.dll"),
+            EvaluatedIntermediateDirectory = Path.Combine(fixture.Path, "App/obj/Release/net9.0"),
+            EvaluatedReferenceAssemblyPath = Path.Combine(fixture.Path, "App/obj/Release/net9.0/ref/app.dll")
+        };
+        second = second with
+        {
+            EvaluatedTargetPath = Path.GetFullPath(second.EvaluatedTargetPath!),
+            EvaluatedIntermediateDirectory = Path.GetFullPath(second.EvaluatedIntermediateDirectory!),
+            EvaluatedReferenceAssemblyPath = Path.GetFullPath(second.EvaluatedReferenceAssemblyPath!)
+        };
+        if (mutation == "target-collision") second = second with { EvaluatedTargetPath = first.EvaluatedTargetPath };
+        if (mutation == "intermediate-collision") second = second with { EvaluatedIntermediateDirectory = first.EvaluatedIntermediateDirectory,
+            EvaluatedReferenceAssemblyPath = Path.Combine(first.EvaluatedIntermediateDirectory!, "ref/other.dll") };
+        if (mutation == "reference-escape") second = second with { EvaluatedReferenceAssemblyPath = Path.Combine(fixture.Path, "escaped.dll") };
+        second = second with { EvaluatedReferenceAssemblyPath = Path.GetFullPath(second.EvaluatedReferenceAssemblyPath!) };
+        var contexts = new[] { first, second };
+        var nodes = contexts.Select((c, i) => new ProjectBuildGraphNode(i == 0 ? "ten" : "nine", project,
+            c.Configuration, c.Platform, c.TargetFramework, new Dictionary<string, string>(), [])).ToArray();
+        var graph = new ProjectContextLoadResult(true, contexts, [])
+            { BuildGraph = nodes, GraphContexts = nodes.Select((n, i) => new ProjectGraphContextBinding(n.Id, project, contexts[i], false)).ToArray() };
+        if (mutation == "none") Assert.Equal(2, CompilerGraphExecution.ValidateAndFreeze(graph).Count);
+        else Assert.Equal("compiler.graphOutputUnproven", Assert.Throws<ProjectContextException>(() =>
+            CompilerGraphExecution.ValidateAndFreeze(graph)).Reason);
+    }
+
+    [Theory]
     [InlineData("failed-loader")]
     [InlineData("empty")]
     [InlineData("duplicate-node")]

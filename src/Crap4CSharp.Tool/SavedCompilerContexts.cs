@@ -10,28 +10,36 @@ namespace Crap4CSharp.Core;
 internal static class SavedCompilerContexts
 {
     internal static void Validate(ArtifactBundle bundle, CompilerGraphPhaseResult compiler, string root, CancellationToken token)
+        => ValidateObserved(bundle, compiler, root, token, null, "saved");
+
+    internal static void ValidateObserved(ArtifactBundle bundle, CompilerGraphPhaseResult compiler, string root, CancellationToken token,
+        global::CompletedProofTiming? timing, string prefix)
     {
         token.ThrowIfCancellationRequested();
         try
         {
             if (compiler.RetainedProof is null) throw Refuse();
-            compiler.RetainedProof.ValidateCurrent(token);
+            using (timing?.StartSynchronous(prefix + ".compiler.retainedOpening"))
+                compiler.RetainedProof.ValidateCurrent(token);
             var bindings = compiler.FinalGraph.GraphContexts;
-            var observations = compiler.Observations.ToDictionary(o => o.ProjectPath, PathIdentityPolicy.Current.Comparer);
+            var observations = compiler.ByGraphId();
             var scored = bindings.Where(b => !b.IsTestProject || b.Context.ExclusionPolicy.IncludeTests).ToArray();
             if (bundle.Manifest.Contexts.Count != scored.Length ||
                 !bundle.Manifest.Contexts.Select(c => c.Id).ToHashSet(StringComparer.Ordinal).SetEquals(scored.Select(b => b.GraphId))) throw Refuse();
             long total = 0;
+            var reads = new CompilerByteReadScope(token);
             var testArtifacts = new HashSet<string>(StringComparer.Ordinal);
             foreach (var binding in bindings)
             {
                 token.ThrowIfCancellationRequested();
                 var current = binding.Context;
                 var excludedTest = binding.IsTestProject && !current.ExclusionPolicy.IncludeTests;
-                var observation = observations[binding.ProjectPath];
-                CompilerOutputBinding.Validate(current, observation, token);
+                var observation = observations[binding.GraphId];
+                using (timing?.StartSynchronous(prefix + ".compiler.outputBinding"))
+                    CompilerOutputBinding.Validate(current, observation, token);
                 var documents = new List<(ManifestInput Input, ImmutableArray<byte> Bytes)>();
                 var references = new List<(ManifestInput Input, ImmutableArray<byte> Bytes)>();
+                using (timing?.StartSynchronous(prefix + ".compiler.documents"))
                 foreach (var source in current.CompilerDocuments)
                 {
                     var content = Read(source.ResolvedPath!);
@@ -40,10 +48,13 @@ internal static class SavedCompilerContexts
                     documents.Add((Input("compiler-source", source.LogicalPath, content, source.IsGenerated,
                         excludedTest ? null : Logical(source.ResolvedPath!), "utf-8"), content));
                 }
-                foreach (var reference in observation.Parameters.Single(p => p.Name == "References").Items.Distinct(PathIdentityPolicy.Current.Comparer))
+                using (timing?.StartSynchronous(prefix + ".compiler.references"))
+                foreach (var reference in CompilerReferenceSnapshot.ResolveSemanticReferences(observation, token))
                 {
-                    var content = Read(reference);
-                    references.Add((Input("reference", "references/" + CanonicalIdentity.Sha256(content.AsSpan()) + ".dll", content), content));
+                    var content = Read(reference.Path);
+                    references.Add((Input("reference", CompilerReferenceSnapshot.LogicalReference(CanonicalIdentity.Sha256(content.AsSpan()),
+                        reference.Aliases, reference.EmbedInteropTypes), content) with
+                        { ReferenceAliases = reference.Aliases, EmbedInteropTypes = reference.EmbedInteropTypes ? true : null }, content));
                 }
                 if (excludedTest)
                 {
@@ -58,7 +69,7 @@ internal static class SavedCompilerContexts
                     {
                         Artifact("test-reference-" + binding.GraphId + "-" + index++, "test-compiler-reference", content);
                         identities.Add(new { role = "reference", logicalPath = input.LogicalPath, locator = input.Locator,
-                            sha256 = input.Sha256, length = input.Length });
+                            sha256 = input.Sha256, length = input.Length, referenceAliases = input.ReferenceAliases, embedInteropTypes = input.EmbedInteropTypes });
                     }
                     foreach (var phase in current.PhaseInputs.Where(p => p.Role != "source" && File.Exists(p.Path)))
                     {
@@ -105,14 +116,32 @@ internal static class SavedCompilerContexts
                     .Select(d => CapturedSource.Create(d.Input.LogicalPath, d.Bytes.AsSpan())).ToArray();
                 var analysis = new CallableAnalysisContext(Logical(binding.ProjectPath), current.TargetFramework, current.Configuration,
                     current.Platform, binding.GraphId, current.ParseOptions);
-                var metadata = references.Select(r => MetadataReference.CreateFromImage(r.Bytes)).ToArray();
-                var empty = !SemanticEligibility.HasApplicable(eligible, allSources, analysis, metadata);
+                MetadataReference[] metadata;
+                using (timing?.StartSynchronous(prefix + ".compiler.metadata"))
+                    metadata = references.Select(r => CompilerReferenceSnapshot.CapturedReference(r.Input, r.Bytes)).ToArray();
+                SyntaxTree[] syntax;
+                using (timing?.StartSynchronous(prefix + ".compiler.syntax"))
+                    syntax = allSources.Select(s => CSharpSyntaxTree.ParseText(s.Text, current.ParseOptions, s.LogicalPath)).ToArray();
+                CSharpCompilation compilation;
+                using (timing?.StartSynchronous(prefix + ".compiler.compilation"))
+                    compilation = CSharpCompilation.Create("Crap4CSharp.CallableInventory", syntax, metadata);
+                var inventories = new Dictionary<string, CallableInventoryResult>(StringComparer.Ordinal);
+                CallableInventoryResult Inventory(CapturedSource source)
+                {
+                    if (!inventories.TryGetValue(source.LogicalPath, out var inventory))
+                    {
+                        using var measurement = timing?.StartSynchronous(prefix + ".compiler.inventory");
+                        inventories.Add(source.LogicalPath, inventory = CallableInventory.AnalyzeCaptured(source, analysis, compilation));
+                    }
+                    return inventory;
+                }
+                var empty = !eligible.Any(s => Inventory(s).Callables.Any(c => c.Applicability == CallableApplicability.Applicable));
                 if (saved.CoverageApplicability != (empty ? "semantic-empty" : null)) throw Refuse();
-                var syntax = allSources.Select(s => CSharpSyntaxTree.ParseText(s.Text, current.ParseOptions, s.LogicalPath)).ToArray();
                 foreach (var source in expected.Where(i => i.Role == "compiler-source" && (!i.Generated || current.ExclusionPolicy.IncludeGenerated)))
-                    if (CallableInventory.Analyze(CapturedSource.Create(source.LogicalPath, bundle.Bytes[source.Locator].AsSpan()).Text,
-                        source.LogicalPath, analysis, metadata, syntax).Callables.Any(c => c.Applicability == CallableApplicability.Applicable)) throw Refuse();
+                    if (Inventory(CapturedSource.Create(source.LogicalPath, bundle.Bytes[source.Locator].AsSpan()))
+                        .Callables.Any(c => c.Applicability == CallableApplicability.Applicable)) throw Refuse();
                 var phaseIdentities = new List<object>();
+                using (timing?.StartSynchronous(prefix + ".compiler.phaseInputs"))
                 foreach (var phase in current.PhaseInputs.Where(i => i.Role != "source" && File.Exists(i.Path)))
                 {
                     var content = Read(phase.Path); var relative = Path.GetRelativePath(root, phase.Path).Replace('\\', '/');
@@ -127,10 +156,12 @@ internal static class SavedCompilerContexts
             }
             var excluded = bundle.Manifest.Artifacts.Where(a => a.Kind is "test-compiler-source" or "test-compiler-reference" or "test-compiler-input-closure").ToArray();
             if (excluded.Length != testArtifacts.Count || !testArtifacts.SetEquals(excluded.Select(a => a.Id))) throw Refuse();
-            compiler.RetainedProof.ValidateCurrent(token);
+            reads.Complete();
+            using (timing?.StartSynchronous(prefix + ".compiler.retainedClosing"))
+                compiler.RetainedProof.ValidateCurrent(token);
 
             string Logical(string path) => CanonicalIdentity.NormalizeLogicalPath(Path.GetRelativePath(root, path).Replace('\\', '/'));
-            ImmutableArray<byte> Read(string path) => CompilerOutputBinding.Read(path, ref total, token);
+            ImmutableArray<byte> Read(string path) => reads.Read(path, ref total);
             static ImmutableArray<byte> Json(object value) => ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(value));
             static ManifestInput Input(string role, string logical, ImmutableArray<byte> content, bool generated = false, string? repository = null, string? encoding = null)
             {

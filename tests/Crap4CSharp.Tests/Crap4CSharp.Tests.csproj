@@ -13,6 +13,7 @@
     <ProjectReference Include="../Crap4CSharp.ProcessFixture/Crap4CSharp.ProcessFixture.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="../../samples/Fixture/Fixture/Fixture.csproj" />
     <None Include="Fixtures/results/*.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures/results/source.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures/results/coverage.xml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures/CoveragePaths/*.xml" CopyToOutputDirectory="PreserveNewest" />

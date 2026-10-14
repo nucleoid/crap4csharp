@@ -17,7 +17,7 @@ public sealed class ProcessProtocolTests
             AppContext.BaseDirectory, TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken, count);
         Assert.Equal(0, result.ExitCode);
         Assert.Equal(Enumerable.Range(0, count).Select(i => (byte)(i % 256)), result.StandardOutput);
-        Assert.Equal(System.Text.Encoding.UTF8.GetBytes("binary-protocol-complete" + Environment.NewLine), result.StandardError);
+        Assert.Equal(System.Text.Encoding.UTF8.GetBytes("binary-protocol-complete\n"), result.StandardError);
     }
 
     [Theory]
@@ -53,7 +53,8 @@ public sealed class ProcessProtocolTests
         {
             ownedPath = snapshot.Path;
             Directory.CreateDirectory(ownedPath); // Positive filesystem setup fault, not a write-task orphan.
-            await Assert.ThrowsAnyAsync<IOException>(() => snapshot.WriteAsync(new byte[1], TestContext.Current.CancellationToken));
+            var error = await Record.ExceptionAsync(() => snapshot.WriteAsync(new byte[1], TestContext.Current.CancellationToken));
+            Assert.True(error is IOException or UnauthorizedAccessException, "A directory must refuse file creation on every supported OS.");
         }
         Assert.False(Directory.Exists(Path.GetDirectoryName(ownedPath)));
     }

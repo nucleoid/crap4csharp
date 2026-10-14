@@ -32,16 +32,30 @@ internal static class TestExecutionAdapter
 
     internal static async Task<TestExecutionRun> RunVerifiedAsync(CheckExecutionPlan plan,
         CompilerGraphPhaseResult bound, string ownedDirectory, TimeSpan timeout, CancellationToken cancellationToken)
+        => await RunVerifiedWithTimingAsync(plan, bound, ownedDirectory, timeout, cancellationToken, null);
+
+    internal static async Task<TestExecutionRun> RunVerifiedWithTimingAsync(CheckExecutionPlan plan,
+        CompilerGraphPhaseResult bound, string ownedDirectory, TimeSpan timeout, CancellationToken cancellationToken,
+        global::CompletedProofTiming? timing)
+        => await RunVerifiedWithSdkObserverAsync(plan, bound, ownedDirectory, timeout, cancellationToken, null, timing);
+
+    internal static async Task<TestExecutionRun> RunVerifiedWithSdkObserverAsync(CheckExecutionPlan plan,
+        CompilerGraphPhaseResult bound, string ownedDirectory, TimeSpan timeout, CancellationToken cancellationToken,
+        Func<string, TimeSpan, CancellationToken, bool, Task<ProjectContextSdkResolution>>? observeSdk,
+        global::CompletedProofTiming? timing = null)
     {
         var proof = bound.RetainedProof ?? throw Refuse("Bound compiler execution did not retain phase evidence through tests.");
         try { CompilerGraphExecution.ValidateFinalGraph(plan.PreparedGraph, bound.FinalGraph); }
         catch (ProjectContextException) { throw Refuse("Bound compiler evidence belongs to a different immutable test plan."); }
-        proof.ValidateCurrent(cancellationToken);
-        return await RunCoreAsync(plan, proof, ownedDirectory, timeout, cancellationToken);
+        using (timing?.Start("execution.test.openingPhysical"))
+            proof.ValidateCurrent(cancellationToken);
+        return await RunCoreAsync(plan, proof, ownedDirectory, timeout, cancellationToken, observeSdk, timing);
     }
 
     private static async Task<TestExecutionRun> RunCoreAsync(CheckExecutionPlan plan,
-        CompilerRetainedProof? proof, string ownedDirectory, TimeSpan timeout, CancellationToken cancellationToken)
+        CompilerRetainedProof? proof, string ownedDirectory, TimeSpan timeout, CancellationToken cancellationToken,
+        Func<string, TimeSpan, CancellationToken, bool, Task<ProjectContextSdkResolution>>? observeSdk = null,
+        global::CompletedProofTiming? timing = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (timeout <= TimeSpan.Zero || timeout == Timeout.InfiniteTimeSpan)
@@ -80,14 +94,21 @@ internal static class TestExecutionAdapter
             try
             {
                 token.ThrowIfCancellationRequested();
-                proof?.ValidateCurrent(token);
+                // RunVerifiedAsync validates before entering this synchronous
+                // setup; subsequent launches follow the prior child's closing
+                // validation. No consumer process runs between those boundaries.
                 var entry = Path.Combine(directory, launch.Index.ToString("D4", System.Globalization.CultureInfo.InvariantCulture));
                 // Empty owned root prevents ambient reuse; not hostile-filesystem attestation.
                 Directory.CreateDirectory(entry);
                 var resultDirectory = Path.Combine(entry, "results");
                 var logs = Path.Combine(entry, "logs");
                 Directory.CreateDirectory(resultDirectory); Directory.CreateDirectory(logs);
-                var sdk = await ProjectContextLoader.ResolveSdkAsync(Path.GetDirectoryName(launch.Node.ProjectPath)!, timeout, token);
+                ProjectContextSdkResolution currentSdk;
+                using (timing?.Start("execution.test.sdk"))
+                    currentSdk = await (observeSdk ?? ProjectContextLoader.ResolveSdkAsync)(Path.GetDirectoryName(launch.Node.ProjectPath)!, timeout, token,
+                        proof?.NativeSdkIdentityProbe ?? false);
+                var frozenSdk = proof?.FrozenSdk ?? plan.PreparedGraph.SelectedSdk;
+                var sdk = frozenSdk is null ? currentSdk : SdkExecutionIdentity.Validate(frozenSdk, currentSdk);
                 var childLog = Path.Combine(logs, "test-child.binlog");
                 if (childLog.IndexOfAny([';', ',']) >= 0) throw Refuse("Test-child logger paths with delimiters are unsupported.");
                 var arguments = launch.Arguments.Concat(new[] { "-bl:" + childLog + ";ProjectImports=None", "--logger", "trx;LogFileName=tests.trx", "--results-directory", resultDirectory,
@@ -96,14 +117,20 @@ internal static class TestExecutionAdapter
                         (launch.IncludeTests ? "true" : "false") }).ToArray();
                 // Preserve interrupted launch diagnostics without manufacturing an exit code.
                 outcomes[launch.Index] = new(launch.Node.Id, "failed", resultDirectory, logs, null);
-                var process = await ProcessRunner.RunLoggedAsync(sdk.HostPath, arguments, Path.GetDirectoryName(launch.Node.ProjectPath)!, timeout, token, logs);
+                LoggedProcessResult process;
+                using (timing?.Start("execution.test.process"))
+                    process = await ProcessRunner.RunLoggedAsync(sdk.HostPath, arguments, Path.GetDirectoryName(launch.Node.ProjectPath)!, timeout, token, logs);
                 results.Add(new(launch.Node.Id, launch.Node.ProjectPath, resultDirectory, process));
                 outcomes[launch.Index] = new(launch.Node.Id, process.ExitCode == 0 ? "completed" : "failed", resultDirectory, logs, process);
                 if (!OperatingSystem.IsWindows() && File.Exists(childLog)) File.SetUnixFileMode(childLog, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-                var observed = await TestChildEvidence.ReadAsync(childLog, launch.Node.ProjectPath, timeout, token);
+                TestChildObservation observed;
+                using (timing?.Start("execution.test.evidence"))
+                    observed = await TestChildEvidence.ReadAsync(childLog, launch.Node.ProjectPath, timeout, token,
+                        proof?.NativeSdkIdentityProbe ?? false, sdk);
                 results[^1] = results[^1] with { ChildBuild = observed };
                 TestChildEvidence.Validate(observed, process);
-                proof?.ValidateCurrent(token);
+                using (timing?.Start("execution.test.closingPhysical"))
+                    proof?.ValidateCurrent(token);
             }
             catch (Exception error) when (IsOperational(error))
             {
@@ -116,7 +143,8 @@ internal static class TestExecutionAdapter
             try
             {
                 token.ThrowIfCancellationRequested();
-                if (proof is not null) await proof.ValidateFinalAsync(token);
+                using (timing?.Start("execution.test.finalGraph"))
+                    if (proof is not null) await proof.ValidateFinalAsync(token);
             }
             catch (Exception error) when (IsOperational(error)) { failure = error; }
         }
@@ -135,7 +163,7 @@ internal static class TestExecutionAdapter
         arguments.Add("-p:BuildProjectReferences=false");
         return Array.AsReadOnly(arguments.ToArray());
     }
-    private static bool IsOperational(Exception error) => error is InvalidOperationException or IOException or
+    private static bool IsOperational(Exception error) => error is InvalidOperationException or IOException or InvalidDataException or
         UnauthorizedAccessException or OperationCanceledException or ProcessTimeoutException or System.ComponentModel.Win32Exception;
 
     private static bool Contains(string parent, string child)

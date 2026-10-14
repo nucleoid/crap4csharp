@@ -26,7 +26,7 @@ internal static class FreshProjectPreparation
             {
                 var restored = await restore(request, deadline.Token);
                 if (restored.ExitCode != 0)
-                    return new(false, [], [restored.StandardError, restored.StandardOutput], "context.restoreFailed");
+                    return new(false, [], ["Explicit selected-root restore failed; raw restore output is not public execution evidence."], "context.restoreFailed");
             }
             return await load(request with { MetadataOnly = false }, deadline.Token);
         }

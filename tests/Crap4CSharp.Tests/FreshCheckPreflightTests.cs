@@ -7,6 +7,49 @@ namespace Crap4CSharp.Tests;
 public sealed class FreshCheckPreflightTests
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BaselineLocalIdentityNormalizesGitRootButRejectsDifferentWorkspace(bool nestedRoot)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-baseline-git-root");
+        const string policy = """
+            {"schemaVersion":"repository-policy-v1","mode":"strict","productionProjects":["App.csproj"],
+             "testProjects":["Tests.csproj"],"configuration":"Debug","targetFrameworks":["net10.0"],
+             "scope":"all","threshold":8,"missingCoverage":"fail","requiredChecks":["tests","coverage","crap"],
+             "exclusions":[],"ruleset":"callables-v1","exemptionFiles":[]}
+            """;
+        foreach (var prefix in new[] { "", "nested/" })
+        {
+            fixture.Write(prefix + "policy.json", policy);
+            fixture.Write(prefix + "App.csproj", "<Project />");
+            fixture.Write(prefix + "Tests.csproj", "<Project />");
+        }
+        var token = TestContext.Current.CancellationToken;
+        foreach (var arguments in new[] { new[] { "init", "-q" }, new[] { "config", "user.name", "Fixture" },
+            new[] { "config", "user.email", "fixture@example.invalid" }, new[] { "add", "." }, new[] { "commit", "-qm", "reviewed base" } })
+            Assert.Equal(0, (await ProcessRunner.RunAsync("git", arguments, fixture.Path, TimeSpan.FromSeconds(30), token)).ExitCode);
+        var head = (await ProcessRunner.RunAsync("git", ["rev-parse", "HEAD"], fixture.Path, TimeSpan.FromSeconds(30), token)).StandardOutput.Trim();
+        var root = nestedRoot ? Path.Combine(fixture.Path, "nested") : fixture.Path;
+        var request = new FreshCheckRequest("App.csproj", "policy.json", null, "all", null, "worktree", "method",
+            null, null, true, false, null, new PolicyOverrides(), TimeSpan.FromSeconds(30));
+        if (nestedRoot)
+        {
+            var error = await Assert.ThrowsAsync<PolicyException>(() => FreshCheckPreflightLoader.LoadLocalIdentityAsync(request, root, head, token));
+            Assert.Equal("provenance.completedPreflightUnsupported", error.Code);
+        }
+        else
+        {
+            var observed = await FreshCheckPreflightLoader.LoadLocalIdentityAsync(request, root, head, token);
+            Assert.Equal(root, observed.Root);
+            Assert.Equal("local-unreviewed", observed.Trusted.Trust);
+            Assert.Equal("none", observed.Trusted.Revision);
+            Assert.NotNull(observed.GitSnapshot);
+            Assert.Equal(head, observed.GitSnapshot.Revision.MergeBase);
+            Assert.Null(observed.LocalSnapshot);
+        }
+    }
+
+    [Theory]
     [InlineData("staged", "scope.executionSnapshotUnsupported")]
     [InlineData("head", "scope.executionSnapshotUnsupported")]
     [InlineData("threshold", "policy.thresholdOverrideForbidden")]

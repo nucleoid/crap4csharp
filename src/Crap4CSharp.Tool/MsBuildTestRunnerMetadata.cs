@@ -7,10 +7,13 @@ internal static partial class MsBuildProjectLoader
 {
     // Evaluation only, under the complete graph globals. No target or Workspace invocation.
     // This is a conservative installed-fixture support gate, not custom-target attestation.
-    private static ProjectTestRunnerMetadata EvaluateTestRunner(ProjectBuildGraphNode node, string sdkPath)
+    private static ProjectTestRunnerMetadata EvaluateTestRunner(ProjectBuildGraphNode node, string sdkPath, CompletedProofTiming? timing = null)
     {
+        using var evaluationTiming = timing?.StartSynchronous("worker.runnerEvaluation");
         using var collection = new ProjectCollection(new Dictionary<string, string>(node.GlobalProperties, StringComparer.OrdinalIgnoreCase));
         var project = collection.LoadProject(node.ProjectPath);
+        evaluationTiming?.Dispose();
+        using var bindingTiming = timing?.StartSynchronous("worker.runnerBinding");
         if (string.Equals(project.GetPropertyValue("TestingPlatformDotnetTestSupport"), "true", StringComparison.OrdinalIgnoreCase))
             throw Unsupported("Microsoft.Testing.Platform package dispatch is not supported; configure a reviewed VSTest project.");
         for (var directory = Path.GetDirectoryName(node.ProjectPath); directory is not null; directory = Path.GetDirectoryName(directory))

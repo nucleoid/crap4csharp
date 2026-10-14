@@ -5,6 +5,18 @@ namespace Crap4CSharp.Core;
 
 public static class SemanticEligibility
 {
+    public static MetadataReferenceProperties ReferenceProperties(ManifestInput input)
+    {
+        if (input.Role != "reference") throw new InvalidDataException("Reference properties require a reference input.");
+        var text = input.ReferenceAliases;
+        if (text is not null && text.Length > 32768) throw new InvalidDataException("Reference aliases exceed the supported limit.");
+        var aliases = text is null ? [] : text.Split(',');
+        if (aliases.Any(alias => alias.Length == 0 || alias != "global" && !SyntaxFacts.IsValidIdentifier(alias)) ||
+            aliases.Distinct(StringComparer.Ordinal).Count() != aliases.Length)
+            throw new InvalidDataException("Reference aliases are invalid.");
+        return new MetadataReferenceProperties(MetadataImageKind.Assembly,
+            System.Collections.Immutable.ImmutableArray.CreateRange(aliases), input.EmbedInteropTypes ?? false);
+    }
     internal static bool ValidateEmptyCaptured(ManifestContext context,
         IReadOnlyDictionary<string, System.Collections.Immutable.ImmutableArray<byte>> bytes)
     {
@@ -18,7 +30,8 @@ public static class SemanticEligibility
             if (inputs.Length == 0) return false;
             var captured = inputs.Select(i => CapturedSource.Create(i.LogicalPath, bytes[i.Locator].AsSpan())).ToArray();
             var eligible = inputs.Where(i => !i.Generated || context.IncludeGenerated).Select(i => CapturedSource.Create(i.LogicalPath, bytes[i.Locator].AsSpan())).ToArray();
-            var references = context.Inputs.Where(i => i.Role == "reference").Select(i => MetadataReference.CreateFromImage(bytes[i.Locator])).ToArray();
+            var references = context.Inputs.Where(i => i.Role == "reference")
+                .Select(i => MetadataReference.CreateFromImage(bytes[i.Locator], ReferenceProperties(i))).ToArray();
             return !HasApplicable(eligible, captured, new(context.Project,context.TargetFramework,context.Configuration,context.Platform,context.Id,parse),references);
         }
         catch (Exception error) when (error is InvalidDataException or ArgumentException or KeyNotFoundException or BadImageFormatException)
@@ -32,7 +45,14 @@ public static class SemanticEligibility
         IEnumerable<MetadataReference> references)
     {
         var trees = compilerSources.Select(s => CSharpSyntaxTree.ParseText(s.Text, context.ParseOptions, s.LogicalPath)).ToArray();
-        return eligibleSources.Any(s => CallableInventory.Analyze(s.Text, s.LogicalPath, context, references, trees)
+        // Preserve the public helper's support for eligible sources outside the
+        // supplied auxiliary closure; only exact captured members share a model.
+        if (trees.Select(t => t.FilePath).Distinct(StringComparer.Ordinal).Count() != trees.Length ||
+            eligibleSources.Any(s => !compilerSources.Any(c => c.LogicalPath == s.LogicalPath && c.Text == s.Text)))
+            return eligibleSources.Any(s => CallableInventory.Analyze(s.Text, s.LogicalPath, context, references, trees)
+                .Callables.Any(c => c.Applicability == CallableApplicability.Applicable));
+        var compilation = CSharpCompilation.Create("Crap4CSharp.CallableInventory", trees, references);
+        return eligibleSources.Any(s => CallableInventory.AnalyzeCaptured(s, context, compilation)
             .Callables.Any(c => c.Applicability == CallableApplicability.Applicable));
     }
 }

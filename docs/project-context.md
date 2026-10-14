@@ -13,7 +13,24 @@ The loader does not restore, build, add packages, run tests, or call Roslyn's mu
 
 `MSBuildWorkspace` design-time documents establish `DesignTimeComplete` only. `CompiledInputBindingComplete` stays false until sanitized compiler observations and output identities are supplied and `CompiledInputCapture.Validate` proves an exact context/source match. `ReuseRecipeComplete` is separate and remains false in this slice. Unknown, drifted, or incomplete evidence fails closed.
 
-The selected consumer SDK is resolved by `dotnet` from the consumer target directory, so a consumer `global.json` participates. The child and its BuildHost receive the resolved host, `DOTNET_ROOT`, and `PATH`; MSBuild is registered from that exact SDK before any workspace type is used. Every selected project directory is rechecked and a nested SDK disagreement fails `context.sdkMismatch`. Each target framework is loaded in a separate workspace with its own global properties.
+The selected consumer SDK is resolved by `dotnet` from the consumer target directory, so a consumer `global.json` participates. The child and its BuildHost receive the resolved host, `DOTNET_ROOT`, and `PATH`; MSBuild is registered from that exact SDK before any workspace type is used. Every selected project directory is rechecked and a nested SDK disagreement fails `context.sdkMismatch`. Every target framework retains its own effective global properties.
+
+When dependency globals differ, mapped graph contexts use an invocation-owned source workspace. The selected SDK
+supplies design-time compiler arguments with actual compilation and dependency builds disabled. A metadata reference
+can become a source project reference only when its executed source-project metadata and output path identify one
+authorized graph node. Reference aliases and embedded-interop flags are preserved. When multiple authorized
+instances share a declared reference path and the SDK supplies no unique producer identity, discovery retains the
+unresolved path and marks that context incomplete; it does not choose a source producer. Compilation and compiled-input
+promotion refuse unresolved ownership before effects. Missing or mixed undeclared references refuse acquisition.
+The loader snapshots all declared graph inputs before targets and checks bytes and source
+membership after each acquisition. Globals that override the noncompiling controls refuse before any targets.
+Ordinary contexts keep their separate workspaces; mapped source projects share a workspace while retaining each
+node's effective framework, configuration, platform and custom globals.
+
+Fresh execution freezes the initial SDK version, full MSBuild version, SDK/host paths and resolution route.
+Later boundaries still resolve the SDK independently; restore, build and test launch only when that observation
+matches the frozen selector. A changed selector refuses before launch. Binlog readers and retained current proofs
+also retain the execution selector. This is selector consistency, not an atomic filesystem or environment sandbox.
 
 ## Identity and exclusions
 

@@ -29,10 +29,14 @@ public sealed class FreshProjectPreparationTests
         var request = new ProjectContextLoadRequest("App.csproj", "Debug", null, [], true, false, TimeSpan.FromMinutes(1));
         var result = await FreshProjectPreparation.LoadAsync(request, false, TestContext.Current.CancellationToken,
             (_, _) => { calls.Add("discover"); return Task.FromResult(new ProjectContextLoadResult(!discoveryFails, [], [], discoveryFails ? "context.targetNotFound" : null)); },
-            (_, _) => { calls.Add("restore"); return Task.FromResult(new ProcessResult(23, "", "fixture restore failure")); },
+            (_, _) => { calls.Add("restore"); return Task.FromResult(new ProcessResult(23,
+                "private consumer source and feed https://user:password@example.invalid/index.json",
+                "private token fixture restore failure")); },
             (_, _) => { calls.Add("workspace"); return Task.FromResult(new ProjectContextLoadResult(true, [], [])); });
         Assert.False(result.Success);
         Assert.Equal(discoveryFails ? "context.targetNotFound" : "context.restoreFailed", result.FailureReason);
+        if (!discoveryFails)
+            Assert.Equal(["Explicit selected-root restore failed; raw restore output is not public execution evidence."], result.Diagnostics);
         Assert.Equal(discoveryFails ? ["discover"] : new[] { "discover", "restore" }, calls);
     }
 

@@ -209,7 +209,7 @@ internal static class CurrentEvidenceAdapter
         {
             paths.Add(observation.Assembly!.Path);
             paths.Add(observation.Pdb!.Path);
-            foreach (var path in observation.Parameters.Single(parameter => parameter.Name == "References").Items)
+            foreach (var path in CompilerReferenceSnapshot.ResolvePaths(observation, token))
                 paths.Add(Path.GetFullPath(path));
         }
         var inputs = bundle.Manifest.Contexts.SelectMany(context => context.Inputs).Where(input => !input.Generated)
@@ -225,7 +225,7 @@ internal static class CurrentEvidenceAdapter
         // outside-output changes. Never copy or rewrite the captured revision hash.
         var bundleFiles = SavedBundleFootprint.Validate(bundle, preflight.Root, paths.ToArray(), token);
         var state = preflight.GitSnapshot is { } git
-            ? FreshGitProof.Identity(git, SavedCompletedProof.OutputFootprint(compiler)) :
+            ? FreshGitProof.Identity(git, SavedCompletedProof.OutputFootprint(compiler), bundleFiles) :
             SavedLocalMembership.Observe(bundle, preflight, SavedCompletedProof.OutputFootprint(compiler), token, bundleFiles);
         compiler.RetainedProof!.ValidateCurrent(token);
         _ = SavedBundleFootprint.Validate(bundle, preflight.Root, paths.ToArray(), token);

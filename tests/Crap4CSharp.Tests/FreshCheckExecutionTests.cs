@@ -10,7 +10,7 @@ public sealed class FreshCheckExecutionTests
     [InlineData(false)]
     [InlineData(true)]
     public Task ColdPublicFreshCheckRestoresBuildsAndTestsOnceAndRetainsBoundArtifacts(bool failing)
-        => RunCase(failing, false);
+        => RunCase(failing, false, publicTiming: true);
 
     [Theory]
     [InlineData(false)]
@@ -84,6 +84,27 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, false, includeGenerated: includeGenerated, generatedFixture: true,
             policyScope: scope, granularity: granularity);
 
+    [Fact]
+    public Task OriginalGeneratedBaseFileDeadlineMeasuresUnchangedPublicProofBoundaries()
+        => RunCase(false, false, includeGenerated: true, generatedFixture: true,
+            policyScope: "base", granularity: "file", publicTiming: true);
+
+    [Fact]
+    public Task OriginalGeneratedExcludedBaseFileDeadlineMeasuresUnchangedPublicProofBoundaries()
+        => RunCase(false, false, includeGenerated: false, generatedFixture: true,
+            policyScope: "base", granularity: "file", publicTiming: true);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task PrivateNativeSdkPreservesOriginalGeneratedBaseFileDeadlineAndCompleteProof(bool includeGenerated)
+        => RunCase(false, false, includeGenerated: includeGenerated, generatedFixture: true,
+            policyScope: "base", granularity: "file", publicTiming: true, nativeSdkIdentity: true);
+
+    [Fact]
+    public Task PrivateNativeSdkCoordinatorRetainsExactAggregateRefusalDetail()
+        => RunCase(false, true, generatedFixture: true, nativeSdkIdentity: true);
+
     [Theory]
     [InlineData("Library/Code.cs", true)]
     [InlineData("Library/Other.cs", false)]
@@ -116,6 +137,13 @@ public sealed class FreshCheckExecutionTests
     public Task FreshCompletePublicationRejectsAfterIntermediateTimestampDriftAndRestoresOriginalOnceExecution()
         => RunCase(false, true, policyScope: "all", local: true, measure: true, standaloneTest: true,
             promotionMeasure: true, promotionDrift: true, promotionIntermediateDrift: true);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task PrivateWarmPostBuildRetainsTwoContextCompleteProofAndEightIntermediateDriftRefusals(bool drift)
+        => RunCase(false, true, policyScope: "all", local: true, measure: true, standaloneTest: true,
+            promotionMeasure: true, promotionDrift: drift, promotionIntermediateDrift: drift, warmPostBuild: true);
 
     [Fact]
     public Task PublicStrictMetricViolationRetainsSuccessfulOnceTestsAndCompleteReusableReplay()
@@ -192,6 +220,24 @@ public sealed class FreshCheckExecutionTests
     [InlineData(true)]
     public Task SavedCompleteBoundaryRechecksTwoRequiredContextsAndRejectsBetweenGateDrift(bool shared)
         => RunCase(false, true, standaloneTest: true, savedCoverage: true, sharedCoverage: shared, compositeProof: true);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task PrivateWarmSavedBoundaryRetainsTwoContextsAndIntermediatePhysicalDriftOrdering(bool shared)
+        => RunCase(false, true, policyScope: "all", local: true, standaloneTest: true,
+            savedCoverage: true, sharedCoverage: shared, compositeProof: true,
+            physicalComposite: true, warmSaved: true);
+
+    [Theory]
+    [InlineData(true, false, false)]
+    [InlineData(true, false, true)]
+    [InlineData(false, true, false)]
+    [InlineData(false, true, true)]
+    public Task PrivateWarmSavedEligibilityRetainsBothRequiredClosures(bool empty, bool generated, bool shared)
+        => RunCase(false, true, emptyEligible: empty, includeGenerated: generated,
+            policyScope: "all", local: true, standaloneTest: true, sharedCoverage: shared,
+            warmSavedEligibility: true);
 
     [Theory]
     [InlineData(true, false)]
@@ -369,8 +415,19 @@ public sealed class FreshCheckExecutionTests
     public Task FreshLateDeadlineRefusalRetainsBothActualSuccessfulRequiredContextsWithoutReusableTerminal()
         => RunCase(false, false, policyScope: "all", standaloneTest: true, savedResults: true, freshTerminalCancellation: true, freshTerminalDeadline: true);
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task DefaultPrivateCompletedPublicationCannotBeReusedAfterLateInterruption(bool deadline)
+        => RunCase(false, false, policyScope: "all", standaloneTest: true, savedResults: true,
+            freshTerminalCancellation: true, freshTerminalDeadline: deadline, privateArtifactOnly: true, publicTiming: true);
+
+    [Fact]
+    public Task FreshAliasedProductionReferencePreservesScoringCapturedReplayAndCurrentReuse()
+        => RunCase(false, false, policyScope: "all", completedReuse: true, aliasedReference: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false, bool warmPostBuild = false, bool warmSaved = false, bool warmSavedEligibility = false, bool nativeSdkIdentity = global::App.DefaultNativeSdkIdentity, bool privateArtifactOnly = false, bool aliasedReference = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -393,6 +450,29 @@ public sealed class FreshCheckExecutionTests
             fixture.Write(outputMutation == "source" ? "Library/compiler-cache/Authored.cs" : "Library/compiler-cache/Rules.json",
                 outputMutation == "source" ? "public static class Authored { public static int Value => 42; }" : "{\"value\":42}");
         fixture.Write("Library/Code.cs", emptyEligible ? "public static class Library {}" : "public static class Library { public static int Value => 42; }");
+        if (aliasedReference)
+        {
+            // Owned fixture setup occurs before analyzed input snapshots. Use
+            // the pinned SDK reference assembly, not runtime implementation refs.
+            var sdkRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT");
+            Assert.False(string.IsNullOrWhiteSpace(sdkRoot));
+            var runtimeReference = Path.Combine(sdkRoot!, "packs", "Microsoft.NETCore.App.Ref", "10.0.3", "ref", "net10.0", "System.Runtime.dll");
+            Assert.True(File.Exists(runtimeReference));
+            var producer = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create("AliasDependency",
+                [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("public static class Dependency { public static int Value => 42; }")],
+                [Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(runtimeReference)],
+                new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
+            var aliasPath = fixture.Write("AliasDependency.dll", "placeholder");
+            using (var aliasStream = File.Create(aliasPath))
+            {
+                var emitted = producer.Emit(aliasStream);
+                Assert.True(emitted.Success, string.Join(" | ", emitted.Diagnostics));
+            }
+            var libraryProject = Path.Combine(fixture.Path, "Library", "Library.csproj");
+            File.WriteAllText(libraryProject, File.ReadAllText(libraryProject).Replace("</Project>",
+                "<ItemGroup><Reference Include=\"AliasDependency\"><HintPath>../AliasDependency.dll</HintPath><Aliases>ProbeLibrary</Aliases></Reference></ItemGroup></Project>", StringComparison.Ordinal));
+            fixture.Write("Library/Code.cs", "extern alias ProbeLibrary; public static class Library { public static int Value => ProbeLibrary::Dependency.Value; }");
+        }
         if (hasGenerated) fixture.Write("Library/obj/Extra.cs", "public static class Extra { public static int Value => 42; }");
         if (coordinatorOnly) fixture.Write("Library/NoRuntime.cs", "#if NOT_DEFINED\npublic class Inactive {}\n#endif\n");
         fixture.Write("Tests/Tests.csproj", """
@@ -409,7 +489,7 @@ public sealed class FreshCheckExecutionTests
                 (outputMutation == "source" ? "Authored.cs" : "Rules.json") +
                 "\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); ") +
             (partialDrift ? "var p = System.IO.Path.GetFullPath(\"../../../../Library/Code.cs\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); " : "") +
-            (priorBuild || measure || thresholdViolation || completedReuse || savedResults || savedCoverage || contextOnly || bundleEvidence ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
+            (priorBuild || measure || thresholdViolation || completedReuse || savedResults || savedCoverage || contextOnly || bundleEvidence || warmSavedEligibility ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
             "Assert.Equal(" + (failing ? "99" : "42") + ", " + (emptyEligible ? "42" : hasGenerated ? "Extra.Value" : "Library.Value") + "); } }");
         fixture.Write("policy.json", """
             {"schemaVersion":"repository-policy-v1","mode":"strict","productionProjects":["Library/Library.csproj"],
@@ -445,7 +525,7 @@ public sealed class FreshCheckExecutionTests
             fixture.Write("Independent/Independent.csproj", File.ReadAllText(Path.Combine(fixture.Path, "Tests/Tests.csproj"))
                 .Replace("<ProjectReference Include=\"../Library/Library.csproj\" />", sharedCoverage ? "<ProjectReference Include=\"../Library/Library.csproj\" />" : "", StringComparison.Ordinal));
             fixture.Write("Independent/Tests.cs", "using Xunit; public class IndependentTests { [Fact] public void Test() { " +
-                (savedResults || savedCoverage || bundleEvidence || promotionMeasure ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") + (sharedCoverage ? "Assert.Equal(42, Library.Value); } }" : "Assert.Equal(42, 42); } }"));
+                (savedResults || savedCoverage || bundleEvidence || promotionMeasure || warmSavedEligibility ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") + (sharedCoverage ? "Assert.Equal(42, " + (emptyEligible ? "42" : hasGenerated ? "Extra.Value" : "Library.Value") + "); } }" : "Assert.Equal(42, 42); } }"));
             fixture.Write("Root.slnx", defaultSolution
                 ? "<Solution><Project Path=\"Tests/Tests.csproj\" /><Project Path=\"Independent/Independent.csproj\" /></Solution>"
                 : "<Solution><Configurations><Platform Name=\"AnyCPU\" /></Configurations><Project Path=\"Tests/Tests.csproj\" /><Project Path=\"Independent/Independent.csproj\" /></Solution>");
@@ -457,7 +537,12 @@ public sealed class FreshCheckExecutionTests
         var token = TestContext.Current.CancellationToken;
         if (!local)
             foreach (var args in new[] { new[] { "init", "-q" }, new[] { "config", "user.name", "Fixture" },
-                new[] { "config", "user.email", "fixture@example.invalid" }, new[] { "add", "." }, new[] { "commit", "-qm", "cold fixture" } })
+                new[] { "config", "user.email", "fixture@example.invalid" },
+                // These fixtures commit their physical authored bytes. Do not
+                // inherit a user's newline filter and turn the empty-scope
+                // premise into an actual changed project configuration.
+                new[] { "config", "core.autocrlf", "false" },
+                new[] { "add", "." }, new[] { "commit", "-qm", "cold fixture" } })
                 Assert.Equal(0, (await ProcessRunner.RunAsync("git", args, fixture.Path, TimeSpan.FromSeconds(30), token)).ExitCode);
         var original = Directory.GetFiles(fixture.Path, "*", SearchOption.AllDirectories).Where(p =>
             !p.Contains(Path.DirectorySeparatorChar + ".git" + Path.DirectorySeparatorChar, StringComparison.Ordinal))
@@ -488,9 +573,12 @@ public sealed class FreshCheckExecutionTests
                 return value;
             }
             var request = new FreshCheckRequest(standaloneTest ? "Root.slnx" : "Tests/Tests.csproj", "policy.json", local ? null : "HEAD", local || newPreflight ? "all" : null, null, "worktree", granularity,
-                null, "bundle", false, false, null, new PolicyOverrides(IncludeGenerated: includeGenerated ? true : null), TimeSpan.FromMinutes(3));
+                null, "bundle", false, false, null, new PolicyOverrides(IncludeGenerated: includeGenerated ? true : null), TimeSpan.FromMinutes(3))
+                { WarmPostBuildProbe = warmPostBuild || nativeSdkIdentity, NativeSdkIdentityProbe = nativeSdkIdentity };
             var preflight = await MeasureAsync("trustedPreflight", () => FreshCheckPreflightLoader.LoadAsync(request, fixture.Path, token));
             var evidence = await MeasureAsync("executionComposite", () => FreshCheckExecution.RunAsync(preflight, token));
+            if (nativeSdkIdentity && evidence.Tests.Failure is not null)
+                Console.WriteLine("PRIVATE_NATIVE_AGGREGATE_FAILURE " + evidence.Tests.Failure);
             Assert.Equal(standaloneTest ? 3 : 2, evidence.Compiler.Observations.Count);
             Assert.Equal(standaloneTest ? 2 : 1, evidence.Tests.Count);
             Assert.Equal(standaloneTest ? 2 : 1, evidence.Tests.Outcomes.Count);
@@ -500,12 +588,47 @@ public sealed class FreshCheckExecutionTests
                 Assert.NotEqual(0, evidence.Tests[0].Process.ExitCode);
                 Assert.Null(evidence.Coverage); Assert.Empty(evidence.SafeChildren);
                 var rawFailure = FreshFailureResult.Create(evidence, DateTimeOffset.UnixEpoch, TimeSpan.Zero);
+                Assert.Equal(global::App.ToolVersion, rawFailure.ToolVersion);
+                Assert.Equal(".", rawFailure.Evaluation.Scope.LogicalWorkspaceRoot);
                 Assert.Equal(1, rawFailure.Run.ExitCode);
                 Assert.Contains(rawFailure.Evaluation.Checks, c => c.Name == "testExecution" && c.Status == "fail");
                 var outcome = Assert.Single(rawFailure.Run.TestOutcomes!);
                 Assert.Equal("failed", outcome.Status); Assert.Equal(evidence.Tests[0].Process.ExitCode, outcome.ExitCode);
                 Assert.All(rawFailure.Run.Artifacts, a => { Assert.False(a.Complete); Assert.False(a.Reusable); });
                 Assert.DoesNotContain(rawFailure.Run.Artifacts, a => a.Kind == "manifest");
+                Assert.True(evidence.Tests.Failure is null,
+                    "Partial failed-test fixture requires valid test-child evidence: " + evidence.Tests.Failure);
+                using (var partialCancelled = new CancellationTokenSource())
+                {
+                    partialCancelled.Cancel();
+                    var interruptedPartial = await FreshPartialAnalysis.AttachAsync(evidence, rawFailure, partialCancelled.Token);
+                    Assert.Equal(rawFailure.Evaluation.Decision, interruptedPartial.Evaluation.Decision);
+                    Assert.Equal(rawFailure.Run, interruptedPartial.Run);
+                    Assert.Empty(interruptedPartial.Evaluation.Metrics);
+                    Assert.Contains(interruptedPartial.Evaluation.Checks,
+                        c => c.Name == "coverage" && c.Reason == "coverage.partialAnalysisCancelled");
+                }
+                var gitRefusal = FreshFailureResult.Refuse(evidence,
+                    new ScopeException("scope.gitFailed", "Fixture Git proof refusal"), DateTimeOffset.UnixEpoch, TimeSpan.Zero);
+                Assert.Equal("tests.failed", gitRefusal.Evaluation.Decision.Reason);
+                Assert.Contains(gitRefusal.Evaluation.Checks, check => check.Name == "postTestEvidence" && check.Reason == "scope.gitFailed");
+                Assert.Equal(rawFailure.Run.TestOutcomes, gitRefusal.Run.TestOutcomes);
+                foreach (var secondary in new Exception[]
+                {
+                    new InvalidDataException("Fixture malformed evidence"),
+                    new InvalidOperationException("Fixture proof refusal"),
+                    new System.ComponentModel.Win32Exception(5),
+                    new ProjectContextException("test.executionHookUnsupported", "Fixture unsupported hook"),
+                    new PolicyException("provenance.fixtureRefusal", "Fixture policy refusal")
+                })
+                {
+                    var refused = FreshFailureResult.Refuse(evidence, secondary, DateTimeOffset.UnixEpoch, TimeSpan.Zero);
+                    Assert.Equal("tests.failed", refused.Evaluation.Decision.Reason);
+                    Assert.Equal(rawFailure.Run.TestOutcomes, refused.Run.TestOutcomes);
+                    Assert.Equal(1, refused.Run.ExitCode);
+                    Assert.Contains(refused.Evaluation.Checks, check => check.Name == "postTestEvidence" && check.Status == "operationalError");
+                    Assert.All(refused.Run.Artifacts, artifact => { Assert.False(artifact.Complete); Assert.False(artifact.Reusable); });
+                }
                 var partialCoverage = CoverageGraphBinding.ValidateFailedInvocation(evidence.Tests[0], evidence.Compiler, token);
                 Assert.NotEmpty(partialCoverage.Modules);
                 Assert.Throws<ProjectContextException>(() => CoverageGraphBinding.ValidateInvocation(evidence.Tests[0], evidence.Compiler, token));
@@ -546,6 +669,46 @@ public sealed class FreshCheckExecutionTests
                 Assert.Equal(0, evidence.Tests[0].Process.ExitCode); Assert.Null(evidence.Tests.Failure);
                 Assert.NotNull(evidence.Coverage); Assert.Equal(standaloneTest ? 2 : 1, evidence.SafeChildren.Count);
                 var captured = await MeasureAsync("captureWithRegates", () => FreshManifestCapture.CaptureAsync(evidence, token));
+                if (contextAgreement || contextOnly)
+                {
+                    var provisional = await FreshManifestCapture.PrepareCompletedAsync(evidence, token);
+                    Assert.True(provisional.RequiresCompletedProof);
+                    Assert.False(captured.RequiresCompletedProof);
+                    Assert.Equal(JsonSerializer.Serialize(captured.Manifest), JsonSerializer.Serialize(provisional.Manifest));
+                    Assert.Equal(captured.Bytes.Keys.Order(StringComparer.Ordinal), provisional.Bytes.Keys.Order(StringComparer.Ordinal));
+                    foreach (var locator in captured.Bytes.Keys)
+                        Assert.True(captured.Bytes[locator].AsSpan().SequenceEqual(provisional.Bytes[locator].AsSpan()));
+                    var refused = await Assert.ThrowsAsync<PolicyException>(() => FreshManifestCapture.PublishAsync(
+                        evidence, provisional, "never-published-provisional", token));
+                    Assert.Equal("check.provisionalCaptureRequiresCompletedProof", refused.Code);
+                    Assert.False(Directory.Exists(Path.Combine(fixture.Path, "never-published-provisional")));
+                    var retained = evidence.Compiler.RetainedProof!;
+                    var sourcePath = evidence.Compiler.FinalGraph.GraphContexts.First().Context.CompilerDocuments
+                        .First(source => !source.IsGenerated).ResolvedPath!;
+                    var originalBytes = File.ReadAllBytes(sourcePath);
+                    var originalTime = File.GetLastWriteTimeUtc(sourcePath);
+                    var changedBytes = originalBytes.ToArray();
+                    changedBytes[0] ^= 1; // Same length and restored timestamp cannot hide closing byte drift.
+                    try
+                    {
+                        Assert.Throws<ProjectContextException>(() => retained.ValidateSynchronousBoundary(
+                            evidence.Compiler.FinalGraph, token, () =>
+                            {
+                                File.WriteAllBytes(sourcePath, changedBytes);
+                                File.SetLastWriteTimeUtc(sourcePath, originalTime);
+                                retained.ValidateCurrent(token);
+                            }));
+                    }
+                    finally
+                    {
+                        File.WriteAllBytes(sourcePath, originalBytes);
+                        File.SetLastWriteTimeUtc(sourcePath, originalTime);
+                    }
+                    var expectedFailure = new InvalidOperationException("synthetic synchronous boundary refusal");
+                    Assert.Same(expectedFailure, Assert.Throws<InvalidOperationException>(() =>
+                        retained.ValidateSynchronousBoundary(evidence.Compiler.FinalGraph, token, () => throw expectedFailure)));
+                    retained.ValidateSynchronousBoundary(evidence.Compiler.FinalGraph, token, () => retained.ValidateCurrent(token));
+                }
                 if (contextAgreement || trustedPolicyBinding)
                 {
                     var trustedValidator = typeof(App).Assembly.GetType("CompletedTrustedPolicy")?.GetMethod("Validate",
@@ -681,6 +844,71 @@ public sealed class FreshCheckExecutionTests
                     File.GetUnixFileMode(Path.GetDirectoryName(manifest)!));
                 var bundle = Measure("bundleLoad", () => ArtifactBundle.Load(manifest, evidence.PrivateDirectory));
                 Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(bundle.Manifest, bundle.Bytes).Status);
+                if (warmSavedEligibility)
+                {
+                    Assert.Equal(2, currentPlan.Tests.Count);
+                    Assert.Equal(2, parsedRequired.Count);
+                    Assert.All(evidence.Tests.Outcomes, o =>
+                    { Assert.Equal("completed", o.State); Assert.Equal(0, o.Process!.ExitCode); });
+                    var warm = await SavedCompletedProof.ValidateAsync(bundle,
+                        preflight with { Request = preflight.Request with { WarmPostBuildProbe = true } }, token);
+                    var ordinary = await SavedCompletedProof.ValidateAsync(bundle, preflight, token);
+                    const string diagnostic = "Private warm selection: warm.";
+                    Assert.Single(warm.FinalGraph.Diagnostics, d => d == diagnostic);
+                    Assert.DoesNotContain(diagnostic, ordinary.FinalGraph.Diagnostics);
+                    Assert.Equal(JsonSerializer.Serialize(ordinary.FinalGraph), JsonSerializer.Serialize(warm.FinalGraph with
+                    { Diagnostics = warm.FinalGraph.Diagnostics.Where(d => d != diagnostic).ToArray() }));
+                    Assert.Equal(JsonSerializer.Serialize(ordinary.Observations), JsonSerializer.Serialize(warm.Observations));
+                    Assert.All(warm.FinalGraph.GraphContexts, b => Assert.Equal(includeGenerated, b.Context.ExclusionPolicy.IncludeGenerated));
+                    var scored = Assert.Single(bundle.Manifest.Contexts);
+                    var production = Assert.Single(warm.FinalGraph.GraphContexts, b => !b.IsTestProject);
+                    Assert.Equal(production.GraphId, scored.Id);
+                    Assert.Equal(emptyEligible ? "semantic-empty" : null, scored.CoverageApplicability);
+                    Assert.Equal(includeGenerated, scored.IncludeGenerated);
+                    Assert.False(scored.ReuseRecipeComplete);
+                    if (includeGenerated)
+                    {
+                        Assert.Contains(production.Context.CompilerDocuments, d => d.IsGenerated && d.LogicalPath.EndsWith("Extra.cs", StringComparison.Ordinal));
+                        Assert.Contains(scored.Inputs, i => i.Generated && i.LogicalPath.EndsWith("Extra.cs", StringComparison.Ordinal));
+                    }
+                    var eligibilityReplay = AnalyzeCommand.Replay(bundle, fixture.Path, DateTimeOffset.UtcNow, TimeSpan.Zero, token, allSources: true);
+                    Assert.Equal(0, eligibilityReplay.Run.ExitCode);
+                    if (emptyEligible) Assert.DoesNotContain(eligibilityReplay.Evaluation.Callables!, c => c.Applicability == "applicable");
+                    else Assert.Contains(eligibilityReplay.Evaluation.Callables!, c => c.SemanticSignature?.Contains("Extra", StringComparison.Ordinal) == true && c.Coverage is not null);
+                    foreach (var required in currentPlan.Tests)
+                    {
+                        var binding = Assert.Single(warm.FinalGraph.GraphContexts, b => b.GraphId == required.GraphId);
+                        var reachesProduction = warm.FinalGraph.BuildGraph.Single(n => n.Id == required.GraphId).Dependencies.Contains(production.GraphId);
+                        Assert.Equal(Path.GetFileName(required.ProjectPath) == "Tests.csproj" || sharedCoverage, reachesProduction);
+                        var source = binding.Context.CompilerDocuments.Single(d => !d.IsGenerated && d.LogicalPath.EndsWith("Tests.cs", StringComparison.Ordinal));
+                        var text = File.ReadAllText(source.ResolvedPath!);
+                        if (includeGenerated && reachesProduction) Assert.Contains("Extra.Value", text, StringComparison.Ordinal);
+                        if (emptyEligible) Assert.DoesNotContain("Library.Value", text, StringComparison.Ordinal);
+                        var closure = Assert.Single(bundle.Manifest.Artifacts, a => a.Id == "test-closure-" + required.GraphId);
+                        Assert.Equal("test-compiler-input-closure", closure.Kind);
+                        var missingClosure = bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with
+                        { Artifacts = bundle.Manifest.Artifacts.Where(a => a.Id != closure.Id).ToArray() }) };
+                        Assert.Equal("provenance.savedCompilerContextsUnproven", Assert.Throws<PolicyException>(() =>
+                            SavedCompilerContexts.Validate(missingClosure, warm, fixture.Path, token)).Code);
+                        var sourceBytes = File.ReadAllBytes(source.ResolvedPath!);
+                        var sourceTime = File.GetLastWriteTimeUtc(source.ResolvedPath!);
+                        try
+                        {
+                            File.WriteAllText(source.ResolvedPath!, text.Replace("42", "43", StringComparison.Ordinal));
+                            File.SetLastWriteTimeUtc(source.ResolvedPath!, sourceTime);
+                            Assert.Equal(sourceTime, File.GetLastWriteTimeUtc(source.ResolvedPath!));
+                            Assert.False(sourceBytes.AsSpan().SequenceEqual(File.ReadAllBytes(source.ResolvedPath!)));
+                            Assert.Equal("provenance.savedCompilerContextsUnproven", Assert.Throws<PolicyException>(() =>
+                                SavedCompilerContexts.Validate(bundle, warm, fixture.Path, token)).Code);
+                        }
+                        finally { File.WriteAllBytes(source.ResolvedPath!, sourceBytes); File.SetLastWriteTimeUtc(source.ResolvedPath!, sourceTime); }
+                        SavedCompilerContexts.Validate(bundle, warm, fixture.Path, token);
+                        Assert.Single(File.ReadAllLines(Path.Combine(Path.GetDirectoryName(binding.Context.EvaluatedTargetPath!)!, "test-count.txt")));
+                        Assert.Single(File.ReadAllLines(Path.Combine(Path.GetDirectoryName(required.ProjectPath)!, "build-count.txt")));
+                    }
+                    Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library/build-count.txt")));
+                    Assert.False(Directory.Exists(Path.Combine(fixture.Path, ".git")));
+                }
                 if (bundleEvidence)
                 {
                     // A new public invocation cannot retain the original pre-build snapshot.
@@ -1105,16 +1333,33 @@ public sealed class FreshCheckExecutionTests
                 }
                 if (compositeProof)
                 {
-                    var gate = typeof(App).Assembly.GetType("SavedCompletedProof")?.GetMethod("ValidateAsync",
-                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
-                    Assert.NotNull(gate);
-                    async Task Agree(Func<CancellationToken, Task>? mutate = null)
+                    var savedPreflight = preflight with
+                    { Request = preflight.Request with { WarmPostBuildProbe = warmSaved } };
+                    Task<CompilerGraphPhaseResult> Agree(Func<CancellationToken, Task>? mutate = null)
+                        => SavedCompletedProof.ValidateAsync(bundle, savedPreflight, token, mutate);
+                    var savedProof = await Agree();
+                    if (warmSaved)
                     {
-                        try { await (Task)gate.Invoke(null, [bundle, preflight, token, mutate])!; }
-                        catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
-                        { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); }
+                        Assert.Equal(2, currentPlan.Tests.Count);
+                        var ordinary = await SavedCompletedProof.ValidateAsync(bundle, preflight, token);
+                        const string warmSelectionDiagnostic = "Private warm selection: warm.";
+                        Assert.Single(savedProof.FinalGraph.Diagnostics, d => d == warmSelectionDiagnostic);
+                        Assert.DoesNotContain(warmSelectionDiagnostic, ordinary.FinalGraph.Diagnostics);
+                        var comparableWarmGraph = savedProof.FinalGraph with
+                        { Diagnostics = savedProof.FinalGraph.Diagnostics.Where(d => d != warmSelectionDiagnostic).ToArray() };
+                        Assert.Equal(JsonSerializer.Serialize(ordinary.FinalGraph), JsonSerializer.Serialize(comparableWarmGraph));
+                        Assert.Equal(JsonSerializer.Serialize(ordinary.Observations), JsonSerializer.Serialize(savedProof.Observations));
+                        using var cancelledSaved = CancellationTokenSource.CreateLinkedTokenSource(token);
+                        var reachedIntermediate = 0;
+                        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => SavedCompletedProof.ValidateAsync(
+                            bundle, savedPreflight, cancelledSaved.Token, _ =>
+                            {
+                                reachedIntermediate++;
+                                cancelledSaved.Cancel();
+                                return Task.CompletedTask;
+                            }));
+                        Assert.Equal(1, reachedIntermediate);
                     }
-                    await Agree();
                     var mutationProject = standaloneTest ? "Independent" : "Tests";
                     var sourcePath = Path.Combine(fixture.Path, mutationProject, "Tests.cs");
                     var originalBytes = File.ReadAllBytes(sourcePath); var originalTime = File.GetLastWriteTimeUtc(sourcePath);
@@ -1637,7 +1882,30 @@ public sealed class FreshCheckExecutionTests
                     Assert.True(finalProof.Reusable); Assert.True(outerProof.Reusable);
                     // Same original execution, physical bundle and current observations:
                     // numeric diagnostics must not affect the complete proof verdict.
-                    var unobservedProof = await FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token);
+                    var ordinaryEvidence = warmPostBuild ? evidence with
+                    { Preflight = evidence.Preflight with { Request = evidence.Preflight.Request with { WarmPostBuildProbe = false } } } : evidence;
+                    var ordinaryTiming = warmPostBuild ? new CompletedProofTiming() : null;
+                    var ordinaryProof = await FreshCompletedCapture.ValidateAsync(ordinaryEvidence, finalBundle, token,
+                        timing: ordinaryTiming);
+                    if (warmPostBuild)
+                    {
+                        // This fixture has one supported framework throughout. Prove
+                        // both paths actually ran before comparing their evidence.
+                        foreach (var boundary in new[] { "intermediate", "final" })
+                        {
+                            var warmPhase = boundary + ".graph.loader.worker.warmTargets";
+                            Assert.Contains(finalTiming.Spans, span => span.Phase == warmPhase);
+                            Assert.Contains(outerTiming.Spans, span => span.Phase == warmPhase);
+                            Assert.DoesNotContain(ordinaryTiming!.Spans, span => span.Phase == warmPhase);
+                            Assert.Contains(ordinaryTiming.Spans,
+                                span => span.Phase == boundary + ".graph.loader.worker.workspace");
+                        }
+                    }
+                    // Keep the original diagnostics-disabled equivalence gate too.
+                    var unobservedProof = warmPostBuild
+                        ? await FreshCompletedCapture.ValidateAsync(ordinaryEvidence, finalBundle, token)
+                        : ordinaryProof;
+                    Assert.Equal(JsonSerializer.Serialize(ordinaryProof), JsonSerializer.Serialize(unobservedProof));
                     Assert.Equal(JsonSerializer.Serialize(unobservedProof), JsonSerializer.Serialize(finalProof));
                     Assert.Equal(JsonSerializer.Serialize(unobservedProof), JsonSerializer.Serialize(outerProof));
                     if (!promotionDrift)
@@ -1823,6 +2091,26 @@ public sealed class FreshCheckExecutionTests
         string[] baseArgs = local ? [] : ["--base", "HEAD"];
         string[] publicArgs = ["check", "--project", standaloneTest ? "Root.slnx" : "Tests/Tests.csproj", "--policy", "policy.json", .. baseArgs,
             "--artifact-output", "bundle", "--format", "json", "--timeout-seconds", completedReuse || freshTerminalCancellation ? "600" : "180", "--granularity", granularity, "--scope", policyScope];
+        if (privateArtifactOnly)
+        {
+            var artifactOption = Array.IndexOf(publicArgs, "--artifact-output");
+            Assert.True(artifactOption >= 0);
+            publicArgs = publicArgs.Where((_, index) => index != artifactOption && index != artifactOption + 1).ToArray();
+        }
+        if (scopedEmpty)
+        {
+            // Prove the fixture's premise before the public invocation. An
+            // incomplete scope correctly widens policy selection and is not an
+            // empty-scope N/A case, even when no C# diff ranges are present.
+            var emptyRequest = new FreshCheckRequest("Tests/Tests.csproj", "policy.json", "HEAD", policyScope,
+                null, "worktree", granularity, null, "bundle", false, false, null,
+                new PolicyOverrides(), TimeSpan.FromSeconds(30));
+            var emptyPreflight = await FreshCheckPreflightLoader.LoadAsync(emptyRequest, fixture.Path, token);
+            Assert.Equal(RepositoryPolicyMode.Incremental, emptyPreflight.Policy.Mode);
+            Assert.Empty(emptyPreflight.Scope!.Files);
+            Assert.True(emptyPreflight.Scope.Completeness == ScopeCompleteness.Complete,
+                string.Join(Environment.NewLine, emptyPreflight.Scope.Diagnostics));
+        }
         if (staleOutput || staleRawOutput) publicArgs = [.. publicArgs, "--output", "result.json"];
         if (includeGenerated) publicArgs = [.. publicArgs, "--include-generated"];
         using var lateFreshCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -1834,6 +2122,8 @@ public sealed class FreshCheckExecutionTests
             beforeTerminalPublication: freshTerminalCancellation ? ct =>
             {
                 ct.ThrowIfCancellationRequested();
+                if (privateArtifactOnly)
+                    Assert.Contains(actualTiming!.Spans, span => span.Phase == "public.completedInnerProof");
                 lateFreshCallbacks++;
                 // Both real required tests and full publication proof have returned;
                 // cancel only at the invocation-local post-serialization seam.
@@ -1841,18 +2131,46 @@ public sealed class FreshCheckExecutionTests
                     throw new ProcessTimeoutException("Fresh check", TimeSpan.FromSeconds(600));
                 lateFreshCancellation.Cancel();
                 return Task.CompletedTask;
-            } : null, freshTiming: actualTiming);
+            } : null, freshTiming: actualTiming, nativeSdkIdentityProbe: nativeSdkIdentity);
         if (actualTiming is not null)
         {
             Assert.All(actualTiming.Spans, span => Assert.True(double.IsFinite(span.Milliseconds) && span.Milliseconds >= 0));
-            Console.WriteLine("STRICT_PUBLIC_TIMING " + JsonSerializer.Serialize(new
-                { outputLayout, exit, wallMilliseconds = actualStart.Elapsed.TotalMilliseconds, spans = actualTiming.Spans }));
+            var timingJson = JsonSerializer.Serialize(new
+                { outputLayout, policyScope, granularity, includeGenerated, generatedFixture, failing, local, scopedEmpty,
+                    exit, wallMilliseconds = actualStart.Elapsed.TotalMilliseconds, spans = actualTiming.Spans });
+            Console.WriteLine("STRICT_PUBLIC_TIMING " + timingJson);
+            // Synthetic fixture diagnostics must survive runners that omit Console output.
+            TestValidationOutput.WriteOptionalProfile("strict-public", timingJson);
         }
         using var terminal = JsonDocument.Parse(output.ToString());
+        Assert.Equal(global::App.ToolVersion, terminal.RootElement.GetProperty("toolVersion").GetString());
+        Assert.Equal(".", terminal.RootElement.GetProperty("evaluation").GetProperty("scope").GetProperty("logicalWorkspaceRoot").GetString());
         if (defaultSolution) Assert.True(exit == 0, errors + Environment.NewLine + output);
+        Assert.True(terminal.RootElement.GetProperty("run").GetProperty("artifacts").EnumerateArray()
+            .Any(a => a.GetProperty("kind").GetString() == "private-diagnostics"),
+            "Expected retained private diagnostics. Actual terminal: " + output + Environment.NewLine + errors);
         AssertRetainedPrivateDiagnostics(terminal.RootElement, requireBuildLog: true);
         if (freshTerminalCancellation)
         {
+            Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));
+            var retainedOutput = Assert.Single(terminal.RootElement.GetProperty("run").GetProperty("artifacts").EnumerateArray(),
+                artifact => artifact.GetProperty("kind").GetString() == "retained-artifact-output");
+            Assert.False(retainedOutput.GetProperty("complete").GetBoolean());
+            Assert.False(retainedOutput.GetProperty("reusable").GetBoolean());
+            var retainedDirectory = retainedOutput.GetProperty("path").GetString()!;
+            Assert.True(Directory.Exists(retainedDirectory));
+            Assert.True(File.Exists(Path.Combine(retainedDirectory, "manifest.json")));
+            Assert.Throws<InvalidDataException>(() => ArtifactBundle.Load(Path.Combine(retainedDirectory, "manifest.json"), fixture.Path));
+            if (privateArtifactOnly)
+            {
+                var privateDirectory = Directory.GetParent(retainedDirectory)!.FullName;
+                Assert.False(Directory.Exists(Path.Combine(privateDirectory, "evaluation-bundle")));
+                var retainedManifests = Directory.GetFiles(privateDirectory, "manifest.json", SearchOption.AllDirectories);
+                Assert.NotEmpty(retainedManifests);
+                Assert.All(retainedManifests, path => Assert.Throws<InvalidDataException>(() => ArtifactBundle.Load(path, fixture.Path)));
+            }
+            Assert.Contains(terminal.RootElement.GetProperty("run").GetProperty("diagnosticLocations").EnumerateArray(),
+                location => location.GetString() == retainedDirectory);
             Assert.Equal(1, lateFreshCallbacks);
             Assert.Equal(1, exit);
             var run = terminal.RootElement.GetProperty("run");
@@ -2183,7 +2501,7 @@ public sealed class FreshCheckExecutionTests
                 using var secondTerminal = JsonDocument.Parse(secondOutput.ToString());
                 Assert.Contains(secondTerminal.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
                     c => c.GetProperty("name").GetString() == "testExecution" && c.GetProperty("status").GetString() == "pass");
-                Assert.Equal("priorCompilerFreshTestPostflightBinding",
+                Assert.Equal("currentWorkspaceMatch",
                     secondTerminal.RootElement.GetProperty("evaluation").GetProperty("provenance").GetProperty("basis").GetString());
                 var recipeArtifact = Assert.Single(bundle.Manifest.Artifacts, a => a.Kind == FreshPriorBuild.Kind);
                 using var recipe = JsonDocument.Parse(bundle.Bytes[recipeArtifact.Locator].ToArray());
@@ -2292,6 +2610,7 @@ public sealed class FreshCheckExecutionTests
         Assert.True(Path.IsPathFullyQualified(path));
         Assert.True(Directory.Exists(path));
         Assert.StartsWith("crap4csharp-fresh-private-", Path.GetFileName(path), StringComparison.Ordinal);
+        PrivateDiagnosticsCleanupTests.AssertSealed(path);
         Assert.Equal("retained", artifact.GetProperty("retention").GetString());
         Assert.False(artifact.GetProperty("complete").GetBoolean());
         Assert.False(artifact.GetProperty("reusable").GetBoolean());

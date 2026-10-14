@@ -7,13 +7,17 @@ internal sealed class FreshFailureOutputProof(FreshCheckPreflight preflight,
     ProjectContextLoadRequest request, ProjectContextLoadResult originalGraph,
     IReadOnlyList<string> priorInputs)
 {
-    internal async Task ValidateAsync()
+    internal async Task ValidateAsync(CancellationToken cancellation, TimeSpan remaining)
     {
-        // Failure/cancellation must not cancel the safety check itself. Bound the
-        // independent reload; any incomplete inspection leaves stdout-only output.
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        cancellation.ThrowIfCancellationRequested();
+        if (remaining <= TimeSpan.Zero) throw new ProcessTimeoutException("Fresh result safety", preflight.Request.Timeout);
+        // A refused output remains stdout-only when its safety proof cannot fit
+        // the invocation budget. Never start new consumer work after cancellation.
+        var budget = remaining < TimeSpan.FromSeconds(30) ? remaining : TimeSpan.FromSeconds(30);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        timeout.CancelAfter(budget);
         var current = await ProjectContextLoader.LoadGraphAsync(request with
-            { Timeout = TimeSpan.FromSeconds(30) }, timeout.Token);
+            { Timeout = budget }, timeout.Token);
         if (!current.Success)
             throw new ProjectContextException(current.FailureReason ?? "context.loadFailed",
                 "Failure output requires complete current evaluated input protection.");

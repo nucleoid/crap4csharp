@@ -4,6 +4,18 @@ Crap4CSharp separates immutable evaluation from filesystem and process execution
 accepts captured source and coverage bytes, explicit parse options, policy, and a provenance observation. It does
 not read files, inspect Git, load projects, run builds or tests, consult the clock, or write output.
 
+Graph and completed-schedule identities fingerprint mapped global-property values
+deterministically. These fingerprints are not encryption or anonymization:
+low-entropy sensitive values can be tested against known inputs. Recognizable
+credential-bearing mapped property names (for example `Password`, `ClientSecret`,
+`ConnectionString`, `ApiKey` and `AccessToken`) are refused with
+`context.sensitiveGlobalProperty` before graph identities are exported. Use the
+consumer's approved private credential mechanism instead of mapped credential
+globals. Values under arbitrary names cannot be classified as secrets reliably;
+review any bundle before sharing, including its compiled consumer artifacts and
+fingerprints. Raw property/environment bodies and private binlogs remain excluded
+from the replay export.
+
 `analyze --reuse-artifacts <manifest>` replays a completed bundle without accessing its original project roots.
 All bundle locators are relative, bounded, containment-checked, and hash/length verified before evaluation. Replay
 reports `captured`: it proves internal consistency of the retained evidence, not that the current checkout matches.
@@ -98,3 +110,5 @@ sibling staging directory followed by an atomic directory move. Incomplete stagi
 manifest. File contents are flushed before publication. Atomic visibility and power-loss durability beyond that flush
 depend on the destination filesystem; v1 does not claim a portable directory-fsync guarantee. Bundle cleanup is
 explicit and user-owned.
+The final file checks and directory move are separate filesystem operations. A concurrent local writer with the
+same access rights can change files between them; v1 does not claim an atomic content transaction against that actor.

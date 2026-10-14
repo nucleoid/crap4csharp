@@ -7,12 +7,16 @@ namespace Crap4CSharp.Tests;
 
 public sealed class TestExecutionAdapterTests
 {
+    [Fact]
+    public Task ChangedSdkSelectorStopsBeforeActualMappedTestChild()
+        => ActualMappedTestsRunOnceWithoutAnyImplicitBuildOrRestore(true, false, sdkDrift: true);
+
     [Theory]
     [InlineData(true, false)]
     [InlineData(false, false)]
     [InlineData(true, true)]
     [InlineData(false, true)]
-    public async Task ActualMappedTestsRunOnceWithoutAnyImplicitBuildOrRestore(bool passes, bool opposingNoBuild, bool skipped = false)
+    public async Task ActualMappedTestsRunOnceWithoutAnyImplicitBuildOrRestore(bool passes, bool opposingNoBuild, bool skipped = false, bool sdkDrift = false)
     {
         using var fixture = TestDirectory.Create("crap4csharp-actual-once-tests");
         var dependency = fixture.Write("Dep/Dep.csproj", """
@@ -86,6 +90,30 @@ public sealed class TestExecutionAdapterTests
         Assert.NotNull(method);
         var ownedResults = System.IO.Path.Combine(fixture.Path, "test-run");
         Directory.CreateDirectory(ownedResults);
+        if (sdkDrift)
+        {
+            var selected = loaded.SelectedSdk ?? throw new InvalidOperationException("Actual SDK identity missing.");
+            var refused = await TestExecutionAdapter.RunVerifiedWithSdkObserverAsync(plan, bound, ownedResults, TimeSpan.FromMinutes(2),
+                TestContext.Current.CancellationToken, (_, _, _, _) => Task.FromResult(selected with { Version = "changed-sdk" }));
+            Assert.Equal("context.sdkMismatch", Assert.IsType<ProjectContextException>(refused.Failure).Reason);
+            Assert.Empty(refused);
+            var sdkOutcome = Assert.Single(refused.Outcomes);
+            Assert.Equal("not-run", sdkOutcome.State);
+            Assert.Null(sdkOutcome.Process);
+            Assert.False(File.Exists(System.IO.Path.Combine(fixture.Path, "Tests/launch-count.txt")));
+            Assert.Empty(Directory.GetFiles(ownedResults, "*.trx", SearchOption.AllDirectories));
+            foreach (var path in Directory.GetFiles(fixture.Path, "build-count.txt", SearchOption.AllDirectories))
+                Assert.Single(File.ReadAllLines(path));
+            foreach (var (path, expected) in authored)
+            {
+                Assert.Equal(expected.Bytes, File.ReadAllBytes(path));
+                Assert.Equal(expected.Time, File.GetLastWriteTimeUtc(path));
+            }
+            foreach (var (path, expected) in outputs) Assert.Equal(expected, File.ReadAllBytes(path));
+            Assert.Equal(restores.Bytes, File.ReadAllBytes(assetsPath));
+            Assert.Equal(restores.Time, File.GetLastWriteTimeUtc(assetsPath));
+            return;
+        }
         var operation = (Task)method.Invoke(null, [plan, bound, ownedResults, TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken])!;
         await operation;
         var run = Assert.IsType<TestExecutionRun>(operation.GetType().GetProperty("Result")!.GetValue(operation));

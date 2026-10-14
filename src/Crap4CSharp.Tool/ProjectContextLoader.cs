@@ -13,9 +13,15 @@ public sealed record ProjectContextLoadRequest(
     bool IncludeGenerated,
     TimeSpan Timeout)
 {
+    internal bool WarmPostBuildProbe { get; init; }
+    internal bool NativeSdkIdentityProbe { get; init; }
     internal bool CollectTiming { get; init; }
+    internal bool WarmAcquisitionProbe { get; init; }
+    internal bool WarmAcquisitionSelectionProbe { get; init; }
+    internal bool CollectProjectObservation { get; init; }
     internal CompletedProofTiming? Timing { get; init; }
     internal string TimingPrefix { get; init; } = "loader";
+    internal ProjectContextSdkResolution? FrozenSdk { get; init; }
     public bool TestRunnersOnly { get; init; }
     public bool MetadataOnly { get; init; }
     public bool GraphOnly { get; init; }
@@ -37,10 +43,14 @@ public sealed record ProjectContextLoadResult(
     [JsonIgnore]
     public IReadOnlyList<ProjectTestRunnerMetadata> TestRunners { get; init; } = [];
     internal IReadOnlyList<CompletedProofTiming.Span> WorkerTimings { get; init; } = [];
+    internal IReadOnlyList<WarmProjectObservationResult> ProjectObservations { get; init; } = [];
+    internal ProjectContextSdkResolution? SelectedSdk { get; init; }
     public IReadOnlyList<ProjectDiscoveryMetadata> Metadata { get; init; } = [];
     public IReadOnlyList<ProjectBuildGraphNode> BuildGraph { get; init; } = [];
     public IReadOnlyList<ProjectGraphContextBinding> GraphContexts { get; init; } = [];
 }
+
+internal sealed record WarmProjectObservationResult(string ProjectPath, string Observation);
 
 public sealed record ProjectTestRunnerMetadata(string GraphId, string ProjectPath, string Configuration, string Platform,
     string TargetFramework, string Runner, string TestSdkVersion, string CollectorVersion);
@@ -60,7 +70,8 @@ internal sealed record ProjectContextSdkResolution(
     string Path,
     string MsBuildVersion,
     string DotNetRoot,
-    string HostPath);
+    string HostPath,
+    string ResolutionRoute = "cli");
 
 public sealed class ProjectContextException(string reason, string message) : InvalidOperationException(message)
 {
@@ -105,10 +116,10 @@ public static class ProjectContextLoader
         {
             var propertyNames = info.Type == typeof(ProjectSourceIdentity) ? new[] { nameof(ProjectSourceIdentity.ResolvedPath) } :
                 info.Type == typeof(ProjectAnalysisContext) ? new[] { nameof(ProjectAnalysisContext.ResolvedProjectPath), nameof(ProjectAnalysisContext.ProtectedPaths),
-                    nameof(ProjectAnalysisContext.CompilerDocuments), nameof(ProjectAnalysisContext.GeneratorOnlyTreeCount), nameof(ProjectAnalysisContext.PhaseInputs), nameof(ProjectAnalysisContext.ReferencePaths), nameof(ProjectAnalysisContext.GeneratedTransitionPaths), nameof(ProjectAnalysisContext.EvaluatedTargetPath),
+                    nameof(ProjectAnalysisContext.CompilerDocuments), nameof(ProjectAnalysisContext.GeneratorOnlyTreeCount), nameof(ProjectAnalysisContext.PhaseInputs), nameof(ProjectAnalysisContext.ReferencePaths), nameof(ProjectAnalysisContext.UnresolvedProjectReferencePaths), nameof(ProjectAnalysisContext.ProjectReferenceOutputs), nameof(ProjectAnalysisContext.GeneratedTransitionPaths), nameof(ProjectAnalysisContext.EvaluatedTargetPath),
                     nameof(ProjectAnalysisContext.EvaluatedIntermediateDirectory), nameof(ProjectAnalysisContext.EvaluatedReferenceAssemblyPath) } :
-                info.Type == typeof(ProjectContextLoadResult) ? new[] { nameof(ProjectContextLoadResult.TestRunners), nameof(ProjectContextLoadResult.WorkerTimings) } :
-                info.Type == typeof(ProjectContextLoadRequest) ? new[] { nameof(ProjectContextLoadRequest.CollectTiming) } : [];
+                info.Type == typeof(ProjectContextLoadResult) ? new[] { nameof(ProjectContextLoadResult.TestRunners), nameof(ProjectContextLoadResult.WorkerTimings), nameof(ProjectContextLoadResult.ProjectObservations) } :
+                info.Type == typeof(ProjectContextLoadRequest) ? new[] { nameof(ProjectContextLoadRequest.CollectTiming), nameof(ProjectContextLoadRequest.WarmAcquisitionProbe), nameof(ProjectContextLoadRequest.WarmAcquisitionSelectionProbe), nameof(ProjectContextLoadRequest.CollectProjectObservation), nameof(ProjectContextLoadRequest.NativeSdkIdentityProbe) } : [];
             foreach (var propertyName in propertyNames)
             {
                 var member = info.Type.GetProperty(propertyName,
@@ -119,10 +130,12 @@ public static class ProjectContextLoader
                 var property = info.CreateJsonPropertyInfo(member.PropertyType, name);
                 property.Get = member.GetValue;
                 property.Set = member.SetValue;
-                if (propertyName == nameof(ProjectContextLoadRequest.CollectTiming))
+                if (propertyName is nameof(ProjectContextLoadRequest.CollectTiming) or nameof(ProjectContextLoadRequest.WarmAcquisitionProbe) or nameof(ProjectContextLoadRequest.WarmAcquisitionSelectionProbe) or nameof(ProjectContextLoadRequest.CollectProjectObservation) or nameof(ProjectContextLoadRequest.NativeSdkIdentityProbe))
                     property.ShouldSerialize = (_, value) => value is true;
                 if (propertyName == nameof(ProjectContextLoadResult.WorkerTimings))
                     property.ShouldSerialize = (_, value) => value is IReadOnlyList<CompletedProofTiming.Span> { Count: > 0 };
+                if (propertyName == nameof(ProjectContextLoadResult.ProjectObservations))
+                    property.ShouldSerialize = (_, value) => value is IReadOnlyList<WarmProjectObservationResult> { Count: > 0 };
                 info.Properties.Add(property);
             }
         });
@@ -144,7 +157,7 @@ public static class ProjectContextLoader
         LoadAsync(request with { GraphOnly = true, MetadataOnly = false }, cancellationToken);
 
     public static Task<ProjectContextLoadResult> LoadAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken) =>
-        LoadAsync(request, cancellationToken, ResolveSdkAsync);
+        LoadAsync(request, cancellationToken, (root, timeout, token) => ResolveSdkAsync(root, timeout, token, request.NativeSdkIdentityProbe));
 
     internal static async Task<ProjectContextLoadResult> LoadAsync(
         ProjectContextLoadRequest request,
@@ -173,6 +186,7 @@ public static class ProjectContextLoader
         {
             using (request.Timing?.Start(request.TimingPrefix + ".sdk"))
                 sdk = await resolveSdkAsync(root, request.Timeout, operationToken);
+            if (request.FrozenSdk is not null) SdkExecutionIdentity.Validate(request.FrozenSdk, sdk);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && overallTimeout.IsCancellationRequested)
         {
@@ -195,12 +209,12 @@ public static class ProjectContextLoader
             Target = target, SdkPath = sdk.Path, SdkVersion = sdk.Version, MsBuildVersion = sdk.MsBuildVersion,
             DotNetRoot = sdk.DotNetRoot, DotNetHostPath = sdk.HostPath
         };
-        var scratch = Path.Combine(Path.GetTempPath(), "crap4csharp-context", Guid.NewGuid().ToString("N"));
-        var requestPath = Path.Combine(scratch, "request.json");
-        var responsePath = Path.Combine(scratch, "response.json");
+        string? scratch = null;
         try
         {
-            Directory.CreateDirectory(scratch);
+            scratch = Directory.CreateTempSubdirectory("crap4csharp-context-").FullName;
+            var requestPath = Path.Combine(scratch, "request.json");
+            var responsePath = Path.Combine(scratch, "response.json");
             await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(effective, JsonOptions), operationToken);
             var assembly = typeof(ProjectContextLoader).Assembly.Location;
             var environment = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -240,6 +254,7 @@ public static class ProjectContextLoader
                         string.Join(", ", before.Keys.Union(after.Keys).Where(path =>
                             !before.TryGetValue(path, out var oldHash) || !after.TryGetValue(path, out var newHash) || oldHash != newHash))]).ToArray(),
                     "context.inputsMutated");
+            loaded = loaded with { SelectedSdk = sdk };
             return result.ExitCode == 0 || !loaded.Success ? loaded : new ProjectContextLoadResult(false, loaded.Contexts,
                 loaded.Diagnostics.Concat(SplitDiagnostics(result)).ToArray(), "context.loaderFailed", loaded.ExcludedProjects);
         }
@@ -265,7 +280,8 @@ public static class ProjectContextLoader
         }
         finally
         {
-            try { Directory.Delete(scratch, true); } catch (IOException) { }
+            if (scratch is not null)
+                try { Directory.Delete(scratch, true); } catch (IOException) { }
         }
     }
 
@@ -281,18 +297,38 @@ public static class ProjectContextLoader
     private static string DotNetHost => Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet";
 
     internal static async Task<ProjectContextSdkResolution> ResolveSdkAsync(string root, TimeSpan timeout, CancellationToken cancellationToken)
+        => await ResolveSdkAsync(root, timeout, cancellationToken, nativeProbe: false);
+
+    internal static async Task<ProjectContextSdkResolution> ResolveSdkAsync(string root, TimeSpan timeout,
+        CancellationToken cancellationToken, bool nativeProbe)
     {
-        var versionResult = await ProcessRunner.RunAsync(DotNetHost, ["--version"], root, timeout, cancellationToken);
+        if (nativeProbe)
+        {
+            var observed = await SdkIdentityProbe.QueryAsync(root, DotNetHost, timeout, cancellationToken);
+            if (observed.Status == "failed")
+                throw new ProjectContextException("context.sdkResolutionFailed", "The selected SDK could not be resolved by the current host.");
+            if (observed.Status == "resolved") return new(observed.Version!, observed.Path!, observed.MsBuildVersion!,
+                observed.DotNetRoot!, observed.HostPath!, "native");
+        }
+        // These three read-only identity observations share one directory/host,
+        // but none consumes another's output. Keep every exact command at every
+        // boundary; await all owned processes before interpreting or returning.
+        var host = DotNetHost;
+        var observations = await Task.WhenAll(
+            ProcessRunner.RunAsync(host, ["--version"], root, timeout, cancellationToken),
+            ProcessRunner.RunAsync(host, ["--list-sdks"], root, timeout, cancellationToken),
+            ProcessRunner.RunAsync(host, ["msbuild", "-version", "-nologo", "-nr:false"], root, timeout, cancellationToken));
+        var versionResult = observations[0];
         if (versionResult.ExitCode != 0) throw new ProjectContextException("context.sdkResolutionFailed", versionResult.StandardError);
         var version = versionResult.StandardOutput.Trim();
-        var list = await ProcessRunner.RunAsync(DotNetHost, ["--list-sdks"], root, timeout, cancellationToken);
+        var list = observations[1];
         var prefix = version + " [";
         var line = list.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries).SingleOrDefault(value => value.Trim().StartsWith(prefix, StringComparison.Ordinal));
         if (line is null) throw new ProjectContextException("context.sdkResolutionFailed", $"Resolved SDK {version} was not present in dotnet --list-sdks.");
         var start = line.IndexOf('[') + 1;
         var end = line.LastIndexOf(']');
         var sdkRoot = line[start..end];
-        var msbuild = await ProcessRunner.RunAsync(DotNetHost, ["msbuild", "-version", "-nologo", "-nr:false"], root, timeout, cancellationToken);
+        var msbuild = observations[2];
         if (msbuild.ExitCode != 0) throw new ProjectContextException("context.sdkResolutionFailed", msbuild.StandardError);
         var msbuildVersion = msbuild.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Last();
         var dotnetRoot = Directory.GetParent(sdkRoot)?.FullName
@@ -348,7 +384,18 @@ public static class ProjectBuildPreparation
         var arguments = new List<string> { "restore", Path.GetFullPath(request.Target), "--disable-parallel", "-nr:false",
             $"-p:Configuration={request.Configuration}" };
         if (request.Platform is not null) arguments.Add($"-p:Platform={request.Platform}");
-        return RunSerialized(request.Target, arguments, request.Timeout, cancellationToken);
+        return request.FrozenSdk is null ? RunSerialized(request.Target, arguments, request.Timeout, cancellationToken) : RunFrozenRestoreAsync();
+        async Task<ProcessResult> RunFrozenRestoreAsync()
+        {
+            await Serial.WaitAsync(cancellationToken);
+            try
+            {
+                var sdk = await SdkExecutionIdentity.ResolveForEffectAsync(Path.GetDirectoryName(Path.GetFullPath(request.Target))!,
+                    request.Timeout, cancellationToken, request.NativeSdkIdentityProbe, request.FrozenSdk);
+                return await ProcessRunner.RunAsync(sdk.HostPath, arguments, Path.GetDirectoryName(Path.GetFullPath(request.Target))!, request.Timeout, cancellationToken);
+            }
+            finally { Serial.Release(); }
+        }
     }
 
     public static Task<ProcessResult> BuildAsync(string target, string configuration, string? framework, string? platform,

@@ -5,6 +5,116 @@ namespace Crap4CSharp.Tests;
 
 public sealed class CompilerReferenceSnapshotTests
 {
+    [Fact]
+    public void AliasedReferenceMetadataSurvivesCaptureAndBindsOnlyItsDeclaredAlias()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-aliased-reference");
+        var token = TestContext.Current.CancellationToken;
+        var producer = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create("ProbeLibrary",
+            [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("namespace Probe { public class Value {} }", cancellationToken: token)],
+            [Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(typeof(object).Assembly.Location)],
+            new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
+        using var stream = new MemoryStream();
+        Assert.True(producer.Emit(stream, cancellationToken: token).Success);
+        var bytes = System.Collections.Immutable.ImmutableArray.CreateRange(stream.ToArray());
+        var path = fixture.Write("ProbeLibrary.dll", "placeholder");
+        File.WriteAllBytes(path, bytes.ToArray());
+        var project = fixture.Write("Consumer.csproj", "<Project />");
+        var observation = new CompilerObservation(project,
+            [new CompilerParameter("References", [path]) { ReferenceProperties = [new(path, "ProbeLibrary", false)] }]);
+        var reference = Assert.Single(CompilerReferenceSnapshot.ResolveSemanticReferences(observation, token));
+        var hash = CanonicalIdentity.Sha256(bytes.AsSpan());
+        var input = new ManifestInput("reference", CompilerReferenceSnapshot.LogicalReference(hash, reference.Aliases, false),
+            "reference.dll", bytes.Length, hash, null, false) { ReferenceAliases = reference.Aliases };
+        var captured = CompilerReferenceSnapshot.CapturedReference(input, bytes);
+        Assert.Equal(["ProbeLibrary"], captured.Properties.Aliases);
+        var consumer = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create("Consumer",
+            [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("extern alias ProbeLibrary; public class Consumer { public ProbeLibrary::Probe.Value Value; }", cancellationToken: token)],
+            [Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(typeof(object).Assembly.Location), captured],
+            new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
+        Assert.DoesNotContain(consumer.GetDiagnostics(token), diagnostic => diagnostic.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error);
+        Assert.NotEqual(CompilerReferenceSnapshot.LogicalReference(hash, null, false), input.LogicalPath);
+        Assert.Throws<ProjectContextException>(() => CompilerReferenceSnapshot.CapturedReference(input with { ReferenceAliases = "Other" }, bytes));
+    }
+
+    [Fact]
+    public void ReusedHashBufferDoesNotIncludePreviousFileTailBytes()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-reference-buffer");
+        var longFile = fixture.Write("Long.dll", new string('x', 70001));
+        var shortFile = fixture.Write("Short.dll", "q");
+        var otherFile = fixture.Write("Other.dll", new string('z', 65539));
+        var token = TestContext.Current.CancellationToken;
+        var scope = new CompilerReferenceSnapshot.ReadScope(token);
+        long total = 0;
+        foreach (var file in new[] { longFile, shortFile, otherFile })
+        {
+            var actual = scope.Read(file, ref total);
+            Assert.Equal(CanonicalIdentity.Sha256(File.ReadAllBytes(file)), actual.Sha256);
+            Assert.Equal(new FileInfo(file).Length, actual.Length);
+        }
+        scope.Complete();
+        Assert.Throws<ProjectContextException>(() => scope.Read(shortFile, ref total));
+    }
+
+    [Fact]
+    public void SharedReadCannotRebaselineAnotherContextOrSurviveTheNextBoundary()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-reference-gate");
+        var reference = fixture.Write("Reference.dll", "original");
+        var project = fixture.Write("App.csproj", "<Project />");
+        var token = TestContext.Current.CancellationToken;
+        var original = CompilerReferenceSnapshot.Capture([reference], token);
+        File.WriteAllText(reference, "modified");
+        var later = CompilerReferenceSnapshot.Capture([reference], token);
+        var observation = new CompilerObservation(project, [new("References", [reference])]);
+        var scope = new CompilerReferenceSnapshot.ReadScope(token);
+        later.Validate(observation, token, scope);
+        Assert.Equal("compiler.referencesUnproven", Assert.Throws<ProjectContextException>(() =>
+            original.Validate(observation, token, scope)).Reason);
+        scope.Complete();
+        File.WriteAllText(reference, "changed-again");
+        Assert.Equal("compiler.referencesUnproven", Assert.Throws<ProjectContextException>(() =>
+            later.Validate(observation, token, new CompilerReferenceSnapshot.ReadScope(token))).Reason);
+    }
+
+    [Fact]
+    public void FreshClosingReadRejectsSameSizePreservedTimestampMutationAfterSharedFinalPass()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-final-reference-closing");
+        var reference = fixture.Write("Reference.dll", "original");
+        var firstProject = fixture.Write("First.csproj", "<Project />");
+        var secondProject = fixture.Write("Second.csproj", "<Project />");
+        var token = TestContext.Current.CancellationToken;
+        var first = CompilerReferenceSnapshot.Capture([reference], token);
+        var second = CompilerReferenceSnapshot.Capture([reference], token);
+        var firstObservation = new CompilerObservation(firstProject, [new("References", [reference])]);
+        var secondObservation = new CompilerObservation(secondProject, [new("References", [reference])]);
+        var originalBytes = File.ReadAllBytes(reference);
+        var originalTime = File.GetLastWriteTimeUtc(reference);
+        var shared = new CompilerReferenceSnapshot.ReadScope(token);
+        try
+        {
+            first.Validate(firstObservation, token, shared);
+            File.WriteAllText(reference, "modified");
+            File.SetLastWriteTimeUtc(reference, originalTime);
+            Assert.Equal(originalBytes.Length, new FileInfo(reference).Length);
+            Assert.Equal(originalTime, File.GetLastWriteTimeUtc(reference));
+            // The same synchronous body can reuse opening bytes, but cannot
+            // provide acceptance without the subsequent fresh closing read.
+            second.Validate(secondObservation, token, shared);
+            shared.Complete();
+            var refusal = Assert.Throws<ProjectContextException>(() => second.Validate(secondObservation, token));
+            Assert.Equal("compiler.referencesUnproven", refusal.Reason);
+        }
+        finally
+        {
+            shared.Abandon();
+            File.WriteAllBytes(reference, originalBytes);
+            File.SetLastWriteTimeUtc(reference, originalTime);
+        }
+    }
+
     // These controls deliberately use arbitrary regular-file bytes/fake reference observations;
     // they prove snapshot integrity, not PE validity, graph resolution or actual compilation.
     [Theory]
@@ -105,7 +215,7 @@ public sealed class CompilerReferenceSnapshotTests
     [Fact]
     public void SymlinkReferenceRefusesWithoutFollowingItsTarget()
     {
-        if (OperatingSystem.IsWindows()) return; // Windows reparse execution remains hosted-CI owned.
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "File symlink creation requires Windows privileges; directory reparse controls exercise junctions.");
         using var fixture = TestDirectory.Create("crap4csharp-reference-symlink");
         var target = fixture.Write("Target.dll", "reference");
         var link = Path.Combine(fixture.Path, "Link.dll");
@@ -113,6 +223,23 @@ public sealed class CompilerReferenceSnapshotTests
         var error = Assert.Throws<ProjectContextException>(() => CompilerReferenceSnapshot.Capture([link], TestContext.Current.CancellationToken));
         Assert.Equal("compiler.referencesUnproven", error.Reason);
         Assert.Equal("reference", File.ReadAllText(target));
+    }
+
+    [Fact]
+    public void LinkedAncestorReferenceRefusesWithoutFollowingItsTarget()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-reference-linked-ancestor");
+        var target = fixture.Write("actual/Target.dll", "reference");
+        var alias = Path.Combine(fixture.Path, "alias");
+        ReparseTestDirectory.Link(alias, Path.GetDirectoryName(target)!);
+        try
+        {
+            var error = Assert.Throws<ProjectContextException>(() => CompilerReferenceSnapshot.Capture(
+                [Path.Combine(alias, "Target.dll")], TestContext.Current.CancellationToken));
+            Assert.Equal("compiler.referencesUnproven", error.Reason);
+            Assert.Equal("reference", File.ReadAllText(target));
+        }
+        finally { Directory.Delete(alias); }
     }
 
     [Fact]
@@ -124,13 +251,25 @@ public sealed class CompilerReferenceSnapshotTests
         snapshot.Validate(new(project, []), TestContext.Current.CancellationToken);
     }
 
-    [Fact]
-    public async Task PreparedSdkReferencesBindIndependentActualCscWithoutConsumerMutation()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PreparedSdkReferencesBindIndependentActualCscWithoutConsumerMutation(bool relative)
     {
         using var fixture = TestDirectory.Create("crap4csharp-reference-actual");
         var project = fixture.Write("App/App.csproj", """
             <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>
-            """);
+            """.Replace("</Project>", relative ? """
+                <Target Name="RelativeCscReferences" BeforeTargets="CoreCompile" Condition="'$(DesignTimeBuild)' != 'true'">
+                  <ItemGroup>
+                    <_RelativeCscReference Include="@(ReferencePathWithRefAssemblies)">
+                      <RelativePath>$([System.IO.Path]::GetRelativePath('$(MSBuildProjectDirectory)', '%(FullPath)'))</RelativePath>
+                    </_RelativeCscReference>
+                    <ReferencePathWithRefAssemblies Remove="@(ReferencePathWithRefAssemblies)" />
+                    <ReferencePathWithRefAssemblies Include="@(_RelativeCscReference->'%(RelativePath)')" />
+                  </ItemGroup>
+                </Target></Project>
+                """ : "</Project>", StringComparison.Ordinal));
         fixture.Write("App/Code.cs", "public class Code { public string M() => System.String.Empty; }");
         var authored = Directory.GetFiles(fixture.Path, "*", SearchOption.AllDirectories).ToDictionary(p => p,
             p => (Bytes: File.ReadAllBytes(p), Mtime: File.GetLastWriteTimeUtc(p)));
@@ -145,10 +284,29 @@ public sealed class CompilerReferenceSnapshotTests
         var observation = await CompilerEvidence.BuildAsync(Assert.Single(loaded.BuildGraph), directory, TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
         snapshot.Validate(observation, TestContext.Current.CancellationToken);
         snapshot.VerifyUnchanged(TestContext.Current.CancellationToken);
+        var raw = observation.Parameters.Single(parameter => parameter.Name == "References").Items.ToArray();
+        if (relative) Assert.Contains(raw, path => !Path.IsPathFullyQualified(path));
+        var resolved = CompilerReferenceSnapshot.ResolvePaths(observation, TestContext.Current.CancellationToken);
+        Assert.All(resolved, path => Assert.True(Path.IsPathFullyQualified(path)));
+        Assert.Equal(context.ReferencePaths.Order(PathIdentityPolicy.Current.Comparer), resolved.Order(PathIdentityPolicy.Current.Comparer));
+        Assert.Equal(raw, observation.Parameters.Single(parameter => parameter.Name == "References").Items);
         foreach (var (path, saved) in authored)
         {
             Assert.Equal(saved.Bytes, File.ReadAllBytes(path));
             Assert.Equal(saved.Mtime, File.GetLastWriteTimeUtc(path));
         }
+    }
+
+    [Fact]
+    public void RelativeAndAbsoluteAliasesCannotHideDuplicateCompilerReferences()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-reference-alias");
+        var project = fixture.Write("App/App.csproj", "<Project />");
+        var reference = fixture.Write("References/ref.dll", "reference");
+        var observation = new CompilerObservation(project,
+            [new("References", ["../References/ref.dll", reference])]);
+        var error = Assert.Throws<ProjectContextException>(() =>
+            CompilerReferenceSnapshot.ResolvePaths(observation, TestContext.Current.CancellationToken));
+        Assert.Equal("compiler.referencesUnproven", error.Reason);
     }
 }

@@ -8,14 +8,17 @@ namespace Crap4CSharp.Core;
 internal static class SavedRequiredTestResults
 {
     internal static IReadOnlyList<SavedRequiredTest> Validate(ArtifactBundle bundle,
-        CheckExecutionPlan current, CompilerGraphPhaseResult compiler, string root, CancellationToken token)
+        CheckExecutionPlan current, CompilerGraphPhaseResult compiler, string root, CancellationToken token,
+        CompletedProofTiming? timing = null, string boundary = "saved")
     {
         token.ThrowIfCancellationRequested();
         try
         {
-            if (compiler.RetainedProof is null ||
-                ProvenanceVerifier.VerifyCaptureCancellable(bundle.Manifest, bundle.Bytes, null, token).Status != ProvenanceStatus.Captured) throw Refuse();
-            compiler.RetainedProof.ValidateCurrent(token);
+            if (compiler.RetainedProof is null) throw Refuse();
+            using (timing?.Start(boundary + ".saved.required.structure"))
+                if (ProvenanceVerifier.VerifyCaptureCancellable(bundle.Manifest, bundle.Bytes, null, token).Status != ProvenanceStatus.Captured) throw Refuse();
+            using (timing?.Start(boundary + ".saved.required.physicalOpen"))
+                compiler.RetainedProof.ValidateCurrent(token);
             CompilerGraphExecution.ValidateFinalGraph(current.PreparedGraph, compiler.FinalGraph);
             var planArtifact = bundle.Manifest.Artifacts.Single(a => a.Kind == CompletedTestPlanRecipe.Kind);
             var plan = Read(planArtifact, CompletedTestPlanRecipe.Kind, "json", null);
@@ -32,7 +35,7 @@ internal static class SavedRequiredTestResults
                 current.Tests.Select(t => t.GraphId).ToArray(), token);
             var expected = new HashSet<string>(StringComparer.Ordinal);
             var bindings = compiler.FinalGraph.GraphContexts.ToDictionary(b => b.GraphId, StringComparer.Ordinal);
-            var observations = compiler.Observations.ToDictionary(o => o.ProjectPath, PathIdentityPolicy.Current.Comparer);
+            var observations = compiler.ByGraphId();
             if (observations.Count != bindings.Count) throw Refuse();
             long total = 0;
             foreach (var saved in inventory)
@@ -41,7 +44,7 @@ internal static class SavedRequiredTestResults
                 var binding = bindings[saved.GraphId];
                 if (!binding.IsTestProject || saved.Project != CanonicalIdentity.NormalizeLogicalPath(
                     Path.GetRelativePath(root, binding.ProjectPath).Replace('\\', '/'))) throw Refuse();
-                var observed = observations[binding.ProjectPath];
+                var observed = observations[binding.GraphId];
                 CompilerOutputBinding.Validate(binding.Context, observed, token);
                 var pe = Artifact(saved.Assembly, "required-test-assembly", null, null);
                 var pdb = Artifact(saved.Pdb, "required-test-pdb", null, null);
@@ -67,7 +70,8 @@ internal static class SavedRequiredTestResults
                 (a.Kind.StartsWith("required-test-", StringComparison.Ordinal) && a.Kind != "required-test-inventory") ||
                 (a.Id.StartsWith("required-test-", StringComparison.Ordinal) && a.Id != "required-test-inventory")).Select(a => a.Id).ToArray();
             if (declared.Length != expected.Count || !expected.SetEquals(declared)) throw Refuse();
-            compiler.RetainedProof.ValidateCurrent(token);
+            using (timing?.Start(boundary + ".saved.required.physicalClose"))
+                compiler.RetainedProof.ValidateCurrent(token);
             token.ThrowIfCancellationRequested();
             return inventory;
 

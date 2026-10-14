@@ -8,12 +8,16 @@ internal sealed record CapturedPolicy(double Threshold, bool AllowMissingCoverag
 internal static class CapturedEvaluationInputs
 {
     public static (CapturedScope Scope, CapturedPolicy Policy) Read(ArtifactBundle bundle)
+        => Read(bundle.Manifest, bundle.Bytes);
+
+    internal static (CapturedScope Scope, CapturedPolicy Policy) Read(RunManifest manifest,
+        IReadOnlyDictionary<string, ImmutableArray<byte>> artifactBytes)
     {
-        var scope = ParseScope(Bytes(bundle, "scope"));
-        var policy = ParsePolicy(Bytes(bundle, "policy"));
-        if (bundle.Manifest.Producer.ComplexityRuleset == ComplexityRules.CallablesV1 && policy.AllowMissingCoverage)
+        var scope = ParseScope(Bytes(manifest, artifactBytes, "scope"));
+        var policy = ParsePolicy(Bytes(manifest, artifactBytes, "policy"));
+        if (manifest.Producer.ComplexityRuleset == ComplexityRules.CallablesV1 && policy.AllowMissingCoverage)
             throw new InvalidDataException("callables-v1 captured policy cannot allow missing coverage.");
-        var available = bundle.Manifest.Contexts.SelectMany(context => context.Inputs
+        var available = manifest.Contexts.SelectMany(context => context.Inputs
                 .Where(input => input.Role == "source" && (!input.Generated || context.IncludeGenerated))
                 .Select(input => input.RepositoryPath is null ? input.LogicalPath :
                     DeclaredRepositorySourcePath(context, input)))
@@ -37,14 +41,15 @@ internal static class CapturedEvaluationInputs
         input.RepositoryPath is null ? RepositorySourcePath(context.Project, input.LogicalPath) :
             CanonicalIdentity.NormalizeLogicalPath(input.RepositoryPath);
 
-    private static ImmutableArray<byte> Bytes(ArtifactBundle bundle, string kind)
+    private static ImmutableArray<byte> Bytes(RunManifest manifest,
+        IReadOnlyDictionary<string, ImmutableArray<byte>> artifactBytes, string kind)
     {
-        var artifacts = bundle.Manifest.Artifacts.Where(item => item.Kind == kind &&
+        var artifacts = manifest.Artifacts.Where(item => item.Kind == kind &&
             item.ContextId is null && item.BuildId is null && item.ExecutionId is null).ToArray();
         if (artifacts.Length != 1)
             throw new InvalidDataException($"Captured {kind} artifact must be declared exactly once.");
         var artifact = artifacts[0];
-        return bundle.Bytes.TryGetValue(artifact.Locator, out var bytes) ? bytes
+        return artifactBytes.TryGetValue(artifact.Locator, out var bytes) ? bytes
             : throw new InvalidDataException($"Captured {kind} bytes are missing.");
     }
 

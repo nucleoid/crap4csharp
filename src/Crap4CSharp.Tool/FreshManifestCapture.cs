@@ -3,23 +3,45 @@ using System.Reflection;
 using System.Text.Json;
 using Crap4CSharp.Core;
 
-internal sealed record FreshCapturedBundle(RunManifest Manifest, IReadOnlyDictionary<string, ImmutableArray<byte>> Bytes);
+internal sealed record FreshCapturedBundle(RunManifest Manifest, IReadOnlyDictionary<string, ImmutableArray<byte>> Bytes)
+{
+    internal bool RequiresCompletedProof { get; init; }
+}
 
 // Capture from already accepted private execution. No raw command properties/binlogs,
 // inferred warm builds, runtime-load attestation or reusable membership recipe.
 internal static class FreshManifestCapture
 {
-    internal static async Task<FreshCapturedBundle> CaptureAsync(FreshExecutionEvidence execution, CancellationToken cancellation,
+    internal static Task<FreshCapturedBundle> CaptureAsync(FreshExecutionEvidence execution, CancellationToken cancellation,
         CompletedProofTiming? timing = null)
+        => CaptureCoreAsync(execution, cancellation, timing, provisional: false);
+
+    // Only the live completed path may prepare provisional bytes. Staging still
+    // regates, and final/outer completed validation must prove those exact bytes.
+    internal static Task<FreshCapturedBundle> PrepareCompletedAsync(FreshExecutionEvidence execution, CancellationToken cancellation,
+        CompletedProofTiming? timing = null)
+        => CaptureCoreAsync(execution, cancellation, timing, provisional: true);
+
+    private static async Task<FreshCapturedBundle> CaptureCoreAsync(FreshExecutionEvidence execution, CancellationToken cancellation,
+        CompletedProofTiming? timing, bool provisional)
     {
         var preflight = execution.Preflight;
         if (execution.Coverage is null || execution.Tests.Failure is not null || execution.Compiler.RetainedProof is null)
             throw Refuse();
-        using (timing?.Start("public.capture.initialRegate"))
-            await RegateAsync(execution, cancellation, timing, "public.capture.initialRegate");
+        if (provisional)
+        {
+            if (execution.Tests.Count != execution.Plan.Tests.Count || execution.Tests.Any(test => test.Process.ExitCode != 0))
+                throw Refuse();
+            using (timing?.Start("public.capture.originalPhysicalBefore"))
+                execution.Compiler.RetainedProof.ValidateCurrent(cancellation);
+        }
+        else
+            using (timing?.Start("public.capture.initialRegate"))
+                await RegateAsync(execution, cancellation, timing, "public.capture.initialRegate");
         var graph = execution.Compiler.FinalGraph;
         var bindings = graph.GraphContexts.ToDictionary(b => b.GraphId, StringComparer.Ordinal);
-        var observations = execution.Compiler.Observations.ToDictionary(o => o.ProjectPath, PathIdentityPolicy.Current.Comparer);
+        var observations = execution.Compiler.ByGraphId();
+        var referenceEdges = CompilerReferenceGraph.Observe(graph, cancellation);
         var bytes = new Dictionary<string, ImmutableArray<byte>>(StringComparer.Ordinal);
         var artifacts = new List<ManifestArtifact>();
         var contexts = new List<ManifestContext>(); var builds = new List<ManifestBuild>();
@@ -64,7 +86,7 @@ internal static class FreshManifestCapture
             cancellation.ThrowIfCancellationRequested();
             var binding = bindings[invocation.GraphId];
             if (!binding.IsTestProject) throw Refuse();
-            var observed = observations[invocation.ProjectPath];
+            var observed = observations[invocation.GraphId];
             var boundResult = TestResultBinding.ValidateSuccessfulTrx(invocation, binding.Context, observed, cancellation);
             var pe = CompilerOutputBinding.Read(observed.Assembly!.Path, ref readTotal, cancellation);
             var pdb = CompilerOutputBinding.Read(observed.Pdb!.Path, ref readTotal, cancellation);
@@ -99,7 +121,7 @@ internal static class FreshManifestCapture
         foreach (var binding in graph.GraphContexts.Where(b => !b.IsTestProject || b.Context.ExclusionPolicy.IncludeTests))
         {
             cancellation.ThrowIfCancellationRequested();
-            var context = binding.Context; var observation = observations[binding.ProjectPath];
+            var context = binding.Context; var observation = observations[binding.GraphId];
             CompilerOutputBinding.Validate(context, observation, cancellation);
             var assembly = CompilerOutputBinding.Read(observation.Assembly!.Path, ref readTotal, cancellation);
             var pdb = CompilerOutputBinding.Read(observation.Pdb!.Path, ref readTotal, cancellation);
@@ -118,10 +140,12 @@ internal static class FreshManifestCapture
                 inputs.Add(Input(pdbPaths.Contains(source.ResolvedPath!) ? "source" : "compiler-source",
                     source.LogicalPath, content, source.IsGenerated, RepositoryPath(source.ResolvedPath!)));
             }
-            foreach (var reference in observation.Parameters.Single(p => p.Name == "References").Items.Distinct(PathIdentityPolicy.Current.Comparer))
+            foreach (var reference in CompilerReferenceSnapshot.ResolveSemanticReferences(observation, cancellation))
             {
-                var content = CompilerOutputBinding.Read(reference, ref readTotal, cancellation);
-                inputs.Add(Input("reference", "references/" + CanonicalIdentity.Sha256(content.AsSpan()) + ".dll", content));
+                var content = CompilerOutputBinding.Read(reference.Path, ref readTotal, cancellation);
+                inputs.Add(Input("reference", CompilerReferenceSnapshot.LogicalReference(CanonicalIdentity.Sha256(content.AsSpan()),
+                    reference.Aliases, reference.EmbedInteropTypes), content) with
+                    { ReferenceAliases = reference.Aliases, EmbedInteropTypes = reference.EmbedInteropTypes ? true : null });
             }
             var phaseIdentities = new List<object>();
             foreach (var phase in context.PhaseInputs.Where(i => i.Role != "source"))
@@ -145,18 +169,29 @@ internal static class FreshManifestCapture
                 CapturedSource.Create(d.LogicalPath, bytes[inputs.Single(i => i.LogicalPath == d.LogicalPath && i.Role is "source" or "compiler-source").Locator].AsSpan()).Text,
                 context.ParseOptions, d.LogicalPath)).ToArray();
             var metadataReferences = inputs.Where(i => i.Role == "reference").Select(i =>
-                Microsoft.CodeAnalysis.MetadataReference.CreateFromImage(bytes[i.Locator])).ToArray();
+                CompilerReferenceSnapshot.CapturedReference(i, bytes[i.Locator])).ToArray();
             var analysis = new CallableAnalysisContext(RepositoryPath(binding.ProjectPath), context.TargetFramework, context.Configuration,
                 context.Platform, binding.GraphId, context.ParseOptions);
+            // This compilation belongs only to these captured bytes and this
+            // context. Later current boundaries rebuild their own compilation.
+            var compilation = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
+                "Crap4CSharp.CallableInventory", syntax, metadataReferences);
+            var inventories = new Dictionary<string, CallableInventoryResult>(StringComparer.Ordinal);
+            CallableInventoryResult Inventory(CapturedSource source)
+            {
+                cancellation.ThrowIfCancellationRequested();
+                if (!inventories.TryGetValue(source.LogicalPath, out var inventory))
+                    inventories.Add(source.LogicalPath, inventory = CallableInventory.AnalyzeCaptured(source, analysis, compilation));
+                return inventory;
+            }
             foreach (var source in inputs.Where(i => i.Role == "compiler-source" && (!i.Generated || context.ExclusionPolicy.IncludeGenerated)))
-                if (CallableInventory.Analyze(CapturedSource.Create(source.LogicalPath, bytes[source.Locator].AsSpan()).Text,
-                    source.LogicalPath, analysis, metadataReferences, syntax).Callables.Any(c => c.Applicability == CallableApplicability.Applicable))
+                if (Inventory(CapturedSource.Create(source.LogicalPath, bytes[source.Locator].AsSpan()))
+                    .Callables.Any(c => c.Applicability == CallableApplicability.Applicable))
                     throw new PolicyException("coverage.pdbUnavailable", "An authored callable has no independently bound PDB document; it cannot be silently omitted or labelled N/A.");
-            var compilerSources = inputs.Where(i => i.Role is "source" or "compiler-source")
-                .Select(i => CapturedSource.Create(i.LogicalPath, bytes[i.Locator].AsSpan())).ToArray();
             var eligibleSources = inputs.Where(i => (i.Role is "source" or "compiler-source") && (!i.Generated || context.ExclusionPolicy.IncludeGenerated))
                 .Select(i => CapturedSource.Create(i.LogicalPath, bytes[i.Locator].AsSpan())).ToArray();
-            var semanticEmpty = !SemanticEligibility.HasApplicable(eligibleSources, compilerSources, analysis, metadataReferences);
+            var semanticEmpty = !eligibleSources.Any(source => Inventory(source).Callables
+                .Any(callable => callable.Applicability == CallableApplicability.Applicable));
             var captured = new ManifestContext(binding.GraphId, RepositoryPath(binding.ProjectPath), context.TargetFramework,
                 context.Configuration, context.Platform, "", "", "", true, false, inputs)
             {
@@ -179,12 +214,12 @@ internal static class FreshManifestCapture
             {
                 if (id == binding.GraphId) return true;
                 if (!seen.Add(id)) return false;
-                return graph.BuildGraph.Single(n => n.Id == id).Dependencies.Any(d => Reaches(d, seen));
+                return referenceEdges[id].Any(d => Reaches(d, seen));
             }
             foreach (var report in execution.Coverage.Invocations.Where(r => Reaches(r.GraphId, new(StringComparer.Ordinal))))
             {
                 var invocation = execution.Tests.Single(t => t.GraphId == report.GraphId);
-                var testContext = bindings[report.GraphId].Context; var testObservation = observations[invocation.ProjectPath];
+                var testContext = bindings[report.GraphId].Context; var testObservation = observations[invocation.GraphId];
                 var testPe = CompilerOutputBinding.Read(testObservation.Assembly!.Path, ref readTotal, cancellation);
                 var testPdb = CompilerOutputBinding.Read(testObservation.Pdb!.Path, ref readTotal, cancellation);
                 CompilerOutputBinding.Match(testObservation.Assembly, testPe); CompilerOutputBinding.Match(testObservation.Pdb, testPdb);
@@ -224,13 +259,13 @@ internal static class FreshManifestCapture
                 identities.Add(new { role = "compiler-source", logicalPath = source.LogicalPath, locator,
                     sha256 = source.ContentIdentity, length = content.Length, generated = source.IsGenerated });
             }
-            foreach (var reference in observations[test.ProjectPath].Parameters.Single(p => p.Name == "References").Items.Distinct(PathIdentityPolicy.Current.Comparer))
+            foreach (var reference in CompilerReferenceSnapshot.ResolveSemanticReferences(observations[test.GraphId], cancellation))
             {
-                var content = CompilerOutputBinding.Read(reference, ref readTotal, cancellation);
+                var content = CompilerOutputBinding.Read(reference.Path, ref readTotal, cancellation);
                 var hash = CanonicalIdentity.Sha256(content.AsSpan()); var locator = Store(content);
                 Artifact("test-reference-" + test.GraphId + "-" + index++, "test-compiler-reference", content);
-                identities.Add(new { role = "reference", logicalPath = "references/" + hash + ".dll", locator,
-                    sha256 = hash, length = content.Length });
+                identities.Add(new { role = "reference", logicalPath = CompilerReferenceSnapshot.LogicalReference(hash, reference.Aliases, reference.EmbedInteropTypes), locator,
+                    sha256 = hash, length = content.Length, referenceAliases = reference.Aliases, embedInteropTypes = reference.EmbedInteropTypes ? (bool?)true : null });
             }
             foreach (var phase in test.Context.PhaseInputs.Where(p => p.Role != "source" && File.Exists(p.Path)))
             {
@@ -271,19 +306,48 @@ internal static class FreshManifestCapture
                 { StateHash = stateHash },
             [new("workspace", "workspace", OperatingSystem.IsWindows() ? "insensitive" : "sensitive")], contexts, builds, executions, artifacts,
             new(CanonicalIdentity.Sha256(scopeBytes.AsSpan()), CanonicalIdentity.Sha256(policyBytes.AsSpan()), null, null), null));
-        using (timing?.Start("public.capture.finalRegate"))
-            await RegateAsync(execution, cancellation, timing, "public.capture.finalRegate");
+        if (provisional)
+            using (timing?.Start("public.capture.originalPhysicalAfter"))
+                execution.Compiler.RetainedProof.ValidateCurrent(cancellation);
+        else
+            using (timing?.Start("public.capture.finalRegate"))
+                await RegateAsync(execution, cancellation, timing, "public.capture.finalRegate");
         using (timing?.Start("public.capture.verifyCapture"))
         {
             var valid = ProvenanceVerifier.VerifyCaptureCancellable(manifest, bytes, preflight.Policy.Ruleset, cancellation);
             if (valid.Status != ProvenanceStatus.Captured) throw new PolicyException("check.captureUnproven", string.Join(", ", valid.Reasons));
         }
-        return new(manifest, bytes);
+        return new(manifest, bytes) { RequiresCompletedProof = provisional };
     }
 
     internal static async Task<string> PublishAsync(FreshExecutionEvidence execution, FreshCapturedBundle captured,
         string destination, CancellationToken cancellation, CompletedProofTiming? timing = null,
         string timingPrefix = "publication")
+    {
+        RejectProvisional(captured);
+        return (await StageAsync(execution, captured, destination, cancellation, timing, timingPrefix)).CommitVerifiedCapture(cancellation);
+    }
+
+    internal static Task<StagedArtifactPublication> StageAsync(FreshExecutionEvidence execution, FreshCapturedBundle captured,
+        string destination, CancellationToken cancellation, CompletedProofTiming? timing = null,
+        string timingPrefix = "publication", Action<string>? retainCreatedDirectory = null)
+    {
+        RejectProvisional(captured);
+        return StageCoreAsync(execution, captured, destination, cancellation, timing, timingPrefix, retainCreatedDirectory);
+    }
+
+    internal static Task<StagedArtifactPublication> StageForCompletedAsync(FreshExecutionEvidence execution, FreshCapturedBundle captured,
+        string destination, CancellationToken cancellation, CompletedProofTiming? timing = null,
+        string timingPrefix = "publication", Action<string>? retainCreatedDirectory = null)
+    {
+        if (!captured.RequiresCompletedProof || captured.Manifest.Contexts.Any(context => !context.ReuseRecipeComplete ||
+            context.CurrentRevalidation is null)) throw ProvisionalRefusal();
+        return StageCoreAsync(execution, captured, destination, cancellation, timing, timingPrefix, retainCreatedDirectory);
+    }
+
+    private static async Task<StagedArtifactPublication> StageCoreAsync(FreshExecutionEvidence execution, FreshCapturedBundle captured,
+        string destination, CancellationToken cancellation, CompletedProofTiming? timing,
+        string timingPrefix, Action<string>? retainCreatedDirectory)
     {
         using (timing?.Start(timingPrefix + ".verifyCapture"))
             if (ProvenanceVerifier.VerifyCaptureCancellable(captured.Manifest, captured.Bytes,
@@ -293,18 +357,48 @@ internal static class FreshManifestCapture
         FreshCheckPreflightLoader.ValidateDestinations(request, preflight.Root,
             preflight.Trusted.ContentHashes.Keys.Concat(preflight.Policy.ProductionProjects).Concat(preflight.Policy.TestProjects));
         FreshCheckExecution.ProtectPreparedDestinations(preflight, execution.Compiler.FinalGraph);
-        await RegateAsync(execution, cancellation, timing, timingPrefix + ".regate");
+        if (captured.RequiresCompletedProof)
+        {
+            // Unpublishable preparation uses ORIGINAL physical/selection/test
+            // evidence. Independently current graph/runner/trust proof remains
+            // mandatory after staging and again at the actual outer commit.
+            using (timing?.Start(timingPrefix + ".originalPhysicalBefore"))
+                execution.Compiler.RetainedProof!.ValidateCurrent(cancellation);
+            await ValidateSelectionAndTestsAsync(execution, cancellation, timing, timingPrefix + ".provisional");
+            using (timing?.Start(timingPrefix + ".originalPhysicalAfter"))
+                execution.Compiler.RetainedProof!.ValidateCurrent(cancellation);
+        }
+        else
+            await RegateAsync(execution, cancellation, timing, timingPrefix + ".regate");
         FreshCheckExecution.ProtectPreparedDestinations(preflight, execution.Compiler.FinalGraph);
         cancellation.ThrowIfCancellationRequested();
         using (timing?.Start(timingPrefix + ".publishAdapter"))
-            return ArtifactCaptureAdapter.PublishNewCancellable(captured.Manifest, captured.Bytes,
-                Path.GetFullPath(destination, preflight.Root), cancellation);
+        {
+            var staged = ArtifactCaptureAdapter.StageNewCancellable(captured.Manifest, captured.Bytes,
+                Path.GetFullPath(destination, preflight.Root), cancellation, retainCreatedDirectory);
+            if (captured.RequiresCompletedProof) staged.RequireCompletedProof();
+            return staged;
+        }
     }
+
+    private static void RejectProvisional(FreshCapturedBundle captured)
+    {
+        if (captured.RequiresCompletedProof) throw ProvisionalRefusal();
+    }
+
+    private static PolicyException ProvisionalRefusal() => new("check.provisionalCaptureRequiresCompletedProof",
+        "Provisional capture requires final and terminal completed proof before publication.");
 
     internal static async Task RegateAsync(FreshExecutionEvidence execution, CancellationToken cancellation,
         CompletedProofTiming? timing = null, string timingPrefix = "regate")
     {
         await execution.Compiler.RetainedProof!.ValidateFinalAsync(cancellation, timing, timingPrefix + ".compiler");
+        await ValidateSelectionAndTestsAsync(execution, cancellation, timing, timingPrefix);
+    }
+
+    private static async Task ValidateSelectionAndTestsAsync(FreshExecutionEvidence execution, CancellationToken cancellation,
+        CompletedProofTiming? timing, string timingPrefix)
+    {
         var graph = execution.Compiler.FinalGraph;
         var footprint = graph.GraphContexts.SelectMany(b =>
             new[] { b.Context.EvaluatedIntermediateDirectory!, Path.GetDirectoryName(b.Context.EvaluatedTargetPath!)! }

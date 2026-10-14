@@ -12,7 +12,11 @@ public sealed record InspectedBuildEvidence(string ModuleIdentity, string Mvid, 
     IReadOnlyDictionary<string, string> Documents, string LanguageVersion, IReadOnlyList<string> PreprocessorSymbols,
     IReadOnlyList<InspectedMethodEvidence> Methods);
 public sealed record InspectedMethodEvidence(int MetadataToken, string TypeName, string MethodName,
-    IReadOnlyList<InspectedSequencePoint> SequencePoints);
+    IReadOnlyList<InspectedSequencePoint> SequencePoints)
+{
+    internal bool CompilerGenerated { get; init; }
+    internal IReadOnlyList<string>? ParameterTypes { get; init; }
+}
 public sealed record InspectedSequencePoint(string Document, int Offset, int StartLine, int StartColumn,
     int EndLine, int EndColumn);
 public sealed record InspectedTestEvidence(int Total, int Passed, int Failed, int Skipped,
@@ -90,8 +94,15 @@ public static class ArtifactEvidenceInspector
                             point.Offset, point.StartLine, point.StartColumn, point.EndLine, point.EndColumn);
                     }).ToArray();
                     if (points.Length > 0)
+                    {
+                        var generated = HasCompilerGeneratedAttribute(metadata, method.GetCustomAttributes()) ||
+                            HasCompilerGeneratedAttribute(metadata, type.GetCustomAttributes());
                         methods.Add(new InspectedMethodEvidence(MetadataTokens.GetToken(methodHandle), typeName,
-                            metadata.GetString(method.Name), points));
+                            metadata.GetString(method.Name), points)
+                        { CompilerGenerated = generated,
+                            ParameterTypes = generated || metadata.GetString(method.Name) == ".ctor"
+                                ? PortablePdbCallableMapper.ReadParameterTypes(metadata, method) : null });
+                    }
                 }
             }
             return new InspectedBuildEvidence(Path.GetFileNameWithoutExtension(moduleName), mvid, debugIdentity,
@@ -293,6 +304,34 @@ public static class ArtifactEvidenceInspector
             if (!output.TryAdd(values[index], values[index + 1]))
                 throw new InvalidDataException("Captured PDB compilation-options record has duplicate keys.");
         return output;
+    }
+
+    private static bool HasCompilerGeneratedAttribute(MetadataReader reader, CustomAttributeHandleCollection attributes)
+    {
+        foreach (var handle in attributes)
+        {
+            var constructor = reader.GetCustomAttribute(handle).Constructor;
+            EntityHandle parent;
+            if (constructor.Kind == HandleKind.MemberReference)
+                parent = reader.GetMemberReference((MemberReferenceHandle)constructor).Parent;
+            else if (constructor.Kind == HandleKind.MethodDefinition)
+                parent = reader.GetMethodDefinition((MethodDefinitionHandle)constructor).GetDeclaringType();
+            else continue;
+            string name; string ns;
+            if (parent.Kind == HandleKind.TypeReference)
+            {
+                var type = reader.GetTypeReference((TypeReferenceHandle)parent);
+                name = reader.GetString(type.Name); ns = reader.GetString(type.Namespace);
+            }
+            else if (parent.Kind == HandleKind.TypeDefinition)
+            {
+                var type = reader.GetTypeDefinition((TypeDefinitionHandle)parent);
+                name = reader.GetString(type.Name); ns = reader.GetString(type.Namespace);
+            }
+            else continue;
+            if (name == "CompilerGeneratedAttribute" && ns == "System.Runtime.CompilerServices") return true;
+        }
+        return false;
     }
 
     private static string TypeName(MetadataReader reader, TypeDefinitionHandle handle)

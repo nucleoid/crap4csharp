@@ -12,6 +12,155 @@ public sealed class ArtifactCaptureTests
 {
     private const string CompiledSource = "tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs";
     [Fact]
+    public void UncommittedPublicationCannotBeLoadedUntilTheGuardedMoveCompletes()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-uncommitted-load");
+        var fixture = CreateFixture();
+        var target = Path.Combine(directory.Path, "bundle");
+        var token = TestContext.Current.CancellationToken;
+        var staged = ArtifactCaptureAdapter.StageNewCancellable(fixture.Manifest, fixture.Bytes, target, token);
+        Assert.False(Directory.Exists(target));
+        var refusal = Assert.Throws<InvalidDataException>(() => ArtifactBundle.Load(staged.Bundle.ManifestPath, directory.Path));
+        Assert.Contains("publication is incomplete", refusal.Message);
+        var published = staged.Commit(token);
+        Assert.False(Directory.Exists(staged.Bundle.BundleRoot));
+        Assert.Equal(staged.Bundle.Manifest.ManifestHash, ArtifactBundle.Load(published, directory.Path).Manifest.ManifestHash);
+    }
+
+    [Fact]
+    public void RefusedCompletedCommitLeavesRetainedStagingUnusableByPublicLoaders()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-refused-completed-load");
+        var fixture = CreateFixture();
+        var target = Path.Combine(directory.Path, "bundle");
+        var staged = ArtifactCaptureAdapter.StageNewCancellable(fixture.Manifest, fixture.Bytes, target, TestContext.Current.CancellationToken);
+        staged.RequireCompletedProof();
+        Assert.Throws<PolicyException>(() => staged.Commit(TestContext.Current.CancellationToken));
+        Assert.False(Directory.Exists(target));
+        Assert.Throws<InvalidDataException>(() => ArtifactBundle.Load(staged.Bundle.ManifestPath, directory.Path));
+    }
+
+    [Fact]
+    public async Task ProvisionalCaptureCannotUseImmediatePublicationAdapters()
+    {
+        // Refusal must precede any execution access, destination validation or I/O.
+        var provisional = new FreshCapturedBundle(null!, new Dictionary<string, ImmutableArray<byte>>())
+            { RequiresCompletedProof = true };
+        var publish = await Assert.ThrowsAsync<PolicyException>(() => FreshManifestCapture.PublishAsync(
+            null!, provisional, "unused", CancellationToken.None));
+        Assert.Equal("check.provisionalCaptureRequiresCompletedProof", publish.Code);
+        var stage = await Assert.ThrowsAsync<PolicyException>(() => FreshManifestCapture.StageAsync(
+            null!, provisional, "unused", CancellationToken.None));
+        Assert.Equal(publish.Code, stage.Code);
+        var staged = new StagedArtifactPublication(null!, "unused");
+        staged.RequireCompletedProof();
+        Assert.Equal(publish.Code, Assert.Throws<PolicyException>(() => staged.CommitVerifiedCapture(CancellationToken.None)).Code);
+        Assert.Equal(publish.Code, Assert.Throws<PolicyException>(() => staged.Commit(CancellationToken.None)).Code);
+        foreach (var proof in new[]
+        {
+            new ProvenanceResult(ProvenanceStatus.Captured, "captured", false, false, []),
+            new ProvenanceResult(ProvenanceStatus.Verified, "current", false, true, []),
+            new ProvenanceResult(ProvenanceStatus.Verified, "current", true, false, [])
+        })
+            Assert.Equal(publish.Code, Assert.Throws<PolicyException>(() => staged.CommitCompleted(null!, proof, CancellationToken.None, [])).Code);
+    }
+
+    [Fact]
+    public void ProvisionalCommitRejectsProofForDifferentBundleWithoutPublishing()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-provisional-publication");
+        var fixture = CreateFixture();
+        var target = Path.Combine(directory.Path, "bundle");
+        var token = TestContext.Current.CancellationToken;
+        var staged = ArtifactCaptureAdapter.StageNewCancellable(fixture.Manifest, fixture.Bytes, target, token);
+        staged.RequireCompletedProof();
+        // Even identical declarations/bytes in a different bundle object cannot
+        // stand in for the physical bundle validated at the outer boundary.
+        var other = staged.Bundle with { };
+        var declaredProof = new ProvenanceResult(ProvenanceStatus.Verified, "current", true, true, []);
+        Assert.Equal("check.provisionalCaptureRequiresCompletedProof", Assert.Throws<PolicyException>(() =>
+            staged.CommitCompleted(other, declaredProof, token, [])).Code);
+        Assert.False(Directory.Exists(target));
+        Assert.True(Directory.Exists(staged.Bundle.BundleRoot));
+    }
+
+    [Theory]
+    [InlineData("none")]
+    [InlineData("tamper")]
+    [InlineData("collision")]
+    [InlineData("cancel")]
+    [InlineData("protected")]
+    public void DeferredPublicationKeepsDestinationAbsentUntilCommitAndRechecksOwnedBytes(string mutation)
+    {
+        using var directory = TestDirectory.Create("crap4csharp-staged-publication");
+        var fixture = CreateFixture();
+        var target = Path.Combine(directory.Path, "bundle");
+        var token = TestContext.Current.CancellationToken;
+        string? retained = null;
+        var staged = ArtifactCaptureAdapter.StageNewCancellable(fixture.Manifest, fixture.Bytes, target, token,
+            path => retained = path);
+        Assert.Equal(staged.Bundle.BundleRoot, retained);
+        Assert.False(Directory.Exists(target));
+        Assert.True(File.Exists(staged.Bundle.ManifestPath));
+        if (mutation == "tamper")
+        {
+            File.AppendAllText(staged.Bundle.ManifestPath, " ");
+            Assert.Equal("provenance.savedBundleFootprintUnproven", Assert.Throws<PolicyException>(() => staged.Commit(token)).Code);
+        }
+        else if (mutation == "collision")
+        {
+            Directory.CreateDirectory(target);
+            var existing = directory.Write("bundle/consumer.txt", "consumer");
+            Assert.Throws<IOException>(() => staged.Commit(token));
+            Assert.Equal("consumer", File.ReadAllText(existing));
+            return;
+        }
+        else if (mutation == "cancel")
+        {
+            using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+            Assert.ThrowsAny<OperationCanceledException>(() => staged.Commit(cancelled.Token));
+            Assert.False(Directory.Exists(target));
+            var retry = ArtifactCaptureAdapter.StageNewCancellable(fixture.Manifest, fixture.Bytes, target, token);
+            Assert.True(File.Exists(retry.Commit(token)));
+            return;
+        }
+        else if (mutation == "protected")
+            Assert.Equal("output.aliasesPolicyInput", Assert.Throws<PolicyException>(() =>
+                staged.Commit(token, [Path.Combine(target, "selected.cs")])).Code);
+        else
+        {
+            var locator = staged.Commit(token);
+            Assert.Equal(staged.ManifestPath, locator);
+            Assert.False(Directory.Exists(staged.Bundle.BundleRoot));
+            Assert.Equal(staged.Bundle.Manifest.ManifestHash, ArtifactBundle.Load(locator, directory.Path).Manifest.ManifestHash);
+            Assert.Throws<InvalidOperationException>(() => staged.Commit(token));
+            return;
+        }
+        Assert.False(Directory.Exists(target));
+    }
+
+    [Fact]
+    public void CancellationAfterStagingCreationReportsTheRetainedDirectoryWithoutDeletingNewInputs()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-stage-creation-cancel");
+        var fixture = CreateFixture();
+        var target = Path.Combine(directory.Path, "bundle");
+        using var cancellation = new CancellationTokenSource();
+        string? retained = null;
+        Assert.ThrowsAny<OperationCanceledException>(() => ArtifactCaptureAdapter.StageNewCancellable(
+            fixture.Manifest, fixture.Bytes, target, cancellation.Token, path =>
+            {
+                retained = path;
+                File.WriteAllText(Path.Combine(path, "consumer-input.txt"), "preserve this input");
+                cancellation.Cancel();
+            }));
+        Assert.NotNull(retained);
+        Assert.True(Directory.Exists(retained));
+        Assert.Equal("preserve this input", File.ReadAllText(Path.Combine(retained, "consumer-input.txt")));
+        Assert.False(Directory.Exists(target));
+    }
+
+    [Fact]
     public void PublicationSealsVerifiesAndNeverOverwritesADestination()
     {
         using var directory = TestDirectory.Create("crap4csharp-publish");

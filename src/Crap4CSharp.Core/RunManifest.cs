@@ -83,6 +83,10 @@ public sealed record ManifestInput(string Role, string LogicalPath, string Locat
     string? Encoding, bool Generated)
 {
     public string? RepositoryPath { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ReferenceAliases { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public bool? EmbedInteropTypes { get; init; }
 }
 public sealed record ManifestBuild(string Id, string ContextId, string ModuleIdentity, string AssemblySha256,
     string Mvid, string PdbSha256, string DebugIdentity);

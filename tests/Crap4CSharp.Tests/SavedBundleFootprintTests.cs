@@ -67,11 +67,9 @@ public sealed class SavedBundleFootprintTests
     }
 
     [Fact]
-    public void LinkedFileOrAncestorCannotBecomeAProvenBundleFootprint()
+    public void LinkedFileCannotBecomeAProvenBundleFootprint()
     {
-        // Linux link controls are additional to portable membership/byte controls;
-        // this does not claim Windows link-creation permission or runtime coverage.
-        if (!OperatingSystem.IsLinux()) return;
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "File symlink creation requires Windows privileges; linked ancestor control exercises a junction.");
         using var fixture = TestDirectory.Create("crap4csharp-bundle-footprint-link");
         var bundle = ArtifactBundle.Load(WriteBundle(fixture), fixture.Path);
         var artifact = Path.Combine(bundle.BundleRoot, "nested", "input.json");
@@ -84,8 +82,15 @@ public sealed class SavedBundleFootprintTests
                 SavedBundleFootprint.Validate(bundle, fixture.Path, [], TestContext.Current.CancellationToken)).Code);
         }
         finally { File.Delete(artifact); File.WriteAllText(artifact, "{}"); }
+    }
+
+    [Fact]
+    public void LinkedAncestorCannotBecomeAProvenBundleFootprint()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-bundle-footprint-ancestor");
+        var bundle = ArtifactBundle.Load(WriteBundle(fixture), fixture.Path);
         var alias = Path.Combine(fixture.Path, "alias");
-        Directory.CreateSymbolicLink(alias, bundle.BundleRoot);
+        ReparseTestDirectory.Link(alias, bundle.BundleRoot);
         try
         {
             // Exercise this boundary with the already-loaded immutable bytes;
@@ -137,7 +142,8 @@ public sealed class SavedBundleFootprintTests
         if (mutation == "changed-original") current["bundle/original.json"] = new string('b', 64);
         if (mutation == "deleted-original") current.Remove("bundle/original.json");
         var provenFiles = new HashSet<string>(PathIdentityPolicy.Current.Comparer)
-            { Path.Combine(fixture.Path, "bundle/original.json"), Path.Combine(fixture.Path, "bundle/new.json") };
+            { Path.GetFullPath(Path.Combine(fixture.Path, "bundle/original.json")),
+                Path.GetFullPath(Path.Combine(fixture.Path, "bundle/new.json")) };
         // Direct normalization-only contract; this fixture does not attest saved compiler/tests.
         var observed = SavedLocalMembership.Observe(bundle, preflight with { LocalSnapshot = current }, [], token, provenFiles);
         Assert.Equal(mutation == "none", observed == state);

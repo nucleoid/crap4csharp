@@ -3,11 +3,18 @@ using System.Text.Json;
 namespace Crap4CSharp.Core;
 
 // Physical paths and raw property values are private execution transport, not exported evidence.
-internal sealed record CompilerParameter(string Name, IReadOnlyList<string> Items);
+internal sealed record CompilerParameter(string Name, IReadOnlyList<string> Items)
+{
+    public IReadOnlyList<CompilerReferenceProperties> ReferenceProperties { get; init; } = [];
+}
+internal sealed record CompilerReferenceProperties(string ItemSpec, string? Aliases, bool EmbedInteropTypes);
 internal sealed record CompilerOutput(string Path, string Sha256, long Length);
 internal sealed record CompilerCopy(string Source, string Destination);
 internal sealed record CompilerObservation(string ProjectPath, IReadOnlyList<CompilerParameter> Parameters)
 {
+    // Parent-assigned owner after the once-scheduled compiler invocation is bound.
+    // Not worker-asserted evidence and not a replacement for parameter/output gates.
+    internal string? GraphId { get; init; }
     public IReadOnlyList<CompilerCopy> RuntimeCopies { get; init; } = [];
     internal CompilerOutput? Assembly { get; init; }
     internal CompilerOutput? Pdb { get; init; }
@@ -23,6 +30,11 @@ internal static class CompilerEvidence
 
     internal static async Task<CompilerObservation> BuildAsync(ProjectBuildGraphNode node, string ownedDirectory,
         TimeSpan timeout, CancellationToken cancellationToken)
+        => await BuildAsync(node, ownedDirectory, timeout, cancellationToken, nativeProbe: false);
+
+    internal static async Task<CompilerObservation> BuildAsync(ProjectBuildGraphNode node, string ownedDirectory,
+        TimeSpan timeout, CancellationToken cancellationToken, bool nativeProbe, ProjectContextSdkResolution? frozenSdk = null,
+        global::CompletedProofTiming? timing = null)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(timeout);
@@ -34,17 +46,24 @@ internal static class CompilerEvidence
         if (File.Exists(log)) throw new ProjectContextException("compiler.outputExists", "Compiler capture destination already exists.");
         if (log.IndexOfAny([';', ',']) >= 0)
             throw new ProjectContextException("compiler.outputPathUnsupported", "Compiler log path contains a logger delimiter.");
-        var sdk = await ProjectContextLoader.ResolveSdkAsync(Path.GetDirectoryName(node.ProjectPath)!, timeout, token);
+        ProjectContextSdkResolution sdk;
+        using (timing?.Start("execution.build.sdk"))
+            sdk = await SdkExecutionIdentity.ResolveForEffectAsync(Path.GetDirectoryName(node.ProjectPath)!, timeout, token, nativeProbe, frozenSdk);
         var arguments = new List<string> { "build", node.ProjectPath, "--no-restore", "--no-incremental", "-m:1", "-nr:false" };
         arguments.AddRange(MappedGlobalArguments.Create(node.GlobalProperties));
         arguments.Add("-p:BuildProjectReferences=false");
         arguments.Add("-p:UseSharedCompilation=false");
         arguments.Add("-bl:" + log + ";ProjectImports=None");
-        var process = await ProcessRunner.RunLoggedAsync(sdk.HostPath, arguments, Path.GetDirectoryName(node.ProjectPath)!,
-            timeout, token, directory);
+        LoggedProcessResult process;
+        using (timing?.Start("execution.build.process"))
+            process = await ProcessRunner.RunLoggedAsync(sdk.HostPath, arguments, Path.GetDirectoryName(node.ProjectPath)!,
+                timeout, token, directory);
         if (!OperatingSystem.IsWindows() && File.Exists(log)) File.SetUnixFileMode(log, UnixFileMode.UserRead | UnixFileMode.UserWrite);
         if (process.ExitCode != 0) throw new ProjectContextException("compiler.buildFailed", "The declared nonincremental build failed; inspect private owned logs.");
-        var observation = await ReadAsync(log, node.ProjectPath, timeout, token);
+        CompilerObservation observation;
+        using (timing?.Start("execution.build.evidence"))
+            observation = await ReadAsync(log, node.ProjectPath, timeout, token, nativeProbe, sdk);
+        using var outputTiming = timing?.Start("execution.build.outputs");
         var output = observation.Parameters.Single(p => p.Name == "OutputAssembly").Items.Single();
         var assembly = Path.GetFullPath(output, Path.GetDirectoryName(node.ProjectPath)!);
         var referenceParameters = observation.Parameters.Where(p => p.Name == "OutputRefAssembly").ToArray();
@@ -58,6 +77,10 @@ internal static class CompilerEvidence
 
     internal static async Task<CompilerObservation> ReadAsync(string binlog, string project, TimeSpan timeout,
         CancellationToken cancellationToken)
+        => await ReadAsync(binlog, project, timeout, cancellationToken, nativeProbe: false);
+
+    internal static async Task<CompilerObservation> ReadAsync(string binlog, string project, TimeSpan timeout,
+        CancellationToken cancellationToken, bool nativeProbe, ProjectContextSdkResolution? frozenSdk = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -66,10 +89,8 @@ internal static class CompilerEvidence
         if (!File.Exists(binlog)) throw new ProjectContextException("compiler.binlogMissing", "The declared compiler log is missing.");
         if (new FileInfo(binlog).Length > MaximumBinlogBytes)
             throw new ProjectContextException("compiler.binlogLimit", "Compiler log is missing or exceeds the private input limit.");
-        var sdk = await ProjectContextLoader.ResolveSdkAsync(Path.GetDirectoryName(project)!, timeout, token);
-        var scratch = Path.Combine(Path.GetTempPath(), "crap4csharp-compiler", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(scratch);
-        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(scratch, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        var sdk = await SdkExecutionIdentity.ResolveForEffectAsync(Path.GetDirectoryName(project)!, timeout, token, nativeProbe, frozenSdk);
+        var scratch = Directory.CreateTempSubdirectory("crap4csharp-compiler-").FullName;
         try
         {
             var request = Path.Combine(scratch, "request.json");

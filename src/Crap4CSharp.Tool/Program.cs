@@ -16,6 +16,12 @@ if (args.Length == 3 && args[0] == CompilerEvidence.Command)
 if (args.Length == 3 && args[0] == ProjectContextLoader.LoaderCommand)
     return await MsBuildLoaderBootstrap.RunAsync(args[1], args[2], CancellationToken.None);
 
+if (args.Length == 3 && args[0] == SdkIdentityProbe.Command)
+    return await SdkIdentityProbe.RunWorkerAsync(args[1], args[2]);
+
+if (args.Length == 3 && args[0] == WarmAcquisitionDiagnosticBootstrap.Command)
+    return await WarmAcquisitionDiagnosticBootstrap.RunAsync(args[1], args[2]);
+
 using var cancellationSource = new CancellationTokenSource();
 ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
 {
@@ -34,6 +40,7 @@ finally
 
 internal static class App
 {
+    internal const bool DefaultNativeSdkIdentity = true;
     internal delegate Task<ProcessResult> ProcessExecutor(string fileName, IEnumerable<string> arguments,
         string workingDirectory, TimeSpan timeout, CancellationToken cancellationToken);
 
@@ -46,6 +53,7 @@ internal static class App
           crap4csharp check --project <path> --policy <path> [--base <ref> | --scope all] [options]
           crap4csharp check --reuse-artifacts <manifest> --policy <path> --base <ref> [options]
           crap4csharp baseline create|update --policy <path> --reuse-artifacts <manifest> --output <candidate>
+          crap4csharp cleanup --private-diagnostics <exact-root> [--older-than-days <n>]
 
         Options:
           --coverage <xml>   Use an OpenCover or Cobertura/Coverlet XML report; repeatable.
@@ -94,6 +102,10 @@ internal static class App
           --base <ref>       CI-authorized base ref used to resolve trusted policy and changed scope.
           --format <value>   Render human (default) or json output.
           --output <path>    Atomically write the versioned JSON result document to path.
+          --private-diagnostics <exact-root>
+                             Cleanup only: remove one aged, inactive marked private temp root.
+          --older-than-days <n>
+                             Cleanup only: minimum root/marker/completion age (default: 7).
           -h, --help         Show help and perform no discovery, tests, or writes.
 
         Exit codes: 0 success, 1 usage/operational failure, 2 threshold exceeded.
@@ -101,13 +113,16 @@ internal static class App
 
     public static async Task<int> RunAsync(string[] args, string workingDirectory, TextWriter output, TextWriter error,
         CancellationToken cancellationToken, ProcessExecutor? processExecutor = null,
-        Func<CancellationToken, Task>? beforeTerminalPublication = null, CompletedProofTiming? freshTiming = null)
+        Func<CancellationToken, Task>? beforeTerminalPublication = null, CompletedProofTiming? freshTiming = null,
+        bool nativeSdkIdentityProbe = DefaultNativeSdkIdentity)
     {
         if (args.Any(arg => arg is "--help" or "-h")) { await output.WriteLineAsync(Help); return 0; }
+        if (args.Length > 0 && args[0] == "cleanup")
+            return await PrivateDiagnosticsCleanup.RunAsync(args, output, error, cancellationToken);
         if (args.Length > 0 && args[0] == "baseline")
             return await BaselineCommand.RunAsync(args, workingDirectory, output, error, cancellationToken);
         if (args.Length > 0 && args[0] is "analyze" or "check")
-            return await RunCallableCommandAsync(args, workingDirectory, output, error, cancellationToken, beforeTerminalPublication, freshTiming);
+            return await RunCallableCommandAsync(args, workingDirectory, output, error, cancellationToken, beforeTerminalPublication, freshTiming, nativeSdkIdentityProbe);
 
         var startedAt = DateTimeOffset.UtcNow;
         var stopwatch = Stopwatch.StartNew();
@@ -211,13 +226,14 @@ internal static class App
 
     private static async Task<int> RunCallableCommandAsync(string[] args, string workingDirectory,
         TextWriter output, TextWriter error, CancellationToken cancellationToken,
-        Func<CancellationToken, Task>? beforeTerminalPublication, CompletedProofTiming? freshTiming)
+        Func<CancellationToken, Task>? beforeTerminalPublication, CompletedProofTiming? freshTiming, bool nativeSdkIdentityProbe)
     {
         var startedAt = DateTimeOffset.UtcNow;
         var stopwatch = Stopwatch.StartNew();
         ModernOptions? options = null;
         FreshFailureOutputProof? failureOutputProof = null;
         string? privateDiagnostics = null;
+        PrivateDiagnosticLease? privateDiagnosticLease = null;
         Func<Task>? terminalProof = null;
         Func<Exception, ResultDocument>? freshTerminalFailure = null;
         try
@@ -232,9 +248,16 @@ internal static class App
                     new PolicyOverrides(Threshold: options.ThresholdExplicit ? options.Threshold : null,
                         Frameworks: options.Frameworks.Count == 0 ? null : options.Frameworks,
                         Configuration: options.Configuration, ExemptionFile: options.Exemptions,
-                        IncludeTests: options.IncludeTests, IncludeGenerated: options.IncludeGenerated), options.Timeout);
+                        IncludeTests: options.IncludeTests, IncludeGenerated: options.IncludeGenerated), options.Timeout)
+                { WarmPostBuildProbe = true, NativeSdkIdentityProbe = nativeSdkIdentityProbe };
+                // This parent-only flag selects fresh graph acquisition AFTER once builds.
+                // Cold preparation, metadata and runner discovery remain ordinary.
                 freshResult = await FreshCheckCommand.RunAsync(request, workingDirectory, startedAt, cancellationToken,
-                    proof => failureOutputProof = proof, directory => privateDiagnostics = directory,
+                    proof => failureOutputProof = proof, directory =>
+                    {
+                        privateDiagnostics = directory;
+                        privateDiagnosticLease = new PrivateDiagnosticLease(directory, ToolVersion);
+                    },
                     proof => terminalProof = proof, refusal => freshTerminalFailure = refusal, freshTiming);
             }
             // Fresh execution has already materialized the graceful cancellation
@@ -269,7 +292,7 @@ internal static class App
                 writeResult = false;
                 if (failureOutputProof is not null)
                 {
-                    try { await failureOutputProof.ValidateAsync(); writeResult = true; }
+                    try { await failureOutputProof.ValidateAsync(cancellationToken, options.Timeout - stopwatch.Elapsed); writeResult = true; }
                     catch (Exception aliasException) when (IsHandled(aliasException)) { }
                 }
                 if (!writeResult)
@@ -374,7 +397,7 @@ internal static class App
             {
                 try
                 {
-                    await failureOutputProof.ValidateAsync();
+                    await failureOutputProof.ValidateAsync(cancellationToken, options!.Timeout - stopwatch.Elapsed);
                     mayWrite = true;
                 }
                 catch (Exception aliasException) when (IsHandled(aliasException)) { mayWrite = false; }
@@ -406,6 +429,7 @@ internal static class App
             await error.WriteLineAsync($"error: {exception.Message}");
             return 1;
         }
+        finally { privateDiagnosticLease?.Dispose(); }
     }
 
     private static ResultDocument AttachPrivateDiagnostics(ResultDocument result, string? directory)
@@ -1230,7 +1254,7 @@ internal static class App
         }
     }
 
-    private static string ToolVersion => typeof(App).Assembly
+    internal static string ToolVersion => typeof(App).Assembly
         .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
         ?? typeof(App).Assembly.GetName().Version?.ToString()
         ?? "unknown";

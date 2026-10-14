@@ -15,6 +15,11 @@ internal static class ArtifactCaptureAdapter
 
     internal static string PublishNewCancellable(RunManifest manifest,
         IReadOnlyDictionary<string, ImmutableArray<byte>> artifacts, string destination, CancellationToken cancellationToken)
+        => StageNewCancellable(manifest, artifacts, destination, cancellationToken).CommitVerifiedCapture(cancellationToken);
+
+    internal static StagedArtifactPublication StageNewCancellable(RunManifest manifest,
+        IReadOnlyDictionary<string, ImmutableArray<byte>> artifacts, string destination, CancellationToken cancellationToken,
+        Action<string>? retainCreatedDirectory = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (artifacts.Keys.Any(locator => string.Equals(locator.Replace('\\', '/'), "manifest.json",
@@ -30,12 +35,15 @@ internal static class ArtifactCaptureAdapter
         if (verification.Status == ProvenanceStatus.Invalid)
             throw new InvalidDataException($"Cannot publish invalid capture: {string.Join(", ", verification.Reasons)}");
         var target = Path.GetFullPath(destination);
+        if (ArtifactBundle.IsPublicationStagingRoot(target))
+            throw new InvalidDataException("Artifact output uses a reserved publication-staging directory name.");
         if (File.Exists(target) || Directory.Exists(target))
             throw new IOException($"Artifact output already exists: {target}");
         var parent = Path.GetDirectoryName(target) ?? throw new IOException("Artifact output has no parent directory.");
         Directory.CreateDirectory(parent);
         var staging = Path.Combine(parent, $".{Path.GetFileName(target)}.{Guid.NewGuid():N}.incomplete");
         Directory.CreateDirectory(staging);
+        retainCreatedDirectory?.Invoke(staging);
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(staging, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         foreach (var pair in artifacts.OrderBy(pair => pair.Key, StringComparer.Ordinal))
         {
@@ -60,13 +68,12 @@ internal static class ArtifactCaptureAdapter
             stream.Write(manifestBytes);
             stream.Flush(true);
         }
-        var staged = ArtifactBundle.Load(manifestPath, staging);
+        var staged = ArtifactBundle.LoadStaging(manifestPath, staging);
         var stagedVerification = ProvenanceVerifier.VerifyCaptureCancellable(staged.Manifest, staged.Bytes, null, cancellationToken);
         if (stagedVerification.Status == ProvenanceStatus.Invalid)
             throw new InvalidDataException($"Staged capture verification failed: {string.Join(", ", stagedVerification.Reasons)}");
         cancellationToken.ThrowIfCancellationRequested();
-        Directory.Move(staging, target);
-        return Path.Combine(target, "manifest.json");
+        return new(staged, target);
     }
 
     private static void EnsureContained(string root, string path)
@@ -120,6 +127,67 @@ internal static class ArtifactCaptureAdapter
     private static string[] Identities(IEnumerable<ManifestInput> values) => values.Select(input =>
             $"{input.Role}\n{input.LogicalPath}\n{input.Sha256}\n{input.Generated}")
         .Order(StringComparer.Ordinal).ToArray();
+}
+
+// A verified capture is still prospective until the caller's terminal proof.
+// Refusal leaves the requested destination absent; the nonce staging directory
+// is retained rather than deleting paths that may have become consumer inputs.
+internal sealed class StagedArtifactPublication(ArtifactBundle bundle, string target)
+{
+    internal ArtifactBundle Bundle { get; } = bundle;
+    internal string Destination { get; } = target;
+    internal string ManifestPath => Path.Combine(Destination, "manifest.json");
+    private bool committed;
+    private bool requiresCompletedProof;
+    internal void RequireCompletedProof() => requiresCompletedProof = true;
+
+    internal string Commit(CancellationToken token, IReadOnlyList<string>? protectedPaths = null)
+    {
+        if (requiresCompletedProof) throw ProvisionalRefusal();
+        return CommitCore(token, protectedPaths ?? [], true);
+    }
+
+    internal string CommitCompleted(ArtifactBundle verifiedBundle, ProvenanceResult proof,
+        CancellationToken token, IReadOnlyList<string> protectedPaths)
+    {
+        if (!requiresCompletedProof || !ReferenceEquals(Bundle, verifiedBundle) ||
+            proof.Status != ProvenanceStatus.Verified || !proof.PostflightVerified || !proof.Reusable)
+            throw ProvisionalRefusal();
+        return CommitCore(token, protectedPaths, true);
+    }
+
+    private static PolicyException ProvisionalRefusal() => new("check.provisionalCaptureRequiresCompletedProof",
+        "Provisional capture requires final and terminal completed proof before publication.");
+
+    // Only the immediate publication adapters call this, directly after their
+    // synchronous staged-byte verification. Deferred exports use Commit instead.
+    internal string CommitVerifiedCapture(CancellationToken token)
+    {
+        if (requiresCompletedProof) throw new PolicyException("check.provisionalCaptureRequiresCompletedProof",
+            "Provisional capture requires final and terminal completed proof before publication.");
+        return CommitCore(token, [], false);
+    }
+
+    private string CommitCore(CancellationToken token, IReadOnlyList<string> protectedPaths, bool verifyFootprint)
+    {
+        token.ThrowIfCancellationRequested();
+        if (committed) throw new InvalidOperationException("Artifact staging has already been published.");
+        var parent = Path.GetDirectoryName(Destination)!;
+        if (verifyFootprint) _ = SavedBundleFootprint.Validate(Bundle, parent, protectedPaths, token);
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (protectedPaths.Any(path => PathIdentityPolicy.Current.Comparer.Equals(Path.GetFullPath(path), Destination) ||
+            Path.GetFullPath(path).StartsWith(Path.TrimEndingDirectorySeparator(Destination) + Path.DirectorySeparatorChar, comparison)))
+            throw new PolicyException("output.aliasesPolicyInput", "Artifact destination contains a protected consumer input.");
+        for (var path = parent; path is not null; path = Path.GetDirectoryName(path))
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                throw new IOException("Artifact destination traverses a reparse point.");
+        if (File.Exists(Destination) || Directory.Exists(Destination))
+            throw new IOException("Artifact destination already exists.");
+        token.ThrowIfCancellationRequested();
+        Directory.Move(Bundle.BundleRoot, Destination);
+        committed = true;
+        return ManifestPath;
+    }
 }
 
 internal sealed record CompilerInputObservation(string Provider, string ContextId,

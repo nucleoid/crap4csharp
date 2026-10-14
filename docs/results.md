@@ -10,6 +10,15 @@ The top-level `schemaVersion` is currently `1.0`. Readers must reject unsupporte
 
 Explicit coverage inputs retain their normalized workspace-relative paths. Coverage produced in an invocation-owned temporary directory uses a content-addressed logical path under `<generated>/coverage/` in `evaluation.artifacts`; its physical temporary location appears only in `run.artifacts`.
 
+If fresh artifact publication is refused after its directory is created,
+`run.artifacts` records that directory as `retained-artifact-output` with
+`complete: false` and `reusable: false`; `run.diagnosticLocations` also includes
+the locator. Before publication this is the nonce staging directory beside the
+requested destination. If publication completed before a later result-writer
+failure, the locator names the moved output instead. Retention does not establish
+a successful gate. Keep these artifacts private, and do not delete a retained
+directory without checking whether it now contains consumer inputs.
+
 Syntax-only contexts use `analysisMode: "syntaxOnly"`. Modern callable adapters label target framework and configuration `unknown` rather than presenting the tool's own target as the analyzed consumer's context; legacy syntax-only contexts retain null project/target/configuration fields.
 
 Captured replay adds `evaluation.provenance` with `status`
@@ -21,9 +30,11 @@ source, PE/PDB, coverage and TRX artifacts. The manifest records which successfu
 execution produced a coverage artifact; neither that coverage-to-execution association
 nor the test assembly's relationship to the production assembly is derived from the
 artifact bytes. `captured` does not claim that the current checkout was inspected.
-Current-workspace `verified` is reserved
-for the future project-aware check producer. The result schema treats this as
-an additive field within v1.
+Project-aware fresh and current-reuse checks use `verified` with
+`currentWorkspaceMatch` after their independent current/compiler/test proofs.
+Check reason codes distinguish fresh compilation from prior compiler reuse with
+mandatory fresh tests. Incomplete policy/coverage results never advertise reusable
+success. The result schema treats provenance as an additive field within v1.
 
 ## Checks, decisions, and exits
 

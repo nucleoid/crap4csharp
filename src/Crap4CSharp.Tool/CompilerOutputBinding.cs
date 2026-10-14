@@ -8,12 +8,17 @@ namespace Crap4CSharp.Core;
 // bytes remain separate obligations. This does not assert compiled/reusable capability.
 internal static class CompilerOutputBinding
 {
-    internal static void Validate(ProjectAnalysisContext context, CompilerObservation observation, CancellationToken token)
+    internal static void Validate(ProjectAnalysisContext context, CompilerObservation observation, CancellationToken token,
+        CompilerFileReadScope? scope = null)
+        => _ = ValidateAndInspect(context, observation, token, scope);
+
+    internal static ValidatedCompilerOutput ValidateAndInspect(ProjectAnalysisContext context,
+        CompilerObservation observation, CancellationToken token, CompilerFileReadScope? scope = null)
     {
         token.ThrowIfCancellationRequested();
         if (context.GeneratorOnlyTreeCount != 0)
             throw new ProjectContextException("compiler.generatorBindingUnsupported", "Generator-only syntax trees require actual compiler binding that this adapter does not support.");
-        CompilerInputBinding.Validate(context, observation, token);
+        CompilerInputBinding.Validate(context, observation, token, scope);
         try
         {
             var paths = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
@@ -57,6 +62,7 @@ internal static class CompilerOutputBinding
                 if (!documents.TryGetValue(path, out var source) || source.ContentIdentity != hash) throw Refuse();
             }
             token.ThrowIfCancellationRequested();
+            return new(context, observation, peBytes, pdbBytes, inspected);
         }
         catch (ProjectContextException) { throw; }
         catch (Exception exception) when (exception is InvalidDataException or IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or BadImageFormatException)
@@ -86,10 +92,15 @@ internal static class CompilerOutputBinding
     }
 
     internal static ImmutableArray<byte> Read(string path, ref long total, CancellationToken token)
+        => Read(path, ref total, token, null);
+
+    internal static ImmutableArray<byte> Read(string path, ref long total, CancellationToken token, CompilerPathBatch? batch)
     {
         token.ThrowIfCancellationRequested();
-        for (var current = path; current is not null; current = Path.GetDirectoryName(current))
-            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) throw Refuse();
+        if (batch is not null) batch.Check(path);
+        else
+            for (var current = path; current is not null; current = Path.GetDirectoryName(current))
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) throw Refuse();
         if (!ArtifactBundle.IsRegularInput(path)) throw Refuse();
         var time = File.GetLastWriteTimeUtc(path).Ticks;
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan);
@@ -114,3 +125,6 @@ internal static class CompilerOutputBinding
     private static ProjectContextException Refuse() => new("compiler.outputsUnproven", "Actual compiler PE/PDB, copied outputs, options or document checksums do not match the final selected context.");
     private static ProjectContextException Limit() => new("compiler.outputLimit", "Compiler output binding exceeded its finite file or closure byte limit.");
 }
+
+internal sealed record ValidatedCompilerOutput(ProjectAnalysisContext Context, CompilerObservation Observation,
+    ImmutableArray<byte> Pe, ImmutableArray<byte> Pdb, InspectedBuildEvidence Build);

@@ -13,19 +13,20 @@ internal static class FreshPartialAnalysis
         if (evidence.Tests.Failure is not null || !evidence.Tests.Any(t => t.Process.ExitCode == 1)) return terminal;
         try
         {
+            token.ThrowIfCancellationRequested();
             await RegateAsync(evidence, token);
             var reports = evidence.Tests.Select(t => t.Process.ExitCode == 1
                 ? CoverageGraphBinding.ValidateFailedInvocation(t, evidence.Compiler, token)
                 : CoverageGraphBinding.ValidateInvocation(t, evidence.Compiler, token)).ToArray();
             var graph = evidence.Compiler.FinalGraph;
-            var observations = evidence.Compiler.Observations.ToDictionary(o => o.ProjectPath, PathIdentityPolicy.Current.Comparer);
+            var observations = evidence.Compiler.ByGraphId();
             var partitions = new List<AnalyzeCommand.ReplayPartition>();
             var repositoryPaths = new Dictionary<(string, string), string>();
             long total = 0;
             foreach (var binding in graph.GraphContexts.Where(b => !b.IsTestProject || b.Context.ExclusionPolicy.IncludeTests))
             {
                 token.ThrowIfCancellationRequested();
-                var context = binding.Context; var compiler = observations[binding.ProjectPath];
+                var context = binding.Context; var compiler = observations[binding.GraphId];
                 CompilerOutputBinding.Validate(context, compiler, token);
                 var pe = CompilerOutputBinding.Read(compiler.Assembly!.Path, ref total, token);
                 var pdb = CompilerOutputBinding.Read(compiler.Pdb!.Path, ref total, token);
@@ -42,8 +43,8 @@ internal static class FreshPartialAnalysis
                     repositoryPaths.Add((binding.GraphId, d.LogicalPath), relative);
                     return CapturedSource.Create(d.LogicalPath, bytes.AsSpan());
                 }).ToArray();
-                var references = compiler.Parameters.Single(p => p.Name == "References").Items
-                    .Select(p => MetadataReference.CreateFromImage(CompilerOutputBinding.Read(p, ref total, token))).ToArray();
+                var references = CompilerReferenceSnapshot.ResolveSemanticReferences(compiler, token)
+                    .Select(p => MetadataReference.CreateFromImage(CompilerOutputBinding.Read(p.Path, ref total, token), p.Properties)).ToArray();
                 var syntax = sources.Select(s => CSharpSyntaxTree.ParseText(s.Text, context.ParseOptions, s.LogicalPath)).ToArray();
                 var eligible = context.CompilerDocuments.Where(d => !d.IsGenerated || context.ExclusionPolicy.IncludeGenerated)
                     .Select(d => d.LogicalPath).ToHashSet(StringComparer.Ordinal);
@@ -110,7 +111,7 @@ internal static class FreshPartialAnalysis
             }
             return terminal with { Evaluation = terminal.Evaluation with
             {
-                Scope = new(evidence.Preflight.Root, metrics.Select(m => m.Path).Distinct(StringComparer.Ordinal).ToArray()),
+                Scope = new(".", metrics.Select(m => m.Path).Distinct(StringComparer.Ordinal).ToArray()),
                 Contexts = partitions.Select(p => new EvaluationContext(p.ContextId, "project", p.Project, p.TargetFramework,
                     p.Configuration, p.SourceSetHash, null)).ToArray(),
                 Metrics = metrics, Findings = findings, Callables = callables, Families = families,
@@ -122,10 +123,13 @@ internal static class FreshPartialAnalysis
                     c.Name == "crap" ? c with { Reason = "crap.partialObservationsNotPolicyDecision" } : c).ToArray()
             }};
         }
-        catch (Exception error) when (error is ProjectContextException or PolicyException or IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException)
+        catch (Exception error) when (error is ProjectContextException or PolicyException or IOException or UnauthorizedAccessException or
+            ArgumentException or InvalidOperationException or OperationCanceledException or ProcessTimeoutException)
         {
             // Preserve the original raw outcomes and fail closed without stale metrics.
-            var reason = error is ProjectContextException context ? context.Reason : error is PolicyException policy ? policy.Code : "coverage.partialAnalysisRefused";
+            var reason = error is OperationCanceledException ? "coverage.partialAnalysisCancelled" :
+                error is ProcessTimeoutException ? "coverage.partialAnalysisTimedOut" :
+                error is ProjectContextException context ? context.Reason : error is PolicyException policy ? policy.Code : "coverage.partialAnalysisRefused";
             return terminal with { Evaluation = terminal.Evaluation with
                 { Checks = terminal.Evaluation.Checks.Select(c => c.Name == "coverage" ? c with { Reason = reason } : c).ToArray() } };
         }

@@ -135,7 +135,10 @@ switch (args[0])
             RedirectStandardOutput = args.Length > 5 && args[5] == "parent-exit-closed-pipes",
             RedirectStandardError = args.Length > 5 && args[5] == "parent-exit-closed-pipes" };
         foreach (string value in new[] { dll, "hold", ready, release }) info.ArgumentList.Add(value);
-        // Deliberately inherit both redirected pipes, reproducing the actual deadline bypass.
+        if (OperatingSystem.IsWindows() && info.RedirectStandardOutput)
+            ClosedPipeFixture.PreventOriginalWriterInheritance();
+        // Negative modes retain the original writers; the closed-pipe positive
+        // mode supplies separate redirected pipes without inheriting originals.
         using var child = Process.Start(info) ?? throw new InvalidOperationException("Child start failed.");
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         while (!File.Exists(ready))
@@ -170,4 +173,29 @@ static async Task WriteBytes(Stream sink, byte[] block, int count)
         count -= size;
     }
     await sink.FlushAsync();
+}
+
+static class ClosedPipeFixture
+{
+    internal static void PreventOriginalWriterInheritance()
+    {
+        // Redirecting standard slots alone does not stop Process.Start from
+        // copying other inheritable handles. This positive scenario must leave
+        // the parent's original writers out of the redirected hold child.
+        foreach (int slot in new[] { -11, -12 })
+        {
+            var handle = GetStdHandle(slot);
+            if (!SetHandleInformation(handle, 1, 0) || !GetHandleInformation(handle, out var flags) || (flags & 1) != 0)
+                throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastPInvokeError(),
+                    "Could not establish the closed-pipe fixture precondition.");
+        }
+    }
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int slot);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool GetHandleInformation(IntPtr handle, out uint flags);
 }

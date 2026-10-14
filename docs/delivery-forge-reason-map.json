@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "delivery-forge-reason-map-v1",
+  "errorPrefixes": ["policy.", "arguments."],
+  "incompletePrefixes": ["coverage.", "provenance.", "compiler.", "context."],
+  "incompleteReasons": ["run.cancelled", "run.timedOut", "tests.incomplete"],
+  "unsupportedFragment": "unsupported",
+  "unknownOutcome": "ERROR"
+}

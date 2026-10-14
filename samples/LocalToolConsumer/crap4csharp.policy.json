@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "repository-policy-v1",
+  "mode": "strict",
+  "productionProjects": ["Consumer/Consumer.csproj"],
+  "testProjects": ["Consumer.Tests/Consumer.Tests.csproj"],
+  "configuration": "Debug",
+  "targetFrameworks": ["net10.0"],
+  "scope": "all",
+  "threshold": 8,
+  "missingCoverage": "fail",
+  "requiredChecks": ["tests", "coverage", "crap"],
+  "exclusions": [],
+  "ruleset": "callables-v1"
+}

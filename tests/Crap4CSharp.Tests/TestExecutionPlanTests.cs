@@ -8,6 +8,18 @@ namespace Crap4CSharp.Tests;
 
 public sealed class TestExecutionPlanTests
 {
+    [Fact]
+    public void CredentialNamedMappedGlobalsCannotBecomeACompletedScheduleRecipe()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-sensitive-plan");
+        var loaded = Valid(directory.Path);
+        loaded = loaded with { BuildGraph = loaded.BuildGraph.Select(node => node with
+            { GlobalProperties = new Dictionary<string, string> { ["ClientSecret"] = "private-plan-canary" } }).ToArray() };
+        var error = Assert.Throws<ProjectContextException>(() => CompilerGraphExecution.ValidateAndFreeze(loaded));
+        Assert.Equal("context.sensitiveGlobalProperty", error.Reason);
+        Assert.DoesNotContain("private-plan-canary", error.Message);
+    }
+
     // Structural protocol controls, not actual compiler or test-execution observations.
     [Theory]
     [InlineData("discovery-failed")]

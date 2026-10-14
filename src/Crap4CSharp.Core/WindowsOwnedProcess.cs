@@ -29,7 +29,9 @@ internal static class WindowsOwnedProcess
         using var stderr = new OwnedPipe();
         using var stdin = new OwnedPipe();
         using var inputFile = standardInputPath is null ? null
-            : File.OpenHandle(standardInputPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            // Windows may finish job accounting before the last inherited handle
+            // closes. Permit owned-file deletion while preserving read-only bytes.
+            : File.OpenHandle(standardInputPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
         SafeFileHandle consumerInput = inputFile ?? stdin.Read;
         if (inputFile is not null)
             Check(SetHandleInformation(inputFile, 1, 1), "Could not mark owned input snapshot inheritable.");
@@ -77,11 +79,16 @@ internal static class WindowsOwnedProcess
             // the operation deadline; job termination follows even on successful exit.
             await Task.WhenAll(output, error).WaitAsync(linked.Token);
             await TerminateJobAsync(job);
+            Check(WaitForSingleObject(nativeProcess, 5000) == 0, "Consumer process did not finish termination within cleanup deadline.");
             return new ProcessResult(exitCode, await output, await error);
         }
         catch (Exception exception)
         {
-            if (assigned) await TerminateJobAsync(job);
+            if (assigned)
+            {
+                await TerminateJobAsync(job);
+                Check(WaitForSingleObject(nativeProcess, 5000) == 0, "Consumer process did not finish termination within cleanup deadline.");
+            }
             else
             {
                 Check(TerminateProcess(nativeProcess, 1), "Could not terminate unassigned suspended consumer.");

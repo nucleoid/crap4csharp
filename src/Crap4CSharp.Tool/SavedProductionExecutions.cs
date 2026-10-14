@@ -45,7 +45,8 @@ internal static class SavedProductionExecutions
         {
             var nodes = CompilerGraphExecution.ValidateAndFreeze(compiler.FinalGraph).ToDictionary(n => n.Id, StringComparer.Ordinal);
             var bindings = compiler.FinalGraph.GraphContexts.ToDictionary(b => b.GraphId, StringComparer.Ordinal);
-            var observed = compiler.Observations.ToDictionary(o => o.ProjectPath, PathIdentityPolicy.Current.Comparer);
+            var observed = compiler.ByGraphId();
+            var referenceEdges = CompilerReferenceGraph.Observe(compiler.FinalGraph, token);
             var production = bindings.Values.Where(b => !b.IsTestProject || b.Context.ExclusionPolicy.IncludeTests).ToArray();
             if (bundle.Manifest.Contexts.Count != production.Length ||
                 !bundle.Manifest.Contexts.Select(c => c.Id).ToHashSet(StringComparer.Ordinal).SetEquals(production.Select(b => b.GraphId)) ||
@@ -61,7 +62,7 @@ internal static class SavedProductionExecutions
                     context.TargetFramework != binding.Context.TargetFramework || context.Platform != binding.Context.Platform) throw Refuse();
                 var buildId = "build-" + binding.GraphId;
                 var build = bundle.Manifest.Builds.Single(b => b.ContextId == binding.GraphId);
-                var observation = observed[binding.ProjectPath];
+                var observation = observed[binding.GraphId];
                 CompilerOutputBinding.Validate(binding.Context, observation, token);
                 var pe = CompilerOutputBinding.Read(observation.Assembly!.Path, ref total, token);
                 var pdb = CompilerOutputBinding.Read(observation.Pdb!.Path, ref total, token);
@@ -126,7 +127,7 @@ internal static class SavedProductionExecutions
 
             string Logical(string path) => CanonicalIdentity.NormalizeLogicalPath(Path.GetRelativePath(root, path).Replace('\\', '/'));
             bool Reaches(string id, string target, HashSet<string> seen)
-                => id == target || seen.Add(id) && nodes[id].Dependencies.Any(d => Reaches(d, target, seen));
+                => id == target || seen.Add(id) && referenceEdges[id].Any(d => Reaches(d, target, seen));
             ImmutableArray<byte> Bytes(string id)
             {
                 token.ThrowIfCancellationRequested();

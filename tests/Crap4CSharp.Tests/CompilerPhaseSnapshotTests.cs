@@ -8,6 +8,25 @@ namespace Crap4CSharp.Tests;
 public sealed class CompilerPhaseSnapshotTests
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SharedSynchronousReadsRejectLengthOrTimestampChange(bool timestampOnly)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-shared-read-stat");
+        var path = fixture.Write("input", "same");
+        var token = TestContext.Current.CancellationToken;
+        var loaded = Loaded(path, "source");
+        var snapshot = CompilerPhaseSnapshot.Capture(loaded, token);
+        var shared = new CompilerFileReadScope(token);
+        snapshot.Validate(loaded, token, shared);
+        if (timestampOnly) File.SetLastWriteTimeUtc(path, File.GetLastWriteTimeUtc(path).AddMinutes(1));
+        else File.WriteAllText(path, "longer input");
+        Assert.Equal("compiler.retainedProofInvalid",
+            Assert.Throws<ProjectContextException>(() => snapshot.Validate(loaded, token, shared)).Reason);
+        shared.Abandon();
+    }
+
+    [Theory]
     [InlineData("source")]
     [InlineData("project")]
     [InlineData("import")]
@@ -157,12 +176,16 @@ public sealed class CompilerPhaseSnapshotTests
     [Fact]
     public void MissingProbeCannotTraverseSymlinkAncestor()
     {
-        if (!OperatingSystem.IsLinux()) return; // Actual symlink execution is Linux-only; Windows runtime remains CI-owned.
         using var fixture = TestDirectory.Create("crap4csharp-phase-probe-link");
         Directory.CreateDirectory(Path.Combine(fixture.Path, "actual"));
-        Directory.CreateSymbolicLink(Path.Combine(fixture.Path, "link"), Path.Combine(fixture.Path, "actual"));
-        var path = Path.Combine(fixture.Path, "link", "missing.globalconfig");
-        Assert.Equal("compiler.inputsMutated", Assert.Throws<ProjectContextException>(() => CompilerPhaseSnapshot.Capture(Loaded(path, "analyzerConfigProbe"), TestContext.Current.CancellationToken)).Reason);
+        var alias = Path.Combine(fixture.Path, "link");
+        ReparseTestDirectory.Link(alias, Path.Combine(fixture.Path, "actual"));
+        try
+        {
+            var path = Path.Combine(alias, "missing.globalconfig");
+            Assert.Equal("compiler.inputsMutated", Assert.Throws<ProjectContextException>(() => CompilerPhaseSnapshot.Capture(Loaded(path, "analyzerConfigProbe"), TestContext.Current.CancellationToken)).Reason);
+        }
+        finally { Directory.Delete(alias); }
     }
 
     private static ProjectContextLoadResult Loaded(string path, string role)

@@ -58,6 +58,8 @@ public sealed class FreshPartialExemptionTests
                 fixture.Path, output, error, token);
             Assert.True(exit == 1, error + Environment.NewLine + output);
             var document = JsonDocument.Parse(output.ToString());
+            Assert.Equal(global::App.ToolVersion, document.RootElement.GetProperty("toolVersion").GetString());
+            Assert.Equal(".", document.RootElement.GetProperty("evaluation").GetProperty("scope").GetProperty("logicalWorkspaceRoot").GetString());
             var evaluation = document.RootElement.GetProperty("evaluation");
             Assert.False(evaluation.GetProperty("decision").GetProperty("completed").GetBoolean());
             Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle" + runs)));

@@ -141,8 +141,7 @@ public sealed class CompilerInputBindingTests
             context = context with { PhaseInputs = [.. context.PhaseInputs, new(fixture.Write(".globalconfig", "root=true"), "analyzerConfigProbe", false)] };
         else
         {
-            // Windows symlink creation requires additional user privileges; runtime proof is Linux.
-            if (OperatingSystem.IsWindows()) return;
+            Assert.SkipWhen(OperatingSystem.IsWindows(), "File symlink creation requires Windows privileges; directory reparse controls exercise junctions.");
             var path = context.CompilerDocuments[0].ResolvedPath!;
             var target = fixture.Write("Original.cs", File.ReadAllText(path));
             File.Delete(path);
@@ -161,6 +160,42 @@ public sealed class CompilerInputBindingTests
         using var cancelled = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
         cancelled.Cancel();
         Assert.ThrowsAny<OperationCanceledException>(() => CompilerInputBinding.Validate(context, observed, cancelled.Token));
+    }
+
+    [Fact]
+    public void SharedPhysicalReadsKeepEverySnapshotExpectationAndExpireAtBoundary()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-shared-input-boundary");
+        var token = TestContext.Current.CancellationToken;
+        var (original, observation) = Valid(fixture);
+        ProjectContextLoadResult Graph(ProjectAnalysisContext context) => new(true, [context], [])
+            { GraphContexts = [new("graph", context.ResolvedProjectPath!, context, false)] };
+        var oldPhase = CompilerPhaseSnapshot.Capture(Graph(original), token);
+        var oldDocuments = CompilerDocumentSnapshot.Capture(Graph(original), token);
+        var path = original.CompilerDocuments[0].ResolvedPath!;
+        var time = File.GetLastWriteTimeUtc(path);
+        File.WriteAllText(path, "public class Next {}");
+        File.SetLastWriteTimeUtc(path, time);
+        var current = original with { CompilerDocuments = [original.CompilerDocuments[0] with
+            { ContentIdentity = ProjectAnalysisContext.ContentHash(File.ReadAllBytes(path)) }] };
+        var phase = CompilerPhaseSnapshot.Capture(Graph(current), token);
+        var scope = new CompilerFileReadScope(token);
+        phase.Validate(Graph(current), token, scope);
+        CompilerDocumentSnapshot.Capture(Graph(current), token).Validate(Graph(current), token, scope);
+        CompilerInputBinding.Validate(current, observation, token, scope);
+        Assert.Equal("compiler.inputsMutated", Assert.Throws<ProjectContextException>(() =>
+            oldPhase.Validate(Graph(current), token, scope)).Reason);
+        Assert.Equal("compiler.documentsMutated", Assert.Throws<ProjectContextException>(() =>
+            oldDocuments.Validate(Graph(current), token, scope)).Reason);
+        Assert.Equal("compiler.inputsUnproven", Assert.Throws<ProjectContextException>(() =>
+            CompilerInputBinding.Validate(original, observation, token, scope)).Reason);
+        scope.Complete();
+        Assert.Equal("compiler.retainedProofInvalid", Assert.Throws<ProjectContextException>(() =>
+            phase.Validate(Graph(current), token, scope)).Reason);
+        File.WriteAllText(path, "public class Last {}");
+        File.SetLastWriteTimeUtc(path, time);
+        Assert.Equal("compiler.inputsMutated", Assert.Throws<ProjectContextException>(() =>
+            phase.Validate(Graph(current), token, new CompilerFileReadScope(token))).Reason);
     }
 
     private static (ProjectAnalysisContext, CompilerObservation) Valid(TestDirectory fixture)

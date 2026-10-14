@@ -14,7 +14,26 @@ public sealed class FreshGitProofTests
     [InlineData("context")]
     [InlineData("expected-output")]
     [InlineData("index-output")]
-    public async Task RealGitRevisionIndexAndScopeChangesRefusePublication(string mutation)
+    [InlineData("owned-bundle")]
+    [InlineData("bundle-extra")]
+    [InlineData("index-bundle")]
+    public Task RealGitRevisionIndexAndScopeChangesRefusePublication(string mutation) => RunCase(mutation, false);
+
+    [Theory]
+    [InlineData("none")]
+    [InlineData("head")]
+    [InlineData("index")]
+    [InlineData("source")]
+    [InlineData("untracked")]
+    [InlineData("context")]
+    [InlineData("expected-output")]
+    [InlineData("index-output")]
+    [InlineData("owned-bundle")]
+    [InlineData("bundle-extra")]
+    [InlineData("index-bundle")]
+    public Task PairedOriginalAndCurrentReadsNeverRebaselineOriginalGitState(string mutation) => RunCase(mutation, true);
+
+    private static async Task RunCase(string mutation, bool paired)
     {
         using var fixture = TestDirectory.Create("crap4csharp-fresh-git-proof");
         fixture.Write("App/App.csproj", "project metadata never loaded");
@@ -44,10 +63,23 @@ public sealed class FreshGitProofTests
             case "context": fixture.Write("Directory.Build.props", "<Project />"); break;
             case "expected-output": fixture.Write("App/obj/Generated.g.cs", "class Generated {}"); fixture.Write("App/obj/generated.props", "<Project />"); break;
             case "index-output": fixture.Write("App/obj/Generated.g.cs", "class Generated {}"); await Git("add", "App/obj/Generated.g.cs"); break;
+            case "owned-bundle": fixture.Write(".bundle-owned.incomplete/manifest.json", "owned"); break;
+            case "bundle-extra": fixture.Write(".bundle-owned.incomplete/manifest.json", "owned"); fixture.Write(".bundle-owned.incomplete/extra.cs", "class Foreign {}"); break;
+            case "index-bundle": fixture.Write(".bundle-owned.incomplete/manifest.json", "owned"); await Git("add", ".bundle-owned.incomplete/manifest.json"); break;
         }
         var outputs = new[] { Path.Combine(fixture.Path, "App", "obj") };
-        if (mutation is "none" or "expected-output") await FreshGitProof.ValidateAsync(preflight, cancellation, outputs);
-        else Assert.Equal("provenance.gitStateChanged", (await Assert.ThrowsAsync<PolicyException>(() => FreshGitProof.ValidateAsync(preflight, cancellation, outputs))).Code);
+        var consumerIndex = Path.Combine(fixture.Path, ".git", "index");
+        var indexBeforeProof = File.ReadAllBytes(consumerIndex);
+        var ownedFiles = mutation is "owned-bundle" or "bundle-extra" or "index-bundle"
+            ? new HashSet<string>(PathIdentityPolicy.Current.Comparer) { Path.Combine(fixture.Path, ".bundle-owned.incomplete", "manifest.json") } : null;
+        var current = paired ? await FreshCheckPreflightLoader.LoadAsync(request, fixture.Path, cancellation) : preflight;
+        Task Validate() => paired
+            ? FreshGitProof.ValidateOriginalAndCurrentAsync(preflight, current, cancellation, outputs,
+                ownedFiles ?? new HashSet<string>(PathIdentityPolicy.Current.Comparer))
+            : FreshGitProof.ValidateAsync(preflight, cancellation, outputs, ownedFiles);
+        if (mutation is "none" or "expected-output" or "owned-bundle") await Validate();
+        else Assert.Equal("provenance.gitStateChanged", (await Assert.ThrowsAsync<PolicyException>(Validate)).Code);
+        Assert.Equal(indexBeforeProof, File.ReadAllBytes(consumerIndex));
         Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));
     }
 }

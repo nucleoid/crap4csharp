@@ -17,6 +17,8 @@ public static class CompiledInputCapture
 {
     public static ProjectContextCapabilities Validate(ProjectAnalysisContext context, CompiledInputEvidence evidence)
     {
+        if (context.UnresolvedProjectReferencePaths is not { Count: 0 })
+            return new ProjectContextCapabilities(false, false, false, "context.projectReferenceUnproven");
         if (!evidence.Complete || evidence.ContextId != context.ContextId)
             return new ProjectContextCapabilities(context.Capabilities.DesignTimeComplete, false, false,
                 evidence.FailureReason ?? "context.compiledInputBindingIncomplete");

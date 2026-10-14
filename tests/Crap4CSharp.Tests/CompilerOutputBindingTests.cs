@@ -125,7 +125,7 @@ public sealed class CompilerOutputBindingTests
         { using (var stream = File.Create(observed.Assembly!.Path)) stream.SetLength(CompilerPhaseSnapshot.MaximumFileBytes + 1); }
         else
         {
-            if (OperatingSystem.IsWindows()) return; // Additional symlink privileges are not assumed.
+            Assert.SkipWhen(OperatingSystem.IsWindows(), "File symlink creation requires Windows privileges; directory reparse controls exercise junctions.");
             File.Delete(observed.Assembly!.Path); File.CreateSymbolicLink(observed.Assembly.Path, context.EvaluatedTargetPath!);
         }
         var error = Assert.Throws<ProjectContextException>(() => CompilerOutputBinding.Validate(context, observed, TestContext.Current.CancellationToken));

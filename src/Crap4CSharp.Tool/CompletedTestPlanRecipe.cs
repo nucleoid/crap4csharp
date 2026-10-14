@@ -33,7 +33,8 @@ internal static class CompletedTestPlanRecipe
                 id = node.Id, project = PathKey(node.ProjectPath),
                 configuration = node.Configuration, platform = node.Platform, framework = node.TargetFramework,
                 dependencies = node.Dependencies.Order(StringComparer.Ordinal).ToArray(),
-                // Values may contain credentials. Publish identities, never dictionaries.
+                // Deterministic fingerprints are not encryption. Credential-like
+                // mapped property names are refused before this recipe is built.
                 propertiesHash = CanonicalIdentity.Set("completed-test-globals-v1", node.GlobalProperties.Select(p =>
                     CanonicalIdentity.Tuple(p.Key.ToUpperInvariant(), p.Value))),
                 contextId = context.ContextId, test = binding.IsTestProject,

@@ -83,6 +83,14 @@ public sealed record ProjectAnalysisContext(
     [JsonIgnore]
     public IReadOnlyList<string> ReferencePaths { get; init; } = [];
 
+    // An unresolved SDK-owned path is inventory, never complete compiler evidence.
+    [JsonIgnore]
+    public IReadOnlyList<string> UnresolvedProjectReferencePaths { get; init; } = [];
+
+    // SDK/Workspace-selected project references; private physical transport only.
+    [JsonIgnore]
+    public IReadOnlyList<ProjectReferenceOutputIdentity> ProjectReferenceOutputs { get; init; } = [];
+
     [JsonIgnore]
     public IReadOnlyList<string> ProtectedPaths { get; init; } = [];
 
@@ -153,4 +161,5 @@ public sealed record ProjectAnalysisContext(
 }
 
 public sealed record ContextualSourceMethod(string ContextId, SourceMethod Method);
+public sealed record ProjectReferenceOutputIdentity(string ProjectPath, string OutputPath);
 public sealed record ContextualCoverageReport(string ContextId, IReadOnlyList<CoverageMethod> Methods);

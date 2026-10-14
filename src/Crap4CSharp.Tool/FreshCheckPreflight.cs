@@ -3,7 +3,13 @@ using Crap4CSharp.Core;
 internal sealed record FreshCheckRequest(string? Project, string PolicyPath, string? BaseRef,
     string? Scope, string? Head, string SourceState, string Granularity,
     string? Output, string? ArtifactOutput, bool NoRestore, bool NoBuild, string? BuildArtifacts,
-    PolicyOverrides Overrides, TimeSpan Timeout);
+    PolicyOverrides Overrides, TimeSpan Timeout)
+{
+    // Parent-only post-build acquisition control; no CLI selector. Public
+    // orchestration enables it explicitly; direct ordinary controls default off.
+    internal bool WarmPostBuildProbe { get; init; }
+    internal bool NativeSdkIdentityProbe { get; init; }
+}
 internal sealed record FreshCheckPreflight(string Root, FreshCheckRequest Request,
     TrustedPolicyResolution Trusted, RepositoryPolicy Policy, CapturedChangeScope? Scope)
 {
@@ -89,7 +95,7 @@ internal static class FreshCheckPreflightLoader
         if (identityBase is null) return local;
         var git = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Base, identityBase),
             local.Root, request.Timeout, token);
-        if (!PathIdentityPolicy.Current.Comparer.Equals(git.RepositoryRoot, local.Root))
+        if (!PathIdentityPolicy.Current.Comparer.Equals(Path.GetFullPath(git.RepositoryRoot), local.Root))
             throw new PolicyException("provenance.completedPreflightUnsupported", "Current Git root differs from selected local root.");
         token.ThrowIfCancellationRequested();
         return local with { Request = request with { BaseRef = identityBase }, GitSnapshot = git, LocalSnapshot = null };

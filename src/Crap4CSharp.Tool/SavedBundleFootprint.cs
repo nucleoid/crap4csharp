@@ -47,7 +47,11 @@ internal static class SavedBundleFootprint
             }
         }
         if (!found.SetEquals(expected) || bundle.LoadedManifestSha256 is null) throw Refuse();
-        var current = ArtifactBundle.Load(bundle.ManifestPath, workspace);
+        // Only an already acquired invocation-owned staging bundle reaches this
+        // internal byte revalidation. Public artifact loading remains closed.
+        var current = ArtifactBundle.IsPublicationStagingRoot(bundle.BundleRoot)
+            ? ArtifactBundle.LoadStaging(bundle.ManifestPath, workspace)
+            : ArtifactBundle.Load(bundle.ManifestPath, workspace);
         if (current.LoadedManifestSha256 != bundle.LoadedManifestSha256 || current.Manifest.ManifestHash != bundle.Manifest.ManifestHash ||
             current.Bytes.Count != bundle.Bytes.Count || !expected.SetEquals(current.ResolvedInputs)) throw Refuse();
         foreach (var entry in bundle.Bytes)

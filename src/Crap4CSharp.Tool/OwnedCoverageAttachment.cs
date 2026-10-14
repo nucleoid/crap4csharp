@@ -49,11 +49,9 @@ internal static class OwnedCoverageAttachment
             // Reject hidden/foreign containers rather than ignoring contradictory evidence.
             foreach (var name in new[] { "TestSettings", "Deployment", "CollectorDataEntries", "Collector", "UriAttachments", "UriAttachment", "A" })
                 if (root.Descendants().Count(e => e.Name.LocalName == name) != 1) throw Refuse();
-            var href = Value(link, "href");
-            var parts = href.Split('/');
-            if (parts.Length != 2 || Segment(parts[0]) != agent || Segment(parts[1]) != "coverage.opencover.xml") throw Refuse();
+            var fileName = AttachmentFileName(Value(link, "href"), agent);
             var directory = System.IO.Path.GetFullPath(invocation.ResultsDirectory);
-            var path = System.IO.Path.GetFullPath(System.IO.Path.Combine(directory, deploymentName, "In", agent, parts[1]));
+            var path = System.IO.Path.GetFullPath(System.IO.Path.Combine(directory, deploymentName, "In", agent, fileName));
             var prefix = directory.TrimEnd(System.IO.Path.DirectorySeparatorChar) + System.IO.Path.DirectorySeparatorChar;
             if (!path.StartsWith(prefix, Paths == StringComparer.OrdinalIgnoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) throw Refuse();
             // Reads exact TRX-declared deployment copy only; GUID copies and ambient XML
@@ -68,6 +66,18 @@ internal static class OwnedCoverageAttachment
         catch (ProjectContextException error) when (error.Reason != "coverage.attachmentUnproven") { throw Refuse(); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or XmlException or OverflowException)
         { throw Refuse(); }
+    }
+
+    internal static string AttachmentFileName(string href, string agent)
+    {
+        // VSTest writes slash separators on Unix and backslashes on Windows.
+        // Both describe exactly one relative agent/file attachment, never a URI,
+        // rooted path, traversal, encoded component or ambient report search.
+        if (href.Contains('/') && href.Contains('\\')) throw Refuse();
+        var parts = href.Split(['/', '\\']);
+        if (parts.Length != 2 || Segment(parts[0]) != Segment(agent) ||
+            Segment(parts[1]) != "coverage.opencover.xml") throw Refuse();
+        return parts[1];
     }
 
     private static string Segment(string value)

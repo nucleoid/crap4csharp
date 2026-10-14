@@ -25,7 +25,9 @@ internal static class SavedCompletedProof
         var platform = await FreshProjectPlatform.ResolveAsync(selected, preflight.Policy.Configuration, token);
         var request = new ProjectContextLoadRequest(selected, preflight.Policy.Configuration, platform,
             preflight.Policy.TargetFrameworks.ToArray(), preflight.Request.Overrides.IncludeTests ?? false,
-            preflight.Request.Overrides.IncludeGenerated ?? false, preflight.Request.Timeout);
+            preflight.Request.Overrides.IncludeGenerated ?? false, preflight.Request.Timeout)
+        { WarmAcquisitionSelectionProbe = preflight.Request.WarmPostBuildProbe,
+            NativeSdkIdentityProbe = preflight.Request.NativeSdkIdentityProbe };
         var plan = await LoadPlanAsync();
         CompletedTestPlanRecipe.Validate(bytes.ToArray(), plan, root, selected, token);
         var imported = FreshPriorBuild.Load(bundle, plan.PreparedGraph, root, token);
@@ -54,7 +56,11 @@ internal static class SavedCompletedProof
             // intermediate and final discovery, including nonreaching tests.
             // Production-linked saved executions are not the required schedule.
             FreshCheckExecution.RequirePolicyTargets(preflight, graph);
-            var runners = await ProjectContextLoader.DiscoverTestRunnersAsync(request, token);
+            // Saved execution is already complete; only independently current graph
+            // acquisition may select the private warm path. Runner discovery stays
+            // ordinary, and RunBound retains this same graph selection for regates.
+            var runners = await ProjectContextLoader.DiscoverTestRunnersAsync(request with
+            { WarmAcquisitionSelectionProbe = false }, token);
             token.ThrowIfCancellationRequested();
             return CheckExecutionPlan.Create(runners, graph, token);
         }

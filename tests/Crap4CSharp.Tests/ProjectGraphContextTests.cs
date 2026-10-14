@@ -30,6 +30,21 @@ public sealed class ProjectGraphContextTests
         Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken)).ExitCode);
         var result = await ProjectContextLoader.LoadGraphAsync(request, TestContext.Current.CancellationToken);
         Assert.True(result.Success, result.FailureReason + ": " + string.Join(" | ", result.Diagnostics));
+        var unresolved = Assert.Single(result.GraphContexts, binding => binding.ProjectPath == root).Context;
+        Assert.Single(unresolved.UnresolvedProjectReferencePaths);
+        Assert.False(unresolved.Capabilities.DesignTimeComplete);
+        Assert.False(unresolved.Capabilities.CompiledInputBindingComplete);
+        Assert.Equal("compiler.graphOutputUnproven", Assert.Throws<ProjectContextException>(() =>
+            CompilerGraphExecution.ValidateAndFreeze(result)).Reason);
+        var builds = 0;
+        var refusal = await Assert.ThrowsAsync<ProjectContextException>(() => CompilerGraphExecution.RunPhasedAsync(
+            request, result, (_, _) =>
+            {
+                builds++;
+                return Task.FromException<CompilerObservation>(new InvalidOperationException("Unresolved graph launched a compiler."));
+            }, TestContext.Current.CancellationToken));
+        Assert.Equal("compiler.graphOutputUnproven", refusal.Reason);
+        Assert.Equal(0, builds);
         Assert.Equal(5, result.GraphContexts.Count);
         var launches = 0;
         var preflight = await Assert.ThrowsAsync<ProjectContextException>(() => CompilerGraphExecution.RunAsync(result,

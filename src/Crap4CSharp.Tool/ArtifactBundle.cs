@@ -20,7 +20,53 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
         UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Skip
     };
 
+    internal static void ValidateCapturedMemory(RunManifest manifest,
+        IReadOnlyDictionary<string, ImmutableArray<byte>> artifacts)
+    {
+        var encoded = JsonSerializer.SerializeToUtf8Bytes(manifest, Json);
+        if (encoded.Length > MaxManifestBytes) throw new InvalidDataException("Artifact manifest exceeds its finite size limit.");
+        using (var document = JsonDocument.Parse(encoded, new JsonDocumentOptions { MaxDepth = 32 }))
+            ValidateShape(document.RootElement);
+        var declarations = manifest.Artifacts.Select(item => (item.Locator, item.Length))
+            .Concat(manifest.Contexts.SelectMany(context => context.Inputs.Select(input => (input.Locator, input.Length))))
+            .GroupBy(item => item.Locator, StringComparer.Ordinal).ToArray();
+        if (declarations.Length > MaxEntries) throw new InvalidDataException("Artifact bundle contains too many entries.");
+        if (!declarations.Select(group => group.Key).ToHashSet(StringComparer.Ordinal).SetEquals(artifacts.Keys))
+            throw new InvalidDataException("Captured artifact bytes must exactly match declared bundle locators.");
+        long total = encoded.Length;
+        foreach (var declaration in declarations)
+        {
+            if (CanonicalIdentity.NormalizeLogicalPath(declaration.Key) != declaration.Key)
+                throw new InvalidDataException("Captured artifact locator is not canonical.");
+            var lengths = declaration.Select(item => item.Length).Distinct().ToArray();
+            if (lengths.Length != 1 || lengths[0] < 0 || lengths[0] > MaxArtifactBytes)
+                throw new InvalidDataException("Artifact has inconsistent or invalid declared length.");
+            if (artifacts.TryGetValue(declaration.Key, out var bytes))
+            {
+                if (bytes.IsDefault || bytes.Length != lengths[0]) throw new InvalidDataException("Captured artifact length differs from its declaration.");
+                if (bytes.Length > MaxBundleBytes - total) throw new InvalidDataException("Artifact bundle exceeds the 512 MB limit.");
+                total += bytes.Length;
+            }
+        }
+    }
+
     public static ArtifactBundle Load(string manifestPath, string workingDirectory)
+        => LoadCore(manifestPath, workingDirectory, allowStaging: false);
+
+    internal static ArtifactBundle LoadStaging(string manifestPath, string workingDirectory)
+        => LoadCore(manifestPath, workingDirectory, allowStaging: true);
+
+    internal static bool IsPublicationStagingRoot(string root)
+    {
+        const string suffix = ".incomplete";
+        var name = Path.GetFileName(Path.TrimEndingDirectorySeparator(root));
+        if (!name.StartsWith('.') || !name.EndsWith(suffix, StringComparison.Ordinal)) return false;
+        var prefix = name[..^suffix.Length];
+        var separator = prefix.LastIndexOf('.');
+        return separator > 0 && Guid.TryParseExact(prefix[(separator + 1)..], "N", out _);
+    }
+
+    private static ArtifactBundle LoadCore(string manifestPath, string workingDirectory, bool allowStaging)
     {
         string fullManifest;
         try { fullManifest = Path.GetFullPath(manifestPath, workingDirectory); }
@@ -33,6 +79,8 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
             throw new InvalidDataException("Artifact manifest locator is not a regular file.");
         var root = Path.GetDirectoryName(fullManifest)
             ?? throw new InvalidDataException("Artifact manifest has no bundle root.");
+        if (!allowStaging && IsPublicationStagingRoot(root))
+            throw new InvalidDataException("Artifact publication is incomplete; staging evidence cannot be loaded as a published bundle.");
         if (new FileInfo(fullManifest).LinkTarget is not null)
             throw new InvalidDataException("Artifact manifest cannot be a symbolic link.");
         var manifestBytes = ReadBounded(fullManifest, MaxManifestBytes, null, "manifest.json");
@@ -183,6 +231,11 @@ internal sealed record ArtifactBundle(RunManifest Manifest,
             foreach (var input in context.GetProperty("inputs").EnumerateArray())
             {
                 Require(input, "role", "logicalPath", "locator", "length", "sha256", "generated");
+                if (input.TryGetProperty("referenceAliases", out var referenceAliases) && referenceAliases.ValueKind != JsonValueKind.String ||
+                    input.TryGetProperty("embedInteropTypes", out var embedded) && embedded.ValueKind is not (JsonValueKind.True or JsonValueKind.False) ||
+                    input.GetProperty("role").GetString() != "reference" &&
+                        (input.TryGetProperty("referenceAliases", out _) || input.TryGetProperty("embedInteropTypes", out _)))
+                    throw new InvalidDataException("Artifact reference properties are malformed or attached to a non-reference input.");
                 if (input.GetProperty("logicalPath").ValueKind != JsonValueKind.String)
                     throw new InvalidDataException("Artifact input logicalPath must be a string.");
                 try { CanonicalIdentity.NormalizeLogicalPath(input.GetProperty("logicalPath").GetString()!); }

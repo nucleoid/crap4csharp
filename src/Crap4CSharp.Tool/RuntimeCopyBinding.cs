@@ -14,17 +14,12 @@ internal static class RuntimeCopyBinding
         long total = 0;
         try
         {
+            var referenceEdges = CompilerReferenceGraph.Observe(graph, token);
             foreach (var node in nodes)
             {
                 token.ThrowIfCancellationRequested();
                 if (!observations.TryGetValue(node.Id, out var observed)) throw Refuse();
-                var dependencies = new HashSet<string>(StringComparer.Ordinal);
-                void Add(string id)
-                {
-                    foreach (var dependency in nodes.Single(n => n.Id == id).Dependencies)
-                        if (dependencies.Add(dependency)) Add(dependency);
-                }
-                Add(node.Id);
+                var dependencies = CompilerReferenceGraph.Closure(referenceEdges, node.Id).Where(id => id != node.Id);
                 var directory = Path.GetDirectoryName(bindings[node.Id].Context.EvaluatedTargetPath!)! + Path.DirectorySeparatorChar;
                 var destinations = new HashSet<string>(paths);
                 foreach (var id in dependencies)

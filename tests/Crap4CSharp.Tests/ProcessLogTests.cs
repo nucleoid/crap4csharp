@@ -28,7 +28,7 @@ public sealed class ProcessLogTests
             Assert.Equal(expected[^257..], result.StandardOutput.Tail);
             Assert.True(result.StandardOutput.TailTruncated);
             byte[] error = mode == "flood" ? Enumerable.Repeat((byte)'E', count).ToArray()
-                : System.Text.Encoding.UTF8.GetBytes("binary-protocol-complete" + Environment.NewLine);
+                : System.Text.Encoding.UTF8.GetBytes("binary-protocol-complete\n");
             Assert.Equal(error, await File.ReadAllBytesAsync(result.StandardError.Path, TestContext.Current.CancellationToken));
             Assert.Equal(error.LongLength, result.StandardError.TotalBytes);
             Assert.Equal(error.TakeLast(257), result.StandardError.Tail);

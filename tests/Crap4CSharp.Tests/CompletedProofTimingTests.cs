@@ -47,12 +47,25 @@ public sealed class CompletedProofTimingTests
             new("worker.projectSdk", -1), new("worker.projectSdk/private-path", 1)]);
         Assert.Equal(4098, timing.Spans.Count);
         Assert.Equal(new CompletedProofTiming.Span("owned.worker.projectSdk", 2.5), timing.Spans[^1]);
-        foreach (var phase in new[] { "worker.authoredBefore", "worker.authoredAfter", "worker.trackedInputs", "worker.generatorDiscovery", "worker.generatorValidation" })
+        foreach (var phase in new[] { "worker.graphEntryEvaluation", "worker.graphConstruction", "worker.graphProjection", "worker.runnerEvaluation", "worker.runnerBinding", "worker.authoredBefore", "worker.authoredAfter", "worker.trackedInputs", "worker.generatorDiscovery", "worker.generatorValidation",
+            "worker.warmEvaluation", "worker.warmTargets", "worker.warmCommandLine", "worker.warmReconstruction", "worker.warmWorkspaceCreation",
+            "worker.warmProjectInfo", "worker.warmProjectInfoAdjustment", "worker.warmAddProject" })
         {
             var before = timing.Spans.Count;
             timing.ImportWorker("owned", [new(phase, 1), new(phase, double.NaN), new(phase, double.PositiveInfinity), new(phase, -1), new(phase + "/private-path", 1)]);
             Assert.Equal(before + 1, timing.Spans.Count);
             Assert.Equal(new CompletedProofTiming.Span("owned." + phase, 1), timing.Spans[^1]);
         }
+        var cpuBefore = timing.Spans.Count;
+        timing.ImportWorker("owned", [new("worker.compilation.cpu", 1), new("worker.compilation.cpu", double.NaN),
+            new("worker.compilation/private-path.cpu", 1), new("worker.compilation.cpu.cpu", 1),
+            new(null!, 1), null!]);
+        Assert.Equal(cpuBefore + 1, timing.Spans.Count);
+        Assert.Equal(new CompletedProofTiming.Span("owned.worker.compilation.cpu", 1), timing.Spans[^1]);
+        var jitBefore = timing.Spans.Count;
+        timing.ImportWorker("owned", [new("worker.compilation.jit", 1), new("worker.compilation.jit", -1),
+            new("worker.compilation/private-path.jit", 1), new("worker.compilation.jit.jit", 1)]);
+        Assert.Equal(jitBefore + 1, timing.Spans.Count);
+        Assert.Equal(new CompletedProofTiming.Span("owned.worker.compilation.jit", 1), timing.Spans[^1]);
     }
 }

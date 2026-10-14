@@ -15,14 +15,15 @@ internal sealed class CompilerPhaseSnapshot
     internal static CompilerPhaseSnapshot Capture(ProjectContextLoadResult loaded, CancellationToken token) =>
         new(Read(loaded, token));
 
-    internal void Validate(ProjectContextLoadResult current, CancellationToken token)
+    internal void Validate(ProjectContextLoadResult current, CancellationToken token, CompilerFileReadScope? scope = null)
     {
-        var after = Read(current, token);
+        var after = Read(current, token, scope);
         if (inputs.Count != after.Count || inputs.Any(p => !after.TryGetValue(p.Key, out var value) || value != p.Value))
             throw Refuse("Authored/prepared input bytes, timestamps, roles or membership changed during execution.");
     }
 
-    private static Dictionary<InputKey, FileIdentity> Read(ProjectContextLoadResult loaded, CancellationToken token)
+    private static Dictionary<InputKey, FileIdentity> Read(ProjectContextLoadResult loaded, CancellationToken token,
+        CompilerFileReadScope? scope = null)
     {
         token.ThrowIfCancellationRequested();
         if (!loaded.Success || loaded.GraphContexts.Count == 0 || loaded.GraphContexts.Count > 4096 ||
@@ -53,7 +54,8 @@ internal sealed class CompilerPhaseSnapshot
                 }
                 if (!cache.TryGetValue(input.Path, out var identity))
                 {
-                    identity = ReadFile(input.Path, token, input.Role == "analyzerConfigProbe");
+                    // Absence probes retain their independent tolerant path walk.
+                    identity = ReadFile(input.Path, token, input.Role == "analyzerConfigProbe", scope);
                     totalBytes = checked(totalBytes + identity.Length);
                     if (totalBytes > MaximumClosureBytes) throw Limit();
                     cache.Add(input.Path, identity);
@@ -66,19 +68,29 @@ internal sealed class CompilerPhaseSnapshot
         return result;
     }
 
-    private static FileIdentity ReadFile(string path, CancellationToken token, bool absenceProbe)
+    private static FileIdentity ReadFile(string path, CancellationToken token, bool absenceProbe,
+        CompilerFileReadScope? scope)
     {
         try
         {
-            for (var current = path; current is not null; current = Path.GetDirectoryName(current))
+            if (!absenceProbe && scope is not null && scope.TryGet(path, out var cached))
             {
-                try
+                if (cached.Length > MaximumFileBytes) throw Limit();
+                return new(cached.Sha256, cached.Length, cached.MtimeTicks);
+            }
+            // Absence probes do not use TryGet and still require the full walk.
+            if (scope is null || absenceProbe)
+            {
+                for (var current = path; current is not null; current = Path.GetDirectoryName(current))
                 {
-                    if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
-                        throw Refuse("Phase inputs cannot traverse reparse points.");
+                    try
+                    {
+                        if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                            throw Refuse("Phase inputs cannot traverse reparse points.");
+                    }
+                    catch (FileNotFoundException) { }
+                    catch (DirectoryNotFoundException) { }
                 }
-                catch (FileNotFoundException) { }
-                catch (DirectoryNotFoundException) { }
             }
             if (absenceProbe && !File.Exists(path) && !Directory.Exists(path))
             {
@@ -94,7 +106,7 @@ internal sealed class CompilerPhaseSnapshot
             var length = stream.Length;
             if (length > MaximumFileBytes) throw Limit();
             using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            var buffer = new byte[65536];
+            var buffer = scope?.Buffer ?? new byte[65536];
             long count = 0;
             while (true)
             {
@@ -107,7 +119,9 @@ internal sealed class CompilerPhaseSnapshot
             }
             if (count != length || stream.Length != length || File.GetLastWriteTimeUtc(path).Ticks != time)
                 throw Refuse("An input changed while its phase identity was read.");
-            return new(Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant(), length, time);
+            var identity = new FileIdentity(Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant(), length, time);
+            if (!absenceProbe) scope?.Remember(path, new(identity.Sha256, identity.Length, identity.MtimeTicks));
+            return identity;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         { throw Refuse("A phase input disappeared or became unreadable."); }

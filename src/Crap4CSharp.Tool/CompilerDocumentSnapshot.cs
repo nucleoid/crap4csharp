@@ -13,15 +13,16 @@ internal sealed class CompilerDocumentSnapshot
     internal static CompilerDocumentSnapshot Capture(ProjectContextLoadResult graph, CancellationToken token) =>
         new(Read(graph, token));
 
-    internal void Validate(ProjectContextLoadResult graph, CancellationToken token)
+    internal void Validate(ProjectContextLoadResult graph, CancellationToken token, CompilerFileReadScope? scope = null)
     {
-        var current = Read(graph, token);
+        var current = Read(graph, token, scope);
         if (documents.Count != current.Count || documents.Any(pair =>
                 !current.TryGetValue(pair.Key, out var identity) || identity != pair.Value))
             throw Refuse();
     }
 
-    private static Dictionary<DocumentKey, Identity> Read(ProjectContextLoadResult graph, CancellationToken token)
+    private static Dictionary<DocumentKey, Identity> Read(ProjectContextLoadResult graph, CancellationToken token,
+        CompilerFileReadScope? scope = null)
     {
         token.ThrowIfCancellationRequested();
         if (!graph.Success || graph.GraphContexts.Count == 0 || graph.GraphContexts.Count > 4096 ||
@@ -44,7 +45,7 @@ internal sealed class CompilerDocumentSnapshot
                     throw Refuse();
                 if (!cache.TryGetValue(document.ResolvedPath, out var identity))
                 {
-                    identity = ReadFile(document.ResolvedPath, ref total, token);
+                    identity = ReadFile(document.ResolvedPath, ref total, token, scope);
                     cache.Add(document.ResolvedPath, identity);
                 }
                 var key = new DocumentKey(binding.GraphId,
@@ -56,12 +57,21 @@ internal sealed class CompilerDocumentSnapshot
         return result;
     }
 
-    private static Identity ReadFile(string path, ref long total, CancellationToken token)
+    private static Identity ReadFile(string path, ref long total, CancellationToken token, CompilerFileReadScope? scope)
     {
         try
         {
-            for (var current = path; current is not null; current = Path.GetDirectoryName(current))
-                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) throw Refuse();
+            if (scope is not null && scope.TryGet(path, out var cached))
+            {
+                total = checked(total + cached.Length);
+                if (cached.Length > CompilerPhaseSnapshot.MaximumFileBytes || total > CompilerPhaseSnapshot.MaximumClosureBytes) throw Limit();
+                return new(cached.Sha256, cached.Length, cached.MtimeTicks);
+            }
+            // Scoped TryGet already checks this file and its first-use ancestors;
+            // Complete independently rechecks all ancestors at this boundary.
+            if (scope is null)
+                for (var current = path; current is not null; current = Path.GetDirectoryName(current))
+                    if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) throw Refuse();
             if (!ArtifactBundle.IsRegularInput(path)) throw Refuse();
             var time = File.GetLastWriteTimeUtc(path).Ticks;
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan);
@@ -70,7 +80,7 @@ internal sealed class CompilerDocumentSnapshot
             total = checked(total + length);
             if (total > CompilerPhaseSnapshot.MaximumClosureBytes) throw Limit();
             using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            var buffer = new byte[65536];
+            var buffer = scope?.Buffer ?? new byte[65536];
             long readTotal = 0;
             while (true)
             {
@@ -82,7 +92,9 @@ internal sealed class CompilerDocumentSnapshot
                 hash.AppendData(buffer, 0, read);
             }
             if (readTotal != length || stream.Length != length || File.GetLastWriteTimeUtc(path).Ticks != time) throw Refuse();
-            return new(Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant(), length, time);
+            var identity = new Identity(Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant(), length, time);
+            scope?.Remember(path, new(identity.Sha256, identity.Length, identity.MtimeTicks));
+            return identity;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         { throw Refuse(); }

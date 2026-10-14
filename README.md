@@ -14,6 +14,24 @@ Coverage is a fraction from 0 through 1. A method violates the gate only when it
 
 Prerequisite: [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0).
 
+Use a committed local tool manifest pinned to the exact reviewed package version.
+Follow [onboarding](docs/onboarding.md) to prepare the independent
+[sample consumer](samples/LocalToolConsumer/README.md) and its controlled local feed.
+Candidate acceptance is pending; the sample's `0.1.0` pin is a template and does
+not identify a published release. From the prepared consumer directory:
+
+```bash
+dotnet tool restore --configfile nuget.config
+dotnet restore Consumer.slnx --disable-parallel
+dotnet tool run crap4csharp -- check --project Consumer.slnx --policy crap4csharp.policy.json --base "$ReviewedBase" --scope all --format json
+```
+
+Select the reviewed base before running the gate. Capture its current JSON result
+and exit code together; see [agent integration](docs/agent-integration.md).
+
+For development in this repository, an isolated tool-path installation is also
+available:
+
 ```bash
 dotnet pack src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj -c Release -o artifacts
 dotnet tool install --tool-path .tools --add-source artifacts Crap4CSharp.Tool

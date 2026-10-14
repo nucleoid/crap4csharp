@@ -8,7 +8,9 @@ public sealed class ProjectContextTests
     [Fact]
     public async Task LoaderCapturesCompileLinksConditionsAndTargetFrameworksWithoutMutation()
     {
-        var fixture = Path.GetFullPath("Fixtures/ProjectContexts", AppContext.BaseDirectory);
+        using var ownedFixture = TestDirectory.Create("crap4csharp-project-context-fixture");
+        var fixture = ownedFixture.Path;
+        CopyAuthoredFixture(Path.GetFullPath("Fixtures/ProjectContexts", AppContext.BaseDirectory), fixture);
         var selected = Path.Combine(fixture, "ContextSolution.slnx");
         var protectedFiles = Directory.EnumerateFiles(fixture, "*", SearchOption.AllDirectories)
             .Where(path => !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}") && !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))

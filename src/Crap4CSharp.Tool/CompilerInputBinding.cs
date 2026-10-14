@@ -6,7 +6,8 @@ namespace Crap4CSharp.Core;
 // prove references, generator-only trees, compiler options or PE/PDB/copy association.
 internal static class CompilerInputBinding
 {
-    internal static void Validate(ProjectAnalysisContext context, CompilerObservation observation, CancellationToken token)
+    internal static void Validate(ProjectAnalysisContext context, CompilerObservation observation, CancellationToken token,
+        CompilerFileReadScope? scope = null)
     {
         token.ThrowIfCancellationRequested();
         var paths = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
@@ -61,7 +62,7 @@ internal static class CompilerInputBinding
             if (!cache.TryGetValue(path, out var hash))
             {
                 if (cache.Count >= CompilerPhaseSnapshot.MaximumInputs) throw Limit();
-                hash = ReadHash(path, ref total, token);
+                hash = ReadHash(path, ref total, token, scope);
                 cache.Add(path, hash);
             }
             if (documents.TryGetValue(path, out var document) && document.ContentIdentity != hash) throw Refuse();
@@ -105,11 +106,18 @@ internal static class CompilerInputBinding
         }
     }
 
-    private static string ReadHash(string path, ref long total, CancellationToken token)
+    private static string ReadHash(string path, ref long total, CancellationToken token, CompilerFileReadScope? scope)
     {
         try
         {
-            CheckAncestors(path);
+            if (scope is not null && scope.TryGet(path, out var cached))
+            {
+                total = checked(total + cached.Length);
+                if (cached.Length > CompilerPhaseSnapshot.MaximumFileBytes || total > CompilerPhaseSnapshot.MaximumClosureBytes) throw Limit();
+                return cached.Sha256;
+            }
+            // TryGet already performed the scoped path/first-use ancestor check.
+            if (scope is null) CheckAncestors(path);
             if (!ArtifactBundle.IsRegularInput(path)) throw Refuse();
             var time = File.GetLastWriteTimeUtc(path).Ticks;
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan);
@@ -118,7 +126,7 @@ internal static class CompilerInputBinding
             total = checked(total + length);
             if (total > CompilerPhaseSnapshot.MaximumClosureBytes) throw Limit();
             using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            var buffer = new byte[65536];
+            var buffer = scope?.Buffer ?? new byte[65536];
             long readTotal = 0;
             while (true)
             {
@@ -130,7 +138,9 @@ internal static class CompilerInputBinding
                 hash.AppendData(buffer, 0, read);
             }
             if (readTotal != length || stream.Length != length || File.GetLastWriteTimeUtc(path).Ticks != time) throw Refuse();
-            return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+            var identity = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+            scope?.Remember(path, new(identity, length, time));
+            return identity;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         { throw Refuse(); }

@@ -16,6 +16,12 @@ internal static partial class MsBuildProjectLoader
     public static async Task<ProjectContextLoadResult> LoadAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken)
     {
         var diagnostics = new List<string>();
+        // The private warm probe requires complete graph preflight. Never acquire a
+        // project through a non-graph route that could hide mapped dependencies.
+        if (request.WarmAcquisitionProbe && request.WarmAcquisitionSelectionProbe)
+            throw new ProjectContextException("context.warmModeConflict", "Select only one private warm acquisition mode.");
+        if ((request.WarmAcquisitionProbe || request.WarmAcquisitionSelectionProbe) && !request.LoadGraphContexts)
+            throw new ProjectContextException("context.warmGraphRequired", "Warm acquisition requires complete graph-context preflight.");
         var root = Path.GetDirectoryName(request.Target)!;
         var excludedProjects = new List<ProjectContextProjectExclusion>();
         ProjectSelection[] projects;
@@ -24,7 +30,7 @@ internal static partial class MsBuildProjectLoader
         if (request.TestRunnersOnly)
         {
             ProjectContextLoadResult graph;
-            using (request.Timing?.Start("worker.graph"))
+            using (request.Timing?.StartSynchronous("worker.graph"))
                 graph = await DiscoverGraph(request, projects, diagnostics, excludedProjects, cancellationToken);
             var runners = new List<ProjectTestRunnerMetadata>();
             foreach (var node in graph.BuildGraph)
@@ -36,32 +42,16 @@ internal static partial class MsBuildProjectLoader
                 EnsurePreparedAssets(metadata, node.ProjectPath);
                 if (metadata.IsTestProject)
                     using (request.Timing?.Start("worker.runnerMetadata"))
-                        runners.Add(EvaluateTestRunner(node, request.SdkPath!));
+                        runners.Add(EvaluateTestRunner(node, request.SdkPath!, request.Timing));
             }
             return new(true, [], diagnostics, null, excludedProjects) { BuildGraph = graph.BuildGraph, TestRunners = runners.ToArray() };
         }
         if (request.LoadGraphContexts)
         {
             ProjectContextLoadResult graph;
-            using (request.Timing?.Start("worker.graph"))
+            using (request.Timing?.StartSynchronous("worker.graph"))
                 graph = await DiscoverGraph(request, projects, diagnostics, excludedProjects, cancellationToken);
-            var bindings = new List<ProjectGraphContextBinding>();
-            using var graphWorkspace = new GraphWorkspace(diagnostics);
-            foreach (var node in graph.BuildGraph)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var selected = request with { Configuration = node.Configuration, Platform = node.Platform };
-                EvaluatedMetadata metadata;
-                using (request.Timing?.Start("worker.nodeMetadata"))
-                    metadata = Evaluate(node.ProjectPath, node.Configuration, node.Platform, node.TargetFramework, node.GlobalProperties);
-                EnsurePreparedAssets(metadata, node.ProjectPath);
-                // Required execution contexts are independent of production inventory filtering.
-                var context = await LoadContext(root, node.ProjectPath, node.TargetFramework, selected, diagnostics,
-                    cancellationToken, node.GlobalProperties, metadata, graphWorkspace);
-                bindings.Add(new(node.Id, node.ProjectPath, context, metadata.IsTestProject));
-            }
-            return new(true, bindings.Select(binding => binding.Context).ToArray(), diagnostics, null, excludedProjects)
-            { BuildGraph = graph.BuildGraph, GraphContexts = bindings };
+            return await LoadGraphContextsAsync(request, root, graph, diagnostics, excludedProjects, cancellationToken);
         }
         if (request.GraphOnly)
             return await DiscoverGraph(request, projects, diagnostics, excludedProjects, cancellationToken);
@@ -80,6 +70,42 @@ internal static partial class MsBuildProjectLoader
                     metadata.AssetsFile, metadata.IsTestProject));
             }
             return new(true, [], diagnostics, null, excludedProjects) { Metadata = discovered };
+        }
+        // Ordinary inventory still returns only its selected production entries.
+        // Resolve incompatible dependency globals through the SDK graph BEFORE
+        // any design-time target; an inherited parent TFM cannot stand in for a
+        // negotiated ProjectReference, even when its binary is not built yet.
+        var inventorySelections = new List<ProjectSelection>();
+        var hasReferences = false;
+        foreach (var selection in projects.OrderBy(value => value.Path, StringComparer.Ordinal))
+        {
+            var selectedRequest = request with { Configuration = selection.Configuration, Platform = selection.Platform };
+            await EnsureProjectSdkAsync(selection.Path, selectedRequest, cancellationToken);
+            var metadata = Evaluate(selection.Path, selection.Configuration, selection.Platform, null);
+            if (metadata.IsTestProject && !request.IncludeTests) continue;
+            inventorySelections.Add(selection);
+            foreach (var framework in metadata.Frameworks.Where(framework => request.Frameworks.Count == 0 ||
+                request.Frameworks.Contains(framework, StringComparer.OrdinalIgnoreCase)))
+                hasReferences |= Evaluate(selection.Path, selection.Configuration, selection.Platform, framework).HasProjectReferences;
+        }
+        if (hasReferences)
+        {
+            var graph = await DiscoverGraph(request, inventorySelections.ToArray(), diagnostics, excludedProjects, cancellationToken);
+            if (!graph.Success) return graph;
+            if (!WarmGraphSupported(graph.BuildGraph))
+            {
+                foreach (var excluded in projects.Except(inventorySelections))
+                {
+                    diagnostics.Add($"Excluded test project: {Logical(root, excluded.Path)}");
+                    excludedProjects.Add(new(Logical(root, excluded.Path), "testProject.defaultExcluded"));
+                }
+                var loaded = await LoadGraphContextsAsync(request, root, graph, diagnostics, excludedProjects, cancellationToken);
+                var selectedPaths = inventorySelections.Select(selection => selection.Path).ToHashSet(PathComparer);
+                return loaded with { Contexts = loaded.GraphContexts.Where(binding => selectedPaths.Contains(binding.ProjectPath) &&
+                    (request.Frameworks.Count == 0 || request.Frameworks.Contains(binding.Context.TargetFramework, StringComparer.OrdinalIgnoreCase)))
+                    .Select(binding => binding.Context).OrderBy(context => context.ProjectPath, StringComparer.Ordinal)
+                    .ThenBy(context => context.TargetFramework, StringComparer.Ordinal).ToArray() };
+            }
         }
         var contexts = new List<ProjectAnalysisContext>();
         var matchedFrameworks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -110,6 +136,110 @@ internal static partial class MsBuildProjectLoader
             .ThenBy(context => context.TargetFramework, StringComparer.Ordinal).ToArray(), diagnostics, null, excludedProjects);
     }
 
+    private static async Task<ProjectContextLoadResult> LoadGraphContextsAsync(ProjectContextLoadRequest request,
+        string root, ProjectContextLoadResult graph, List<string> diagnostics,
+        List<ProjectContextProjectExclusion> excludedProjects, CancellationToken cancellationToken)
+    {
+        if (request.WarmAcquisitionSelectionProbe)
+        {
+            // Choose ONCE for the entire graph, before any design-time target.
+            // No exception after LoadContext may switch acquisition paths.
+            var useWarm = WarmGraphSupported(graph.BuildGraph);
+            request = request with { WarmAcquisitionProbe = useWarm };
+            diagnostics.Add(useWarm ? "Private warm selection: warm." : "Private warm selection: ordinary.");
+        }
+        else if (request.WarmAcquisitionProbe)
+            EnsureWarmGraphSupported(graph.BuildGraph);
+        var bindings = new List<ProjectGraphContextBinding>();
+        var observations = request.CollectProjectObservation ? new List<WarmProjectObservationResult>() : null;
+        var useMapped = !request.WarmAcquisitionProbe && !WarmGraphSupported(graph.BuildGraph);
+        var mappedMetadata = new Dictionary<string, EvaluatedMetadata>(StringComparer.Ordinal);
+        if (useMapped)
+            foreach (var node in graph.BuildGraph)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var metadata = Evaluate(node.ProjectPath, node.Configuration, node.Platform, node.TargetFramework, node.GlobalProperties);
+                EnsurePreparedAssets(metadata, node.ProjectPath);
+                mappedMetadata.Add(node.Id, metadata);
+            }
+        static IEnumerable<string> MappedInputs(EvaluatedMetadata metadata) => metadata.AuthoredInputs
+            .Concat(metadata.PhaseInputs.Where(input => input.Role != "analyzerConfigProbe").Select(input => input.Path));
+        var mappedBefore = useMapped ? SnapshotInputs(mappedMetadata.Values.SelectMany(MappedInputs).Distinct(PathComparer)) : null;
+        var mappedAbsent = useMapped ? mappedMetadata.Values.SelectMany(metadata => metadata.PhaseInputs)
+            .Where(input => input.Role == "analyzerConfigProbe").Select(input => input.Path).Distinct(PathComparer).ToArray() : [];
+        void ValidateMappedInputs()
+        {
+            if (mappedBefore is null) return;
+            cancellationToken.ThrowIfCancellationRequested();
+            var currentPaths = graph.BuildGraph.Select(node => Evaluate(node.ProjectPath, node.Configuration,
+                node.Platform, node.TargetFramework, node.GlobalProperties)).SelectMany(MappedInputs).Distinct(PathComparer);
+            if (mappedAbsent.Any(File.Exists))
+                throw new ProjectContextException("context.inputsMutated", "A declared absent graph input appeared during mapped design-time acquisition.");
+            if (!mappedBefore.OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                .SequenceEqual(SnapshotInputs(currentPaths).OrderBy(pair => pair.Key, StringComparer.Ordinal)))
+                throw new ProjectContextException("context.inputsMutated", "Authored graph inputs changed during mapped design-time acquisition.");
+        }
+        using var mappedWorkspace = useMapped ? new MappedDesignTimeWorkspace(graph.BuildGraph,
+            mappedMetadata.ToDictionary(pair => pair.Key, pair => (pair.Value.TargetPath, pair.Value.ReferenceAssemblyPath), StringComparer.Ordinal)) : null;
+        using var graphWorkspace = new GraphWorkspace(diagnostics);
+        foreach (var node in graph.BuildGraph)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var selected = request with { Configuration = node.Configuration, Platform = node.Platform };
+            EvaluatedMetadata metadata;
+            using (request.Timing?.Start("worker.nodeMetadata"))
+                metadata = useMapped ? mappedMetadata[node.Id] : Evaluate(node.ProjectPath, node.Configuration, node.Platform, node.TargetFramework, node.GlobalProperties);
+            EnsurePreparedAssets(metadata, node.ProjectPath);
+            // Required execution contexts are independent of production inventory filtering.
+            var context = await LoadContext(root, node.ProjectPath, node.TargetFramework, selected, diagnostics,
+                cancellationToken, node.GlobalProperties, metadata, graphWorkspace, observations, mappedWorkspace, node.Id,
+                useMapped ? ValidateMappedInputs : null);
+            ValidateMappedInputs();
+            bindings.Add(new(node.Id, node.ProjectPath, context, metadata.IsTestProject));
+        }
+        bindings = BindMappedProjectReferences(graph.BuildGraph, bindings, cancellationToken);
+        return new(true, bindings.Select(binding => binding.Context).ToArray(), diagnostics, null, excludedProjects)
+        { BuildGraph = graph.BuildGraph, GraphContexts = bindings, ProjectObservations = observations?.ToArray() ?? [] };
+    }
+
+    private static List<ProjectGraphContextBinding> BindMappedProjectReferences(
+        IReadOnlyList<ProjectBuildGraphNode> nodes, IReadOnlyList<ProjectGraphContextBinding> bindings,
+        CancellationToken token)
+    {
+        var byId = nodes.ToDictionary(node => node.Id, StringComparer.Ordinal);
+        return bindings.Select(binding =>
+        {
+            var node = byId[binding.GraphId];
+            var permitted = new HashSet<string>(StringComparer.Ordinal);
+            void Add(string id)
+            {
+                foreach (var dependency in byId[id].Dependencies)
+                    if (permitted.Add(dependency)) Add(dependency);
+            }
+            Add(node.Id);
+            var references = binding.Context.ProjectReferenceOutputs.Select(reference =>
+            {
+                token.ThrowIfCancellationRequested();
+                var owners = bindings.Where(candidate => permitted.Contains(candidate.GraphId) &&
+                    PathComparer.Equals(candidate.ProjectPath, reference.ProjectPath)).ToArray();
+                if (owners.Any(owner => PathComparer.Equals(owner.Context.EvaluatedTargetPath, reference.OutputPath)))
+                    return reference; // Framework selection was already independently observed.
+                // Workspace can project the parent's globals onto a mapped reference.
+                // MSBuild's evaluated graph owns the mapping. Reconcile only a unique
+                // selected project, after proving the observed projection by evaluation;
+                // never select a framework by proximity, filename or assembly name.
+                if (owners.Length != 1)
+                    throw new ProjectContextException("context.projectReferenceUnproven", "Mapped project-reference owner is ambiguous.");
+                var projected = Evaluate(reference.ProjectPath, node.Configuration, node.Platform,
+                    node.TargetFramework, node.GlobalProperties);
+                if (!PathComparer.Equals(projected.TargetPath, reference.OutputPath))
+                    throw new ProjectContextException("context.projectReferenceUnproven", "Workspace project-reference projection differs from independent evaluation.");
+                return reference with { OutputPath = owners[0].Context.EvaluatedTargetPath! };
+            }).ToArray();
+            return binding with { Context = binding.Context with { ProjectReferenceOutputs = references } };
+        }).ToList();
+    }
+
     private static async Task<ProjectContextLoadResult> DiscoverGraph(ProjectContextLoadRequest request,
         ProjectSelection[] selections, List<string> diagnostics, List<ProjectContextProjectExclusion> exclusions,
         CancellationToken cancellationToken)
@@ -119,13 +249,20 @@ internal static partial class MsBuildProjectLoader
         foreach (var selection in selections)
         {
             await EnsureProjectSdkAsync(selection.Path, request, cancellationToken);
-            var metadata = Evaluate(selection.Path, selection.Configuration, selection.Platform, null);
+            EvaluatedMetadata metadata;
+            using (request.Timing?.StartSynchronous("worker.graphEntryEvaluation"))
+                metadata = Evaluate(selection.Path, selection.Configuration, selection.Platform, null);
             foreach (var framework in metadata.Frameworks)
             {
                 if (request.Frameworks.Count > 0 && !request.Frameworks.Contains(framework, StringComparer.OrdinalIgnoreCase)) continue;
                 matched.Add(framework);
                 var properties = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-                { ["Configuration"] = selection.Configuration, ["TargetFramework"] = framework };
+                { ["Configuration"] = selection.Configuration };
+                // A single-framework project already selects its framework by evaluation.
+                // Adding a redundant global creates a second SDK graph node when the same
+                // project is both a solution entry and a negotiated ProjectReference.
+                // Multi-framework entries still require explicit inner-build selection.
+                if (metadata.RequiresInnerFrameworkSelection) properties["TargetFramework"] = framework;
                 if (selection.Platform is not null) properties["Platform"] = selection.Platform;
                 entries.Add(new(selection.Path, properties));
             }
@@ -135,7 +272,10 @@ internal static partial class MsBuildProjectLoader
         using var collection = new ProjectCollection();
         // MSBuild owns ProjectReference mappings and framework negotiation; execute no targets here.
         // Serial construction plus the owning subprocess deadline also bounds evaluation cancellation.
-        var graph = new ProjectGraph(entries, collection, null, 1, cancellationToken);
+        ProjectGraph graph;
+        using (request.Timing?.StartSynchronous("worker.graphConstruction"))
+            graph = new ProjectGraph(entries, collection, null, 1, cancellationToken);
+        using var projectionTiming = request.Timing?.StartSynchronous("worker.graphProjection");
         var nodes = graph.ProjectNodesTopologicallySorted.ToArray();
         if (nodes.Length > 4096)
             throw new ProjectContextException("context.graphLimit", "The build graph exceeds 4096 evaluated nodes.");
@@ -179,8 +319,40 @@ internal static partial class MsBuildProjectLoader
         return new(true, [], diagnostics, null, exclusions) { BuildGraph = result };
     }
 
+    private static void EnsureWarmGraphSupported(IReadOnlyList<ProjectBuildGraphNode> nodes)
+    {
+        if (!WarmGraphSupported(nodes))
+            throw new ProjectContextException("context.warmMappedGraphUnsupported", "Warm acquisition does not support mapped dependency globals; no design-time targets were executed.");
+    }
+
+    private static bool WarmGraphSupported(IReadOnlyList<ProjectBuildGraphNode> nodes)
+    {
+        // Check the entire normalized graph before the first design-time target.
+        // Mapped references can cause ordinary Workspace to retain additional
+        // recursively loaded ProjectReferences, which this probe cannot reproduce.
+        var byId = nodes.ToDictionary(node => node.Id, StringComparer.Ordinal);
+        foreach (var node in nodes)
+        foreach (var dependencyId in node.Dependencies)
+        {
+            if (!byId.TryGetValue(dependencyId, out var dependency))
+                return false;
+            // Compare the exact dictionaries both acquisition paths actually use.
+            // Graph references may omit the TargetFramework global while their
+            // evaluated framework is equal; WorkspaceProperties sets it explicitly.
+            var parentGlobals = WorkspaceProperties(node.Configuration, node.Platform, node.TargetFramework, node.GlobalProperties);
+            var childGlobals = WorkspaceProperties(dependency.Configuration, dependency.Platform, dependency.TargetFramework, dependency.GlobalProperties);
+            if (node.Configuration != dependency.Configuration || node.Platform != dependency.Platform ||
+                node.TargetFramework != dependency.TargetFramework ||
+                parentGlobals.Count != childGlobals.Count ||
+                parentGlobals.Any(pair => !childGlobals.TryGetValue(pair.Key, out var value) || value != pair.Value))
+                return false;
+        }
+        return true;
+    }
+
     private static string GraphIdentity(ProjectGraphNode node)
     {
+        MappedGlobalPrivacy.Validate(node.ProjectInstance.GlobalProperties);
         // All mapped globals distinguish contexts, including custom AdditionalProperties.
         // JSON framing avoids delimiter collisions; physical identities remain private transport only.
         var globals = node.ProjectInstance.GlobalProperties.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
@@ -246,11 +418,12 @@ internal static partial class MsBuildProjectLoader
     private static async Task<ProjectAnalysisContext> LoadContext(string root, string projectPath, string framework,
         ProjectContextLoadRequest request, List<string> diagnostics, CancellationToken cancellationToken,
         IReadOnlyDictionary<string, string>? globalProperties = null, EvaluatedMetadata? evaluatedMetadata = null,
-        GraphWorkspace? graphWorkspace = null)
+        GraphWorkspace? graphWorkspace = null, ICollection<WarmProjectObservationResult>? observations = null,
+        MappedDesignTimeWorkspace? mappedWorkspace = null, string? graphId = null, Action? validateMappedInputs = null)
     {
-        using var contextTiming = request.Timing?.Start("worker.context");
+        using var contextTiming = request.Timing?.StartSynchronous("worker.context");
         EvaluatedMetadata metadata;
-        using (request.Timing?.Start("worker.contextMetadata"))
+        using (request.Timing?.StartSynchronous("worker.contextMetadata"))
             // Reuse only this exact graph node's evaluation in this worker invocation.
             // Each independent current load still evaluates every node afresh; differing
             // mapped globals and all authored snapshots remain isolated and unchanged.
@@ -260,17 +433,40 @@ internal static partial class MsBuildProjectLoader
         using (request.Timing?.Start("worker.authoredBefore"))
             beforeInputs = SnapshotInputs(metadata.AuthoredInputs);
         List<WorkspaceDiagnostic> workspaceDiagnostics = [];
-        using var ownedWorkspace = graphWorkspace is null
+        using var ownedWorkspace = !request.WarmAcquisitionProbe && mappedWorkspace is null && graphWorkspace is null
             ? CreateWorkspace(request.Configuration, request.Platform, framework, diagnostics, out workspaceDiagnostics, globalProperties)
             : null;
-        var workspace = ownedWorkspace ?? graphWorkspace!.Acquire(request.Configuration, request.Platform, framework,
-            globalProperties, out workspaceDiagnostics);
+        WarmDesignTimeProject? acquiredWarmProject = null;
         Microsoft.CodeAnalysis.Project project;
-        using (request.Timing?.Start("worker.workspace"))
-            project = await workspace.OpenProjectAsync(projectPath, cancellationToken: cancellationToken);
+        try
+        {
+            using var workspaceTiming = request.Timing?.StartSynchronous("worker.workspace");
+            if (request.WarmAcquisitionProbe || mappedWorkspace is not null)
+            {
+                acquiredWarmProject = await WarmDesignTimeProject.AcquireAsync(projectPath,
+                    WorkspaceProperties(request.Configuration, request.Platform, framework, globalProperties), diagnostics, cancellationToken,
+                    timing: request.Timing, mappedGraph: mappedWorkspace, graphId: graphId);
+                validateMappedInputs?.Invoke();
+                project = acquiredWarmProject.Project;
+            }
+            else
+            {
+                var workspace = ownedWorkspace ?? graphWorkspace!.Acquire(request.Configuration, request.Platform, framework,
+                    globalProperties, out workspaceDiagnostics);
+                project = await workspace.OpenProjectAsync(projectPath, cancellationToken: cancellationToken);
+            }
+        }
+        catch
+        {
+            acquiredWarmProject?.Dispose();
+            throw;
+        }
+        using var warmProject = acquiredWarmProject;
         ThrowOnWorkspaceFailure(workspaceDiagnostics, projectPath);
         if (project.ParseOptions is not CSharpParseOptions parseOptions)
             throw new ProjectContextException("context.parseOptionsUnavailable", $"C# parse options were unavailable for {projectPath}.");
+        if (observations is not null)
+            observations.Add(new(projectPath, await WarmProjectObservation.CaptureAsync(project, cancellationToken)));
         var sources = new List<ProjectSourceIdentity>();
         var compilerDocuments = new List<ProjectSourceIdentity>();
         var exclusions = new List<ProjectSourceExclusion>();
@@ -299,7 +495,9 @@ internal static partial class MsBuildProjectLoader
             if (generated && !request.IncludeGenerated) exclusions.Add(new(identity.PhysicalPath, identity.LogicalPath, "generated.defaultExcluded", identity.ContentIdentity));
             else sources.Add(identity);
         }
+        var unresolvedReferences = warmProject?.UnresolvedProjectReferencePaths ?? [];
         var generatorOnlyTreeCount = 0;
+        if (unresolvedReferences.Count == 0)
         {
             if (project.AnalyzerReferences.Any(reference => reference is UnresolvedAnalyzerReference))
                 throw new ProjectContextException("context.generatedSourceUnavailable", "An analyzer or generator reference could not be resolved.");
@@ -325,7 +523,7 @@ internal static partial class MsBuildProjectLoader
             if (analyzerLoadFailures.Count > 0)
                 throw new ProjectContextException("context.generatedSourceUnavailable", string.Join(Environment.NewLine, analyzerLoadFailures));
             Compilation compilation;
-            using (request.Timing?.Start("worker.compilation"))
+            using (request.Timing?.StartSynchronous("worker.compilation"))
                 compilation = await project.GetCompilationAsync(cancellationToken)
                     ?? throw new ProjectContextException("context.generatedSourceUnavailable", "Compilation was unavailable while inspecting generator binding.");
             var extraTrees = compilation.SyntaxTrees.Where(tree => string.IsNullOrWhiteSpace(tree.FilePath) ||
@@ -391,20 +589,32 @@ internal static partial class MsBuildProjectLoader
             afterInputs = SnapshotInputs(metadata.AuthoredInputs);
         if (!beforeInputs.OrderBy(pair => pair.Key, StringComparer.Ordinal).SequenceEqual(afterInputs.OrderBy(pair => pair.Key, StringComparer.Ordinal)))
             throw new ProjectContextException("context.inputsMutated", $"Authored inputs changed while loading {projectPath}.");
-        return ProjectAnalysisContext.Create(Logical(root, projectPath), project.AssemblyName ?? metadata.AssemblyName,
+        var createdContext = ProjectAnalysisContext.Create(Logical(root, projectPath), project.AssemblyName ?? metadata.AssemblyName,
             framework, metadata.Configuration, metadata.Platform, parseOptions.LanguageVersion,
             parseOptions.PreprocessorSymbolNames, parseOptions.Kind,
             metadata.Imports.Where(path => !IsWithin(metadata.ProjectExtensionsPath, path))
                 .Select(path => ImportIdentity(root, request.SdkPath, path)).Append(RestoreIdentity(metadata.AssetsFile)),
-            sources, new ProjectExclusionPolicy(request.IncludeTests, request.IncludeGenerated), adapter, exclusions) with
+            sources, new ProjectExclusionPolicy(request.IncludeTests, request.IncludeGenerated), adapter, exclusions);
+        return createdContext with
         {
+            Capabilities = unresolvedReferences.Count == 0 ? createdContext.Capabilities : new(false, false, false,
+                "SDK-declared project references have ambiguous graph producers; semantic/compiler evidence is incomplete."),
+            UnresolvedProjectReferencePaths = unresolvedReferences.ToArray(),
             ResolvedProjectPath = Path.GetFullPath(projectPath),
             GeneratorOnlyTreeCount = generatorOnlyTreeCount,
             CompilerDocuments = compilerDocuments.OrderBy(source => source.ResolvedPath, StringComparer.Ordinal).ToArray(),
             PhaseInputs = phaseInputs.Distinct().OrderBy(p => p.Path, StringComparer.Ordinal).ThenBy(p => p.Role, StringComparer.Ordinal).ToArray(),
             ReferencePaths = project.MetadataReferences.Select(r => r.Display)
                 .Where(p => !string.IsNullOrWhiteSpace(p)).Select(p => Path.GetFullPath(p!))
-                .Distinct(PathComparer).Order(StringComparer.Ordinal).ToArray(),
+                .Concat(unresolvedReferences).Distinct(PathComparer).Order(StringComparer.Ordinal).ToArray(),
+            ProjectReferenceOutputs = project.ProjectReferences.Select(reference =>
+            {
+                var referenced = project.Solution.GetProject(reference.ProjectId);
+                if (referenced?.FilePath is null || referenced.OutputFilePath is null ||
+                    !Path.IsPathFullyQualified(referenced.FilePath) || !Path.IsPathFullyQualified(referenced.OutputFilePath))
+                    throw new ProjectContextException("context.projectReferenceUnproven", "Workspace project-reference output identity is unavailable.");
+                return new ProjectReferenceOutputIdentity(Path.GetFullPath(referenced.FilePath), Path.GetFullPath(referenced.OutputFilePath));
+            }).OrderBy(reference => reference.ProjectPath, StringComparer.Ordinal).ThenBy(reference => reference.OutputPath, StringComparer.Ordinal).ToArray(),
             EvaluatedReferenceAssemblyPath = metadata.ReferenceAssemblyPath,
             EvaluatedTargetPath = metadata.TargetPath,
             EvaluatedIntermediateDirectory = metadata.IntermediateDirectory,
@@ -546,7 +756,11 @@ internal static partial class MsBuildProjectLoader
                 .Distinct(PathComparer).ToArray(),
             EvaluatedPath("TargetPath"), EvaluatedPath("IntermediateOutputPath"),
             string.Equals(project.GetPropertyValue("ProduceReferenceAssembly"), "true", StringComparison.OrdinalIgnoreCase)
-                ? EvaluatedPath("TargetRefPath") : null, phaseInputs.ToArray());
+                ? EvaluatedPath("TargetRefPath") : null, phaseInputs.ToArray())
+        {
+            RequiresInnerFrameworkSelection = string.IsNullOrWhiteSpace(project.GetPropertyValue("TargetFramework")),
+            HasProjectReferences = project.GetItems("ProjectReference").Any()
+        };
 
         string? EvaluatedPath(string name)
         {
@@ -630,8 +844,27 @@ internal static partial class MsBuildProjectLoader
         };
         ProcessResult result;
         using (request.Timing?.Start("worker.projectSdk"))
+        {
+            // This call is already isolated in the deadline-owned loader worker.
+            // Observe each project's current selection independently before its
+            // evaluation; never memoize by path or replay an earlier SDK result.
+            if (request.NativeSdkIdentityProbe)
+            {
+                var observed = NativeSdkIdentity.TryObserve(Path.GetDirectoryName(projectPath)!, request.DotNetHostPath, cancellationToken);
+                if (observed.Status == "failed")
+                    throw new ProjectContextException("context.sdkMismatch", $"Project {projectPath} cannot resolve its selected SDK.");
+                if (observed.Status == "resolved")
+                {
+                    using var nativeTiming = request.Timing?.Start("worker.projectSdkNative");
+                    if (observed.Version != request.SdkVersion || observed.MsBuildVersion != request.MsBuildVersion ||
+                        !PathComparer.Equals(observed.Path, request.SdkPath) || !PathComparer.Equals(observed.DotNetRoot, request.DotNetRoot))
+                        throw new ProjectContextException("context.sdkMismatch", $"Project {projectPath} resolves a different SDK/engine identity.");
+                    return;
+                }
+            }
             result = await ProcessRunner.RunWithEnvironmentAsync(request.DotNetHostPath, ["--version"], Path.GetDirectoryName(projectPath)!,
                 request.Timeout, cancellationToken, environment);
+        }
         if (result.ExitCode != 0 || !result.StandardOutput.Trim().Equals(request.SdkVersion, StringComparison.Ordinal))
             throw new ProjectContextException("context.sdkMismatch",
                 $"Project {projectPath} resolves SDK {result.StandardOutput.Trim()}, but the selected target resolved {request.SdkVersion}.");
@@ -649,15 +882,67 @@ internal static partial class MsBuildProjectLoader
             throw new ProjectContextException("context.inputsMutated", $"An evaluated input changed or became unreadable: {exception.Message}");
         }
     }
-    private static void ThrowOnWorkspaceFailure(IEnumerable<WorkspaceDiagnostic> workspaceDiagnostics, string target)
+    internal static void ThrowOnWorkspaceFailure(IEnumerable<WorkspaceDiagnostic> workspaceDiagnostics, string target)
     {
-        var failures = workspaceDiagnostics.Where(diagnostic => diagnostic.Kind == WorkspaceDiagnosticKind.Failure).ToArray();
+        var observed = workspaceDiagnostics.ToArray();
+        if (observed.Any(diagnostic => diagnostic.Kind == WorkspaceDiagnosticKind.Warning))
+        {
+            // Workspace removes unresolved references before returning Project.
+            // Recognize its localized diagnostic using the exact installed
+            // dependency's resources, rather than accepting a reduced closure.
+            string[] templates;
+            try
+            {
+                var resources = new System.Resources.ResourceManager(
+                    "Microsoft.CodeAnalysis.MSBuild.WorkspaceMSBuildResources", typeof(MSBuildWorkspace).Assembly);
+                var cultures = new List<System.Globalization.CultureInfo>
+                {
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.CultureInfo.CurrentUICulture
+                };
+                // A worker can emit diagnostics under a different culture. Use
+                // every installed satellite beside this exact Roslyn assembly.
+                var assemblyDirectory = Path.GetDirectoryName(typeof(MSBuildWorkspace).Assembly.Location);
+                if (assemblyDirectory is not null)
+                    foreach (var directory in Directory.EnumerateDirectories(assemblyDirectory))
+                    {
+                        try { cultures.Add(System.Globalization.CultureInfo.GetCultureInfo(Path.GetFileName(directory))); }
+                        catch (System.Globalization.CultureNotFoundException) { }
+                    }
+                templates = cultures.Select(culture => resources.GetString(
+                        "Unresolved_metadata_reference_removed_from_project_0", culture))
+                    .Where(template => template is not null).Select(template => template!)
+                    .Distinct(StringComparer.Ordinal).ToArray();
+            }
+            catch (Exception exception) when (exception is System.Resources.MissingManifestResourceException
+                or IOException or UnauthorizedAccessException)
+            { throw new ProjectContextException("context.metadataUnavailable", "Workspace metadata-reference diagnostics could not be verified."); }
+            if (templates.Length == 0)
+                throw new ProjectContextException("context.metadataUnavailable", "Workspace metadata-reference diagnostics could not be verified.");
+            foreach (var template in templates)
+            {
+                var marker = template.IndexOf("{0}", StringComparison.Ordinal);
+                if (marker <= 0 || template.IndexOf("{0}", marker + 3, StringComparison.Ordinal) >= 0)
+                    throw new ProjectContextException("context.metadataUnavailable", "Workspace metadata-reference diagnostics could not be verified.");
+                var prefix = template[..marker];
+                var suffix = template[(marker + 3)..];
+                if (observed.Any(diagnostic => diagnostic.Kind == WorkspaceDiagnosticKind.Warning &&
+                    diagnostic.Message.StartsWith(prefix, StringComparison.Ordinal) &&
+                    diagnostic.Message.EndsWith(suffix, StringComparison.Ordinal)))
+                    throw new ProjectContextException("context.metadataUnavailable", "Workspace removed an unresolved metadata reference; the compiler closure is incomplete.");
+            }
+        }
+        var failures = observed.Where(diagnostic => diagnostic.Kind == WorkspaceDiagnosticKind.Failure).ToArray();
         if (failures.Length > 0)
             throw new ProjectContextException("context.projectLoadFailed", $"MSBuildWorkspace failed to load {target}: {string.Join(" | ", failures.Select(value => value.Message))}");
     }
 
     private sealed record EvaluatedMetadata(string[] Frameworks, bool IsTestProject, string AssemblyName,
         string Configuration, string Platform, string[] Imports, string AssetsFile, string ProjectExtensionsPath,
-        string[] AuthoredInputs, string[] CompileInputs, string[] IntermediatePaths, string? TargetPath, string? IntermediateDirectory, string? ReferenceAssemblyPath, ProjectPhaseInput[] PhaseInputs);
+        string[] AuthoredInputs, string[] CompileInputs, string[] IntermediatePaths, string? TargetPath, string? IntermediateDirectory, string? ReferenceAssemblyPath, ProjectPhaseInput[] PhaseInputs)
+    {
+        public bool RequiresInnerFrameworkSelection { get; init; }
+        public bool HasProjectReferences { get; init; }
+    }
     private sealed record ProjectSelection(string Path, string Configuration, string? Platform);
 }

@@ -10,6 +10,28 @@ internal static class FreshCompletedCapture
     {
         using (timing?.Start("promotion.originalRegate"))
             await FreshManifestCapture.RegateAsync(execution, token, timing, "promotion.originalRegate");
+        var prospective = PrepareForValidation(execution, captured, token);
+        string path;
+        using (timing?.Start("promotion.prospectivePublish"))
+            path = await FreshManifestCapture.PublishAsync(execution, prospective,
+                Path.Combine(execution.PrivateDirectory, "prospective-completed-bundle"), token, timing, "promotion.prospectivePublish");
+        ArtifactBundle bundle;
+        using (timing?.Start("promotion.physicalLoad"))
+            bundle = ArtifactBundle.Load(path, execution.PrivateDirectory);
+        await ValidateAsync(execution, bundle, token, timing: timing);
+        return prospective;
+    }
+
+    // Declarations are provisional. The public command proves the actual final
+    // bundle, independently twice, before returning any reusable result. Building
+    // and proving a second prospective copy adds no evidence to those boundaries.
+    internal static FreshCapturedBundle PrepareForValidation(FreshExecutionEvidence execution,
+        FreshCapturedBundle captured, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        if (execution.Compiler.RetainedProof is null || execution.Tests.Failure is not null ||
+            execution.Tests.Count != execution.Plan.Tests.Count || execution.Tests.Any(test => test.Process.ExitCode != 0))
+            throw Refuse();
         var root = execution.Preflight.Root;
         string Relative(string physical)
         {
@@ -23,6 +45,7 @@ internal static class FreshCompletedCapture
         {
             Contexts = captured.Manifest.Contexts.Select(context =>
             {
+                token.ThrowIfCancellationRequested();
                 var matches = execution.Compiler.FinalGraph.GraphContexts.Where(binding =>
                     binding.GraphId == context.Id).ToArray();
                 if (matches.Length != 1) throw Refuse();
@@ -36,21 +59,14 @@ internal static class FreshCompletedCapture
                 return proposed;
             }).ToArray(), ManifestHash = null
         });
-        var prospective = captured with { Manifest = manifest };
-        string path;
-        using (timing?.Start("promotion.prospectivePublish"))
-            path = await FreshManifestCapture.PublishAsync(execution, prospective,
-                Path.Combine(execution.PrivateDirectory, "prospective-completed-bundle"), token, timing, "promotion.prospectivePublish");
-        ArtifactBundle bundle;
-        using (timing?.Start("promotion.physicalLoad"))
-            bundle = ArtifactBundle.Load(path, execution.PrivateDirectory);
-        await ValidateAsync(execution, bundle, token, timing: timing);
-        return prospective;
+        token.ThrowIfCancellationRequested();
+        return captured with { Manifest = manifest };
     }
 
     internal static async Task<ProvenanceResult> ValidateAsync(FreshExecutionEvidence execution,
         ArtifactBundle bundle, CancellationToken token,
-        Func<CancellationToken, Task>? beforeFinalValidation = null, CompletedProofTiming? timing = null)
+        Func<CancellationToken, Task>? beforeFinalValidation = null, CompletedProofTiming? timing = null,
+        Action<CurrentEvidence, ProvenanceResult>? beforePublication = null)
     {
         token.ThrowIfCancellationRequested();
         var original = execution.Preflight;
@@ -60,6 +76,11 @@ internal static class FreshCompletedCapture
             preflight = await CompletedReusePreflight.LoadAsync(bundle, original.Root,
                 original.Request.PolicyPath, local ? null : original.Trusted.Revision,
                 local, null, original.Request.Timeout, token);
+        // The current preflight still independently reloads all trust/scope bytes;
+        // retain only this invocation's acquisition choice, never its old graph.
+        preflight = preflight with { Request = preflight.Request with
+            { NativeSdkIdentityProbe = original.Request.NativeSdkIdentityProbe,
+                WarmPostBuildProbe = original.Request.WarmPostBuildProbe } };
         CompletedReusePreflight.ValidateScope(bundle, preflight);
         // Only this live invocation may reuse its original retained compiler proof.
         // Saved-only public consumers continue through the full generic validator.
@@ -75,6 +96,7 @@ internal static class FreshCompletedCapture
             OutputDestinationSafety.RejectExistingConsumerFile(original.Request.Output, original.Root);
         }
         token.ThrowIfCancellationRequested();
+        beforePublication?.Invoke(current, proof);
         return proof;
     }
 

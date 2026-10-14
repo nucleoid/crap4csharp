@@ -34,7 +34,8 @@ internal static class FreshRetainedCompletedProof
         var platform = await FreshProjectPlatform.ResolveAsync(selected, preflight.Policy.Configuration, token);
         var request = new ProjectContextLoadRequest(selected, preflight.Policy.Configuration, platform,
             preflight.Policy.TargetFrameworks.ToArray(), preflight.Request.Overrides.IncludeTests ?? false,
-            preflight.Request.Overrides.IncludeGenerated ?? false, preflight.Request.Timeout);
+            preflight.Request.Overrides.IncludeGenerated ?? false, preflight.Request.Timeout)
+        { NativeSdkIdentityProbe = preflight.Request.NativeSdkIdentityProbe, FrozenSdk = retained.FrozenSdk };
         var intermediate = await LoadPlanAsync("intermediate");
         var compiler = execution.Compiler with { FinalGraph = intermediate.PreparedGraph };
         using (timing?.Start("intermediate.saved")) ValidateSaved(compiler, intermediate, "intermediate");
@@ -45,17 +46,25 @@ internal static class FreshRetainedCompletedProof
         compiler = execution.Compiler with { FinalGraph = final.PreparedGraph };
         using (timing?.Start("final.saved")) ValidateSaved(compiler, final, "final");
         var outputs = SavedCompletedProof.OutputFootprint(compiler);
-        using (timing?.Start("revision.originalGit"))
-            if (execution.Preflight.GitSnapshot is not null)
-                await FreshGitProof.ValidateAsync(execution.Preflight, token, outputs);
-        using (timing?.Start("revision.current"))
-            await FreshGitProof.ValidateAsync(preflight, token, outputs);
         CurrentEvidence current;
         using (timing?.Start("projection"))
             current = CurrentEvidenceAdapter.ProjectCompleted(bundle, preflight, compiler, token);
         IReadOnlySet<string> bundleFiles;
         using (timing?.Start("physical.bundleIntermediate"))
             bundleFiles = SavedBundleFootprint.Validate(bundle, root, current.ProtectedPaths, token);
+        if (execution.Preflight.GitSnapshot is not null)
+        {
+            // Independent read-only observations; neither consumes the other's
+            // result. Keep both complete checks and wait for both owned cleanups.
+            using (timing?.Start("revision.originalAndCurrentGit"))
+                await FreshGitProof.ValidateOriginalAndCurrentAsync(execution.Preflight, preflight,
+                    token, outputs, bundleFiles);
+        }
+        else
+        {
+            using (timing?.Start("revision.current"))
+                await FreshGitProof.ValidateAsync(preflight, token, outputs, bundleFiles, currentBundleSnapshot: true);
+        }
         if (execution.Preflight.GitSnapshot is null)
         {
             // Manifest ORIGINAL membership must equal the retained invocation,
@@ -83,22 +92,30 @@ internal static class FreshRetainedCompletedProof
             ProjectContextLoadResult graph;
             using (timing?.Start(boundary + ".graph"))
                 graph = await ProjectContextLoader.LoadGraphAsync(request with
-                { CollectTiming = timing is not null, Timing = timing, TimingPrefix = boundary + ".graph.loader" }, token);
+                { CollectTiming = timing is not null, Timing = timing, TimingPrefix = boundary + ".graph.loader",
+                    WarmAcquisitionSelectionProbe = preflight.Request.WarmPostBuildProbe }, token);
             FreshCheckExecution.RequirePolicyTargets(preflight, graph);
             FreshCheckExecution.RequirePolicyTargets(execution.Preflight, graph);
             var plan = CheckExecutionPlan.Create(runners, graph, token);
             CompletedTestPlanRecipe.Validate(bytes.ToArray(), plan, root, selected, token);
             CompletedTestPlanRecipe.Validate(originalRecipe, plan, root, selected, token);
-            retained.ValidateAgainstCurrentGraph(plan.PreparedGraph, token);
+            // The caller immediately enters ValidateSaved's synchronous boundary,
+            // which checks this current graph against the original physical inputs
+            // before its body and rereads closing bytes afterwards. Do not perform
+            // a third identical physical read here; no callback or consumer effect
+            // occurs between plan acquisition and that opening check.
             return plan;
         }
         void ValidateSaved(CompilerGraphPhaseResult current, CheckExecutionPlan plan, string boundary)
         {
-            SavedProductionExecutions.ValidateFreshBoundary(bundle, plan, current, root, token, timing, boundary);
-            using (timing?.Start(boundary + ".saved.compilerContexts"))
-                SavedCompilerContexts.Validate(bundle, current, root, token);
-            using (timing?.Start(boundary + ".saved.originalPhysical"))
-                retained.ValidateAgainstCurrentGraph(current.FinalGraph, token);
+            retained.ValidateObservedSynchronousBoundary(current.FinalGraph, token, () =>
+            {
+                SavedProductionExecutions.ValidateFreshBoundary(bundle, plan, current, root, token, timing, boundary);
+                using (timing?.Start(boundary + ".saved.compilerContexts"))
+                    SavedCompilerContexts.ValidateObserved(bundle, current, root, token, timing, boundary);
+                using (timing?.Start(boundary + ".saved.originalPhysical"))
+                    retained.ValidateAgainstCurrentGraph(current.FinalGraph, token);
+            }, timing, boundary);
         }
     }
     private static PolicyException Refuse() => new("check.retainedCompletedProofUnproven",

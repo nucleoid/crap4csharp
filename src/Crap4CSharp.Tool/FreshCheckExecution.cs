@@ -29,11 +29,15 @@ internal static class FreshCheckExecution
         var request = new ProjectContextLoadRequest(selected, preflight.Policy.Configuration, platform,
             preflight.Policy.TargetFrameworks.ToArray(), preflight.Request.Overrides.IncludeTests ?? false,
             preflight.Request.Overrides.IncludeGenerated ?? false, preflight.Request.Timeout)
-        { Timing = timing, CollectTiming = timing is not null, TimingPrefix = "execution.loader" };
+        { Timing = timing, CollectTiming = timing is not null, TimingPrefix = "execution.loader",
+            WarmPostBuildProbe = preflight.Request.WarmPostBuildProbe,
+            NativeSdkIdentityProbe = preflight.Request.NativeSdkIdentityProbe };
         ProjectContextLoadResult metadata;
         using (timing?.Start("execution.metadata"))
             metadata = await ProjectContextLoader.DiscoverAsync(request, token);
         Require(metadata);
+        request = request with { FrozenSdk = metadata.SelectedSdk ?? throw new ProjectContextException(
+            "context.sdkResolutionFailed", "Initial SDK execution identity was not retained.") };
         ProjectContextLoadResult graph;
         using (timing?.Start("execution.graph"))
             graph = await ProjectContextLoader.DiscoverGraphAsync(request, token);
@@ -77,12 +81,12 @@ internal static class FreshCheckExecution
             var directory = Path.Combine(owned, "build", node.Id);
             Directory.CreateDirectory(directory);
             using (timing?.Start("execution.compilerBuild"))
-                return await CompilerEvidence.BuildAsync(node, directory, preflight.Request.Timeout, ct);
+                return await CompilerEvidence.BuildAsync(node, directory, preflight.Request.Timeout, ct, preflight.Request.NativeSdkIdentityProbe, request.FrozenSdk, timing);
         }, token);
         var testDirectory = Path.Combine(owned, "tests"); Directory.CreateDirectory(testDirectory);
         TestExecutionRun tests;
         using (timing?.Start("execution.tests"))
-            tests = await TestExecutionAdapter.RunVerifiedAsync(plan, bound, testDirectory, preflight.Request.Timeout, token);
+            tests = await TestExecutionAdapter.RunVerifiedWithTimingAsync(plan, bound, testDirectory, preflight.Request.Timeout, token, timing);
         // Raw failing test outcomes must remain observable. They cannot pass coverage,
         // safe-child success export, or become reusable completed execution evidence.
         if (tests.Failure is not null || tests.Count != plan.Tests.Count || tests.Any(t => t.Process.ExitCode != 0))
@@ -90,8 +94,13 @@ internal static class FreshCheckExecution
                 new Dictionary<string, ImmutableArray<byte>>(StringComparer.Ordinal), owned);
         try
         {
-            using (timing?.Start("execution.retainedFinal"))
-                await bound.RetainedProof!.ValidateFinalAsync(token);
+            // RunVerifiedAsync owns the full independent post-test graph proof.
+            // Failure/null-count/raw-exit checks above exclude any unproved run.
+            // No consumer process or callback runs between its return and this
+            // fresh physical closing check. Publication still independently
+            // reloads graph/runners/trust at final and outer boundaries.
+            using (timing?.Start("execution.retainedPhysical"))
+                bound.RetainedProof!.ValidateCurrent(token);
             var outputFootprint = bound.FinalGraph.GraphContexts.SelectMany(b =>
                 new[] { b.Context.EvaluatedIntermediateDirectory!, Path.GetDirectoryName(b.Context.EvaluatedTargetPath!)! }
                     .Concat(b.Context.PhaseInputs.Where(i => i.Role == "restoreAssets").Select(i => Path.GetDirectoryName(i.Path)!)))
@@ -112,7 +121,9 @@ internal static class FreshCheckExecution
             token.ThrowIfCancellationRequested();
             return new(preflight, plan, bound, tests, coverage, children, owned);
         }
-        catch (Exception error) when (error is ProjectContextException or PolicyException or OperationCanceledException or ProcessTimeoutException)
+        catch (Exception error) when (error is ProjectContextException or PolicyException or ScopeException or
+            IOException or InvalidDataException or InvalidOperationException or System.ComponentModel.Win32Exception or
+            UnauthorizedAccessException or OperationCanceledException or ProcessTimeoutException)
         {
             // Post-test proof/aggregate refusal must not erase actual process
             // outcomes or turn a completed raw-zero child into a failed test.

@@ -30,13 +30,26 @@ public sealed class AnalyzeCommandTests
     {
         using var directory = TestDirectory.Create("crap4csharp-check-base");
         var error = new StringWriter();
+        var path = CreateBundle(directory.Path);
+        var captured = ReadManifest(path);
+        WriteManifest(path, ManifestIdentity.Seal(captured with
+        {
+            Revision = captured.Revision with { Kind = "git", Head = new string('a', 40), Base = new string('b', 40) },
+            Contexts = captured.Contexts.Select(context => context with
+            {
+                ReuseRecipeComplete = true,
+                CurrentRevalidation = new ManifestCurrentRevalidation(CurrentEvidenceAdapter.SupportedRecipeProvider,
+                    context.Project, "bin/App.dll", "bin/App.pdb")
+            }).ToArray(),
+            ManifestHash = null
+        }));
 
         var exit = await global::App.RunAsync(["check", "--reuse-artifacts", "manifest.json", "--policy",
             "policy.json", "--format", "json"], directory.Path, TextWriter.Null, error,
             TestContext.Current.CancellationToken);
 
         Assert.Equal(1, exit);
-        Assert.Contains("requires --policy and --base", error.ToString(), StringComparison.Ordinal);
+        Assert.Contains("requires --base", error.ToString(), StringComparison.Ordinal);
     }
     [Fact]
     public async Task TruncatedManifestReturnsOneStructuredJsonDocument()
@@ -172,6 +185,39 @@ public sealed class AnalyzeCommandTests
         Assert.Equal(0, document.RootElement.GetProperty("evaluation").GetProperty("policy")
             .GetProperty("threshold").GetDouble());
         Assert.NotEmpty(document.RootElement.GetProperty("evaluation").GetProperty("findings").EnumerateArray());
+    }
+
+    [Fact]
+    public void CapturedMemoryEvaluationMatchesReplayWithoutClaimingAPhysicalManifest()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-captured-memory");
+        var path = CreateBundle(directory.Path);
+        var bundle = ArtifactBundle.Load(path, directory.Path);
+        var token = TestContext.Current.CancellationToken;
+        var physical = AnalyzeCommand.Replay(bundle, directory.Path, DateTimeOffset.UnixEpoch,
+            TimeSpan.Zero, token, allSources: true, thresholdOverride: 8);
+        File.Delete(path); // This test owns the exact generated manifest file.
+        var memory = AnalyzeCommand.ReplayCaptured(bundle.Manifest, bundle.Bytes, directory.Path,
+            DateTimeOffset.UnixEpoch, TimeSpan.Zero, token, allSources: true, thresholdOverride: 8);
+        Assert.Equal(JsonSerializer.Serialize(physical.Evaluation), JsonSerializer.Serialize(memory.Evaluation));
+        Assert.Equal(physical.Run.ExitCode, memory.Run.ExitCode);
+        Assert.Empty(memory.Run.Artifacts);
+        Assert.False(File.Exists(path));
+    }
+
+    [Fact]
+    public void CapturedMemoryCannotBypassPhysicalBundleDeclaredLengthLimits()
+    {
+        using var directory = TestDirectory.Create("crap4csharp-captured-memory-limits");
+        var bundle = ArtifactBundle.Load(CreateBundle(directory.Path), directory.Path);
+        var oversized = bundle.Manifest with
+        {
+            Artifacts = bundle.Manifest.Artifacts.Select(artifact => artifact with
+                { Length = ArtifactBundle.MaxArtifactBytes + 1L }).ToArray()
+        };
+        Assert.Throws<InvalidDataException>(() => AnalyzeCommand.ReplayCaptured(oversized, bundle.Bytes,
+            directory.Path, DateTimeOffset.UnixEpoch, TimeSpan.Zero, TestContext.Current.CancellationToken,
+            allSources: true, thresholdOverride: 8));
     }
 
     [Fact]

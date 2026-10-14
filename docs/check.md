@@ -20,13 +20,21 @@ For a non-Git workspace, explicitly select `--scope all`. Policy is then read lo
 4. Execute each required supported VSTest context once, with no build/no restore and the installed XPlat collector. Retain original phase proof and recheck sources, generated documents, references and outputs before/after tests. Observed test-side compilation is refused.
 5. Bind actual TRX outcomes and invocation coverage to the compiled graph, validate aggregate eligible coverage, revalidate final state, capture safe replay inputs and evaluate the resolved policy.
 
-Supported fixture versions are .NET 10, `Microsoft.NET.Test.Sdk` 18.0.1, `xunit.v3` 3.2.2, `xunit.runner.visualstudio` 3.1.5 and `coverlet.collector` 6.0.4. This is not a promise of every runner/version. MTP, unknown collector hooks, emitted generator-only trees, ambiguous associations, repeated contexts of one physical project and colliding output directories are conservatively refused. A successful compiler event or a warm DLL alone is not accepted test evidence. Binding proves supported evidence consistency, not universal runtime-load tracing, hostile-filesystem atomicity or malicious-actor attestation.
+Cold preparation uses ordinary Workspace loading. After the declared once builds, independently current graph boundaries may use one design-time acquisition per node and a fresh Roslyn project reconstructed from the executed compiler arguments and document items. The entire evaluated graph selects its path before any design-time targets: mapped dependency globals keep ordinary loading for every node. A failed warm acquisition never retries ordinary loading after targets. Runner discovery remains ordinary; authored/generated, compiler/reference/output, required-test, coverage, policy, revision and final physical revalidation gates are unchanged. No graph or acceptance proof is reused across boundaries.
+
+The tool remains .NET 10. Supported fixture versions are `Microsoft.NET.Test.Sdk` 18.0.1, `xunit.v3` 3.2.2, `xunit.runner.visualstudio` 3.1.5 and `coverlet.collector` 6.0.4. The net9/net10 consumer fixture uses separately selected compiler, test and coverage owners; executing its net9 tests also requires the .NET 9 runtime. This is not a promise of every runner/version. MTP, unknown collector hooks, emitted generator-only trees, ambiguous associations, duplicate scheduled mapped contexts and colliding output directories are conservatively refused. A successful compiler event or a warm DLL alone is not accepted test evidence. Binding proves supported evidence consistency, not universal runtime-load tracing, hostile-filesystem atomicity or malicious-actor attestation.
 
 ### Collector and mapped-document boundaries
 
+Git scope compares physical compiler-input bytes without running Git clean
+filters. An EOL-filtered project or configuration file can therefore widen
+scope even when Git's canonical text appears unchanged. Changed directories
+and gitlinks also make scope incomplete and widen evaluation; the tool does
+not assume a nested repository is unrelated to C# compilation.
+
 Every eligible authored compiler/PDB method must be represented by uniquely bound aggregate coverage. `ExcludeFromCodeCoverage` on an executable authored method does not itself change policy eligibility: if the collector omits that method, fresh check refuses with `coverage.aggregateUnproven`, even when the actual tests pass. It never invents zero coverage or silently makes the omitted body not applicable. Coverlet 6.0.4 emits empty metadata-token declarations; supported association uses actual module identity, unique method names and PDB sequence points, not purported report tokens.
 
-Actual passing-test acceptance isolates async methods, iterators, local functions, lambdas, a simple non-positional authored record, a positional record and an authored record-property initializer. Async/iterator/local-function callable coverage remains `coverage.unsupportedGeneratedMapping`; independently mapped ordinary methods retain their known scores, but the overall check exits 1. The tested lambda and record reports cannot represent the full eligible compiler/PDB method inventory and refuse `coverage.aggregateUnproven`, retaining the real completed/raw-zero test outcome without accepted metrics or a successful bundle. Record synthesized executable members are not silently discarded; positional/property-initializer fixtures retain actual constructor and property-getter PDB points. These specific fixtures do not establish support for every nested-callable or initializer form.
+Async/iterator/local-function callable coverage remains `coverage.unsupportedGeneratedMapping`; independently mapped ordinary methods retain their known scores, but required unknown coverage keeps the overall check at exit 1. Compiler-generated metadata alone never excludes an explicitly authored constructor or method. Synthesized record members and nested generated bodies are classified using actual PE/PDB evidence and Roslyn source ownership; no generated `MoveNext` method is guessed back to an authored callable. The positional-record fixture retains independently known scores while its authored primary constructor remains unknown (`coverage.noMatchingMethod`). The lambda fixture similarly retains an independently covered ordinary method while anonymous mapping and ambiguous parent ownership remain unknown (`coverage.unsupportedGeneratedMapping` / `coverage.ambiguousCallableOwnership`). Both runs remain incomplete, exit 1 and expose no reusable successful bundle despite passing tests. Unsupported aggregate inventories still refuse `coverage.aggregateUnproven`. The simple non-positional record fixture, without an authored constructor or property initializer, retains known coverage for its three authored ordinary methods. The record-property initializer fixture also retains those three known method scores, but its authored initializer remains applicable and unknown (`scope.unsupportedCallable`), keeping exit 1 and incomplete/nonreusable artifacts. Its semicolon-only generated accessors are proven separately from that authored initialization. These fixtures do not establish support for every record, nested-callable or initializer form.
 
 Deterministic compilation without mapped PDB documents is supported. Explicit `PathMap`, `#line` aliases or SDK CI source-root remapping are refused with `compiler.outputsUnproven` when a PDB document cannot resolve to the independently enumerated physical compiler document with matching checksum. In the tested SDK/xUnit consumer, `ContinuousIntegrationBuild=true` introduces such remapping in the test-project PDB and is refused before tests. No suffix matching or user-supplied coverage path map upgrades this compiler evidence. These are conservative unsupported-evidence failures, not known metric violations or failed-test claims.
 
@@ -55,10 +63,36 @@ Strict policy evaluates all applicable observations, even when Git reports no ed
 
 ## Retention, replay and reuse
 
-`--artifact-output` must name a **new** safe directory, published through owned sibling staging. Without it, the invocation-owned temporary replay bundle is retained. Locate its entry manifest in `run.artifacts`; user-directed cleanup is explicit. Once private execution storage is allocated, every graceful terminal (success, failed tests, build/capture error, cancellation or timeout) lists its exact root as `run.artifacts` kind `private-diagnostics` and in `run.diagnosticLocations`; human output also names it. Preallocation failures have no such directory. These diagnostics remain explicitly incomplete/nonreusable even when the separately listed replay manifest is complete. Raw binlogs and logs may contain secrets: keep the private root local, do not upload it as a replay bundle, and remove only that invocation-owned directory when its evidence is no longer needed. Retention lasts until user-directed cleanup; no automatic expiry or cleanup command is implied, and forced termination cannot guarantee a locator. On Unix the root is owner-only (0700); on Windows it inherits the user's temporary-directory permissions, not a claimed custom ACL. Raw secret-bearing binlogs, environment/property bodies and private diagnostic logs are not exported in safe replay bundles.
+SDK selection uses the installed host's native resolver in an owned worker for the verified 10.0.103 layout. It re-observes each selection and checks the host, SDK and MSBuild identity; no selection is cached across proof boundaries. Other layouts and custom resolver settings use the independent CLI probes before consumer targets run.
+
+`--artifact-output` must name a **new** safe directory, published through owned sibling staging. Without it, the invocation-owned temporary replay bundle is retained. Locate its entry manifest in `run.artifacts`; user-directed cleanup is explicit. Once private execution storage is allocated, every graceful terminal (success, failed tests, build/capture error, cancellation or timeout) lists its exact root as `run.artifacts` kind `private-diagnostics` and in `run.diagnosticLocations`; human output also names it. Preallocation failures have no such directory. These diagnostics remain explicitly incomplete/nonreusable even when the separately listed replay manifest is complete. Raw binlogs and logs may contain secrets: keep the private root local, do not upload it as a replay bundle, and remove only that invocation-owned directory when its evidence is no longer needed. Retention lasts until user-directed cleanup; no automatic expiry is implied, and forced termination cannot guarantee a locator. On Unix the root is owner-only (0700); on Windows it inherits the user's temporary-directory permissions, not a claimed custom ACL. Raw secret-bearing binlogs, environment/property bodies and private diagnostic logs are not exported in safe replay bundles.
 
 ```bash
 crap4csharp analyze --reuse-artifacts artifacts/post-task-run/manifest.json --format json
 ```
+
+### Removing retained private diagnostics
+
+After recording the evidence you need, explicitly name the private root returned
+by that invocation:
+
+```bash
+crap4csharp cleanup --private-diagnostics /absolute/temp/crap4csharp-fresh-private-EXACT --older-than-days 7
+```
+
+The default age is seven days. Cleanup requires a completed lifecycle marker,
+exclusive access to it, and an age of at least the requested number of days for
+the root, marker and recorded completion. The root must be a direct child of
+the current user's applicable temporary directory with the tool-private prefix.
+Linked paths or contents, malformed markers, active or unsealed runs, and
+consumer directories are refused with exit 1 before removal. Successful removal
+returns 0. Cleanup accepts one exact root; it never scans for old runs or expands
+wildcards. On Unix the root must also remain owner-only.
+
+Default retention has no expiry. Removing a root also removes any default replay
+bundle inside it; a separately exported bundle remains at its explicit destination.
+Legacy unmarked roots and runs terminated before sealing are ineligible for this
+command. These checks protect ordinary lifecycle and path mistakes; they do not
+attest against hostile concurrent filesystem changes by the same user.
 
 Captured replay needs no original checkout or project/test execution and reports historical `captured` provenance. Supported successful fresh evidence reports current `verified` binding but remains **nonreusable** when a complete future membership/environment recipe is absent. Explicit prior compiler reuse with fresh tests is distinct from `check --reuse-artifacts`, which would reuse tests as well. Current-test reuse and baseline candidate generation require their supported complete current-revalidation recipe; a fresh captured-only/nonreusable bundle is refused, never silently upgraded or retested. See [provenance](provenance.md) and [policy](policy.md).

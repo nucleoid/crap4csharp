@@ -23,5 +23,6 @@ PATH=/home/fuego/.dotnet:$PATH dotnet test Crap4CSharp.slnx -c Release --no-buil
 - Merge multiple reports as a union of distinct eligible sequence points, never summed denominators. Keep file/type/name/arity/module matching conservative; do not map generated `MoveNext` methods back by guesswork.
 - Preserve exit codes: 0 success, 1 usage/operations, 2 threshold violation.
 - Do not install packages into analyzed projects, write analyzed source files, or delete result directories not created by the current invocation.
+  The explicitly owner-approved `cleanup` command may remove one exact aged, inactive, lifecycle-marked tool-private temporary root; it must never scan or remove consumer source/results.
 - Keep the clean-room attribution prominent. Do not copy or translate the unlicensed reference implementation.
 - Run the unit suite, package/install smoke test, deterministic fixture gates, and real Coverlet E2E before release.

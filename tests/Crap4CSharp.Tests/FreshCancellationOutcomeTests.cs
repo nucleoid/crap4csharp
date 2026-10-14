@@ -6,8 +6,10 @@ namespace Crap4CSharp.Tests;
 
 public sealed class FreshCancellationOutcomeTests
 {
-    [Fact]
-    public async Task PublicCancellationRetainsActualCompletedInterruptedAndNotRunContexts()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PublicCancellationRetainsActualCompletedInterruptedAndNotRunContexts(bool failFirst)
     {
         using var fixture = TestDirectory.Create("crap4csharp-public-cancel-outcomes");
         fixture.Write("Dep/Dep.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>");
@@ -26,7 +28,8 @@ public sealed class FreshCancellationOutcomeTests
                 """);
             fixture.Write(name + "/Tests.cs", "using Xunit; public class Once { [Fact] public void Test() { Assert.Equal(42, Dependency.Value); " +
                 "System.IO.File.AppendAllText(" + JsonSerializer.Serialize(order) + ", " + JsonSerializer.Serialize(name + "\n") + "); " +
-                "if (System.IO.File.ReadAllLines(" + JsonSerializer.Serialize(order) + ").Length == 2) { System.IO.File.WriteAllText(" + JsonSerializer.Serialize(ready) + ", \"ready\"); System.Threading.Thread.Sleep(System.Threading.Timeout.Infinite); } } }");
+                "if (System.IO.File.ReadAllLines(" + JsonSerializer.Serialize(order) + ").Length == 2) { System.IO.File.WriteAllText(" + JsonSerializer.Serialize(ready) + ", \"ready\"); System.Threading.Thread.Sleep(System.Threading.Timeout.Infinite); } " +
+                (failFirst ? "if (System.IO.File.ReadAllLines(" + JsonSerializer.Serialize(order) + ").Length == 1) Assert.Fail(\"Real first-context failure\"); " : "") + "} }");
         }
         fixture.Write("Root/Root.csproj", """
             <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
@@ -66,18 +69,26 @@ public sealed class FreshCancellationOutcomeTests
         Assert.Equal(2, launched.Distinct(StringComparer.Ordinal).Count());
         Assert.Equal(1, exit);
         using var json = JsonDocument.Parse(output.ToString());
+        Assert.Equal(global::App.ToolVersion, json.RootElement.GetProperty("toolVersion").GetString());
+        Assert.Equal(".", json.RootElement.GetProperty("evaluation").GetProperty("scope").GetProperty("logicalWorkspaceRoot").GetString());
         var run = json.RootElement.GetProperty("run");
         Assert.True(run.GetProperty("cancellation").GetProperty("cancelled").GetBoolean());
         Assert.False(run.GetProperty("cancellation").GetProperty("timedOut").GetBoolean());
-        Assert.Equal("run.cancelled", json.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("reason").GetString());
+        Assert.Equal("run.cancelled", run.GetProperty("cancellation").GetProperty("reason").GetString());
+        Assert.Equal(failFirst ? "tests.failed" : "run.cancelled", json.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("reason").GetString());
+        Assert.Contains(json.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
+            check => check.GetProperty("name").GetString() == "testExecution" &&
+                check.GetProperty("status").GetString() == (failFirst ? "fail" : "cancelled"));
         var outcomes = run.GetProperty("testOutcomes").EnumerateArray().ToArray();
         Assert.Equal(3, outcomes.Length);
         Assert.Equal(launched, outcomes.Take(2).Select(o => Path.GetFileNameWithoutExtension(o.GetProperty("project").GetString())));
         Assert.DoesNotContain(Path.GetFileNameWithoutExtension(outcomes[2].GetProperty("project").GetString()), launched);
-        Assert.Equal(new[] { "completed", "failed", "not-run" }, outcomes.Select(o => o.GetProperty("status").GetString()));
-        Assert.Equal(0, outcomes[0].GetProperty("exitCode").GetInt32());
+        Assert.Equal(new[] { failFirst ? "failed" : "completed", "failed", "not-run" }, outcomes.Select(o => o.GetProperty("status").GetString()));
+        Assert.Equal(failFirst ? 1 : 0, outcomes[0].GetProperty("exitCode").GetInt32());
         Assert.Equal(JsonValueKind.Null, outcomes[1].GetProperty("exitCode").ValueKind);
-        Assert.Single(Directory.GetFiles(outcomes[0].GetProperty("resultsDirectory").GetString()!, "*.trx"));
+        var firstTrx = Assert.Single(Directory.GetFiles(outcomes[0].GetProperty("resultsDirectory").GetString()!, "*.trx"));
+        var counters = System.Xml.Linq.XDocument.Load(firstTrx).Descendants().Single(element => element.Name.LocalName == "Counters");
+        Assert.Equal(failFirst ? "1" : "0", counters.Attribute("failed")!.Value);
         Assert.True(Directory.Exists(outcomes[1].GetProperty("logDirectory").GetString()));
         Assert.All(run.GetProperty("artifacts").EnumerateArray(), a =>
         {
@@ -88,6 +99,7 @@ public sealed class FreshCancellationOutcomeTests
             a => a.GetProperty("kind").GetString() == "private-diagnostics");
         var privateRoot = diagnostics.GetProperty("path").GetString()!;
         Assert.True(Directory.Exists(privateRoot));
+        PrivateDiagnosticsCleanupTests.AssertSealed(privateRoot);
         Assert.Contains(run.GetProperty("diagnosticLocations").EnumerateArray(), p => p.GetString() == privateRoot);
         Assert.NotEmpty(Directory.GetFiles(privateRoot, "compiler.binlog", SearchOption.AllDirectories));
         Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));

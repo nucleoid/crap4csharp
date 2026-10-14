@@ -17,7 +17,11 @@ internal static class FreshPriorBuild
         MaxDepth = 24
     };
     internal sealed record SavedPath(string? Relative, string Identity);
-    internal sealed record SavedParameter(string Name, SavedPath[] Items);
+    internal sealed record SavedParameter(string Name, SavedPath[] Items)
+    {
+        public SavedReferenceProperties[] ReferenceProperties { get; init; } = [];
+    }
+    internal sealed record SavedReferenceProperties(SavedPath Item, string? Aliases, bool EmbedInteropTypes);
     internal sealed record SavedOutput(SavedPath Path, string Sha256, long Length);
     internal sealed record SavedCopy(SavedPath Source, SavedPath Destination);
     internal sealed record SavedNode(string Id, SavedParameter[] Parameters, SavedOutput Assembly,
@@ -31,15 +35,18 @@ internal static class FreshPriorBuild
         var root = execution.Preflight.Root;
         var targets = graph.GraphContexts.Select(b => b.Context.EvaluatedTargetPath!)
             .ToHashSet(PathIdentityPolicy.Current.Comparer);
-        var observations = execution.Compiler.Observations.ToDictionary(o => o.ProjectPath, PathIdentityPolicy.Current.Comparer);
+        var observations = execution.Compiler.ByGraphId();
         SavedOutput Output(CompilerOutput output) => new(SavePath(root, output.Path), output.Sha256, output.Length);
         var nodes = graph.BuildGraph.Select(node =>
         {
             token.ThrowIfCancellationRequested();
-            var observed = observations[node.ProjectPath];
+            var observed = observations[node.Id];
             var directory = Path.GetDirectoryName(node.ProjectPath)!;
             return new SavedNode(node.Id, observed.Parameters.Select(p => new SavedParameter(p.Name,
-                    p.Items.Select(i => SavePath(root, Path.GetFullPath(i, directory))).ToArray())).ToArray(),
+                    p.Items.Select(i => SavePath(root, Path.GetFullPath(i, directory))).ToArray())
+                    { ReferenceProperties = p.ReferenceProperties.Select(reference => new SavedReferenceProperties(
+                        SavePath(root, Path.GetFullPath(reference.ItemSpec, directory)),
+                        CompilerReferenceSnapshot.NormalizeAliases(reference.Aliases), reference.EmbedInteropTypes)).ToArray() }).ToArray(),
                 Output(observed.Assembly ?? throw Refuse()), Output(observed.Pdb ?? throw Refuse()),
                 observed.ReferenceAssembly is null ? null : Output(observed.ReferenceAssembly),
                 observed.RuntimeCopies.Where(c => targets.Contains(c.Source))
@@ -112,10 +119,19 @@ internal static class FreshPriorBuild
             var parameters = saved.Parameters.Select(p =>
             {
                 if (p is null || p.Items is null || p.Items.Length > CompilerPhaseSnapshot.MaximumInputs) throw Refuse();
-                return new CompilerParameter(p.Name, p.Items.Select(Resolve).ToArray());
+                if (p.ReferenceProperties is null || p.ReferenceProperties.Length > CompilerPhaseSnapshot.MaximumInputs ||
+                    p.ReferenceProperties.Length != 0 && (p.Name != "References" || p.ReferenceProperties.Length != p.Items.Length)) throw Refuse();
+                var items = p.Items.Select(Resolve).ToArray();
+                var references = p.ReferenceProperties.Select((reference, index) =>
+                {
+                    if (reference is null || Resolve(reference.Item) != items[index]) throw Refuse();
+                    return new CompilerReferenceProperties(items[index], CompilerReferenceSnapshot.NormalizeAliases(reference.Aliases), reference.EmbedInteropTypes);
+                }).ToArray();
+                return new CompilerParameter(p.Name, items) { ReferenceProperties = references };
             }).ToArray();
             var observation = new CompilerObservation(node.ProjectPath, parameters)
             {
+                GraphId = node.Id,
                 Assembly = Output(saved.Assembly), Pdb = Output(saved.Pdb),
                 ReferenceAssembly = saved.ReferenceAssembly is null ? null : Output(saved.ReferenceAssembly),
                 RuntimeCopies = saved.Copies.Select(c => c is null ? throw Refuse() : new CompilerCopy(Resolve(c.Source), Resolve(c.Destination))).ToArray()

@@ -35,3 +35,10 @@
 - Expanded tests to 18 passing cases covering formulas and strict gates, N/A behavior, duplicate/overlapping reports, hidden/empty points, ambiguity, overloads/generics/state machines, malformed inputs, Git porcelain, explicit-coverage isolation, and source immutability.
 - Final bounded restore/build/test succeeded with 0 warnings and 0 errors and 18/18 tests passing. Packaging and local tool installation succeeded. Installed-tool help exited `0` without writing its empty working directory (the repository-local SDK requires command-local `DOTNET_ROOT=/home/fuego/.dotnet` for apphost discovery in this environment).
 - Real Coverlet fixture E2E passed 1/1 fixture test, matched both source methods, exited `0` at threshold `100`, and left the analyzed source SHA-256 unchanged. Reusing the report twice exited `0` at exact threshold `4`; threshold `3.99` exited `2`; explicit-report runs created or deleted no result directories.
+## Retaining test diagnostics
+
+Tests keep diagnostic files in their owned temporary fixtures by default. To retain
+them after cleanup, set `CRAP4CSHARP_VALIDATION_OUT` to an absolute directory before
+running tests. Each test creates a uniquely named subdirectory there; no shared
+"latest" file is written. These files can contain private fixture inputs and logs
+and should remain local. Clear the environment variable for ordinary runs.

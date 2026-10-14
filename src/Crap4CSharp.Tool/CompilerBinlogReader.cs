@@ -61,14 +61,32 @@ internal static class CompilerBinlogReader
             if (observed.Parameters.Any(p => p.Name == parameter.ParameterName))
                 throw new ProjectContextException("compiler.associationInvalid", "Duplicate compiler input parameter.");
             var items = new List<string>();
+            var referenceProperties = new List<CompilerReferenceProperties>();
             foreach (var item in parameter.Items)
             {
-                var text = item is ITaskItem taskItem ? taskItem.ItemSpec : item?.ToString() ?? "";
+                var text = item is IItemData itemData ? itemData.EvaluatedInclude :
+                    item is ITaskItem taskItem ? taskItem.ItemSpec : item?.ToString() ?? "";
+                if (parameter.ParameterName == "References")
+                {
+                    if (item is not (IItemData or ITaskItem))
+                        throw new ProjectContextException("compiler.associationInvalid", "Compiler reference item metadata is unavailable.");
+                    var metadata = new ItemData("reference", item).EnumerateMetadata()
+                        .Where(pair => pair.Key.Equals("Aliases", StringComparison.OrdinalIgnoreCase) ||
+                            pair.Key.Equals("EmbedInteropTypes", StringComparison.OrdinalIgnoreCase))
+                        .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+                    var aliases = metadata.GetValueOrDefault("Aliases", "");
+                    var embedded = metadata.GetValueOrDefault("EmbedInteropTypes", "");
+                    if (!string.IsNullOrEmpty(embedded) && !bool.TryParse(embedded, out var parsedEmbedded))
+                        throw new ProjectContextException("compiler.associationInvalid", "Compiler embedded-reference metadata is invalid.");
+                    characters += aliases.Length + embedded.Length;
+                    referenceProperties.Add(new(text, string.IsNullOrEmpty(aliases) ? null : aliases,
+                        !string.IsNullOrEmpty(embedded) && bool.Parse(embedded)));
+                }
                 if (++itemCount > 32768 || (characters += text.Length) > 2 * 1024 * 1024)
                     throw new ProjectContextException("compiler.evidenceLimit", "Compiler input limit exceeded.");
                 items.Add(text);
             }
-            observed.Parameters.Add(new(parameter.ParameterName, items));
+            observed.Parameters.Add(new(parameter.ParameterName, items) { ReferenceProperties = referenceProperties.ToArray() });
         };
         events.Replay(stream, token);
         if (!buildCompleted || tasks.Count != 1)
