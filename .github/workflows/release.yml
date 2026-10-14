@@ -32,6 +32,9 @@ jobs:
           DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
         with:
           dotnet-version: ${{ steps.acceptance-sdk.outputs.version }}
+      - name: Bind the exact SDK host for consumer processes
+        shell: pwsh
+        run: ./scripts/bind-acceptance-sdk-host.ps1
       - name: Locate the original immutable candidate on reruns
         id: original
         uses: actions/github-script@v7
@@ -90,6 +93,9 @@ jobs:
           DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
         with:
           dotnet-version: ${{ steps.acceptance-sdk.outputs.version }}
+      - name: Bind the exact SDK host for consumer processes
+        shell: pwsh
+        run: ./scripts/bind-acceptance-sdk-host.ps1
       - uses: actions/download-artifact@v4
         with:
           name: candidate
@@ -155,6 +161,9 @@ jobs:
           DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
         with:
           dotnet-version: ${{ steps.acceptance-sdk.outputs.version }}
+      - name: Bind the exact SDK host for consumer processes
+        shell: pwsh
+        run: ./scripts/bind-acceptance-sdk-host.ps1
       - name: Install exact consumer runtime
         shell: pwsh
         run: ./scripts/install-consumer-runtime.ps1 -DotnetRoot $env:DOTNET_ROOT -Version 9.0.20
@@ -225,6 +234,9 @@ jobs:
           DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
         with:
           dotnet-version: ${{ steps.acceptance-sdk.outputs.version }}
+      - name: Bind the exact SDK host for consumer processes
+        shell: pwsh
+        run: ./scripts/bind-acceptance-sdk-host.ps1
       - name: Install exact consumer runtime
         shell: pwsh
         run: ./scripts/install-consumer-runtime.ps1 -DotnetRoot $env:DOTNET_ROOT -Version 9.0.20

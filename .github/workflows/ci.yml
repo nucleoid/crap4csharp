@@ -33,6 +33,9 @@ jobs:
           DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
         with:
           dotnet-version: ${{ steps.acceptance-sdk.outputs.version }}
+      - name: Bind the exact SDK host for consumer processes
+        shell: pwsh
+        run: ./scripts/bind-acceptance-sdk-host.ps1
       - run: dotnet restore Crap4CSharp.slnx --disable-parallel
       - run: dotnet build Crap4CSharp.slnx -c Release --no-restore -m:1 -nr:false
       - name: Export one bound Release runtime
@@ -80,6 +83,9 @@ jobs:
           DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
         with:
           dotnet-version: ${{ steps.acceptance-sdk.outputs.version }}
+      - name: Bind the exact SDK host for consumer processes
+        shell: pwsh
+        run: ./scripts/bind-acceptance-sdk-host.ps1
       - name: Install exact .NET 9 consumer runtime
         shell: pwsh
         run: ./scripts/install-consumer-runtime.ps1 -DotnetRoot $env:DOTNET_ROOT -Version 9.0.20
@@ -142,6 +148,9 @@ jobs:
           DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
         with:
           dotnet-version: ${{ steps.acceptance-sdk.outputs.version }}
+      - name: Bind the exact SDK host for consumer processes
+        shell: pwsh
+        run: ./scripts/bind-acceptance-sdk-host.ps1
       - name: Require every suite job to succeed
         shell: pwsh
         env:
