@@ -207,9 +207,10 @@ internal sealed class WarmDesignTimeProject : IDisposable
                     var link = item.GetMetadataValue("Link");
                     var relative = Path.GetRelativePath(directory, physical);
                     // The ordinary loader places an unlinked absolute external document
-                    // at the logical project root; Link and relative item paths remain explicit.
+                    // at the logical project root, including a different Windows drive;
+                    // Link and relative item paths remain explicit.
                     var externalAbsolute = Path.IsPathRooted(item.EvaluatedInclude) &&
-                        (relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal));
+                        (Path.IsPathRooted(relative) || relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal));
                     var logical = !string.IsNullOrWhiteSpace(link) ? link : externalAbsolute ? Path.GetFileName(physical) : relative;
                     var components = logical.Replace('\\', '/').Split('/');
                     yield return DocumentInfo.Create(DocumentId.CreateNewId(info.Id), components[^1],
