@@ -311,6 +311,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Callable assertion exit-semantics gate failed.' }
           ./scripts/assert-callable-coverage.ps1 -RepoRoot $PWD -DebugResults artifacts/callable-debug -ReleaseResults artifacts/callable-release
           if ($LASTEXITCODE -ne 0) { throw 'Callable collector capability gate failed.' }
+      - name: Require installed unsupported runner and collector refusals
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = Join-Path $env:RUNNER_TEMP ('installed-refusals-' + [guid]::NewGuid().ToString('N'))
+          ./scripts/test-installed-refusals.ps1 -PackagePath $env:CRAP4CSHARP_CANDIDATE_PACKAGE -ExpectedVersion $env:CANDIDATE_VERSION -ExpectedCommit $env:GITHUB_SHA -OutputDirectory $output
       - name: Record successful exact-package acceptance
         shell: pwsh
         env:
