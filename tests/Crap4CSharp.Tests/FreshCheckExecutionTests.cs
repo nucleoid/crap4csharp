@@ -1180,9 +1180,7 @@ public sealed class FreshCheckExecutionTests
                     Assert.Equal(bundle.Manifest.Revision.StateHash, observed.StateHash);
                     if (newPreflight && !local)
                     {
-                        var identity = typeof(App).Assembly.GetType("FreshGitProof")!.GetMethod("Identity",
-                            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
-                        var raw = (string)identity.Invoke(null, [observationPreflight.GitSnapshot, null])!;
+                        var raw = FreshGitProof.Identity(observationPreflight.GitSnapshot!);
                         // Actual generated output records differ, but the complete logical index is unchanged.
                         Assert.NotEqual(bundle.Manifest.Revision.StateHash, raw);
                         Assert.Equal(preflight.GitSnapshot!.Revision.IndexIdentity,
