@@ -13,7 +13,7 @@ matrix in both Debug and Release suites. The test harness accepts the paired
 purpose; ordinary test runs still create their own isolated unique candidate.
 Preparation and successful per-OS acceptance receipts expire after seven days.
 Each configuration uses 16 deterministic method partitions. Theory rows stay
-together, and each runner executes its partition serially. At most four hosted
+together, and each runner executes its partition serially. At most eight hosted
 suite jobs run concurrently; each has a bounded six-hour job limit. Individual
 test deadlines, including the original 180-second checks, remain unchanged.
 
