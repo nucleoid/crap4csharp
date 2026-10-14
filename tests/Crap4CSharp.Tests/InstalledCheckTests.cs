@@ -8,7 +8,7 @@ using Xunit;
 
 namespace Crap4CSharp.Tests;
 
-public sealed class InstalledCheckTests
+public sealed partial class InstalledCheckTests
 {
     [Theory]
     [InlineData("compiler.outputsUnproven", "completed", 0, "INCOMPLETE")]
