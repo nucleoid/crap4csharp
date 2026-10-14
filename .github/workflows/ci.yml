@@ -21,11 +21,18 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
+      - name: Resolve exact acceptance SDK declaration
+        id: acceptance-sdk
+        shell: pwsh
+        run: |
+          . ./scripts/sdk-acceptance-contract.ps1
+          $version = Get-SuiteAcceptanceSdkVersion
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - uses: actions/setup-dotnet@v5
         env:
           DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
         with:
-          global-json-file: global.json
+          dotnet-version: ${{ steps.acceptance-sdk.outputs.version }}
       - run: dotnet restore Crap4CSharp.slnx --disable-parallel
       - run: dotnet build Crap4CSharp.slnx -c Release --no-restore -m:1 -nr:false
       - name: Export one bound Release runtime
@@ -61,11 +68,18 @@ jobs:
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v5
+      - name: Resolve exact acceptance SDK declaration
+        id: acceptance-sdk
+        shell: pwsh
+        run: |
+          . ./scripts/sdk-acceptance-contract.ps1
+          $version = Get-SuiteAcceptanceSdkVersion
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - uses: actions/setup-dotnet@v5
         env:
           DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
         with:
-          global-json-file: global.json
+          dotnet-version: ${{ steps.acceptance-sdk.outputs.version }}
       - name: Install exact .NET 9 consumer runtime
         shell: pwsh
         run: ./scripts/install-consumer-runtime.ps1 -DotnetRoot $env:DOTNET_ROOT -Version 9.0.20
@@ -108,11 +122,18 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
+      - name: Resolve exact acceptance SDK declaration
+        id: acceptance-sdk
+        shell: pwsh
+        run: |
+          . ./scripts/sdk-acceptance-contract.ps1
+          $version = Get-SuiteAcceptanceSdkVersion
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - uses: actions/setup-dotnet@v5
         env:
           DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
         with:
-          global-json-file: global.json
+          dotnet-version: ${{ steps.acceptance-sdk.outputs.version }}
       - name: Require every suite job to succeed
         shell: pwsh
         env:
