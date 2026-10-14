@@ -80,7 +80,11 @@ public sealed class InstalledCheckTests
             {
                 using var content = package.GetEntry(name)!.Open();
                 using var reader = new StreamReader(content);
-                Assert.Equal(File.ReadAllText(Path.Combine(repository, name)), reader.ReadToEnd());
+                // One immutable package is exercised on both operating systems.
+                // Git checkout line endings may differ from the packing checkout;
+                // require identical document content after only newline normalization.
+                Assert.Equal(File.ReadAllText(Path.Combine(repository, name)).ReplaceLineEndings("\n"),
+                    reader.ReadToEnd().ReplaceLineEndings("\n"));
             }
             using var spec = Assert.Single(package.Entries, e => e.FullName.EndsWith(".nuspec", StringComparison.Ordinal)).Open();
             var metadata = System.Xml.Linq.XDocument.Load(spec).Descendants().Single(e => e.Name.LocalName == "metadata");
