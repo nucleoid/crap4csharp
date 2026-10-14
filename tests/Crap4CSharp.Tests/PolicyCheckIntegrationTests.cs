@@ -279,6 +279,16 @@ public sealed class PolicyCheckIntegrationTests
         if (missingGit)
         {
             // Change only the child environment: never mutate the test runner's PATH.
+            if (OperatingSystem.IsLinux())
+            {
+                // Keep the owned-session launcher available while excluding git.
+                foreach (var utility in new[] { "sh", "setsid" })
+                {
+                    var installed = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator)
+                        .Select(path => Path.GetFullPath(Path.Combine(path, utility))).First(File.Exists);
+                    File.CreateSymbolicLink(Path.Combine(directory.Path, utility), installed);
+                }
+            }
             var tool = typeof(global::App).Assembly.Location;
             var host = Path.Combine(System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory(),
                 "..", "..", "..", OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet");

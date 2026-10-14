@@ -2209,7 +2209,7 @@ public sealed class FreshCheckExecutionTests
             Assert.True(output.ToString().Contains("compiler.inputsMutated", StringComparison.Ordinal) || output.ToString().Contains("provenance.localWorkspaceChanged", StringComparison.Ordinal), output.ToString());
             Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library", "build-count.txt")));
             Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "build-count.txt")));
-            var path = Path.Combine(fixture.Path, "Library/compiler-cache", outputMutation == "source" ? "Authored.cs" : "Rules.json");
+            var path = Path.Combine(fixture.Path, "Library", "compiler-cache", outputMutation == "source" ? "Authored.cs" : "Rules.json");
             Assert.Contains("43", File.ReadAllText(path), StringComparison.Ordinal);
             File.WriteAllBytes(path, original[path]);
             foreach (var (input, bytes) in original) Assert.Equal(bytes, File.ReadAllBytes(input));
