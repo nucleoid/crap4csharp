@@ -47,6 +47,13 @@ internal static class FreshManifestCapture
         var contexts = new List<ManifestContext>(); var builds = new List<ManifestBuild>();
         var executions = new List<ManifestExecution>();
         long readTotal = 0;
+        // This synchronous construction still rereads every file. Check shared
+        // ancestors once on entry and again before the independent closing proof.
+        var readPaths = new CompilerPathBatch(cancellation, RefuseReadPath);
+        ImmutableArray<byte> ReadCaptured(string path, ref long total, CancellationToken token)
+            => CompilerOutputBinding.Read(path, ref total, token, readPaths);
+        static ProjectContextException RefuseReadPath() => new("compiler.outputsUnproven",
+            "A compiler input path changed during capture construction.");
         string Store(ImmutableArray<byte> content)
         {
             cancellation.ThrowIfCancellationRequested();
@@ -88,8 +95,8 @@ internal static class FreshManifestCapture
             if (!binding.IsTestProject) throw Refuse();
             var observed = observations[invocation.GraphId];
             var boundResult = TestResultBinding.ValidateSuccessfulTrx(invocation, binding.Context, observed, cancellation);
-            var pe = CompilerOutputBinding.Read(observed.Assembly!.Path, ref readTotal, cancellation);
-            var pdb = CompilerOutputBinding.Read(observed.Pdb!.Path, ref readTotal, cancellation);
+            var pe = ReadCaptured(observed.Assembly!.Path, ref readTotal, cancellation);
+            var pdb = ReadCaptured(observed.Pdb!.Path, ref readTotal, cancellation);
             CompilerOutputBinding.Match(observed.Assembly, pe); CompilerOutputBinding.Match(observed.Pdb, pdb);
             var inspected = ArtifactEvidenceInspector.InspectBuild(pe, pdb);
             var trx = TestResultBinding.ReadTrx(Path.Combine(invocation.ResultsDirectory, "tests.trx"), cancellation);
@@ -123,8 +130,8 @@ internal static class FreshManifestCapture
             cancellation.ThrowIfCancellationRequested();
             var context = binding.Context; var observation = observations[binding.GraphId];
             CompilerOutputBinding.Validate(context, observation, cancellation);
-            var assembly = CompilerOutputBinding.Read(observation.Assembly!.Path, ref readTotal, cancellation);
-            var pdb = CompilerOutputBinding.Read(observation.Pdb!.Path, ref readTotal, cancellation);
+            var assembly = ReadCaptured(observation.Assembly!.Path, ref readTotal, cancellation);
+            var pdb = ReadCaptured(observation.Pdb!.Path, ref readTotal, cancellation);
             CompilerOutputBinding.Match(observation.Assembly, assembly); CompilerOutputBinding.Match(observation.Pdb, pdb);
             var inspected = ArtifactEvidenceInspector.InspectBuild(assembly, pdb);
             var pdbPaths = inspected.Documents.Keys.Select(p => Path.GetFullPath(p, Path.GetDirectoryName(binding.ProjectPath)!))
@@ -132,7 +139,7 @@ internal static class FreshManifestCapture
             var inputs = new List<ManifestInput>();
             foreach (var source in context.CompilerDocuments)
             {
-                var content = CompilerOutputBinding.Read(source.ResolvedPath!, ref readTotal, cancellation);
+                var content = ReadCaptured(source.ResolvedPath!, ref readTotal, cancellation);
                 if (CanonicalIdentity.Sha256(content.AsSpan()) != source.ContentIdentity) throw Refuse();
                 _ = CapturedSource.Create(source.LogicalPath, content.AsSpan());
                 // A valid Csc source need not have a PDB document. Preserve it in the
@@ -142,7 +149,7 @@ internal static class FreshManifestCapture
             }
             foreach (var reference in CompilerReferenceSnapshot.ResolveSemanticReferences(observation, cancellation))
             {
-                var content = CompilerOutputBinding.Read(reference.Path, ref readTotal, cancellation);
+                var content = ReadCaptured(reference.Path, ref readTotal, cancellation);
                 inputs.Add(Input("reference", CompilerReferenceSnapshot.LogicalReference(CanonicalIdentity.Sha256(content.AsSpan()),
                     reference.Aliases, reference.EmbedInteropTypes), content) with
                     { ReferenceAliases = reference.Aliases, EmbedInteropTypes = reference.EmbedInteropTypes ? true : null });
@@ -151,7 +158,7 @@ internal static class FreshManifestCapture
             foreach (var phase in context.PhaseInputs.Where(i => i.Role != "source"))
             {
                 if (!File.Exists(phase.Path)) continue; // absent probes remain a non-reusable private phase obligation
-                var content = CompilerOutputBinding.Read(phase.Path, ref readTotal, cancellation);
+                var content = ReadCaptured(phase.Path, ref readTotal, cancellation);
                 var relative = Path.GetRelativePath(preflight.Root, phase.Path).Replace('\\', '/');
                 var inside = relative != ".." && !relative.StartsWith("../", StringComparison.Ordinal) && !Path.IsPathRooted(relative);
                 var logical = inside ? relative : "external/" + CanonicalIdentity.Tuple("phase-path", phase.Role, phase.Path);
@@ -220,8 +227,8 @@ internal static class FreshManifestCapture
             {
                 var invocation = execution.Tests.Single(t => t.GraphId == report.GraphId);
                 var testContext = bindings[report.GraphId].Context; var testObservation = observations[invocation.GraphId];
-                var testPe = CompilerOutputBinding.Read(testObservation.Assembly!.Path, ref readTotal, cancellation);
-                var testPdb = CompilerOutputBinding.Read(testObservation.Pdb!.Path, ref readTotal, cancellation);
+                var testPe = ReadCaptured(testObservation.Assembly!.Path, ref readTotal, cancellation);
+                var testPdb = ReadCaptured(testObservation.Pdb!.Path, ref readTotal, cancellation);
                 CompilerOutputBinding.Match(testObservation.Assembly, testPe); CompilerOutputBinding.Match(testObservation.Pdb, testPdb);
                 var tested = ArtifactEvidenceInspector.InspectBuild(testPe, testPdb);
                 var trx = TestResultBinding.ReadTrx(Path.Combine(invocation.ResultsDirectory, "tests.trx"), cancellation);
@@ -251,7 +258,7 @@ internal static class FreshManifestCapture
             var identities = new List<object>(); var index = 0;
             foreach (var source in test.Context.CompilerDocuments)
             {
-                var content = CompilerOutputBinding.Read(source.ResolvedPath!, ref readTotal, cancellation);
+                var content = ReadCaptured(source.ResolvedPath!, ref readTotal, cancellation);
                 if (CanonicalIdentity.Sha256(content.AsSpan()) != source.ContentIdentity) throw Refuse();
                 _ = CapturedSource.Create(source.LogicalPath, content.AsSpan());
                 var locator = Store(content);
@@ -261,7 +268,7 @@ internal static class FreshManifestCapture
             }
             foreach (var reference in CompilerReferenceSnapshot.ResolveSemanticReferences(observations[test.GraphId], cancellation))
             {
-                var content = CompilerOutputBinding.Read(reference.Path, ref readTotal, cancellation);
+                var content = ReadCaptured(reference.Path, ref readTotal, cancellation);
                 var hash = CanonicalIdentity.Sha256(content.AsSpan()); var locator = Store(content);
                 Artifact("test-reference-" + test.GraphId + "-" + index++, "test-compiler-reference", content);
                 identities.Add(new { role = "reference", logicalPath = CompilerReferenceSnapshot.LogicalReference(hash, reference.Aliases, reference.EmbedInteropTypes), locator,
@@ -269,7 +276,7 @@ internal static class FreshManifestCapture
             }
             foreach (var phase in test.Context.PhaseInputs.Where(p => p.Role != "source" && File.Exists(p.Path)))
             {
-                var content = CompilerOutputBinding.Read(phase.Path, ref readTotal, cancellation);
+                var content = ReadCaptured(phase.Path, ref readTotal, cancellation);
                 identities.Add(new { role = phase.Role, logicalPath = "metadata/" + CanonicalIdentity.Tuple("phase-path", phase.Role, phase.Path),
                     sha256 = CanonicalIdentity.Sha256(content.AsSpan()), length = content.Length });
             }
@@ -306,6 +313,7 @@ internal static class FreshManifestCapture
                 { StateHash = stateHash },
             [new("workspace", "workspace", OperatingSystem.IsWindows() ? "insensitive" : "sensitive")], contexts, builds, executions, artifacts,
             new(CanonicalIdentity.Sha256(scopeBytes.AsSpan()), CanonicalIdentity.Sha256(policyBytes.AsSpan()), null, null), null));
+        readPaths.Complete();
         if (provisional)
             using (timing?.Start("public.capture.originalPhysicalAfter"))
                 execution.Compiler.RetainedProof.ValidateCurrent(cancellation);

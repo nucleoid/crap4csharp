@@ -145,6 +145,8 @@ internal static class FreshPriorBuild
     {
         var values = new List<string>();
         var cache = new Dictionary<string, string>(PathIdentityPolicy.Current.Comparer);
+        var readPaths = new CompilerPathBatch(token, () => new("compiler.outputsUnproven",
+            "A compiler input path changed during prior-build fingerprinting."));
         long total = 0;
         foreach (var node in CompilerGraphExecution.ValidateAndFreeze(graph))
         {
@@ -164,7 +166,7 @@ internal static class FreshPriorBuild
                     if (Directory.Exists(input.Path)) throw Refuse();
                     // Missing probes are obligations too; an appeared probe changes the digest.
                     hash = File.Exists(input.Path)
-                        ? CanonicalIdentity.Sha256(CompilerOutputBinding.Read(input.Path, ref total, token).AsSpan()) : "absent";
+                        ? CanonicalIdentity.Sha256(CompilerOutputBinding.Read(input.Path, ref total, token, readPaths).AsSpan()) : "absent";
                     cache.Add(input.Path, hash);
                 }
                 values.Add(CanonicalIdentity.Tuple("phase", node.Id, input.Role, PathKey(input.Path),
@@ -178,12 +180,13 @@ internal static class FreshPriorBuild
                 if (values.Count >= CompilerPhaseSnapshot.MaximumInputs) throw Refuse();
                 if (!cache.TryGetValue(reference, out var hash))
                 {
-                    hash = CanonicalIdentity.Sha256(CompilerOutputBinding.Read(reference, ref total, token).AsSpan());
+                    hash = CanonicalIdentity.Sha256(CompilerOutputBinding.Read(reference, ref total, token, readPaths).AsSpan());
                     cache.Add(reference, hash);
                 }
                 values.Add(CanonicalIdentity.Tuple("reference", node.Id, PathKey(reference), hash));
             }
         }
+        readPaths.Complete();
         return CanonicalIdentity.Set(Provider, values);
     }
     private static SavedPath SavePath(string root, string path)
