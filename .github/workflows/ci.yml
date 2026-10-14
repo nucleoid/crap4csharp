@@ -15,11 +15,11 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
-    env:
-      DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-dotnet@v5
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
         with:
           global-json-file: global.json
       - run: dotnet restore Crap4CSharp.slnx --disable-parallel
@@ -47,11 +47,11 @@ jobs:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 360
-    env:
-      DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-dotnet@v5
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
         with:
           global-json-file: global.json
       - name: Install exact .NET 9 consumer runtime
@@ -94,11 +94,11 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
-    env:
-      DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-dotnet@v5
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
         with:
           global-json-file: global.json
       - name: Require every suite job to succeed

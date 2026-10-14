@@ -17,11 +17,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
       CANDIDATE_VERSION: ${{ inputs.candidate_version }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-dotnet@v5
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
         with:
           global-json-file: global.json
       - name: Locate the original immutable candidate on reruns
@@ -67,11 +68,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
       CANDIDATE_VERSION: ${{ inputs.candidate_version }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-dotnet@v5
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
         with:
           global-json-file: global.json
       - uses: actions/download-artifact@v4
@@ -124,11 +126,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 360
     env:
-      DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
       CANDIDATE_VERSION: ${{ inputs.candidate_version }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-dotnet@v5
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
         with:
           global-json-file: global.json
       - name: Install exact consumer runtime
@@ -186,11 +189,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 360
     env:
-      DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
       CANDIDATE_VERSION: ${{ inputs.candidate_version }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-dotnet@v5
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
         with:
           global-json-file: global.json
       - name: Install exact consumer runtime
