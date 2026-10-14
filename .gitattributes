@@ -1,3 +1,6 @@
+tests/Crap4CSharp.Tests/Fixtures/results/* text eol=lf
+tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs text eol=lf
+
 # Packaged documents must have identical bytes on Windows and Linux.
 /README.md text eol=lf
 /LICENSE text eol=lf
