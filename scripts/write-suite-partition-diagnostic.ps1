@@ -37,7 +37,7 @@ try {
         $method=$case.Class+'.'+$case.Method
         $messageNode=$row.SelectSingleNode('*[local-name()="Output"]/*[local-name()="ErrorInfo"]/*[local-name()="Message"]')
         $message=if($null -eq $messageNode){''}else{[string]$messageNode.InnerText}
-        $tokens=@(foreach($token in @('run.timedOut','run.cancelled','context.projectLoadFailed','context.inputsMutated','compiler.inputsMutated','compiler.referencesUnproven','coverage.unavailable','test.runnerUnsupported')){
+        $tokens=@(foreach($token in @('run.timedOut','run.cancelled','context.projectLoadFailed','context.assetsUnavailable','context.inputsMutated','compiler.inputsMutated','compiler.referencesUnproven','coverage.unavailable','test.runnerUnsupported')){
             if($message.Contains($token,[StringComparison]::Ordinal)){$token}
         })
         $failures.Add([ordered]@{caseDigest=(Get-SuiteCaseDigest $case);

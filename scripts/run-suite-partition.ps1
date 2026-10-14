@@ -15,6 +15,12 @@ $results=$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath
 if(Test-Path -LiteralPath $results){throw 'Partition results require a new owned directory.'}
 [void][IO.Directory]::CreateDirectory($results)
 $prefix=Join-Path $results ("$Configuration-$ShardIndex")
+# This repository-owned fixture is analyzed by integration tests. A fresh shared
+# bin import has no restore assets; restore only its declared dependencies, with
+# no rebuild of the bound runtime and no changes to analyzed consumer fixtures.
+& dotnet restore tests/Crap4CSharp.ProvenanceFixture/Crap4CSharp.ProvenanceFixture.csproj `
+    --disable-parallel -nr:false *> "$prefix.fixture.restore.log"
+if($LASTEXITCODE -ne 0){throw 'Repository-owned provenance fixture restore failed.'}
 $assembly="tests/Crap4CSharp.Tests/bin/$Configuration/net10.0/Crap4CSharp.Tests.dll"
 if($BuildManifestPath){
     & "$PSScriptRoot/write-suite-discovery.ps1" -AssemblyPath $assembly -OutputPath "$prefix.discovery.json"
