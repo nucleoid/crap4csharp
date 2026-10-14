@@ -43,6 +43,9 @@ if($BuildManifestPath){
 & dotnet vstest $assembly "--TestCaseFilter:$($plan[$ShardIndex].filter)" `
     "--Logger:trx;LogFileName=$Configuration-$ShardIndex.trx" "--ResultsDirectory:$results" *> "$prefix.log"
 $actualExit=$LASTEXITCODE
+# Separate diagnostic observation; never supplies or relaxes an acceptance receipt.
+& "$PSScriptRoot/write-suite-partition-diagnostic.ps1" -DiscoveryPath "$prefix.discovery.json" -ShardCount $ShardCount `
+    -ShardIndex $ShardIndex -TrxPath "$prefix.trx" -ExitCode $actualExit -OutputPath "$prefix.partition.diagnostic.json"
 & "$PSScriptRoot/write-suite-identity.ps1" @identityArgs -OutputPath "$prefix.after.identity.json"
 & "$PSScriptRoot/assert-suite-identity.ps1" -BeforePath "$prefix.before.identity.json" `
     -AfterPath "$prefix.after.identity.json" -OutputPath "$prefix.identity.receipt.json"

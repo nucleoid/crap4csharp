@@ -271,7 +271,7 @@ internal static class CoverageGraphBinding
     {
         IReadOnlyList<SavedRequiredTest> inventory;
         using (timing?.Start(boundary + ".saved.requiredResults"))
-            inventory = SavedRequiredTestResults.Validate(bundle, current, bound, root, token, timing, boundary);
+            inventory = SavedRequiredTestResults.ValidateWithTiming(bundle, current, bound, root, token, timing, boundary);
         using (timing?.Start(boundary + ".saved.coverage"))
             return (inventory, ValidateSavedNormalizedCore(bundle, bound, token, inventory));
     }

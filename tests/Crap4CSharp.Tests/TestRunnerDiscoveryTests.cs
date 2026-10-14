@@ -71,11 +71,16 @@ public sealed class TestRunnerDiscoveryTests
             Directory.CreateDirectory(owned);
             foreach (var file in Directory.GetFiles(installed)) File.Copy(file, Path.Combine(owned, Path.GetFileName(file)));
             var generatedTargets = Path.Combine(fixture.Path, "obj", "Tests.csproj.nuget.g.targets");
-            var oldImport = "$(NuGetPackageRoot)" + suffix + "/coverlet.collector.targets";
-            var targets = File.ReadAllText(generatedTargets);
-            Assert.Contains(oldImport, targets);
-            File.WriteAllText(generatedTargets, targets.Replace(oldImport,
-                Path.Combine(owned, "coverlet.collector.targets"), StringComparison.Ordinal));
+            var targets = System.Xml.Linq.XDocument.Load(generatedTargets);
+            var expectedImport = suffix + "/coverlet.collector.targets";
+            var collectorImport = Assert.Single(targets.Descendants()
+                .Where(element => element.Name.LocalName == "Import")
+                .Select(element => element.Attribute("Project")),
+                attribute => attribute is not null &&
+                    attribute.Value.StartsWith("$(NuGetPackageRoot)", StringComparison.Ordinal) &&
+                    attribute.Value["$(NuGetPackageRoot)".Length..].Replace('\\', '/').TrimStart('/') == expectedImport);
+            collectorImport!.Value = Path.Combine(owned, "coverlet.collector.targets");
+            targets.Save(generatedTargets);
             var missing = mode switch
             {
                 "missing-collector" => "coverlet.collector.dll",

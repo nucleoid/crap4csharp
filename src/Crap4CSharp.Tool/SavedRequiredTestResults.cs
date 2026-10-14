@@ -8,6 +8,10 @@ namespace Crap4CSharp.Core;
 internal static class SavedRequiredTestResults
 {
     internal static IReadOnlyList<SavedRequiredTest> Validate(ArtifactBundle bundle,
+        CheckExecutionPlan current, CompilerGraphPhaseResult compiler, string root, CancellationToken token)
+        => ValidateWithTiming(bundle, current, compiler, root, token, null, "saved");
+
+    internal static IReadOnlyList<SavedRequiredTest> ValidateWithTiming(ArtifactBundle bundle,
         CheckExecutionPlan current, CompilerGraphPhaseResult compiler, string root, CancellationToken token,
         CompletedProofTiming? timing = null, string boundary = "saved")
     {

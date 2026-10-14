@@ -100,6 +100,14 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           ./scripts/run-suite-partition.ps1 -Configuration Release -ShardCount 16 -ShardIndex ${{ matrix.shard }} -Commit $env:GITHUB_SHA -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -BuildManifestPath artifacts/selected-build/build.json -ResultsDirectory artifacts/test-results
+      - name: Retain sanitized partition diagnostic
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-Release-${{ matrix.os }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: artifacts/test-results/Release-${{ matrix.shard }}.partition.diagnostic.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Retain only sanitized partition receipt
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
