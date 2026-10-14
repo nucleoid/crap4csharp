@@ -852,7 +852,8 @@ public sealed class FreshCheckExecutionTests
                     { Assert.Equal("completed", o.State); Assert.Equal(0, o.Process!.ExitCode); });
                     var warm = await SavedCompletedProof.ValidateAsync(bundle,
                         preflight with { Request = preflight.Request with { WarmPostBuildProbe = true } }, token);
-                    var ordinary = await SavedCompletedProof.ValidateAsync(bundle, preflight, token);
+                    var ordinary = await SavedCompletedProof.ValidateAsync(bundle,
+                        preflight with { Request = preflight.Request with { WarmPostBuildProbe = false } }, token);
                     const string diagnostic = "Private warm selection: warm.";
                     Assert.Single(warm.FinalGraph.Diagnostics, d => d == diagnostic);
                     Assert.DoesNotContain(diagnostic, ordinary.FinalGraph.Diagnostics);
@@ -1339,7 +1340,8 @@ public sealed class FreshCheckExecutionTests
                     if (warmSaved)
                     {
                         Assert.Equal(2, currentPlan.Tests.Count);
-                        var ordinary = await SavedCompletedProof.ValidateAsync(bundle, preflight, token);
+                        var ordinary = await SavedCompletedProof.ValidateAsync(bundle,
+                            preflight with { Request = preflight.Request with { WarmPostBuildProbe = false } }, token);
                         const string warmSelectionDiagnostic = "Private warm selection: warm.";
                         Assert.Single(savedProof.FinalGraph.Diagnostics, d => d == warmSelectionDiagnostic);
                         Assert.DoesNotContain(warmSelectionDiagnostic, ordinary.FinalGraph.Diagnostics);
