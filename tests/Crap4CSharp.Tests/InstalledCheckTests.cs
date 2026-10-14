@@ -103,6 +103,10 @@ public sealed class InstalledCheckTests
             SecurityElement.Escape(feed) + "\" /></packageSources></configuration>");
         var environment = new Dictionary<string, string>
         {
+            // Local-tool resolver entries include absolute package paths. Keep
+            // them with this installation so repeated exact-version acceptance
+            // cannot reuse a prior fixture's disposed package directory.
+            ["DOTNET_CLI_HOME"] = Path.Combine(installation.Path, "cli-home"),
             ["NUGET_PACKAGES"] = Path.Combine(installation.Path, "package-cache"),
             ["NUGET_HTTP_CACHE_PATH"] = Path.Combine(installation.Path, "http-cache")
         };
