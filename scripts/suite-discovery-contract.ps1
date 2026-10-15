@@ -1,4 +1,18 @@
 . "$PSScriptRoot/suite-receipt-contract.ps1"
+function Convert-SuiteDiscoveryOutput([string]$Text){
+    # xUnit v3.2.2 can finish discovery successfully before a foreground thread
+    # exits. Its single fixed shutdown notice is the only permitted suffix.
+    $json=$Text.TrimEnd()
+    $notice='Waiting 10 seconds for foreground threads to exit...'
+    if($json.EndsWith("`n"+$notice,[StringComparison]::Ordinal)){
+        $json=$json.Substring(0,$json.Length-$notice.Length).TrimEnd()
+    }
+    $document=[Text.Json.JsonDocument]::Parse($json)
+    try{
+        if($document.RootElement.ValueKind -ne [Text.Json.JsonValueKind]::Array){throw 'Discovery must contain exactly one JSON array.'}
+    }finally{$document.Dispose()}
+    @($json|ConvertFrom-Json)
+}
 function Convert-SuiteDiscoveredCases([object[]]$Cases,[string]$Assembly){
     $ids=[Collections.Generic.SortedDictionary[string,object]]::new([StringComparer]::Ordinal)
     $names=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)

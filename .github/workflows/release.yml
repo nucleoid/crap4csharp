@@ -123,8 +123,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Restore failed.' }
           dotnet build Crap4CSharp.slnx -c ${{ matrix.configuration }} --no-restore -m:1 -nr:false "-p:Version=$env:CANDIDATE_VERSION"
           if ($LASTEXITCODE -ne 0) { throw 'Configuration build failed.' }
-          ./scripts/prepare-native-tool-assets.ps1 -Version $env:CANDIDATE_VERSION -Configuration ${{ matrix.configuration }} -OutputDirectory artifacts/native-assets
-          ./scripts/install-native-test-runtime.ps1 -NativeAssetsDirectory artifacts/native-assets -Version $env:CANDIDATE_VERSION -Configuration ${{ matrix.configuration }}
+          if ('${{ matrix.configuration }}' -ceq 'Release') {
+            ./scripts/install-native-test-runtime.ps1 -PackagePath $env:CRAP4CSHARP_CANDIDATE_PACKAGE -Version $env:CANDIDATE_VERSION -Configuration Release
+          } else {
+            ./scripts/prepare-native-tool-assets.ps1 -Version $env:CANDIDATE_VERSION -Configuration Debug -OutputDirectory artifacts/native-assets
+            ./scripts/install-native-test-runtime.ps1 -NativeAssetsDirectory artifacts/native-assets -Version $env:CANDIDATE_VERSION -Configuration Debug
+          }
           ./scripts/export-suite-build.ps1 -Configuration ${{ matrix.configuration }} -Commit $env:GITHUB_SHA -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -PackagePath $env:CRAP4CSHARP_CANDIDATE_PACKAGE -OutputDirectory artifacts/suite-build
       - uses: actions/upload-artifact@v4
         with:
@@ -209,7 +213,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: diagnostic-${{ matrix.configuration }}-${{ matrix.os }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
-          path: artifacts/test-results/${{ matrix.configuration }}-${{ matrix.shard }}.partition.diagnostic.json
+          path: |
+            artifacts/test-results/${{ matrix.configuration }}-${{ matrix.shard }}.partition.diagnostic.json
+            artifacts/test-results/${{ matrix.configuration }}-${{ matrix.shard }}.discovery.json.diagnostic.json
           if-no-files-found: warn
           retention-days: 7
       - name: Retain only sanitized partition receipt

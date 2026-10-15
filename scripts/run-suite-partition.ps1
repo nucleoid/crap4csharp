@@ -25,8 +25,7 @@ $assembly="tests/Crap4CSharp.Tests/bin/$Configuration/net10.0/Crap4CSharp.Tests.
 if($BuildManifestPath){
     & "$PSScriptRoot/write-suite-discovery.ps1" -AssemblyPath $assembly -OutputPath "$prefix.discovery.json"
 }else{
-    & dotnet $assembly -noColor -preEnumerateTheories -list full/json > "$prefix.discovery.json"
-    if($LASTEXITCODE -ne 0){throw 'Complete theory discovery failed.'}
+    & "$PSScriptRoot/write-suite-discovery.ps1" -AssemblyPath $assembly -OutputPath "$prefix.discovery.json" -InitializeAssemblyIdentity
 }
 $cases=@(Get-Content -LiteralPath "$prefix.discovery.json" -Raw | ConvertFrom-Json)
 $plan=@(Get-SuitePartitionPlan $cases $ShardCount)

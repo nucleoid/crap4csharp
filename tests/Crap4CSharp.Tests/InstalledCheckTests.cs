@@ -14,6 +14,9 @@ public sealed class InstalledCheckTests
     [InlineData("compiler.outputsUnproven", "completed", 0, "INCOMPLETE")]
     [InlineData("context.metadataUnavailable", "completed", 0, "INCOMPLETE")]
     [InlineData("coverage.unavailable", "completed", 0, "INCOMPLETE")]
+    [InlineData("coverage.aggregateUnproven", "completed", 0, "INCOMPLETE")]
+    [InlineData("provenance.postTestEvidenceUnproven", "completed", 0, "INCOMPLETE")]
+    [InlineData("run.timedOut", "completed", 0, "INCOMPLETE")]
     [InlineData("provenance.stale", "completed", 0, "INCOMPLETE")]
     [InlineData("test.runnerUnsupported", "completed", 0, "INCOMPLETE")]
     [InlineData("tests.incomplete", "failed", null, "INCOMPLETE")]
@@ -29,7 +32,9 @@ public sealed class InstalledCheckTests
         using var terminal = JsonDocument.Parse(JsonSerializer.Serialize(new
         {
             schemaVersion = ResultContract.SchemaVersion, toolVersion = "pinned-fixture",
-            evaluation = new { invocationMode = "check", checks = new[] { new { reason } } },
+            evaluation = new { invocationMode = "check", checks = new[] {
+                new { name = "policyTrust", status = "pass", reason = "policy.baseTrusted" },
+                new { name = "evidence", status = "operationalError", reason } } },
             run = new { exitCode = 1, cancellation = new { cancelled = false, timedOut = false },
                 testOutcomes = new[] { new { status = state, exitCode = testExit } } }
         }));
@@ -401,7 +406,7 @@ public sealed class InstalledCheckTests
 
 
 
-    private static string NormalizeDeliveryForgeGate(JsonElement terminal, int exitCode,
+    internal static string NormalizeDeliveryForgeGate(JsonElement terminal, int exitCode,
         string exactToolVersion, string reviewedRevision, bool currentReuse = false)
     {
         if (terminal.GetProperty("schemaVersion").GetString() != ResultContract.SchemaVersion ||
@@ -425,7 +430,8 @@ public sealed class InstalledCheckTests
                 test.GetProperty("status").GetString() == "failed" &&
                 (!test.TryGetProperty("exitCode", out var observedExit) || observedExit.ValueKind == JsonValueKind.Null)))
                 return "INCOMPLETE";
-            var reasons = checks.Select(check => check.GetProperty("reason").GetString() ?? "").ToArray();
+            var reasons = checks.Where(check => check.GetProperty("status").GetString() != "pass")
+                .Select(check => check.GetProperty("reason").GetString() ?? "").ToArray();
             using var reasonMap = JsonDocument.Parse(File.ReadAllText(Path.Combine(
                 Path.GetFullPath("../../../../../", AppContext.BaseDirectory), "docs", "delivery-forge-reason-map.json")));
             var map = reasonMap.RootElement;
