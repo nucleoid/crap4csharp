@@ -145,6 +145,36 @@ public sealed class PrivateDiagnosticsCleanupTests
         finally { Directory.Delete(link); }
     }
 
+    [Theory]
+    [InlineData("duplicate")]
+    [InlineData("unknown")]
+    [InlineData("empty")]
+    [InlineData("oversize")]
+    [InlineData("wrong-root")]
+    public async Task CommandRefusesMalformedMarkersWithoutAnUnhandledExceptionOrDeletion(string defect)
+    {
+        using var fixture = new OwnedPrivateRoot();
+        using (new PrivateDiagnosticLease(fixture.Path, "fixture")) { }
+        var marker = System.IO.Path.Combine(fixture.Path, PrivateDiagnosticLease.MarkerName);
+        var text = File.ReadAllText(marker);
+        text = defect switch
+        {
+            "duplicate" => text.Replace("{", "{\"schemaVersion\":\"duplicate\",", StringComparison.Ordinal),
+            "unknown" => text.Replace("{", "{\"unexpected\":true,", StringComparison.Ordinal),
+            "empty" => "",
+            "oversize" => new string(' ', 4097),
+            _ => text.Replace(fixture.Path.Replace("\\", "\\\\", StringComparison.Ordinal), "wrong-root", StringComparison.Ordinal)
+        };
+        File.WriteAllText(marker, text);
+        using var output = new StringWriter(); using var error = new StringWriter();
+        Assert.Equal(1, await App.RunAsync(["cleanup", "--private-diagnostics", fixture.Path], fixture.Path,
+            output, error, TestContext.Current.CancellationToken));
+        Assert.Equal("", output.ToString());
+        Assert.Contains("cleanup refused", error.ToString());
+        Assert.True(File.Exists(fixture.ProtectedFile));
+        Assert.Equal(text, File.ReadAllText(marker));
+    }
+
     [Fact]
     public async Task CommandRejectsUnknownOrRepeatedArgumentsWithoutDeletion()
     {

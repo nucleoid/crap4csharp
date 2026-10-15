@@ -11,6 +11,38 @@ public sealed class GitScopeTests : IDisposable
     public void Dispose() => fixture.Dispose();
 
     [Fact]
+    public async Task ConvertedCheckoutDoesNotWidenScopeAndStillDetectsSameTimestampConfigurationEdits()
+    {
+        var token = TestContext.Current.CancellationToken;
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        await Git("config", "core.autocrlf", "true");
+        Write("Code.cs", "class C {\n int M() => 42;\n}\n");
+        Write("Project.csproj", "<Project>\n<PropertyGroup><Value>42</Value></PropertyGroup>\n</Project>\n");
+        await Git("add", "."); await Git("commit", "--quiet", "-m", "base");
+        File.Delete(Path.Combine(temporary, "Code.cs"));
+        File.Delete(Path.Combine(temporary, "Project.csproj"));
+        await Git("checkout-index", "--all", "--force");
+        var index = File.ReadAllBytes(Path.Combine(temporary, ".git", "index"));
+        var request = new GitScopeRequest(ChangeScopeMode.Worktree);
+        var clean = await GitScopeResolver.CaptureAsync(request, temporary, TimeSpan.FromSeconds(30), token);
+        Assert.Equal(ScopeCompleteness.Complete, clean.Completeness);
+        Assert.All(clean.Files, file => { Assert.Empty(file.AddedRanges); Assert.Empty(file.DeletedRanges); });
+        var project = Path.Combine(temporary, "Project.csproj");
+        var timestamp = File.GetLastWriteTimeUtc(project);
+        File.WriteAllText(project, File.ReadAllText(project).Replace("42", "43", StringComparison.Ordinal));
+        File.SetLastWriteTimeUtc(project, timestamp);
+        var changed = await GitScopeResolver.CaptureAsync(request, temporary, TimeSpan.FromSeconds(30), token);
+        Assert.Equal(ScopeCompleteness.ContextIncomplete, changed.Completeness);
+        Assert.Equal(index, File.ReadAllBytes(Path.Combine(temporary, ".git", "index")));
+        await Git("update-index", "--skip-worktree", "Project.csproj");
+        var hidden = await Assert.ThrowsAsync<ScopeException>(() => GitScopeResolver.CaptureAsync(request, temporary,
+            TimeSpan.FromSeconds(30), token));
+        Assert.Equal("scope.hiddenIndexEntry", hidden.Reason);
+    }
+
+    [Fact]
     public async Task LargerOpaqueQueryPreservesOriginalProtocolAllowanceAndCompleteGroups()
     {
         var paths = Enumerable.Range(0, 48).Select(i => "input" + i).ToArray();

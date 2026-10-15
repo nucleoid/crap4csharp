@@ -2,16 +2,16 @@
 
 Crap4CSharp has two deliberately different analysis contexts:
 
-- **Project context** is an internal, versioned `project-context-v1` adapter used by the forthcoming `check` workflow. It loads prepared MSBuild projects in an isolated process and captures Roslyn `Document` inputs, logical link paths, target framework, configuration/platform, language version, preprocessor symbols, evaluated imports, generated/test exclusions, and SDK/MSBuild/Roslyn identities.
+- **Project context** is an internal, versioned `project-context-v1` adapter used by the `check` workflow. It loads prepared MSBuild projects in an isolated process and captures Roslyn `Document` inputs, logical link paths, target framework, configuration/platform, language version, preprocessor symbols, evaluated imports, generated/test exclusions, and SDK/MSBuild/Roslyn identities.
 - **Syntax-only context** is the existing command-line behavior. It discovers files and parses them with the tool's default parser. It remains labelled `syntaxOnly` and does not claim compiler-input, project, or target-framework fidelity.
 
 Project loading never falls back to syntax-only analysis. A missing SDK, restore assets, project, target framework, reference pack, build host, source path, or generated-source capability is an operational context failure.
 
 ## Preparation and execution boundary
 
-The loader does not restore, build, add packages, run tests, or call Roslyn's mutating workspace APIs. Callers must first restore the consumer's already-declared dependencies. `ProjectBuildPreparation` exposes serialized restore and non-incremental `--no-restore -m:1` build operations for the eventual check orchestrator; it does not itself constitute that workflow.
+The loader does not restore, build, add packages, run tests or write consumer source. It may construct an in-memory Roslyn workspace. Callers first restore the consumer's already-declared dependencies. The fresh-check orchestrator uses `ProjectBuildPreparation` for serialized restore and non-incremental `--no-restore -m:1` builds. MSBuild evaluation and design-time targets can execute imported logic, as described below.
 
-`MSBuildWorkspace` design-time documents establish `DesignTimeComplete` only. `CompiledInputBindingComplete` stays false until sanitized compiler observations and output identities are supplied and `CompiledInputCapture.Validate` proves an exact context/source match. `ReuseRecipeComplete` is separate and remains false in this slice. Unknown, drifted, or incomplete evidence fails closed.
+`MSBuildWorkspace` design-time documents establish `DesignTimeComplete` only. `CompiledInputBindingComplete` stays false until sanitized compiler observations and output identities are supplied and `CompiledInputCapture.Validate` proves an exact context/source match. `ReuseRecipeComplete` is separate: design-time loading alone leaves it false; a supported completed-check provider must prove the full current recipe. Unknown, drifted, or incomplete evidence fails closed.
 
 The selected consumer SDK is resolved by `dotnet` from the consumer target directory, so a consumer `global.json` participates. The child and its BuildHost receive the resolved host, `DOTNET_ROOT`, and `PATH`; MSBuild is registered from that exact SDK before any workspace type is used. Every selected project directory is rechecked and a nested SDK disagreement fails `context.sdkMismatch`. Every target framework retains its own effective global properties.
 
@@ -46,13 +46,14 @@ The protocol uses task-owned request/response files so loader logs cannot corrup
 
 Captured `analyze` and trusted reused `check` consume this context through a hash-bound manifest. The supported
 current-revalidation recipe reloads the declared project/TFM/configuration and inspects current PE/PDB outputs; it
-does not itself restore, build, or test. Fresh execution and bundle production remain later orchestration work.
+does not itself restore, build, or test. The fresh-check orchestrator separately executes the required build/test plan and produces bundles only after their applicable proof gates.
 
 ## Required graph Workspace preparation (internal)
 
-`LoadGraphAsync` loads each dependency-first mapped graph node in its own Workspace using all of its global
-properties, including custom `AdditionalProperties`, not only root configuration/TFM. Its private association
+`LoadGraphAsync` retains each dependency-first graph node and all of its global properties, including custom
+`AdditionalProperties`, not only root configuration/TFM. Ordinary nodes use their own workspace; mapped nodes
+can share an invocation-owned workspace with their explicit project-reference associations. Its private association
 retains graph ID, physical project path, design-time context and evaluated test-project classification.
 Required test contexts remain present even when production inventory excludes tests. Loading requires existing
 restore assets and never implicitly restores or compiles. These associations do not establish actual Csc inputs,
-test execution, final output binding, reusable evidence or a completed public fresh-check workflow.
+test execution, final output binding or reusable evidence; the fresh-check workflow proves those separately.

@@ -82,17 +82,13 @@ internal sealed class CompilerReferenceSnapshot
     }
 
     internal static string LogicalReference(string sha256, string? aliases, bool embedded) =>
-        "references/" + (aliases is null && !embedded ? sha256 :
-            CanonicalIdentity.Tuple("reference-properties-v1", sha256, aliases ?? "", embedded ? "true" : "false")) + ".dll";
+        SemanticEligibility.ReferenceLogicalPath(sha256, aliases, embedded);
 
     internal static Microsoft.CodeAnalysis.PortableExecutableReference CapturedReference(ManifestInput input,
         System.Collections.Immutable.ImmutableArray<byte> bytes)
     {
-        var aliases = NormalizeAliases(input.ReferenceAliases);
-        var embedded = input.EmbedInteropTypes ?? false;
-        if (input.Role != "reference" || input.ReferenceAliases != aliases || input.EmbedInteropTypes == false ||
-            (aliases is not null || embedded) && input.LogicalPath != LogicalReference(CanonicalIdentity.Sha256(bytes.AsSpan()), aliases, embedded)) throw Refuse();
-        return Microsoft.CodeAnalysis.MetadataReference.CreateFromImage(bytes, SemanticEligibility.ReferenceProperties(input));
+        try { return SemanticEligibility.CapturedReference(input, bytes); }
+        catch (InvalidDataException) { throw Refuse(); }
     }
 
     internal CompilerReferenceSnapshot Extend(IEnumerable<string> paths, CancellationToken token)

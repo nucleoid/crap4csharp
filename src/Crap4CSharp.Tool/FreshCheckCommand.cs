@@ -163,9 +163,14 @@ internal static class FreshCheckCommand
                 finalDeadline.CancelAfter(remaining);
                 try
                 {
-                    await FreshManifestCapture.RegateAsync(evidence, finalDeadline.Token, timing, "public.outerCapturedProof");
-                    CommitExport(evidence.Compiler.FinalGraph.GraphContexts.SelectMany(b => b.Context.ProtectedPaths
-                        .Concat(b.Context.PhaseInputs.Select(i => i.Path))).ToArray(), finalDeadline.Token);
+                    var protectedPaths = evidence.Compiler.FinalGraph.GraphContexts.SelectMany(b => b.Context.ProtectedPaths
+                        .Concat(b.Context.PhaseInputs.Select(i => i.Path))).ToArray();
+                    var bundleFiles = SavedBundleFootprint.Validate(export.Bundle, preflight.Root,
+                        protectedPaths, finalDeadline.Token);
+                    await FreshManifestCapture.RegateAsync(evidence, finalDeadline.Token, timing,
+                        "public.outerCapturedProof", bundleFiles);
+                    _ = SavedBundleFootprint.Validate(export.Bundle, preflight.Root, protectedPaths, finalDeadline.Token);
+                    CommitExport(protectedPaths, finalDeadline.Token);
                 }
                 catch (OperationCanceledException) when (!cancellation.IsCancellationRequested && finalDeadline.IsCancellationRequested)
                 { throw new ProcessTimeoutException("Fresh check", request.Timeout); }
