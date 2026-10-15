@@ -48,6 +48,8 @@ An otherwise unclassified exit 1 is `ERROR`, never `PASS`. Do not normalize the
 whole invocation as not applicable merely because changed-code scope is empty.
 The machine-readable [reason map](delivery-forge-reason-map.json) defines exit-1
 evidence and invocation classifications used by the representative consumer.
+Classify reasons from checks whose status is not `pass`. A passing policy-trust
+check is context, and must not turn missing evidence into an invocation error.
 An actual test failure requires a numeric nonzero test exit code. A `failed`
 outcome with `exitCode: null` records an interrupted launch and maps to
 `INCOMPLETE`; it must never be treated as a completed failing test.

@@ -131,7 +131,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: diagnostic-Release-${{ matrix.os }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
-          path: artifacts/test-results/Release-${{ matrix.shard }}.partition.diagnostic.json
+          path: |
+            artifacts/test-results/Release-${{ matrix.shard }}.partition.diagnostic.json
+            artifacts/test-results/Release-${{ matrix.shard }}.discovery.json.diagnostic.json
           if-no-files-found: warn
           retention-days: 7
       - name: Retain only sanitized partition receipt

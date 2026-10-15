@@ -38,6 +38,8 @@ public sealed class FreshDeadlineTests
             "--timeout-seconds", userCancellation ? "30" : "1", "--format", "json"], fixture.Path, output, new StringWriter(), cancellation.Token);
         Assert.Equal(1, exit);
         using var result = JsonDocument.Parse(output.ToString());
+        Assert.Equal("INCOMPLETE", InstalledCheckTests.NormalizeDeliveryForgeGate(
+            result.RootElement, exit, global::App.ToolVersion, "fixture-base"));
         var run = result.RootElement.GetProperty("run");
         Assert.DoesNotContain(run.GetProperty("artifacts").EnumerateArray(),
             a => a.GetProperty("kind").GetString() == "private-diagnostics");
