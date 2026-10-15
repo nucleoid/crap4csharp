@@ -10,6 +10,10 @@ public sealed class NativeSdkGraphTests
     [InlineData("ClientSecret")]
     [InlineData("SigningKey")]
     [InlineData("StorageSasToken")]
+    [InlineData("GitHubToken")]
+    [InlineData("StorageAccountKey")]
+    [InlineData("KeyPassphrase")]
+    [InlineData("Bearer")]
     public async Task CredentialMappedDependencyRefusesBeforeDesignTimeHooks(string credentialProperty)
     {
         using var fixture = TestDirectory.Create("crap4csharp-sensitive-sdk-graph");

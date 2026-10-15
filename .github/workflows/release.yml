@@ -358,7 +358,7 @@ jobs:
           path: ${{ runner.temp }}/candidate/acceptance.json
           if-no-files-found: error
           retention-days: 7
-      - name: Retain only sanitized complete union receipts
+      - name: Retain only sanitized complete union receipts and discovery diagnostics
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
@@ -366,6 +366,8 @@ jobs:
           path: |
             artifacts/test-results/Debug.partition-coverage.receipt.json
             artifacts/test-results/Release.partition-coverage.receipt.json
+            artifacts/test-results/Debug.discovery.json.diagnostic.json
+            artifacts/test-results/Release.discovery.json.diagnostic.json
           if-no-files-found: warn
           retention-days: 7
 
