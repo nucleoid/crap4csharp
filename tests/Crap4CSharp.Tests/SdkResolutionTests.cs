@@ -7,24 +7,24 @@ namespace Crap4CSharp.Tests;
 public sealed class SdkResolutionTests
 {
     [Theory]
-    [InlineData("null")]
-    [InlineData("[]")]
-    [InlineData("{}")]
-    [InlineData("{\"runtimeOptions\":null}")]
-    [InlineData("{\"runtimeOptions\":[]}")]
-    [InlineData("{\"runtimeOptions\":{}}")]
-    [InlineData("{\"runtimeOptions\":{\"frameworks\":[]}}")]
-    [InlineData("{\"runtimeOptions\":{\"framework\":null}}")]
-    [InlineData("{\"runtimeOptions\":{\"framework\":[]}}")]
-    [InlineData("{\"runtimeOptions\":{\"framework\":{}}}")]
-    [InlineData("{\"runtimeOptions\":{\"framework\":{\"name\":123,\"version\":\"10.0.0\"}}}")]
-    [InlineData("{\"runtimeOptions\":{\"framework\":{\"name\":\"Microsoft.NETCore.App\"}}}")]
-    [InlineData("{\"runtimeOptions\":{\"framework\":{\"name\":\"Microsoft.NETCore.App\",\"version\":123}}}")]
-    [InlineData("{\"runtimeOptions\":{\"framework\":{\"name\":\"Microsoft.NETCore.App\",\"version\":\"invalid\"}}}")]
-    public void UnknownNativeRuntimeConfigShapeIsUnsupportedInsteadOfThrowing(string json)
+    [InlineData("null-root", "null")]
+    [InlineData("array-root", "[]")]
+    [InlineData("missing-options", "{}")]
+    [InlineData("null-options", "{\"runtimeOptions\":null}")]
+    [InlineData("array-options", "{\"runtimeOptions\":[]}")]
+    [InlineData("missing-framework", "{\"runtimeOptions\":{}}")]
+    [InlineData("frameworks-array", "{\"runtimeOptions\":{\"frameworks\":[]}}")]
+    [InlineData("null-framework", "{\"runtimeOptions\":{\"framework\":null}}")]
+    [InlineData("array-framework", "{\"runtimeOptions\":{\"framework\":[]}}")]
+    [InlineData("empty-framework", "{\"runtimeOptions\":{\"framework\":{}}}")]
+    [InlineData("numeric-name", "{\"runtimeOptions\":{\"framework\":{\"name\":123,\"version\":\"10.0.0\"}}}")]
+    [InlineData("missing-version", "{\"runtimeOptions\":{\"framework\":{\"name\":\"Microsoft.NETCore.App\"}}}")]
+    [InlineData("numeric-version", "{\"runtimeOptions\":{\"framework\":{\"name\":\"Microsoft.NETCore.App\",\"version\":123}}}")]
+    [InlineData("invalid-version", "{\"runtimeOptions\":{\"framework\":{\"name\":\"Microsoft.NETCore.App\",\"version\":\"invalid\"}}}")]
+    public void UnknownNativeRuntimeConfigShapeIsUnsupportedInsteadOfThrowing(string scenario, string json)
     {
         using var document = JsonDocument.Parse(json);
-        Assert.False(NativeSdkIdentity.SupportsRuntimeConfig(document.RootElement, new Version(10, 0, 3)));
+        Assert.False(NativeSdkIdentity.SupportsRuntimeConfig(document.RootElement, new Version(10, 0, 3)), scenario);
     }
 
     [Theory]
