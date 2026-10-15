@@ -27,29 +27,61 @@ names, arguments, diagnostics, attachments or consumer paths. Raw discovery,
 filters, TRX and logs remain private to the runner.
 
 A final comparison requires complete Debug and Release unions on Windows and
-Linux from the same workflow attempt, bound to the prepared package SHA-256,
+Linux from the same workflow run, bound to the prepared package SHA-256,
 version, commit and tree, and passing real collector gates. The CI checks
 `test (windows-latest)` and `test (ubuntu-latest)` require the complete Release
 union and collector gates; individual shard successes cannot satisfy them.
-The workflow is not yet validated by a hosted run. Its publication job is
+Receipt selection uses the latest available receipt for each partition; receipts
+from an earlier attempt of the same run remain eligible when all source, runtime
+and package identities agree. Future-attempt receipts are refused. Hosted
+Release CI has produced complete Windows/Linux unions. Final-head CI, manual
+packaged acceptance and actual rerun validation remain required. The publication job is
 disabled and also refuses execution until separately approved feed, credentials
 and artifact verification are wired. It contains no package push or tag trigger.
 
 Keep the framework-dependent tool and Core on `net10.0`. Build with the supported
 .NET SDK floor (10.0.103/latestPatch); executing the tool requires the .NET 10
-runtime. Package version, JSON schema version and callable ruleset are distinct
+runtime. The native SDK identity provider is enabled for the verified 10.0.103
+layout. Other selected SDK versions or unsupported layouts use independent CLI
+identity queries; newer patch selections can therefore take longer. Acceptance
+uses an isolated 10.0.103 SDK so hosted SDK updates do not change its inputs.
+Package version, JSON schema version and callable ruleset are distinct
 identities.
+
+The prepared package remains framework-dependent. It includes complete native
+ReadyToRun groups for Windows x64 and Linux x64, plus a portable IL group. The
+SDK selects the matching group during tool installation; consumer manifest and
+restore commands do not change. Other architectures use the IL group and are
+outside the Windows/Linux x64 acceptance matrix. These images do not include a
+private runtime or remove the SDK requirement for project-aware checks.
+
+Native preparation binds both platform groups to one source commit, version and
+configuration, preserves the declared runtime floor, and records every file hash.
+Candidate validation checks native platform headers, settings, runtime/dependency
+metadata and exact prepared bytes. Package mutation controls reject missing or
+swapped groups, native images in the portable group, wrong metadata and unsafe
+archive paths. Installed tests inspect actual SDK-selected tool paths and compare
+all selected bytes with the immutable package.
+The normal pack target validates the source/version/configuration and prepared
+hashes before adding native assets. The package carries its complete native
+inventory, so downstream validation checks every dependency without requiring
+the original preparation directory.
 
 Choose a new immutable prerelease version for each candidate. Pass that same
 `Version` to restore, build, tests and pack; do not pack an old assembly under a
 new version. Use owned output/feed/cache locations. The candidate sequence is:
 
 ```powershell
-dotnet restore Crap4CSharp.slnx --disable-parallel -p:Version=$CandidateVersion
-dotnet build Crap4CSharp.slnx -c Release --no-restore -m:1 -nr:false -p:Version=$CandidateVersion
-dotnet test Crap4CSharp.slnx -c Release --no-build -m:1 -nr:false -p:Version=$CandidateVersion
-dotnet pack src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj -c Release --no-build -o $OwnedFeed -p:Version=$CandidateVersion
+./scripts/prepare-candidate.ps1 -Version $CandidateVersion -OutputDirectory $OwnedFeed
 ```
+
+This prepares both native groups and one canonical package. A plain `dotnet pack`
+without prepared native assets still produces an ordinary IL development package.
+For suite acceptance, prepare matching Debug or Release native assets and run
+`scripts/install-native-test-runtime.ps1` before discovery or runtime export.
+The workflows perform that ordering explicitly and seal the full resulting
+runtime inventory. Debug suites use Debug-built images; they do not borrow the
+Release implementation from the candidate package.
 
 These commands do not replace the full acceptance matrix. Before release,
 require exact committed-head Debug and Release suites, original unchanged public
