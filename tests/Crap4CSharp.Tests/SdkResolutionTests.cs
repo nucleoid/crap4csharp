@@ -28,13 +28,15 @@ public sealed class SdkResolutionTests
         Assert.Equal(0, selected.ExitCode);
         Assert.Equal(0, installed.ExitCode);
         Assert.Equal(0, engine.ExitCode);
+        var expectedVersion = selected.StandardOutput.Trim();
         var actual = await ProjectContextLoader.ResolveSdkAsync(fixture.Path, timeout, token, nativeProbe);
         if (nativeProbe)
         {
             var observation = await SdkIdentityProbe.QueryAsync(fixture.Path, host, timeout, token);
-            Assert.Equal("resolved", observation.Status);
+            // Only the proven floor has a native layout contract. A newer
+            // latestPatch selection must retain the independent CLI fallback.
+            Assert.Equal(expectedVersion == "10.0.103" ? "resolved" : "unsupported", observation.Status);
         }
-        var expectedVersion = selected.StandardOutput.Trim();
         var entry = Assert.Single(installed.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries),
             line => line.Trim().StartsWith(expectedVersion + " [", StringComparison.Ordinal));
         var sdkRoot = entry[(entry.IndexOf('[') + 1)..entry.LastIndexOf(']')];

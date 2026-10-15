@@ -13,7 +13,7 @@ internal static class MappedGlobalArguments
             if (key.Length == 0 || key.Any(c => !(char.IsAsciiLetterOrDigit(c) || c == '_')) || !names.Add(key) || raw.Contains('\0'))
                 throw new ProjectContextException("compiler.globalPropertyInvalid", "A mapped global property cannot be transported.");
             var value = raw;
-            foreach (var character in new[] { '%', ';', ',', '$', '@', '\'', '(', ')', '*', '?' })
+            foreach (var character in new[] { '%', ';', ',', '$', '@', '\'', '"', '(', ')', '*', '?' })
                 value = value.Replace(character.ToString(), "%" + ((int)character).ToString("X2"), StringComparison.Ordinal);
             result.Add($"-p:{key}={value}");
         }

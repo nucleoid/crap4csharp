@@ -13,7 +13,7 @@ matrix in both Debug and Release suites. The test harness accepts the paired
 purpose; ordinary test runs still create their own isolated unique candidate.
 Preparation and successful per-OS acceptance receipts expire after seven days.
 Each configuration uses 16 deterministic method partitions. Theory rows stay
-together, and each runner executes its partition serially. At most four hosted
+together, and each runner executes its partition serially. At most eight hosted
 suite jobs run concurrently; each has a bounded six-hour job limit. Individual
 test deadlines, including the original 180-second checks, remain unchanged.
 
@@ -27,17 +27,25 @@ names, arguments, diagnostics, attachments or consumer paths. Raw discovery,
 filters, TRX and logs remain private to the runner.
 
 A final comparison requires complete Debug and Release unions on Windows and
-Linux from the same workflow attempt, bound to the prepared package SHA-256,
+Linux from the same workflow run, bound to the prepared package SHA-256,
 version, commit and tree, and passing real collector gates. The CI checks
 `test (windows-latest)` and `test (ubuntu-latest)` require the complete Release
 union and collector gates; individual shard successes cannot satisfy them.
-The workflow is not yet validated by a hosted run. Its publication job is
+Receipt selection uses the latest available receipt for each partition; receipts
+from an earlier attempt of the same run remain eligible when all source, runtime
+and package identities agree. Future-attempt receipts are refused. Hosted
+Release CI has produced complete Windows/Linux unions. Final-head CI, manual
+packaged acceptance and actual rerun validation remain required. The publication job is
 disabled and also refuses execution until separately approved feed, credentials
 and artifact verification are wired. It contains no package push or tag trigger.
 
 Keep the framework-dependent tool and Core on `net10.0`. Build with the supported
 .NET SDK floor (10.0.103/latestPatch); executing the tool requires the .NET 10
-runtime. Package version, JSON schema version and callable ruleset are distinct
+runtime. The native SDK identity provider is enabled for the verified 10.0.103
+layout. Other selected SDK versions or unsupported layouts use independent CLI
+identity queries; newer patch selections can therefore take longer. Acceptance
+uses an isolated 10.0.103 SDK so hosted SDK updates do not change its inputs.
+Package version, JSON schema version and callable ruleset are distinct
 identities.
 
 Choose a new immutable prerelease version for each candidate. Pass that same

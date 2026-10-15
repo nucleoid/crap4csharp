@@ -462,6 +462,23 @@ public sealed class TestExecutionAdapterTests
             { ["Flavor"] = "left\0right" }));
     }
 
+    [Theory]
+    [InlineData("left\"right")]
+    [InlineData("left\"middle\"right")]
+    [InlineData("literal%22\"quoted\" value")]
+    public async Task MappedPropertyQuotesRoundTripThroughActualMsBuild(string value)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-mapped-quote-transport");
+        var project = fixture.Write("Transport.proj", "<Project />");
+        var arguments = new List<string> { "msbuild", project, "-nologo", "-getProperty:TransportValue" };
+        arguments.AddRange(MappedGlobalArguments.Create(new Dictionary<string, string> { ["TransportValue"] = value }));
+        var host = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet";
+        var result = await ProcessRunner.RunAsync(host, arguments, fixture.Path, TimeSpan.FromSeconds(30),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(value, result.StandardOutput.TrimEnd('\r', '\n'));
+    }
+
     [Fact]
     public async Task PrecancelledAdapterCannotValidateOrCreateResults()
     {
