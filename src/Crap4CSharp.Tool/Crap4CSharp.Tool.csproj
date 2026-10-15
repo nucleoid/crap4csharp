@@ -27,4 +27,5 @@
     <None Include="../../ATTRIBUTION.md" Pack="true" PackagePath="/" />
     <InternalsVisibleTo Include="Crap4CSharp.Tests" />
   </ItemGroup>
+  <Import Project="../../scripts/native-tool-package.targets" />
 </Project>
