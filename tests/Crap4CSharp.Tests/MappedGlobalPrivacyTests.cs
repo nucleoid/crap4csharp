@@ -24,6 +24,19 @@ public sealed class MappedGlobalPrivacyTests
     [InlineData("AuthCookie")]
     [InlineData("Cookie")]
     [InlineData("Signature")]
+    [InlineData("AuthToken")]
+    [InlineData("GitHubToken")]
+    [InlineData("NpmToken")]
+    [InlineData("ApiToken")]
+    [InlineData("ServiceToken")]
+    [InlineData("StorageAccountKey")]
+    [InlineData("AccountKey")]
+    [InlineData("Passphrase")]
+    [InlineData("KeyPassphrase")]
+    [InlineData("Bearer")]
+    [InlineData("GitHub-Token")]
+    [InlineData("AUTH_TOKEN")]
+    [InlineData("PrivatePublicKeyToken")]
     public void CredentialNamedPropertiesRefuseWithoutDisclosingTheirNameOrValue(string property)
     {
         const string value = "private-credential-canary";

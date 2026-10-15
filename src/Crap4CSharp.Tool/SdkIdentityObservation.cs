@@ -85,10 +85,7 @@ internal static class NativeSdkIdentity
             if (cli.ProductVersion != manifest[3] + "+" + manifest[0] ||
                 !manifest[3].StartsWith(manifest[1] + "-", StringComparison.Ordinal)) return Unsupported();
             using var runtime = JsonDocument.Parse(File.ReadAllBytes(System.IO.Path.Combine(selected, "dotnet.runtimeconfig.json")));
-            var framework = runtime.RootElement.GetProperty("runtimeOptions").GetProperty("framework");
-            if (framework.GetProperty("name").GetString() != "Microsoft.NETCore.App" ||
-                !Version.TryParse(framework.GetProperty("version").GetString(), out var required) ||
-                required.Major != 10 || Environment.Version < required) return Unsupported();
+            if (!SupportsRuntimeConfig(runtime.RootElement, Environment.Version)) return Unsupported();
             var fileVersion = FileVersionInfo.GetVersionInfo(enginePath).FileVersion;
             if (!Version.TryParse(fileVersion, out var engine) || engine.Revision < 0) return Unsupported();
             token.ThrowIfCancellationRequested();
@@ -101,6 +98,19 @@ internal static class NativeSdkIdentity
             NativeLibrary.Free(library);
         }
         IntPtr Allocate(string value) => windows ? Marshal.StringToHGlobalUni(value) : Marshal.StringToCoTaskMemUTF8(value);
+    }
+
+    // Unknown but valid JSON shapes are unsupported native layouts, not worker
+    // failures. The caller must retain its independently executed CLI fallback.
+    internal static bool SupportsRuntimeConfig(JsonElement runtime, Version availableRuntime)
+    {
+        return runtime.ValueKind == JsonValueKind.Object &&
+            runtime.TryGetProperty("runtimeOptions", out var options) && options.ValueKind == JsonValueKind.Object &&
+            options.TryGetProperty("framework", out var framework) && framework.ValueKind == JsonValueKind.Object &&
+            framework.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String &&
+            name.GetString() == "Microsoft.NETCore.App" &&
+            framework.TryGetProperty("version", out var version) && version.ValueKind == JsonValueKind.String &&
+            Version.TryParse(version.GetString(), out var required) && required.Major == 10 && availableRuntime >= required;
     }
 
     private static SdkIdentityObservation Unsupported() => new("unsupported", 0);
