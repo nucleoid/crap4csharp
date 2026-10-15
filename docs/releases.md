@@ -62,6 +62,10 @@ metadata and exact prepared bytes. Package mutation controls reject missing or
 swapped groups, native images in the portable group, wrong metadata and unsafe
 archive paths. Installed tests inspect actual SDK-selected tool paths and compare
 all selected bytes with the immutable package.
+The normal pack target validates the source/version/configuration and prepared
+hashes before adding native assets. The package carries its complete native
+inventory, so downstream validation checks every dependency without requiring
+the original preparation directory.
 
 Choose a new immutable prerelease version for each candidate. Pass that same
 `Version` to restore, build, tests and pack; do not pack an old assembly under a

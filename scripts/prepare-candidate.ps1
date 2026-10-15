@@ -33,6 +33,7 @@ try {
     $metadata = & "$PSScriptRoot/assert-package-metadata.ps1" -PackagePath $packages[0].FullName -ExpectedVersion $Version -NativeAssetsDirectory $native
     & "$PSScriptRoot/test-native-tool-preparation.ps1"
     & "$PSScriptRoot/test-native-tool-package.ps1" -PackagePath $packages[0].FullName -ExpectedVersion $Version
+    & "$PSScriptRoot/test-native-tool-pack-binding.ps1" -NativeAssetsDirectory $native -Version $Version -OutputDirectory (Join-Path $destination 'pack-refusals')
     $afterStatus = & git --no-optional-locks status --porcelain
     if ($LASTEXITCODE -ne 0 -or $afterStatus) { throw 'Candidate preparation changed source or could not verify its state.' }
     $afterCommit = & git rev-parse HEAD

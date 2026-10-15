@@ -101,14 +101,22 @@ try {
             }finally{$pe.Dispose()}
         }
     }
-    if($NativeAssetsDirectory){
-        $prepared=Get-Content -LiteralPath (Join-Path $NativeAssetsDirectory manifest.json) -Raw|ConvertFrom-Json
+    $preparedText=ReadPackageText 'native-tool-assets.json'
+    $prepared=$preparedText|ConvertFrom-Json
+    if($NativeAssetsDirectory -and (Get-Content -LiteralPath (Join-Path $NativeAssetsDirectory manifest.json) -Raw) -cne $preparedText){
+        throw 'Embedded native inventory differs from prepared assets.'
+    }
+    . "$PSScriptRoot/sdk-acceptance-contract.ps1"
+    $declaredSdk=Get-SuiteAcceptanceSdkVersion (Join-Path $repository global.json)
+    $tree=(& git -C $repository rev-parse 'HEAD^{tree}').Trim()
+    if($LASTEXITCODE -ne 0){throw 'Package source tree unavailable.'}
         $head=(& git -C $repository rev-parse HEAD).Trim()
         if($LASTEXITCODE -ne 0 -or $prepared.schemaVersion -cne 'native-tool-assets-v1' -or $prepared.commit -cne $head -or
+            $prepared.tree -cne $tree -or $prepared.sdk -cne $declaredSdk -or
             $prepared.version -cne $ExpectedVersion -or $prepared.configuration -cne 'Release' -or
             @($prepared.groups).Count -ne 2 -or @($prepared.groups.rid|Sort-Object -Unique).Count -ne 2){throw 'Prepared native source/version binding differs.'}
         foreach($group in $prepared.groups){
-            if($group.rid -cnotin @('win-x64','linux-x64')){throw 'Unexpected prepared native RID.'}
+            if($group.rid -cnotin @('win-x64','linux-x64') -or $group.runtimeFloor -cne '10.0.0'){throw 'Unexpected prepared native RID.'}
             $prefix='tools/net10.0/'+$group.rid+'/'
             $files=@($group.files.PSObject.Properties)
             if($groupCounts[$group.rid] -ne $files.Count+1){throw 'Native package group inventory differs from prepared assets.'}
@@ -120,7 +128,6 @@ try {
                 if($hash -cne $file.Value){throw 'Packaged native bytes differ from prepared assets.'}
             }
         }
-    }
     [pscustomobject]@{
         packageId = 'Crap4CSharp.Tool'
         version = $ExpectedVersion

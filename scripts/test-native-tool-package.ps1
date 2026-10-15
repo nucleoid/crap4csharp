@@ -19,7 +19,7 @@ function ReplaceEntry([IO.Compression.ZipArchive]$zip,[string]$name,[byte[]]$byt
     try{$stream.Write($bytes,0,$bytes.Length)}finally{$stream.Dispose()}
 }
 try{
-    $controls=@('missing-group','wrong-platform','native-any','runtime-floor','settings','dependency-version','extra-group','duplicate-case','traversal')
+    $controls=@('missing-group','wrong-platform','native-any','runtime-floor','settings','dependency-version','extra-group','duplicate-case','traversal','missing-dependency','changed-dependency')
     foreach($control in $controls){
         $copy=Join-Path $owned "$control.nupkg"
         [IO.File]::Copy($package,$copy)
@@ -68,6 +68,14 @@ try{
                 traversal {
                     ReplaceEntry $zip 'tools/net10.0/linux-x64/../escape.txt' ([byte[]](1))
                     $expected='Ambiguous or unsafe package path.'
+                }
+                missing-dependency {
+                    $zip.GetEntry('tools/net10.0/linux-x64/Microsoft.CodeAnalysis.Workspaces.MSBuild.dll').Delete()
+                    $expected='Native package group inventory differs from prepared assets.'
+                }
+                changed-dependency {
+                    ReplaceEntry $zip 'tools/net10.0/linux-x64/Microsoft.CodeAnalysis.Workspaces.MSBuild.dll' ([byte[]](1,2,3))
+                    $expected='Packaged native bytes differ from prepared assets.'
                 }
             }
         }finally{$zip.Dispose()}

@@ -55,6 +55,7 @@ jobs:
           ./scripts/assert-package-metadata.ps1 -PackagePath $package -ExpectedVersion $version -NativeAssetsDirectory $native
           ./scripts/test-native-tool-preparation.ps1
           ./scripts/test-native-tool-package.ps1 -PackagePath $package -ExpectedVersion $version
+          ./scripts/test-native-tool-pack-binding.ps1 -NativeAssetsDirectory $native -Version $version -OutputDirectory artifacts/native-pack-refusals
           ./scripts/install-native-test-runtime.ps1 -NativeAssetsDirectory $native -Version $version -Configuration Release
       - name: Export one bound Release runtime
         shell: pwsh
