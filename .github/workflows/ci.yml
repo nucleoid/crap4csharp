@@ -215,12 +215,14 @@ jobs:
           ./scripts/write-suite-identity.ps1 -Configuration Release -Commit $env:GITHUB_SHA -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -DiscoveryPath artifacts/test-results/Release.discovery.json -OutputPath artifacts/test-results/Release.expected.identity.json
           ./scripts/select-suite-partition-receipts.ps1 -Configuration Release -RunnerOS '${{ matrix.os }}' -ShardCount 16 -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -InputDirectory artifacts/partition-receipts -OutputDirectory artifacts/selected-partition-receipts
           ./scripts/assert-suite-partitions.ps1 -DiscoveryPath artifacts/test-results/Release.discovery.json -ShardCount 16 -ReceiptDirectory artifacts/selected-partition-receipts -ExpectedIdentityPath artifacts/test-results/Release.expected.identity.json -OutputPath artifacts/test-results/Release.partition-coverage.receipt.json
-      - name: Retain sanitized complete suite receipt
+      - name: Retain sanitized complete suite receipt and discovery diagnostic
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: suite-${{ matrix.os }}-attempt-${{ github.run_attempt }}
-          path: artifacts/test-results/Release.partition-coverage.receipt.json
+          path: |
+            artifacts/test-results/Release.partition-coverage.receipt.json
+            artifacts/test-results/Release.discovery.json.diagnostic.json
           if-no-files-found: warn
           retention-days: 7
       - name: Build top-level callable fixture

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Crap4CSharp.Core;
 using Xunit;
 
@@ -5,6 +6,39 @@ namespace Crap4CSharp.Tests;
 
 public sealed class SdkResolutionTests
 {
+    [Theory]
+    [InlineData("null")]
+    [InlineData("[]")]
+    [InlineData("{}")]
+    [InlineData("{\"runtimeOptions\":null}")]
+    [InlineData("{\"runtimeOptions\":[]}")]
+    [InlineData("{\"runtimeOptions\":{}}")]
+    [InlineData("{\"runtimeOptions\":{\"frameworks\":[]}}")]
+    [InlineData("{\"runtimeOptions\":{\"framework\":null}}")]
+    [InlineData("{\"runtimeOptions\":{\"framework\":[]}}")]
+    [InlineData("{\"runtimeOptions\":{\"framework\":{}}}")]
+    [InlineData("{\"runtimeOptions\":{\"framework\":{\"name\":123,\"version\":\"10.0.0\"}}}")]
+    [InlineData("{\"runtimeOptions\":{\"framework\":{\"name\":\"Microsoft.NETCore.App\"}}}")]
+    [InlineData("{\"runtimeOptions\":{\"framework\":{\"name\":\"Microsoft.NETCore.App\",\"version\":123}}}")]
+    [InlineData("{\"runtimeOptions\":{\"framework\":{\"name\":\"Microsoft.NETCore.App\",\"version\":\"invalid\"}}}")]
+    public void UnknownNativeRuntimeConfigShapeIsUnsupportedInsteadOfThrowing(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        Assert.False(NativeSdkIdentity.SupportsRuntimeConfig(document.RootElement, new Version(10, 0, 3)));
+    }
+
+    [Theory]
+    [InlineData("Microsoft.NETCore.App", "10.0.0", true)]
+    [InlineData("Microsoft.NETCore.App", "10.0.3", true)]
+    [InlineData("Microsoft.NETCore.App", "10.0.4", false)]
+    [InlineData("Microsoft.NETCore.App", "9.0.0", false)]
+    [InlineData("Microsoft.AspNetCore.App", "10.0.0", false)]
+    public void NativeRuntimeConfigMustMatchTheVerifiedFrameworkAndAvailableRuntime(string name, string version, bool supported)
+    {
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(new { runtimeOptions = new { framework = new { name, version } } }));
+        Assert.Equal(supported, NativeSdkIdentity.SupportsRuntimeConfig(document.RootElement, new Version(10, 0, 3)));
+    }
+
     [Theory]
     [InlineData("10.0.103", "disable", false)]
     [InlineData("10.0.100", "latestPatch", false)]
