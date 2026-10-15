@@ -274,7 +274,9 @@ internal static partial class GitScopeResolver
                 // captured bytes below. Apply the same distinction to filtered
                 // inputs before deciding that project/configuration changes
                 // widen the scope. --no-filters preserves physical newline and
-                // filter differences that ordinary git diff can hide.
+                // filter differences that ordinary git diff can hide. Configuration-only
+                // CRLF separators are equivalent for scope selection; physical
+                // compiler inputs still retain their exact byte identities.
                 var unchanged = new HashSet<string>(StringComparer.Ordinal);
                 var candidates = changes.Where(change => change.Kind == ScopeChangeKind.Modified &&
                     !Eligible(change.NewPath) && change.OldPath == change.NewPath && change.NewPath is not null &&
@@ -287,7 +289,9 @@ internal static partial class GitScopeResolver
                     // blobs retain raw --no-filters semantics without one child
                     // pair per 16 paths. Closing capture independently repeats it.
                     if (inventory!.TryGetValue(path, out var oldBlob) &&
-                        await RawWorktreeBlobIdentity(Path.Combine(root, path), oldBlob.Identity.Length, cancellationToken) == oldBlob.Identity)
+                        (await RawWorktreeBlobIdentity(Path.Combine(root, path), oldBlob.Identity.Length, cancellationToken) == oldBlob.Identity ||
+                         (ContextInput(path) || Path.GetExtension(path).ToLowerInvariant() is ".resx" or ".rsp") &&
+                         await ConfigurationLineEndingIdentity(Path.Combine(root, path), oldBlob.Identity.Length, cancellationToken) == oldBlob.Identity))
                         unchanged.Add(path);
                 }
                 changes = changes.Where(change => change.NewPath is null || !unchanged.Contains(change.NewPath)).ToList();
@@ -574,7 +578,7 @@ internal static partial class GitScopeResolver
         {
             if (entry.Length < 3 || entry[1] != ' ') continue;
             var path = entry[2..];
-            if ((entry[0] == 'S' || char.IsLower(entry[0])) && (Eligible(path) || ContextInput(path)))
+            if ((entry[0] == 'S' || char.IsLower(entry[0])) && (Eligible(path) || BuildRelevantFilteredInput(path)))
                 throw new ScopeException("scope.hiddenIndexEntry", $"{path} is marked skip-worktree or assume-unchanged.");
         }
     }

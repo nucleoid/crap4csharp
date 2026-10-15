@@ -1,4 +1,4 @@
-# Process execution boundary (issue #10 implementation in progress)
+# Process execution boundary
 
 The compatibility `ProcessRunner.RunAsync` APIs return complete decoded text or refuse
 output exceeding 4 Mi UTF-16 characters per stream. They never substitute a tail for a
@@ -21,8 +21,8 @@ without waiting for the other inherited pipe to close. Linux establishes a retai
 leader before launching the consumer and terminates its verified process group even on
 success. Deliberate session escape is unsupported. Windows creates the consumer suspended,
 assigns a non-breakaway kill-on-close job before resuming, and terminates/positively observes
-the job on completion or failure. Windows runtime acceptance remains pending; Linux tests
-and compilation are not Windows proof. Cleanup has a separate finite five-second bound.
+the job on completion or failure. Required Windows and Linux CI exercise their respective
+process ownership and cancellation controls. Cleanup has a separate finite five-second bound.
 Linux requires executable `setsid` and `sh` on the effective child `PATH`, including
 per-invocation environment overrides. Both utilities are resolved before launch rather
 than assumed at fixed distribution paths. Missing utilities fail with a typed launch
@@ -55,8 +55,9 @@ This is a finite, seekable file-backed stdin protocol, NOT interactive or pipe-t
 stdin. Callers needing terminal/pipe-specific behavior or input over 16 MiB are unsupported;
 there is no secret-bearing persistent input artifact. The caller must keep its supplied
 memory unchanged until the call completes. The snapshot is deleted after owned cleanup.
-Windows handle inheritance/runtime behavior still requires actual Windows CI.
-Fresh `check` orchestration remains unfinished; these adapters do not establish its acceptance.
+Windows CI exercises inherited handles and runtime cleanup directly. Fresh `check` uses
+these adapters for owned restore, build and test execution; its compiler, coverage and
+publication proofs remain separate requirements.
 
 Git scope commands now use the same owned byte-protocol adapter, with complete stdout and
 stderr limited independently to 16 MiB. They preserve existing no-optional-locks and diff
@@ -75,3 +76,5 @@ be scheduled conservatively; each identical mapped context appears once. Graph d
 executes no restore/build/Workspace targets. It remains a private orchestration seam, not
 public fresh-check completion or actual compiler evidence. Mapped globals and physical
 paths must stay in private local transport, never exported as raw diagnostic evidence.
+
+Git scope preserves raw C# bytes, including line-ending-only diagnostics. For filtered textual configuration and response inputs, CRLF and LF separators alone do not widen the selected graph; independently captured compiler inputs still bind exact bytes. Binary/UTF-16 inputs, arbitrary clean/smudge transformations and substantive configuration edits retain conservative raw-byte handling. Hidden build-relevant skip-worktree/assume-unchanged entries are refused.

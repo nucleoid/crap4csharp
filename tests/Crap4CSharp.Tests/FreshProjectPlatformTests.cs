@@ -22,6 +22,8 @@ public sealed class FreshProjectPlatformTests
     [InlineData("<Solution />", "Any CPU")]
     [InlineData("<Solution><Configurations><Platform Name=\"AnyCPU\" /></Configurations></Solution>", "AnyCPU")]
     [InlineData("<Solution><Configurations><Platform Name=\"x64\" /></Configurations></Solution>", "x64")]
+    [InlineData("<Solution><Configurations><Platform Name=\"ARM64\" /><Platform Name=\"Any CPU\" /></Configurations></Solution>", "Any CPU")]
+    [InlineData("<Solution><Configurations><Platform Name=\"x86\" /><Platform Name=\"x64\" /></Configurations></Solution>", "x64")]
     public async Task RootSolutionPlatformSpellingIsPreserved(string xml, string expected)
     {
         using var fixture = TestDirectory.Create("crap4csharp-root-platform");

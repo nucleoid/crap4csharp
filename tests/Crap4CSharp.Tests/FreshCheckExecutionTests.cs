@@ -28,6 +28,13 @@ public sealed class FreshCheckExecutionTests
     public Task SemanticEmptyProductionStillRunsRequiredTestsAndReportsExplicitNA()
         => RunCase(false, false, true);
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task LocalIncrementalExportOmitsOnlyItsVerifiedBundleFiles(bool addUnrelatedJson)
+        => RunCase(false, false, policyScope: "all", local: true,
+            localIncremental: true, lateLocalJson: addUnrelatedJson);
+
     [Fact]
     public Task NonGitAllScopeFreshCheckRunsRequiredContextsWithLocalUnreviewedTrustAndNoGitRevision()
         => RunCase(false, false, policyScope: "all", local: true);
@@ -427,7 +434,7 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, false, policyScope: "all", completedReuse: true, aliasedReference: true);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false, bool warmPostBuild = false, bool warmSaved = false, bool warmSavedEligibility = false, bool nativeSdkIdentity = global::App.DefaultNativeSdkIdentity, bool privateArtifactOnly = false, bool aliasedReference = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false, bool warmPostBuild = false, bool warmSaved = false, bool warmSavedEligibility = false, bool nativeSdkIdentity = global::App.DefaultNativeSdkIdentity, bool privateArtifactOnly = false, bool aliasedReference = false, bool localIncremental = false, bool lateLocalJson = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -509,7 +516,7 @@ public sealed class FreshCheckExecutionTests
             File.WriteAllText(path, File.ReadAllText(path).Replace("\"threshold\":8", "\"threshold\":0.5", StringComparison.Ordinal)
                 .Replace("\"exclusions\":[]", "\"exclusions\":[\"" + partialExclusion + "\"]", StringComparison.Ordinal));
         }
-        if (scopedEmpty)
+        if (scopedEmpty || localIncremental)
         {
             var policyPath = Path.Combine(fixture.Path, "policy.json");
             var text = File.ReadAllText(policyPath).Replace("\"mode\":\"strict\"", "\"mode\":\"incremental\",\"baseline\":\"baseline.json\"", StringComparison.Ordinal);
@@ -2119,7 +2126,12 @@ public sealed class FreshCheckExecutionTests
         var actualStart = System.Diagnostics.Stopwatch.StartNew();
         var exit = await global::App.RunAsync(publicArgs, fixture.Path, output, errors,
             freshTerminalCancellation ? lateFreshCancellation.Token : token,
-            beforeTerminalPublication: freshTerminalCancellation ? ct =>
+            beforeTerminalPublication: lateLocalJson ? ct =>
+            {
+                ct.ThrowIfCancellationRequested();
+                fixture.Write("UnrelatedAfterCapture.json", "{}");
+                return Task.CompletedTask;
+            } : freshTerminalCancellation ? ct =>
             {
                 ct.ThrowIfCancellationRequested();
                 if (privateArtifactOnly)
@@ -2150,6 +2162,28 @@ public sealed class FreshCheckExecutionTests
             .Any(a => a.GetProperty("kind").GetString() == "private-diagnostics"),
             "Expected retained private diagnostics. Actual terminal: " + output + Environment.NewLine + errors);
         AssertRetainedPrivateDiagnostics(terminal.RootElement, requireBuildLog: true);
+        if (localIncremental)
+        {
+            Assert.True(exit == (lateLocalJson ? 1 : 0), errors + Environment.NewLine + output);
+            Assert.Equal(!lateLocalJson, Directory.Exists(Path.Combine(fixture.Path, "bundle")));
+            if (lateLocalJson)
+            {
+                Assert.Contains("provenance.localWorkspaceChanged", output.ToString(), StringComparison.Ordinal);
+                Assert.False(terminal.RootElement.GetProperty("evaluation").GetProperty("decision").GetProperty("completed").GetBoolean());
+            }
+            else
+            {
+                var capturedBundle = ArtifactBundle.Load(Path.Combine(fixture.Path, "bundle", "manifest.json"), fixture.Path);
+                var capturedReplay = AnalyzeCommand.Replay(capturedBundle, fixture.Path, DateTimeOffset.UnixEpoch,
+                    TimeSpan.Zero, token, allSources: true);
+                Assert.Equal(0, capturedReplay.Run.ExitCode);
+                Assert.Equal("captured", capturedReplay.Evaluation.Provenance!.Status);
+            }
+            Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library", "build-count.txt")));
+            Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "build-count.txt")));
+            foreach (var (path, bytes) in original) Assert.Equal(bytes, File.ReadAllBytes(path));
+            return;
+        }
         if (freshTerminalCancellation)
         {
             Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));

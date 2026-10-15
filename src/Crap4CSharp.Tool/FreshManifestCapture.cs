@@ -398,14 +398,15 @@ internal static class FreshManifestCapture
         "Provisional capture requires final and terminal completed proof before publication.");
 
     internal static async Task RegateAsync(FreshExecutionEvidence execution, CancellationToken cancellation,
-        CompletedProofTiming? timing = null, string timingPrefix = "regate")
+        CompletedProofTiming? timing = null, string timingPrefix = "regate",
+        IReadOnlySet<string>? provenBundleFiles = null)
     {
         await execution.Compiler.RetainedProof!.ValidateFinalAsync(cancellation, timing, timingPrefix + ".compiler");
-        await ValidateSelectionAndTestsAsync(execution, cancellation, timing, timingPrefix);
+        await ValidateSelectionAndTestsAsync(execution, cancellation, timing, timingPrefix, provenBundleFiles);
     }
 
     private static async Task ValidateSelectionAndTestsAsync(FreshExecutionEvidence execution, CancellationToken cancellation,
-        CompletedProofTiming? timing, string timingPrefix)
+        CompletedProofTiming? timing, string timingPrefix, IReadOnlySet<string>? provenBundleFiles = null)
     {
         var graph = execution.Compiler.FinalGraph;
         var footprint = graph.GraphContexts.SelectMany(b =>
@@ -413,7 +414,7 @@ internal static class FreshManifestCapture
                 .Concat(b.Context.PhaseInputs.Where(i => i.Role == "restoreAssets").Select(i => Path.GetDirectoryName(i.Path)!)))
             .Distinct(PathIdentityPolicy.Current.Comparer).ToArray();
         using (timing?.Start(timingPrefix + ".revision"))
-            await FreshGitProof.ValidateAsync(execution.Preflight, cancellation, footprint);
+            await FreshGitProof.ValidateAsync(execution.Preflight, cancellation, footprint, provenBundleFiles);
         using (timing?.Start(timingPrefix + ".aggregate"))
             _ = CoverageGraphBinding.ValidateAggregate(execution.Tests, execution.Compiler, cancellation);
         using (timing?.Start(timingPrefix + ".children"))

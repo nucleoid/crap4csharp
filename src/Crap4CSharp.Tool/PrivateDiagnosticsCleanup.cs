@@ -73,7 +73,7 @@ internal static class PrivateDiagnosticsCleanup
             await output.WriteLineAsync("Removed the named private diagnostic root.");
             return 0;
         }
-        catch (Exception exception) when (exception is ArgumentException or IOException or
+        catch (Exception exception) when (exception is ArgumentException or InvalidDataException or IOException or
             UnauthorizedAccessException or JsonException or InvalidOperationException or OperationCanceledException)
         {
             await error.WriteLineAsync("error: private diagnostic cleanup refused: " + exception.Message);
