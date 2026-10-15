@@ -69,6 +69,8 @@ public sealed class FreshCancellationOutcomeTests
         Assert.Equal(2, launched.Distinct(StringComparer.Ordinal).Count());
         Assert.Equal(1, exit);
         using var json = JsonDocument.Parse(output.ToString());
+        Assert.Equal(failFirst ? "FAIL" : "INCOMPLETE", InstalledCheckTests.NormalizeDeliveryForgeGate(
+            json.RootElement, exit, global::App.ToolVersion, "fixture-base"));
         Assert.Equal(global::App.ToolVersion, json.RootElement.GetProperty("toolVersion").GetString());
         Assert.Equal(".", json.RootElement.GetProperty("evaluation").GetProperty("scope").GetProperty("logicalWorkspaceRoot").GetString());
         var run = json.RootElement.GetProperty("run");

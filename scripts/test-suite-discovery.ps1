@@ -24,3 +24,24 @@ $reverse=@($baseline);[Array]::Reverse($reverse)
 if((@(Convert-SuiteDiscoveredCases $reverse $assembly)|ConvertTo-Json -Compress) -cne
     (@(Convert-SuiteDiscoveredCases $baseline $assembly)|ConvertTo-Json -Compress)){throw 'Discovery depends on order.'}
 Write-Output 'Discovery normalization controls passed (10); actual IDs retained; synthetic schema controls only.'
+$json=$baseline|ConvertTo-Json -Compress
+$notice='Waiting 10 seconds for foreground threads to exit...'
+$samples=@(
+    @{name='plain';text=$json;accepted=$true},
+    @{name='known-lf';text=$json+"`n"+$notice+"`n";accepted=$true},
+    @{name='known-crlf';text=$json+"`r`n"+$notice+"`r`n";accepted=$true},
+    @{name='unknown';text=$json+"`nWarning";accepted=$false},
+    @{name='duplicate-notice';text=$json+"`n"+$notice+"`n"+$notice;accepted=$false},
+    @{name='notice-prefix';text=$notice+"`n"+$json;accepted=$false},
+    @{name='multiple-json';text=$json+"`n[]";accepted=$false},
+    @{name='truncated';text=$json.Substring(0,$json.Length-1)+"`n"+$notice;accepted=$false},
+    @{name='non-array';text='{}';accepted=$false},
+    @{name='missing-linebreak';text=$json+$notice;accepted=$false}
+)
+foreach($sample in $samples){
+    $accepted=$true
+    try{$parsed=@(Convert-SuiteDiscoveryOutput $sample.text);$normalized=@(Convert-SuiteDiscoveredCases $parsed $assembly)}catch{$accepted=$false}
+    if($accepted -ne $sample.accepted){throw "Unexpected discovery output decision: $($sample.name)"}
+    if($accepted -and ($normalized|ConvertTo-Json -Compress) -cne (@(Convert-SuiteDiscoveredCases $baseline $assembly)|ConvertTo-Json -Compress)){throw 'Shutdown notice changed case identities.'}
+}
+Write-Output 'Discovery output controls passed (10); only one exact known shutdown notice accepted.'

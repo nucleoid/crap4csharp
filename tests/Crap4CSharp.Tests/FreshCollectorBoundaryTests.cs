@@ -128,6 +128,8 @@ public sealed class FreshCollectorBoundaryTests
                 Assert.DoesNotContain(other.MetadataToken, represented);
                 Assert.Equal(1, exit);
                 Assert.Contains("coverage.aggregateUnproven", output.ToString(), StringComparison.Ordinal);
+                Assert.Equal("INCOMPLETE", InstalledCheckTests.NormalizeDeliveryForgeGate(
+                    terminal.RootElement, exit, terminal.RootElement.GetProperty("toolVersion").GetString()!, "fixture-base"));
                 if (requireOutcome)
                 {
                     var outcome = Assert.Single(run.GetProperty("testOutcomes").EnumerateArray());
