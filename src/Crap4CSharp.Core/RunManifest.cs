@@ -233,7 +233,13 @@ public static class ManifestIdentity
         return unhashed with { ManifestHash = ManifestHash(unhashed) };
     }
 
-    private static string InputIdentity(ManifestInput input) => input.RepositoryPath is null
+    private static string InputIdentity(ManifestInput input) =>
+        input.ReferenceAliases is not null || input.EmbedInteropTypes is not null
+            ? CanonicalIdentity.Tuple("input-reference-properties-v1", InputIdentityWithoutReferenceProperties(input),
+                input.ReferenceAliases, input.EmbedInteropTypes?.ToString())
+            : InputIdentityWithoutReferenceProperties(input);
+
+    private static string InputIdentityWithoutReferenceProperties(ManifestInput input) => input.RepositoryPath is null
         ? CanonicalIdentity.Tuple("input", input.Role, input.LogicalPath, input.Locator,
             input.Length.ToString(System.Globalization.CultureInfo.InvariantCulture), input.Sha256,
             input.Encoding, input.Generated.ToString())

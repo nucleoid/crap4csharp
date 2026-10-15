@@ -1,6 +1,6 @@
 # Pinned local-tool onboarding
 
-Candidate acceptance is pending. The independent
+Use an explicitly accepted candidate version and its SHA-256 receipt. The independent
 [sample consumer](../samples/LocalToolConsumer/README.md) is a setup template;
 its `0.1.0` pin does not imply that a release has been published.
 

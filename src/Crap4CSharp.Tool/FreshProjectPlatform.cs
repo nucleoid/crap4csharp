@@ -14,7 +14,8 @@ internal static class FreshProjectPlatform
             await using var stream = File.OpenRead(target);
             var model = await SolutionSerializers.SlnXml.OpenAsync(stream, token);
             token.ThrowIfCancellationRequested();
-            return model.Platforms.Order(StringComparer.Ordinal).FirstOrDefault() ?? "Any CPU";
+            return model.Platforms.FirstOrDefault(platform => platform is "Any CPU" or "AnyCPU")
+                ?? model.Platforms.FirstOrDefault() ?? "Any CPU";
         }
         // Preserve the existing direct-project and classic-solution selector.
         // SDK/MSBuild assemblies are loaded only by the isolated loader worker.

@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory)][string]$ExpectedCommit,
     [Parameter(Mandatory)][string]$OutputDirectory
 )
+Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 $PSNativeCommandUseErrorActionPreference=$false
 . "$PSScriptRoot/sdk-acceptance-contract.ps1"

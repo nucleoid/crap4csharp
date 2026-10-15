@@ -35,6 +35,14 @@ public sealed class CompilerReferenceSnapshotTests
         Assert.DoesNotContain(consumer.GetDiagnostics(token), diagnostic => diagnostic.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error);
         Assert.NotEqual(CompilerReferenceSnapshot.LogicalReference(hash, null, false), input.LogicalPath);
         Assert.Throws<ProjectContextException>(() => CompilerReferenceSnapshot.CapturedReference(input with { ReferenceAliases = "Other" }, bytes));
+        var stripped = input with { ReferenceAliases = null };
+        Assert.Throws<ProjectContextException>(() => CompilerReferenceSnapshot.CapturedReference(stripped, bytes));
+        Assert.Throws<InvalidDataException>(() => SemanticEligibility.CapturedReference(stripped, bytes));
+        var embedded = input with { ReferenceAliases = null, EmbedInteropTypes = true,
+            LogicalPath = CompilerReferenceSnapshot.LogicalReference(hash, null, true) };
+        Assert.True(SemanticEligibility.CapturedReference(embedded, bytes).Properties.EmbedInteropTypes);
+        Assert.Throws<InvalidDataException>(() => SemanticEligibility.CapturedReference(embedded with { EmbedInteropTypes = null }, bytes));
+        Assert.Empty(SemanticEligibility.CapturedReference(stripped with { LogicalPath = "refs/app.dll" }, bytes).Properties.Aliases);
     }
 
     [Fact]

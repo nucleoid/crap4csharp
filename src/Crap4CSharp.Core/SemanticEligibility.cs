@@ -17,6 +17,32 @@ public static class SemanticEligibility
         return new MetadataReferenceProperties(MetadataImageKind.Assembly,
             System.Collections.Immutable.ImmutableArray.CreateRange(aliases), input.EmbedInteropTypes ?? false);
     }
+    public static string ReferenceLogicalPath(string sha256, string? aliases, bool embedded) =>
+        "references/" + (aliases is null && !embedded ? sha256 :
+            CanonicalIdentity.Tuple("reference-properties-v1", sha256, aliases ?? "", embedded ? "true" : "false")) + ".dll";
+
+    public static PortableExecutableReference CapturedReference(ManifestInput input,
+        System.Collections.Immutable.ImmutableArray<byte> bytes)
+    {
+        var properties = ReferenceProperties(input);
+        var names = properties.Aliases;
+        if (input.EmbedInteropTypes == false ||
+            names.Length == 1 && names[0] == "global" ||
+            !names.SequenceEqual(names.Order(StringComparer.Ordinal)))
+            throw new InvalidDataException("Captured reference properties are not canonical.");
+        // Preserve legacy arbitrary default reference names. The reserved canonical
+        // namespace always binds properties, including their removal after resealing.
+        var path = input.LogicalPath;
+        var canonicalName = path.StartsWith("references/", StringComparison.Ordinal) &&
+            path.EndsWith(".dll", StringComparison.Ordinal) && path.Length == 79 &&
+            path.AsSpan(11, 64).IndexOfAnyExcept("0123456789abcdef") < 0;
+        if ((canonicalName || input.ReferenceAliases is not null || properties.EmbedInteropTypes) &&
+            path != ReferenceLogicalPath(CanonicalIdentity.Sha256(bytes.AsSpan()),
+                input.ReferenceAliases, properties.EmbedInteropTypes))
+            throw new InvalidDataException("Captured reference identity does not bind its properties.");
+        return MetadataReference.CreateFromImage(bytes, properties);
+    }
+
     internal static bool ValidateEmptyCaptured(ManifestContext context,
         IReadOnlyDictionary<string, System.Collections.Immutable.ImmutableArray<byte>> bytes)
     {
@@ -31,7 +57,7 @@ public static class SemanticEligibility
             var captured = inputs.Select(i => CapturedSource.Create(i.LogicalPath, bytes[i.Locator].AsSpan())).ToArray();
             var eligible = inputs.Where(i => !i.Generated || context.IncludeGenerated).Select(i => CapturedSource.Create(i.LogicalPath, bytes[i.Locator].AsSpan())).ToArray();
             var references = context.Inputs.Where(i => i.Role == "reference")
-                .Select(i => MetadataReference.CreateFromImage(bytes[i.Locator], ReferenceProperties(i))).ToArray();
+                .Select(i => CapturedReference(i, bytes[i.Locator])).ToArray();
             return !HasApplicable(eligible, captured, new(context.Project,context.TargetFramework,context.Configuration,context.Platform,context.Id,parse),references);
         }
         catch (Exception error) when (error is InvalidDataException or ArgumentException or KeyNotFoundException or BadImageFormatException)

@@ -8,6 +8,22 @@ namespace Crap4CSharp.Tests;
 public sealed class ProvenanceTests
 {
     private const string CompiledSource = "tests/Crap4CSharp.ProvenanceFixture/CompiledEvidence.cs";
+
+    [Fact]
+    public void ReferencePropertiesCannotChangeWithoutChangingManifestIdentity()
+    {
+        var manifest = Fixture();
+        var context = manifest.Contexts[0];
+        var input = new ManifestInput("reference", "refs/app.dll", "app.dll", 1,
+            CanonicalIdentity.Sha256(new byte[] { 1 }), null, false);
+        string Closure(ManifestInput reference) => ManifestIdentity.InputClosureHash(context with { Inputs = [reference] });
+        var ordinary = Closure(input);
+        Assert.NotEqual(ordinary, Closure(input with { ReferenceAliases = "Probe" }));
+        Assert.NotEqual(ordinary, Closure(input with { EmbedInteropTypes = true }));
+        Assert.NotEqual(Closure(input with { ReferenceAliases = "Probe" }),
+            Closure(input with { ReferenceAliases = "Other" }));
+    }
+
     [Fact]
     public void CanonicalIdentityBindsExactBytesAndLogicalIdentity()
     {
