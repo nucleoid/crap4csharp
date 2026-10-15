@@ -67,9 +67,12 @@ public sealed partial class InstalledCheckTests
             var license = metadata.Elements().Single(e => e.Name.LocalName == "license");
             Assert.Equal("expression", license.Attribute("type")!.Value);
             Assert.Equal("MIT", license.Value);
-            Assert.Contains(package.Entries, e => e.FullName == "tools/net10.0/any/Crap4CSharp.Core.dll");
+            var groups = suppliedPackage is null ? new[] { "any" } : new[] { "any", "win-x64", "linux-x64" };
+            foreach (var group in groups)
+                foreach (var name in new[] { "Crap4CSharp.Core.dll", "Crap4CSharp.Tool.dll", "DotnetToolSettings.xml" })
+                    Assert.Contains(package.Entries, e => e.FullName == $"tools/net10.0/{group}/{name}");
             Assert.DoesNotContain(package.Entries, e => e.FullName.StartsWith("tools/", StringComparison.Ordinal) &&
-                !e.FullName.StartsWith("tools/net10.0/any/", StringComparison.Ordinal));
+                !groups.Any(group => e.FullName.StartsWith($"tools/net10.0/{group}/", StringComparison.Ordinal)));
         }
         var packagePath = Assert.Single(Directory.GetFiles(feed, "*.nupkg"));
         var packageSha256 = ProjectAnalysisContext.ContentHash(File.ReadAllBytes(packagePath));
@@ -86,6 +89,7 @@ public sealed partial class InstalledCheckTests
         };
         Success(await Run("dotnet", ["tool", "install", "Crap4CSharp.Tool", "--version", version,
             "--tool-path", tools, "--configfile", config, "--no-cache"], repository, environment), "exact candidate install");
+        AssertInstalledToolSelection(tools, packagePath, version, suppliedPackage is not null);
         var executable = Path.Combine(tools, OperatingSystem.IsWindows() ? "crap4csharp.exe" : "crap4csharp");
         Assert.True(File.Exists(executable));
 
