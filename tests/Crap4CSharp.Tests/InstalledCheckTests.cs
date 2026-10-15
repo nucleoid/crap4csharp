@@ -93,9 +93,12 @@ public sealed class InstalledCheckTests
             var license = metadata.Elements().Single(e => e.Name.LocalName == "license");
             Assert.Equal("expression", license.Attribute("type")!.Value);
             Assert.Equal("MIT", license.Value);
-            Assert.Contains(package.Entries, e => e.FullName == "tools/net10.0/any/Crap4CSharp.Core.dll");
+            var groups = suppliedPackage is null ? new[] { "any" } : new[] { "any", "win-x64", "linux-x64" };
+            foreach (var group in groups)
+                foreach (var name in new[] { "Crap4CSharp.Core.dll", "Crap4CSharp.Tool.dll", "DotnetToolSettings.xml" })
+                    Assert.Contains(package.Entries, e => e.FullName == $"tools/net10.0/{group}/{name}");
             Assert.DoesNotContain(package.Entries, e => e.FullName.StartsWith("tools/", StringComparison.Ordinal) &&
-                !e.FullName.StartsWith("tools/net10.0/any/", StringComparison.Ordinal));
+                !groups.Any(group => e.FullName.StartsWith($"tools/net10.0/{group}/", StringComparison.Ordinal)));
         }
         var packagePath = Assert.Single(Directory.GetFiles(feed, "*.nupkg"));
         var packageSha256 = ProjectAnalysisContext.ContentHash(File.ReadAllBytes(packagePath));
@@ -114,6 +117,7 @@ public sealed class InstalledCheckTests
             "--tool-path", tools, "--configfile", config, "--no-cache"], repository, environment), "exact candidate install");
         var executable = Path.Combine(tools, OperatingSystem.IsWindows() ? "crap4csharp.exe" : "crap4csharp");
         Assert.True(File.Exists(executable));
+        AssertInstalledToolSelection(tools, packagePath, version, suppliedPackage is not null);
 
         foreach (var scenario in new[] { "pass", "test-failure", "metric-violation", "operational-failure" })
         {
@@ -260,6 +264,49 @@ public sealed class InstalledCheckTests
         File.WriteAllText(Path.Combine(receiptDirectory, "completed-index.json"), JsonSerializer.Serialize(new
         { status = "completed", packageVersion = version, packageSha256, receipts = receiptPaths,
             qualification = "Installed representative-consumer normalization demonstration; not whole committed-head/hosted CI or Delivery Forge host certification." }));
+    }
+
+    private static void AssertInstalledToolSelection(string tools, string packagePath, string version, bool native)
+    {
+        var store = Path.Combine(tools, ".store");
+        var assetsPath = Assert.Single(Directory.GetFiles(store, "project.assets.json", SearchOption.AllDirectories));
+        Assert.Empty(Directory.GetFiles(store, "project.assets.ridpackage.json", SearchOption.AllDirectories));
+        using var assets = JsonDocument.Parse(File.ReadAllBytes(assetsPath));
+        var target = Assert.Single(assets.RootElement.GetProperty("targets").EnumerateObject(), p => p.Name.Contains('/'));
+        var rid = OperatingSystem.IsWindows() ? "win-x64" : "linux-x64";
+        Assert.Equal("net10.0/" + rid, target.Name);
+        var library = Assert.Single(target.Value.EnumerateObject());
+        Assert.Equal("Crap4CSharp.Tool/" + version, library.Name, ignoreCase: true);
+        var group = native ? rid : "any";
+        var prefix = "tools/net10.0/" + group + "/";
+        var selected = library.Value.GetProperty("tools").EnumerateObject().Select(p => p.Name).ToArray();
+        Assert.NotEmpty(selected);
+        Assert.All(selected, name =>
+        {
+            Assert.StartsWith(prefix, name, StringComparison.Ordinal);
+            Assert.DoesNotContain("\\", name, StringComparison.Ordinal);
+            Assert.DoesNotContain(name.Split('/'), segment => segment is "." or "..");
+        });
+        // SDK103 persists a minimal tool lockfile. Its .tools keys prove selection;
+        // libraries/files would only inventory package contents and may be empty.
+        var installed = Path.Combine(Path.GetDirectoryName(assetsPath)!, "crap4csharp.tool", version);
+        using var package = ZipFile.OpenRead(packagePath);
+        var expected = package.Entries.Where(e => e.FullName.StartsWith(prefix, StringComparison.Ordinal) && !e.FullName.EndsWith('/'))
+            .Select(e => e.FullName).ToArray();
+        Assert.Equal(expected.Order(StringComparer.Ordinal), selected.Order(StringComparer.Ordinal));
+        foreach (var name in selected)
+        {
+            using var packed = package.GetEntry(name)!.Open();
+            using var actual = File.OpenRead(Path.Combine(installed, name.Replace('/', Path.DirectorySeparatorChar)));
+            Assert.Equal(System.Security.Cryptography.SHA256.HashData(packed), System.Security.Cryptography.SHA256.HashData(actual));
+        }
+        if (native)
+        {
+            using var pe = new System.Reflection.PortableExecutable.PEReader(File.OpenRead(
+                Path.Combine(installed, prefix.Replace('/', Path.DirectorySeparatorChar), "Crap4CSharp.Tool.dll")));
+            Assert.True(pe.PEHeaders.CorHeader!.ManagedNativeHeaderDirectory.Size > 0);
+            Assert.Equal(OperatingSystem.IsWindows() ? 0x8664 : 0xfd1d, (int)pe.PEHeaders.CoffHeader.Machine);
+        }
     }
 
     private static async Task VerifyManifestConsumerAsync(string repository, string feed, string toolConfig,

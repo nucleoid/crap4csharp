@@ -39,8 +39,23 @@ jobs:
       - run: dotnet restore Crap4CSharp.slnx --disable-parallel
       - run: dotnet build Crap4CSharp.slnx -c Release --no-restore -m:1 -nr:false
       # Tool packing needs obj metadata omitted from the portable runtime export.
-      - name: Pack the built tool before exporting its tested runtime
-        run: dotnet pack src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj -c Release --no-build --no-restore -m:1 -nr:false -o artifacts/package
+      - name: Prepare native groups, pack, and select the tested runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (& dotnet msbuild src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj -nologo -getProperty:Version).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve package version.' }
+          ./scripts/prepare-native-tool-assets.ps1 -Version $version -Configuration Release -OutputDirectory artifacts/native-assets
+          $native = (Resolve-Path artifacts/native-assets).Path
+          dotnet pack src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj -c Release --no-build --no-restore -m:1 -nr:false -o artifacts/package "-p:CrapNativeToolAssetsRoot=$native/tools"
+          if ($LASTEXITCODE -ne 0) { throw 'Native tool pack failed.' }
+          $packages = @(Get-ChildItem artifacts/package/*.nupkg)
+          if ($packages.Count -ne 1) { throw 'Expected one native tool package.' }
+          $package = $packages[0].FullName
+          ./scripts/assert-package-metadata.ps1 -PackagePath $package -ExpectedVersion $version -NativeAssetsDirectory $native
+          ./scripts/test-native-tool-preparation.ps1
+          ./scripts/test-native-tool-package.ps1 -PackagePath $package -ExpectedVersion $version
+          ./scripts/install-native-test-runtime.ps1 -NativeAssetsDirectory $native -Version $version -Configuration Release
       - name: Export one bound Release runtime
         shell: pwsh
         run: ./scripts/export-suite-build.ps1 -Configuration Release -Commit $env:GITHUB_SHA -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputDirectory artifacts/suite-build

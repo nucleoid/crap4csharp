@@ -48,16 +48,36 @@ uses an isolated 10.0.103 SDK so hosted SDK updates do not change its inputs.
 Package version, JSON schema version and callable ruleset are distinct
 identities.
 
+The prepared package remains framework-dependent. It includes complete native
+ReadyToRun groups for Windows x64 and Linux x64, plus a portable IL group. The
+SDK selects the matching group during tool installation; consumer manifest and
+restore commands do not change. Other architectures use the IL group and are
+outside the Windows/Linux x64 acceptance matrix. These images do not include a
+private runtime or remove the SDK requirement for project-aware checks.
+
+Native preparation binds both platform groups to one source commit, version and
+configuration, preserves the declared runtime floor, and records every file hash.
+Candidate validation checks native platform headers, settings, runtime/dependency
+metadata and exact prepared bytes. Package mutation controls reject missing or
+swapped groups, native images in the portable group, wrong metadata and unsafe
+archive paths. Installed tests inspect actual SDK-selected tool paths and compare
+all selected bytes with the immutable package.
+
 Choose a new immutable prerelease version for each candidate. Pass that same
 `Version` to restore, build, tests and pack; do not pack an old assembly under a
 new version. Use owned output/feed/cache locations. The candidate sequence is:
 
 ```powershell
-dotnet restore Crap4CSharp.slnx --disable-parallel -p:Version=$CandidateVersion
-dotnet build Crap4CSharp.slnx -c Release --no-restore -m:1 -nr:false -p:Version=$CandidateVersion
-dotnet test Crap4CSharp.slnx -c Release --no-build -m:1 -nr:false -p:Version=$CandidateVersion
-dotnet pack src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj -c Release --no-build -o $OwnedFeed -p:Version=$CandidateVersion
+./scripts/prepare-candidate.ps1 -Version $CandidateVersion -OutputDirectory $OwnedFeed
 ```
+
+This prepares both native groups and one canonical package. A plain `dotnet pack`
+without prepared native assets still produces an ordinary IL development package.
+For suite acceptance, prepare matching Debug or Release native assets and run
+`scripts/install-native-test-runtime.ps1` before discovery or runtime export.
+The workflows perform that ordering explicitly and seal the full resulting
+runtime inventory. Debug suites use Debug-built images; they do not borrow the
+Release implementation from the candidate package.
 
 These commands do not replace the full acceptance matrix. Before release,
 require exact committed-head Debug and Release suites, original unchanged public

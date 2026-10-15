@@ -24,11 +24,15 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Candidate restore failed.' }
     & dotnet build Crap4CSharp.slnx -c Release --no-restore -m:1 -nr:false "-p:Version=$Version"
     if ($LASTEXITCODE -ne 0) { throw 'Candidate build failed.' }
-    & dotnet pack src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj -c Release --no-build --no-restore -m:1 -nr:false -o $destination "-p:Version=$Version"
+    $native = Join-Path $destination 'native-assets'
+    & "$PSScriptRoot/prepare-native-tool-assets.ps1" -Version $Version -Configuration Release -OutputDirectory $native
+    & dotnet pack src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj -c Release --no-build --no-restore -m:1 -nr:false -o $destination "-p:Version=$Version" "-p:CrapNativeToolAssetsRoot=$native/tools"
     if ($LASTEXITCODE -ne 0) { throw 'Candidate pack failed.' }
     $packages = @(Get-ChildItem -LiteralPath $destination -Filter '*.nupkg')
     if ($packages.Count -ne 1) { throw 'Expected exactly one candidate nupkg.' }
-    $metadata = & "$PSScriptRoot/assert-package-metadata.ps1" -PackagePath $packages[0].FullName -ExpectedVersion $Version
+    $metadata = & "$PSScriptRoot/assert-package-metadata.ps1" -PackagePath $packages[0].FullName -ExpectedVersion $Version -NativeAssetsDirectory $native
+    & "$PSScriptRoot/test-native-tool-preparation.ps1"
+    & "$PSScriptRoot/test-native-tool-package.ps1" -PackagePath $packages[0].FullName -ExpectedVersion $Version
     $afterStatus = & git --no-optional-locks status --porcelain
     if ($LASTEXITCODE -ne 0 -or $afterStatus) { throw 'Candidate preparation changed source or could not verify its state.' }
     $afterCommit = & git rev-parse HEAD
