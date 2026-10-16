@@ -433,8 +433,20 @@ public sealed class FreshCheckExecutionTests
     public Task FreshAliasedProductionReferencePreservesScoringCapturedReplayAndCurrentReuse()
         => RunCase(false, false, policyScope: "all", completedReuse: true, aliasedReference: true);
 
+    [Theory]
+    [InlineData("cancel")]
+    [InlineData("deadline")]
+    [InlineData("format")]
+    public Task SingleWriterPreparationRequiresActualProofBeforeSerializationAndCommit(string interruption)
+        => RunCase(false, false, policyScope: "all", standaloneTest: true, savedResults: true,
+            publicTiming: true, writerProbe: interruption);
+
+    [Fact]
+    public Task PendingFreshStagingCanBeRestoredBeforeTheSingleWriterProof()
+        => RunCase(false, false, policyScope: "all", publicTiming: true, writerOrdering: true);
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false, bool warmPostBuild = false, bool warmSaved = false, bool warmSavedEligibility = false, bool nativeSdkIdentity = global::App.DefaultNativeSdkIdentity, bool privateArtifactOnly = false, bool aliasedReference = false, bool localIncremental = false, bool lateLocalJson = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false, bool warmPostBuild = false, bool warmSaved = false, bool warmSavedEligibility = false, bool nativeSdkIdentity = global::App.DefaultNativeSdkIdentity, bool privateArtifactOnly = false, bool aliasedReference = false, bool localIncremental = false, bool lateLocalJson = false, string? writerProbe = null, bool writerOrdering = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -2124,9 +2136,94 @@ public sealed class FreshCheckExecutionTests
         var lateFreshCallbacks = 0;
         var actualTiming = publicTiming ? new CompletedProofTiming() : null;
         var actualStart = System.Diagnostics.Stopwatch.StartNew();
+        if (writerProbe is not null)
+        {
+            Func<Exception, ResultDocument>? refusal = null;
+            var probeBudget = TimeSpan.FromSeconds(writerProbe == "deadline" ? 180 : 600);
+            var request = new FreshCheckRequest("Root.slnx", "policy.json", "HEAD", "all",
+                null, "worktree", "method", null, "bundle", false, false, null,
+                new PolicyOverrides(), probeBudget)
+            { WarmPostBuildProbe = true, NativeSdkIdentityProbe = nativeSdkIdentity };
+            var probeClock = System.Diagnostics.Stopwatch.StartNew();
+            var prepared = await global::FreshCheckCommand.RunAsync(request, fixture.Path,
+                DateTimeOffset.UtcNow, lateFreshCancellation.Token,
+                retainTerminalProof: _ => Assert.Fail("The typed pending terminal owns its writer proof."),
+                retainTerminalFailure: factory => refusal = factory, timing: actualTiming);
+            Assert.True(prepared.RequiresWriterProof);
+            Assert.Null(prepared.ImmediateResult);
+            Assert.Equal(0, prepared.IntendedExitCode);
+            Assert.DoesNotContain(actualTiming!.Spans, span => span.Phase is "public.finalProof" or "public.outerProof");
+            Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));
+            global::SerializedFreshTerminal? serialized = null;
+            var formatCalls = 0;
+            var failure = await Record.ExceptionAsync(async () =>
+            {
+                serialized = await prepared.CompleteAtWriterAsync(proven =>
+                {
+                    formatCalls++;
+                    Assert.Equal("verified", proven.Evaluation.Provenance!.Status);
+                    Assert.True(proven.Evaluation.Provenance!.Reusable);
+                    Assert.Equal(2, proven.Run.TestOutcomes!.Count);
+                    Assert.Contains(actualTiming!.Spans, span => span.Phase == "public.validatedWriterEvidence");
+                    Assert.DoesNotContain(actualTiming!.Spans, span => span.Phase == "public.finalProof");
+                    if (writerProbe == "format") throw new JsonException("Owned post-proof serialization refusal.");
+                    var json = ResultWriter.Serialize(proven);
+                    if (writerProbe == "cancel") lateFreshCancellation.Cancel();
+                    if (writerProbe == "deadline")
+                    {
+                        // Let the REAL remaining writer timer expire after actual
+                        // provenance. No synthetic timeout exception or new clock.
+                        var remaining = probeBudget + TimeSpan.FromSeconds(1) - probeClock.Elapsed;
+                        if (remaining > TimeSpan.Zero) Thread.Sleep(remaining);
+                    }
+                    return new global::SerializedFreshTerminal(proven, json);
+                });
+            });
+            Assert.Equal(1, formatCalls);
+            if (writerProbe == "cancel") Assert.IsAssignableFrom<OperationCanceledException>(failure);
+            else if (writerProbe == "deadline") Assert.IsType<ProcessTimeoutException>(failure);
+            else Assert.IsType<JsonException>(failure);
+            Assert.Null(serialized);
+            Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));
+            Assert.NotNull(refusal);
+            var rejected = refusal!(failure!);
+            Assert.Equal(1, rejected.Run.ExitCode);
+            Assert.False(rejected.Evaluation.Provenance?.Reusable ?? false);
+            Assert.Equal(2, rejected.Run.TestOutcomes!.Count);
+            if (writerProbe == "deadline")
+            {
+                using var rejectedJson = JsonDocument.Parse(ResultWriter.Serialize(rejected));
+                Assert.True(rejectedJson.RootElement.GetProperty("run").GetProperty("cancellation").GetProperty("timedOut").GetBoolean());
+            }
+            Assert.Throws<InvalidOperationException>(() =>
+            {
+                _ = prepared.CompleteAtWriterAsync(_ => throw new InvalidOperationException("Never retry publication."));
+            });
+            foreach (var project in new[] { "Library", "Tests", "Independent" })
+                Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, project, "build-count.txt")));
+            foreach (var project in new[] { "Tests", "Independent" })
+                Assert.Single(File.ReadAllLines(Assert.Single(Directory.GetFiles(
+                    Path.Combine(fixture.Path, project, "bin"), "test-count.txt", SearchOption.AllDirectories))));
+            foreach (var (path, bytes) in original) Assert.Equal(bytes, File.ReadAllBytes(path));
+            return;
+        }
+        var stagingMutations = 0;
+        var writerRepairs = 0;
+        var stagedSource = Path.Combine(fixture.Path, "Library", "Code.cs");
+        var stagedSourceTime = default(DateTime);
         var exit = await global::App.RunAsync(publicArgs, fixture.Path, output, errors,
             freshTerminalCancellation ? lateFreshCancellation.Token : token,
-            beforeTerminalPublication: lateLocalJson ? ct =>
+            beforeTerminalPublication: writerOrdering ? ct =>
+            {
+                ct.ThrowIfCancellationRequested();
+                Assert.Equal(1, stagingMutations);
+                Assert.False(original[stagedSource].SequenceEqual(File.ReadAllBytes(stagedSource)));
+                Assert.DoesNotContain(actualTiming!.Spans, span => span.Phase is "public.finalProof" or "public.outerProof");
+                writerRepairs++;
+                File.WriteAllBytes(stagedSource, original[stagedSource]);
+                File.SetLastWriteTimeUtc(stagedSource, stagedSourceTime);
+                return Task.CompletedTask;
+            } : lateLocalJson ? ct =>
             {
                 ct.ThrowIfCancellationRequested();
                 fixture.Write("UnrelatedAfterCapture.json", "{}");
@@ -2135,15 +2232,32 @@ public sealed class FreshCheckExecutionTests
             {
                 ct.ThrowIfCancellationRequested();
                 if (privateArtifactOnly)
-                    Assert.Contains(actualTiming!.Spans, span => span.Phase == "public.completedInnerProof");
+                    Assert.Contains(actualTiming!.Spans, span => span.Phase == "public.provisionalTerminalPrepared");
                 lateFreshCallbacks++;
-                // Both real required tests and full publication proof have returned;
-                // cancel only at the invocation-local post-serialization seam.
+                // Both real required tests and provisional preparation have returned;
+                // the approved seam now precedes the full writer proof.
                 if (freshTerminalDeadline)
                     throw new ProcessTimeoutException("Fresh check", TimeSpan.FromSeconds(600));
                 lateFreshCancellation.Cancel();
                 return Task.CompletedTask;
-            } : null, freshTiming: actualTiming, nativeSdkIdentityProbe: nativeSdkIdentity);
+            } : null, freshTiming: actualTiming, nativeSdkIdentityProbe: nativeSdkIdentity,
+            onFreshStagingCreated: writerOrdering ? path =>
+            {
+                Assert.True(Directory.Exists(path));
+                Assert.Equal(0, stagingMutations++);
+                stagedSourceTime = File.GetLastWriteTimeUtc(stagedSource);
+                var changed = original[stagedSource].ToArray();
+                changed[0] ^= 1;
+                File.WriteAllBytes(stagedSource, changed);
+                File.SetLastWriteTimeUtc(stagedSource, stagedSourceTime);
+            } : null);
+        if (writerOrdering)
+        {
+            Assert.Equal(1, stagingMutations);
+            Assert.Equal(1, writerRepairs);
+            Assert.Equal(0, exit);
+            Assert.Equal(original[stagedSource], File.ReadAllBytes(stagedSource));
+        }
         if (actualTiming is not null)
         {
             Assert.All(actualTiming.Spans, span => Assert.True(double.IsFinite(span.Milliseconds) && span.Milliseconds >= 0));
@@ -2155,6 +2269,22 @@ public sealed class FreshCheckExecutionTests
             TestValidationOutput.WriteOptionalProfile("strict-public", timingJson);
         }
         using var terminal = JsonDocument.Parse(output.ToString());
+        if (writerOrdering)
+        {
+            var evaluation = terminal.RootElement.GetProperty("evaluation");
+            Assert.True(evaluation.GetProperty("decision").GetProperty("completed").GetBoolean());
+            var provenance = evaluation.GetProperty("provenance");
+            Assert.Equal("verified", provenance.GetProperty("status").GetString());
+            Assert.True(provenance.GetProperty("postflightVerified").GetBoolean());
+            Assert.True(provenance.GetProperty("reusable").GetBoolean());
+            var manifest = Assert.Single(terminal.RootElement.GetProperty("run").GetProperty("artifacts").EnumerateArray(),
+                artifact => artifact.GetProperty("kind").GetString() == "manifest");
+            Assert.True(manifest.GetProperty("complete").GetBoolean());
+            Assert.True(manifest.GetProperty("reusable").GetBoolean());
+            Assert.Single(actualTiming!.Spans, span => span.Phase == "public.outerProof");
+            Assert.Single(actualTiming.Spans, span => span.Phase == "public.validatedWriterEvidence");
+            Assert.DoesNotContain(actualTiming.Spans, span => span.Phase == "public.finalProof");
+        }
         Assert.Equal(global::App.ToolVersion, terminal.RootElement.GetProperty("toolVersion").GetString());
         Assert.Equal(".", terminal.RootElement.GetProperty("evaluation").GetProperty("scope").GetProperty("logicalWorkspaceRoot").GetString());
         if (defaultSolution) Assert.True(exit == 0, errors + Environment.NewLine + output);
