@@ -57,3 +57,10 @@ retains graph ID, physical project path, design-time context and evaluated test-
 Required test contexts remain present even when production inventory excludes tests. Loading requires existing
 restore assets and never implicitly restores or compiles. These associations do not establish actual Csc inputs,
 test execution, final output binding or reusable evidence; the fresh-check workflow proves those separately.
+
+Mapped global properties distinguish build contexts and can travel through private
+worker requests and MSBuild arguments. Do not put credentials in them; use the
+consumer's approved private credential mechanism. The guard refuses conventional
+credential names, including mapped password, token and connection-key variants.
+It cannot determine whether an arbitrary property value is secret. Deterministic
+identity hashes are not encryption, and private diagnostics must remain private.

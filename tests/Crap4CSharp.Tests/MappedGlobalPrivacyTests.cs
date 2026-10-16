@@ -37,6 +37,16 @@ public sealed class MappedGlobalPrivacyTests
     [InlineData("GitHub-Token")]
     [InlineData("AUTH_TOKEN")]
     [InlineData("PrivatePublicKeyToken")]
+    [InlineData("DbPwd")]
+    [InlineData("AdoPat")]
+    [InlineData("StorageSas")]
+    [InlineData("ClientSecrets")]
+    [InlineData("ConnString")]
+    [InlineData("SubscriptionKey")]
+    [InlineData("EncryptionKey")]
+    [InlineData("SharedKey")]
+    [InlineData("DB_PWD")]
+    [InlineData("ADO_PAT")]
     public void CredentialNamedPropertiesRefuseWithoutDisclosingTheirNameOrValue(string property)
     {
         const string value = "private-credential-canary";
@@ -53,7 +63,7 @@ public sealed class MappedGlobalPrivacyTests
         {
             ["Configuration"] = "Debug", ["Platform"] = "AnyCPU", ["TargetFramework"] = "net10.0",
             ["Flavor"] = "LEFT", ["MetadataToken"] = "42", ["PublicKeyToken"] = "public",
-            ["Compatibility"] = "v1", ["Compat"] = "true", ["AssemblyOriginatorKeyFile"] = "public.snk",
+            ["Compatibility"] = "v1", ["Compat"] = "true", ["BuildCompat"] = "true", ["AssemblyOriginatorKeyFile"] = "public.snk",
             ["KeyboardLayout"] = "US", ["PassThrough"] = "true"
         });
 }

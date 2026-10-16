@@ -6,8 +6,11 @@ internal static class MappedGlobalPrivacy
     ["PASSWORD", "PASSWD", "CLIENTSECRET", "SECRET", "CREDENTIAL", "CREDENTIALS", "CONNECTIONSTRING",
      "APIKEY", "ACCESSTOKEN", "AUTHORIZATIONTOKEN", "BEARERTOKEN", "REFRESHTOKEN", "PRIVATEKEY", "ACCESSKEY",
      "SIGNINGKEY", "NUGETKEY", "SASTOKEN", "PFXPASS", "AUTHCOOKIE", "SESSIONCOOKIE",
-     "PERSONALACCESSTOKEN", "PERSONALACCESSTOKENVALUE", "TOKEN", "PASSPHRASE", "ACCOUNTKEY", "BEARER"];
+     "PERSONALACCESSTOKEN", "PERSONALACCESSTOKENVALUE", "TOKEN", "PASSPHRASE", "ACCOUNTKEY", "BEARER",
+     "PWD", "ADOPAT", "SAS", "SECRETS", "CONNSTRING", "SUBSCRIPTIONKEY", "ENCRYPTIONKEY", "SHAREDKEY"];
 
+    // Conventional credential names are a refusal guard, not secret detection.
+    // Keep PAT narrow: a generic PAT suffix would reject ordinary Compat globals.
     internal static void Validate(IEnumerable<KeyValuePair<string, string>> properties)
     {
         foreach (var (name, _) in properties)
