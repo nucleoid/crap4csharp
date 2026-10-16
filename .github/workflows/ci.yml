@@ -121,13 +121,13 @@ jobs:
         run: |
           ./scripts/test-workflow-artifact-selection.ps1
           ./scripts/select-workflow-artifact-ids.ps1 -Kind build -Configuration Release -RunnerOS '${{ matrix.os }}' -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputPath artifacts/build-artifact-selection.json
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6; includes the final metadata page
         with:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ github.run_id }}
           artifact-ids: ${{ steps.build-artifacts.outputs.ids }}
-          path: artifacts/downloaded-builds
+          path: artifacts/downloaded-builds/${{ steps.build-artifacts.outputs.single-artifact-name }}
       - name: Import the bound shared Release runtime
         shell: pwsh
         run: |
@@ -204,13 +204,13 @@ jobs:
         run: |
           ./scripts/test-workflow-artifact-selection.ps1
           ./scripts/select-workflow-artifact-ids.ps1 -Kind build -Configuration Release -RunnerOS '${{ matrix.os }}' -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputPath artifacts/build-artifact-selection.json
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6; includes the final metadata page
         with:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ github.run_id }}
           artifact-ids: ${{ steps.build-artifacts.outputs.ids }}
-          path: artifacts/downloaded-builds
+          path: artifacts/downloaded-builds/${{ steps.build-artifacts.outputs.single-artifact-name }}
       - name: Import the bound shared Release runtime
         shell: pwsh
         run: |
@@ -223,7 +223,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/select-workflow-artifact-ids.ps1 -Kind partition -Configuration Release -RunnerOS '${{ matrix.os }}' -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputPath artifacts/partition-artifact-selection.json
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6; includes the final metadata page
         with:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
