@@ -147,6 +147,7 @@ jobs:
           path: |
             artifacts/test-results/Release-${{ matrix.shard }}.partition.diagnostic.json
             artifacts/test-results/Release-${{ matrix.shard }}.discovery.json.diagnostic.json
+            artifacts/build-artifact-selection.json
           if-no-files-found: warn
           retention-days: 7
       - name: Retain only sanitized partition receipt
@@ -256,6 +257,8 @@ jobs:
           path: |
             artifacts/test-results/Release.partition-coverage.receipt.json
             artifacts/test-results/Release.discovery.json.diagnostic.json
+            artifacts/build-artifact-selection.json
+            artifacts/partition-artifact-selection.json
           if-no-files-found: warn
           retention-days: 7
       - name: Build top-level callable fixture

@@ -195,9 +195,20 @@ jobs:
           "CRAP4CSHARP_CANDIDATE_VERSION=$env:CANDIDATE_VERSION" >> $env:GITHUB_ENV
       - name: Record SDK and runtime inventory
         run: dotnet --info
+      - name: Select newest published configuration build generation
+        id: build-artifacts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/test-workflow-artifact-selection.ps1
+          ./scripts/select-workflow-artifact-ids.ps1 -Kind build -Configuration '${{ matrix.configuration }}' -RunnerOS '${{ matrix.os }}' -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputPath artifacts/build-artifact-selection.json
       - uses: actions/download-artifact@v4
         with:
-          pattern: suite-build-${{ matrix.configuration }}-${{ matrix.os }}-attempt-*
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          artifact-ids: ${{ steps.build-artifacts.outputs.ids }}
           path: artifacts/downloaded-builds
       - name: Import the bound shared ${{ matrix.configuration }} runtime
         shell: pwsh
@@ -216,6 +227,7 @@ jobs:
           path: |
             artifacts/test-results/${{ matrix.configuration }}-${{ matrix.shard }}.partition.diagnostic.json
             artifacts/test-results/${{ matrix.configuration }}-${{ matrix.shard }}.discovery.json.diagnostic.json
+            artifacts/build-artifact-selection.json
           if-no-files-found: warn
           retention-days: 7
       - name: Retain only sanitized partition receipt
@@ -278,13 +290,35 @@ jobs:
           "CRAP4CSHARP_CANDIDATE_VERSION=$env:CANDIDATE_VERSION" >> $env:GITHUB_ENV
       - name: Record SDK and runtime inventory
         run: dotnet --info
+      - name: Select newest generation for both complete partition inventories
+        id: partition-artifacts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/test-workflow-artifact-selection.ps1
+          ./scripts/select-workflow-artifact-ids.ps1 -Kind partition -Configuration Debug,Release -RunnerOS '${{ matrix.os }}' -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputPath artifacts/partition-artifact-selection.json
       - uses: actions/download-artifact@v4
         with:
-          pattern: partition-*-${{ matrix.os }}-*
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          artifact-ids: ${{ steps.partition-artifacts.outputs.ids }}
           path: artifacts/partition-receipts
+      - name: Select newest Debug and Release build generations
+        id: build-artifacts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/test-workflow-artifact-selection.ps1
+          ./scripts/select-workflow-artifact-ids.ps1 -Kind build -Configuration Debug,Release -RunnerOS '${{ matrix.os }}' -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputPath artifacts/build-artifact-selection.json
       - uses: actions/download-artifact@v4
         with:
-          pattern: suite-build-*-${{ matrix.os }}-attempt-*
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          artifact-ids: ${{ steps.build-artifacts.outputs.ids }}
           path: artifacts/downloaded-builds
       - name: Prove complete Debug and Release partition unions
         shell: pwsh
@@ -374,6 +408,8 @@ jobs:
             artifacts/test-results/Release.partition-coverage.receipt.json
             artifacts/test-results/Debug.discovery.json.diagnostic.json
             artifacts/test-results/Release.discovery.json.diagnostic.json
+            artifacts/build-artifact-selection.json
+            artifacts/partition-artifact-selection.json
           if-no-files-found: warn
           retention-days: 7
 
@@ -388,9 +424,20 @@ jobs:
         with:
           name: candidate
           path: candidate
+      - name: Select newest acceptance generation for both platforms
+        id: platform-artifacts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/test-workflow-artifact-selection.ps1
+          ./scripts/select-workflow-artifact-ids.ps1 -Kind acceptance -RunnerOS ubuntu-latest,windows-latest -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputPath artifacts/platform-artifact-selection.json
       - uses: actions/download-artifact@v4
         with:
-          pattern: acceptance-*-attempt-*
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          artifact-ids: ${{ steps.platform-artifacts.outputs.ids }}
           path: acceptance
       - name: Require both platforms to accept identical package bytes
         shell: pwsh
@@ -399,6 +446,15 @@ jobs:
           ./scripts/test-platform-acceptance-reruns.ps1
           ./scripts/select-platform-acceptance.ps1 -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -InputDirectory acceptance -OutputDirectory selected-acceptance
           ./scripts/assert-partitioned-platform-acceptance.ps1 -CandidateDirectory candidate -AcceptanceDirectory selected-acceptance -Version $env:CANDIDATE_VERSION -Commit $env:GITHUB_SHA -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT
+      - name: Retain sanitized platform artifact selection
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath artifacts/platform-artifact-selection.json) {
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '```json'
+            Get-Content -LiteralPath artifacts/platform-artifact-selection.json | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '```'
+          }
 
   publish:
     needs: compare

@@ -1,28 +1,59 @@
+function Read-WorkflowArtifactMetadata {
+    param(
+        [Parameter(Mandatory)][scriptblock]$ReadSnapshot,
+        [scriptblock]$WaitForNextObservation = { Start-Sleep -Seconds 2 }
+    )
+    $ErrorActionPreference='Stop'
+    for($observation=0;$observation -lt 3;$observation++){
+        $snapshot=& $ReadSnapshot
+        if($null -eq $snapshot -or $snapshot.exitCode -ne 0 -or $null -eq $snapshot.pages){throw 'Workflow artifact metadata unavailable.'}
+        $pages=@($snapshot.pages)
+        if(!$pages.Count){throw 'Workflow artifact metadata unavailable.'}
+        $rows=@($pages|ForEach-Object artifacts)
+        if(@($pages|Where-Object {$_.total_count -ne $pages[0].total_count}).Count -eq 0 -and
+            $rows.Count -eq $pages[0].total_count -and @($rows.id|Sort-Object -Unique).Count -eq $rows.Count){
+            return [pscustomobject]@{artifacts=$rows;observations=$observation+1}
+        }
+        if($observation -lt 2){[void](& $WaitForNextObservation)}
+    }
+    throw 'Workflow artifact metadata remained inconsistent.'
+}
+
 function Select-WorkflowArtifactMetadata {
     param(
-        [Parameter(Mandatory)][object[]]$Artifacts,
-        [Parameter(Mandatory)][ValidateSet('build','partition')][string]$Kind,
-        [Parameter(Mandatory)][ValidateSet('Debug','Release')][string]$Configuration,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Artifacts,
+        [Parameter(Mandatory)][ValidateSet('build','partition','acceptance')][string]$Kind,
+        [ValidateSet('Debug','Release')][string]$Configuration,
         [Parameter(Mandatory)][ValidateSet('ubuntu-latest','windows-latest')][string]$RunnerOS,
         [Parameter(Mandatory)][ValidateRange(1,2147483647)][int]$WorkflowAttempt,
         [ValidateRange(1,64)][int]$ShardCount=16
     )
     $ErrorActionPreference='Stop'
-    $prefix=if($Kind -ceq 'build'){"suite-build-$Configuration-$RunnerOS-attempt-"}else{"partition-$Configuration-$RunnerOS-"}
-    $pattern=if($Kind -ceq 'build'){'^'+[regex]::Escape($prefix)+'([1-9][0-9]*)$'}else{'^'+[regex]::Escape($prefix)+'(0|[1-9][0-9]*)-attempt-([1-9][0-9]*)$'}
+    if($Kind -ceq 'acceptance'){
+        if(![string]::IsNullOrEmpty($Configuration)){throw 'Platform acceptance selection must not specify a configuration.'}
+        $prefix='acceptance-'
+        $pattern='^acceptance-(ubuntu-latest|windows-latest)-attempt-([1-9][0-9]*)$'
+    }else{
+        if([string]::IsNullOrEmpty($Configuration)){throw 'Build and partition selection require a configuration.'}
+        $prefix=if($Kind -ceq 'build'){"suite-build-$Configuration-$RunnerOS-attempt-"}else{"partition-$Configuration-$RunnerOS-"}
+        $pattern=if($Kind -ceq 'build'){'^'+[regex]::Escape($prefix)+'([1-9][0-9]*)$'}else{'^'+[regex]::Escape($prefix)+'(0|[1-9][0-9]*)-attempt-([1-9][0-9]*)$'}
+    }
     $slots=@{}
     foreach($artifact in $Artifacts){
-        $match=[regex]::Match([string]$artifact.name,$pattern,[Text.RegularExpressions.RegexOptions]::CultureInvariant)
-        if(!$match.Success){continue}
-        $slot=if($Kind -ceq 'build'){0}else{[int]::Parse($match.Groups[1].Value,[Globalization.CultureInfo]::InvariantCulture)}
+        $name=[string]$artifact.name
+        if(!$name.StartsWith($prefix,[StringComparison]::Ordinal)){continue}
+        $match=[regex]::Match($name,$pattern,[Text.RegularExpressions.RegexOptions]::CultureInvariant)
+        if(!$match.Success){throw 'Invalid workflow artifact name.'}
+        $slot=if($Kind -ceq 'partition'){[int]::Parse($match.Groups[1].Value,[Globalization.CultureInfo]::InvariantCulture)}else{0}
         if($slot -ge $ShardCount){throw 'Artifact shard is outside the declared partition inventory.'}
         $attemptIndex=if($Kind -ceq 'build'){1}else{2}
         $attempt=[int]::Parse($match.Groups[$attemptIndex].Value,[Globalization.CultureInfo]::InvariantCulture)
-        if($attempt -gt $WorkflowAttempt){continue}
+        if($attempt -gt $WorkflowAttempt){throw 'Workflow artifact is newer than the current attempt.'}
+        if($Kind -ceq 'acceptance' -and $match.Groups[1].Value -cne $RunnerOS){continue}
         if(!$slots.ContainsKey($slot)){$slots[$slot]=[Collections.Generic.List[object]]::new()}
         $slots[$slot].Add([pscustomobject]@{artifact=$artifact;attempt=$attempt;slot=$slot})
     }
-    $required=if($Kind -ceq 'build'){@(0)}else{@(0..($ShardCount-1))}
+    $required=if($Kind -ceq 'partition'){@(0..($ShardCount-1))}else{@(0)}
     $selected=@(foreach($slot in $required){
         if(!$slots.ContainsKey($slot)){throw 'Required workflow artifact slot is missing.'}
         $latest=($slots[$slot]|Measure-Object attempt -Maximum).Maximum

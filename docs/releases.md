@@ -31,10 +31,13 @@ Linux from the same workflow run, bound to the prepared package SHA-256,
 version, commit and tree, and passing real collector gates. The CI checks
 `test (windows-latest)` and `test (ubuntu-latest)` require the complete Release
 union and collector gates; individual shard successes cannot satisfy them.
-Receipt selection uses the latest available receipt for each partition; receipts
-from an earlier attempt of the same run remain eligible when all source, runtime
-and package identities agree. Future-attempt receipts are refused. Hosted
-Release CI has produced complete Windows/Linux unions. Final-head CI, manual
+Before download, metadata selection chooses the newest named generation for each
+required build, partition or platform slot. Missing, expired, malformed, future
+or ambiguous generations refuse. Only selected IDs are downloaded; an unavailable
+newest artifact fails rather than falling back to an older pass. Earlier attempts
+of the same run remain eligible only when all source, runtime and package
+identities agree. Existing strict receipt validation still runs after download.
+Hosted Release CI has produced complete Windows/Linux unions. Final-head CI, manual
 packaged acceptance and actual rerun validation remain required. The publication job is
 disabled and also refuses execution until separately approved feed, credentials
 and artifact verification are wired. It contains no package push or tag trigger.
@@ -128,9 +131,14 @@ or expired, start a new workflow run with a new candidate version. Even a failed
 first preparation requires a new run if it never uploaded its candidate.
 
 Build, partition and platform artifacts have attempt-specific names. A partial
-rerun selects the newest available receipt for each partition and platform from
-that same workflow run, then checks the complete source, SDK, runtime and package
-identity. A newer failed or invalid receipt cannot be replaced by an older pass.
+rerun selects the newest named generation for each required build, partition and
+platform from that same workflow run before downloading exact artifact IDs, then
+checks the complete source, SDK, runtime and package identity. An expired,
+ambiguous or unavailable newest generation refuses without an older fallback.
+Sanitized selected names and IDs are retained with existing diagnostic artifacts;
+the compare job retains its selection in the attempt summary so a compare-only
+rerun does not add or replace the original immutable package/platform artifacts.
+A newer failed or invalid receipt cannot be replaced by an older pass.
 Rebuilding a configuration changes its runtime identity; every accepted partition
 must still bind to the selected shared build. Rerun its complete partition set
 when rebuilding rather than combining receipts from different runtime bytes.
