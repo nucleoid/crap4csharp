@@ -114,7 +114,7 @@ internal static class App
     public static async Task<int> RunAsync(string[] args, string workingDirectory, TextWriter output, TextWriter error,
         CancellationToken cancellationToken, ProcessExecutor? processExecutor = null,
         Func<CancellationToken, Task>? beforeTerminalPublication = null, CompletedProofTiming? freshTiming = null,
-        bool nativeSdkIdentityProbe = DefaultNativeSdkIdentity)
+        bool nativeSdkIdentityProbe = DefaultNativeSdkIdentity, Action<string>? onFreshStagingCreated = null)
     {
         if (args.Any(arg => arg is "--help" or "-h")) { await output.WriteLineAsync(Help); return 0; }
         if (args.Length > 0 && args[0] == "cleanup")
@@ -122,7 +122,7 @@ internal static class App
         if (args.Length > 0 && args[0] == "baseline")
             return await BaselineCommand.RunAsync(args, workingDirectory, output, error, cancellationToken);
         if (args.Length > 0 && args[0] is "analyze" or "check")
-            return await RunCallableCommandAsync(args, workingDirectory, output, error, cancellationToken, beforeTerminalPublication, freshTiming, nativeSdkIdentityProbe);
+            return await RunCallableCommandAsync(args, workingDirectory, output, error, cancellationToken, beforeTerminalPublication, freshTiming, nativeSdkIdentityProbe, onFreshStagingCreated);
 
         var startedAt = DateTimeOffset.UtcNow;
         var stopwatch = Stopwatch.StartNew();
@@ -226,7 +226,8 @@ internal static class App
 
     private static async Task<int> RunCallableCommandAsync(string[] args, string workingDirectory,
         TextWriter output, TextWriter error, CancellationToken cancellationToken,
-        Func<CancellationToken, Task>? beforeTerminalPublication, CompletedProofTiming? freshTiming, bool nativeSdkIdentityProbe)
+        Func<CancellationToken, Task>? beforeTerminalPublication, CompletedProofTiming? freshTiming, bool nativeSdkIdentityProbe,
+        Action<string>? onFreshStagingCreated)
     {
         var startedAt = DateTimeOffset.UtcNow;
         var stopwatch = Stopwatch.StartNew();
@@ -235,11 +236,13 @@ internal static class App
         string? privateDiagnostics = null;
         PrivateDiagnosticLease? privateDiagnosticLease = null;
         Func<Task>? terminalProof = null;
+        SerializedFreshTerminal? serializedFreshTerminal = null;
         Func<Exception, ResultDocument>? freshTerminalFailure = null;
         try
         {
             options = ParseModern(args, out options);
             ResultDocument? freshResult = null;
+            FreshCheckPreparation? freshPreparation = null;
             if (options.Command == "check" && options.ReuseArtifacts is null)
             {
                 var request = new FreshCheckRequest(options.Project, options.Policy!, options.Base, options.Scope,
@@ -252,13 +255,14 @@ internal static class App
                 { WarmPostBuildProbe = true, NativeSdkIdentityProbe = nativeSdkIdentityProbe };
                 // This parent-only flag selects fresh graph acquisition AFTER once builds.
                 // Cold preparation, metadata and runner discovery remain ordinary.
-                freshResult = await FreshCheckCommand.RunAsync(request, workingDirectory, startedAt, cancellationToken,
+                freshPreparation = await FreshCheckCommand.RunAsync(request, workingDirectory, startedAt, cancellationToken,
                     proof => failureOutputProof = proof, directory =>
                     {
                         privateDiagnostics = directory;
                         privateDiagnosticLease = new PrivateDiagnosticLease(directory, ToolVersion);
                     },
-                    proof => terminalProof = proof, refusal => freshTerminalFailure = refusal, freshTiming);
+                    proof => terminalProof = proof, refusal => freshTerminalFailure = refusal, freshTiming, onFreshStagingCreated);
+                freshResult = freshPreparation.ImmediateResult;
             }
             // Fresh execution has already materialized the graceful cancellation
             // terminal, including actual completed/interrupted/not-run contexts.
@@ -270,8 +274,25 @@ internal static class App
             // guarded write path below refuse it without discarding those outcomes.
             // Success and nonfresh paths retain their existing consumer-file guard.
             if (options.Command == "check" && options.Output is not null &&
-                (freshResult is null || freshResult.Run.ExitCode != 1))
+                (freshPreparation is null || freshPreparation.IntendedExitCode != 1))
                 OutputDestinationSafety.RejectExistingConsumerFile(options.Output, workingDirectory);
+            if (freshPreparation?.RequiresWriterProof == true)
+            {
+                // Preparation is not completed/reusable evidence. The owner-approved
+                // terminal seam now precedes the ONE complete writer proof.
+                if (beforeTerminalPublication is not null) await beforeTerminalPublication(cancellationToken);
+                serializedFreshTerminal = await freshPreparation.CompleteAtWriterAsync(proven =>
+                {
+                    // Pure synchronous formatting only: no consumer callbacks or
+                    // awaits between the final physical closings and guarded commit.
+                    proven = AttachPrivateDiagnostics(proven, privateDiagnostics);
+                    var finalDuration = stopwatch.Elapsed;
+                    proven = proven with { Run = proven.Run with
+                        { FinishedAt = startedAt + finalDuration, DurationMilliseconds = finalDuration.TotalMilliseconds } };
+                    return new SerializedFreshTerminal(proven, ResultWriter.Serialize(proven));
+                });
+                freshResult = serializedFreshTerminal.Result;
+            }
             var result = freshResult ?? (options.Command == "check"
                 ? await PolicyCheckCommand.RunAsync(options.ReuseArtifacts!, options.Policy!, options.Base!,
                     workingDirectory, options.Output, options.Timeout, startedAt, stopwatch.Elapsed, cancellationToken,
@@ -282,7 +303,7 @@ internal static class App
                 : options.Ruleset == ComplexityRules.OrdinaryMethodsV1
                 ? await AnalyzeLegacyCapturedInputsAsync(options, workingDirectory, startedAt, stopwatch, cancellationToken)
                 : AnalyzeCapturedInputs(options, workingDirectory, startedAt, stopwatch));
-            result = AttachPrivateDiagnostics(result, privateDiagnostics);
+            if (serializedFreshTerminal is null) result = AttachPrivateDiagnostics(result, privateDiagnostics);
             var writeResult = true;
             if (freshResult is not null && result.Run.ExitCode == 1 && options.Output is not null)
             {
@@ -307,11 +328,12 @@ internal static class App
             }
             // Capture terminal timing after replay/current revalidation, not before awaiting it.
             var duration = stopwatch.Elapsed;
-            result = result with { Run = result.Run with
-                { FinishedAt = startedAt + duration, DurationMilliseconds = duration.TotalMilliseconds } };
-            var json = ResultWriter.Serialize(result);
+            if (serializedFreshTerminal is null)
+                result = result with { Run = result.Run with
+                    { FinishedAt = startedAt + duration, DurationMilliseconds = duration.TotalMilliseconds } };
+            var json = serializedFreshTerminal?.Json ?? ResultWriter.Serialize(result);
             // Invocation-local deterministic acceptance seam; null changes no normal behavior.
-            if (beforeTerminalPublication is not null) await beforeTerminalPublication(cancellationToken);
+            if (serializedFreshTerminal is null && beforeTerminalPublication is not null) await beforeTerminalPublication(cancellationToken);
             // A complete saved check must still match ALL required test/compiler/
             // physical/trust/ORIGINAL revision inputs at the actual outer writer.
             // On refusal, discard the serialized success and emit only failure.

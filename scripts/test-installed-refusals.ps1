@@ -129,8 +129,13 @@ foreach($mode in @('no-collector','mtp-property','mtp-global')){
         $result.evaluation.decision.completed -or $result.evaluation.decision.policyDecision -cne 'unknown'){
         throw "Unsupported capability was not an ordinary incomplete refusal: $mode"
     }
+    # Test outcomes are optional/null when refusal precedes execution. Strict
+    # mode must still reject every present non-null outcome, including malformed
+    # scalar/object values; absence must not throw before this oracle runs.
+    $outcomesProperty=$result.run.PSObject.Properties['testOutcomes']
+    $testOutcomes=@(if($null -ne $outcomesProperty){$outcomesProperty.Value|Where-Object {$null -ne $_}})
     if(@($result.run.artifacts|Where-Object {$_.complete -or $_.reusable}).Count -or
-        @($result.run.testOutcomes|Where-Object {$null -ne $_}).Count){throw 'Unsupported setup produced execution/reusable evidence.'}
+        $testOutcomes.Count){throw 'Unsupported setup produced execution/reusable evidence.'}
     $rows+=@([pscustomobject]@{mode=$mode;fixture=$root;terminal=$terminal;processExit=$exit;reason=$expected;sourceChanges=$changes;actualExecutionMarkers=$markers.Count;terminalSha256=(Get-FileHash -LiteralPath $terminal).Hash.ToLowerInvariant()})
 }
 if((Get-FileHash -LiteralPath (Join-Path $candidate ('feed/'+$receipt.package))).Hash.ToLowerInvariant() -cne $receipt.sha256){throw 'Package changed.'}

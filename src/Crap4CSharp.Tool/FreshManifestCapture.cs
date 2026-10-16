@@ -368,8 +368,8 @@ internal static class FreshManifestCapture
         if (captured.RequiresCompletedProof)
         {
             // Unpublishable preparation uses ORIGINAL physical/selection/test
-            // evidence. Independently current graph/runner/trust proof remains
-            // mandatory after staging and again at the actual outer commit.
+            // evidence. The complete independently current intermediate/final
+            // graph/runner/trust proof remains mandatory at the actual writer.
             using (timing?.Start(timingPrefix + ".originalPhysicalBefore"))
                 execution.Compiler.RetainedProof!.ValidateCurrent(cancellation);
             await ValidateSelectionAndTestsAsync(execution, cancellation, timing, timingPrefix + ".provisional");
@@ -395,7 +395,7 @@ internal static class FreshManifestCapture
     }
 
     private static PolicyException ProvisionalRefusal() => new("check.provisionalCaptureRequiresCompletedProof",
-        "Provisional capture requires final and terminal completed proof before publication.");
+        "Provisional capture requires complete writer proof before publication.");
 
     internal static async Task RegateAsync(FreshExecutionEvidence execution, CancellationToken cancellation,
         CompletedProofTiming? timing = null, string timingPrefix = "regate",
