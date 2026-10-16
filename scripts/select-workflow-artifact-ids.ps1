@@ -47,3 +47,8 @@ if(Test-Path -LiteralPath $output){throw 'Artifact selection receipt already exi
     qualification='Newest named generation per required slot only. Download and all existing source/runtime/SDK/package/partition receipt validators must still succeed; unavailable latest artifacts never fall back.'}|
     ConvertTo-Json -Depth 6|Set-Content -LiteralPath $output
 [IO.File]::AppendAllText($env:GITHUB_OUTPUT,"ids=$($selected.id -join ',')`n")
+# Newer download-artifact versions flatten a single ID. Preserve the exact
+# selected generation directory explicitly; multi-artifact downloads retain names.
+if($selected.Count -eq 1){
+    [IO.File]::AppendAllText($env:GITHUB_OUTPUT,"single-artifact-name=$($selected[0].name)`n")
+}

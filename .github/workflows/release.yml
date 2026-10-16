@@ -96,7 +96,7 @@ jobs:
       - name: Bind the exact SDK host for consumer processes
         shell: pwsh
         run: ./scripts/bind-acceptance-sdk-host.ps1
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6; includes the final metadata page
         with:
           name: candidate
           path: ${{ runner.temp }}/candidate
@@ -174,7 +174,7 @@ jobs:
       - name: Install exact consumer runtime
         shell: pwsh
         run: ./scripts/install-consumer-runtime.ps1 -DotnetRoot $env:DOTNET_ROOT -Version 9.0.20
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6; includes the final metadata page
         with:
           name: candidate
           path: ${{ runner.temp }}/candidate
@@ -203,13 +203,13 @@ jobs:
         run: |
           ./scripts/test-workflow-artifact-selection.ps1
           ./scripts/select-workflow-artifact-ids.ps1 -Kind build -Configuration '${{ matrix.configuration }}' -RunnerOS '${{ matrix.os }}' -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputPath artifacts/build-artifact-selection.json
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6; includes the final metadata page
         with:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ github.run_id }}
           artifact-ids: ${{ steps.build-artifacts.outputs.ids }}
-          path: artifacts/downloaded-builds
+          path: artifacts/downloaded-builds/${{ steps.build-artifacts.outputs.single-artifact-name }}
       - name: Import the bound shared ${{ matrix.configuration }} runtime
         shell: pwsh
         run: |
@@ -269,7 +269,7 @@ jobs:
       - name: Install exact consumer runtime
         shell: pwsh
         run: ./scripts/install-consumer-runtime.ps1 -DotnetRoot $env:DOTNET_ROOT -Version 9.0.20
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6; includes the final metadata page
         with:
           name: candidate
           path: ${{ runner.temp }}/candidate
@@ -298,7 +298,7 @@ jobs:
         run: |
           ./scripts/test-workflow-artifact-selection.ps1
           ./scripts/select-workflow-artifact-ids.ps1 -Kind partition -Configuration Debug,Release -RunnerOS '${{ matrix.os }}' -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputPath artifacts/partition-artifact-selection.json
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6; includes the final metadata page
         with:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
@@ -313,7 +313,7 @@ jobs:
         run: |
           ./scripts/test-workflow-artifact-selection.ps1
           ./scripts/select-workflow-artifact-ids.ps1 -Kind build -Configuration Debug,Release -RunnerOS '${{ matrix.os }}' -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputPath artifacts/build-artifact-selection.json
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6; includes the final metadata page
         with:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
@@ -420,7 +420,7 @@ jobs:
       CANDIDATE_VERSION: ${{ inputs.candidate_version }}
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6; includes the final metadata page
         with:
           name: candidate
           path: candidate
@@ -432,7 +432,7 @@ jobs:
         run: |
           ./scripts/test-workflow-artifact-selection.ps1
           ./scripts/select-workflow-artifact-ids.ps1 -Kind acceptance -RunnerOS ubuntu-latest,windows-latest -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputPath artifacts/platform-artifact-selection.json
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6; includes the final metadata page
         with:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}

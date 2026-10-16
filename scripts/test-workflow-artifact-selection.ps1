@@ -106,6 +106,30 @@ try{
     Must-Refuse {& $entry -Kind build -Configuration Debug,Debug -RunnerOS windows-latest -WorkflowRun 123 -WorkflowAttempt 2 -OutputPath "$fixture/duplicate.json"} 'contexts must be unique'
     Must-Refuse {& $entry -Kind acceptance -RunnerOS windows-latest,ubuntu-latest -WorkflowRun 123 -WorkflowAttempt 2 -OutputPath "$fixture/acceptance.json"} 'receipt already exists'
     if(@(Get-Content $env:GITHUB_OUTPUT).Count -ne 3){throw 'A refused entrypoint appended an accepted selection.'}
+    # A retained build must keep its selected generation name even when the
+    # current workflow attempt is newer and the action flattens a single ID.
+    $beforeSingle=$global:CrapWorkflowSelectionFixture.reads
+    & $entry -Kind build -Configuration Debug -RunnerOS windows-latest -WorkflowRun 123 -WorkflowAttempt 3 -OutputPath "$fixture/single-build.json"
+    $single=Get-Content "$fixture/single-build.json" -Raw|ConvertFrom-Json
+    $lines=@(Get-Content $env:GITHUB_OUTPUT)
+    if($global:CrapWorkflowSelectionFixture.reads -ne $beforeSingle+1 -or $single.selected.Count -ne 1 -or
+        $single.selected[0].name -cne 'suite-build-Debug-windows-latest-attempt-2' -or $single.selected[0].id -cne '1000' -or
+        $lines.Count -ne 5 -or $lines[-2] -cne 'ids=1000' -or $lines[-1] -cne 'single-artifact-name=suite-build-Debug-windows-latest-attempt-2'){
+        throw 'Single-ID retained build output differs.'
+    }
+    $downloadRoot=Join-Path $fixture downloaded-builds
+    $selectedDirectory=Join-Path $downloadRoot $single.selected[0].name
+    [void][IO.Directory]::CreateDirectory($selectedDirectory)
+    @{identity=@{workflowRun='123';workflowAttempt='2';configuration='Debug'}}|ConvertTo-Json -Depth 4|Set-Content (Join-Path $selectedDirectory build.json)
+    Set-Content (Join-Path $selectedDirectory identity.json) '{}'
+    [IO.File]::WriteAllBytes((Join-Path $selectedDirectory runtime.zip),[byte[]](1,2,3))
+    $selectBuild=Join-Path $PSScriptRoot select-suite-build.ps1
+    & $selectBuild -Configuration Debug -RunnerOS windows-latest -WorkflowRun 123 -WorkflowAttempt 3 -InputDirectory $downloadRoot -OutputDirectory "$fixture/selected-build"
+    if(@(Get-ChildItem "$fixture/selected-build" -File).Count -ne 3 -or
+        (Get-Content "$fixture/selected-build/build.json" -Raw|ConvertFrom-Json).identity.workflowAttempt -cne '2'){
+        throw 'Explicit single-ID generation directory was not imported.'
+    }
+    Must-Refuse {& $selectBuild -Configuration Debug -RunnerOS windows-latest -WorkflowRun 123 -WorkflowAttempt 3 -InputDirectory $selectedDirectory -OutputDirectory "$fixture/flat-refused"} 'Required shared build artifact missing'
     $global:CrapWorkflowSelectionFixture.json='[]'
     $before=$global:CrapWorkflowSelectionFixture.reads
     Must-Refuse {& $entry -Kind acceptance -RunnerOS windows-latest,ubuntu-latest -WorkflowRun 123 -WorkflowAttempt 2 -OutputPath "$fixture/empty-api.json"} 'metadata unavailable'
