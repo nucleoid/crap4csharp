@@ -22,9 +22,9 @@ internal static class FreshCompletedCapture
         return prospective;
     }
 
-    // Declarations are provisional. The public command proves the actual final
-    // bundle, independently twice, before returning any reusable result. Building
-    // and proving a second prospective copy adds no evidence to those boundaries.
+    // Declarations are provisional. The public writer proves the actual bundle
+    // with independent intermediate/final observations before returning any
+    // reusable result. No prospective copy or prepared terminal supplies proof.
     internal static FreshCapturedBundle PrepareForValidation(FreshExecutionEvidence execution,
         FreshCapturedBundle captured, CancellationToken token)
     {
