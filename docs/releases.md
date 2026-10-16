@@ -80,11 +80,18 @@ new version. Use owned output/feed/cache locations. The candidate sequence is:
 
 This prepares both native groups and one canonical package. A plain `dotnet pack`
 without prepared native assets still produces an ordinary IL development package.
-For suite acceptance, prepare matching Debug or Release native assets and run
-`scripts/install-native-test-runtime.ps1` before discovery or runtime export.
-The workflows perform that ordering explicitly and seal the full resulting
-runtime inventory. Debug suites use Debug-built images; they do not borrow the
-Release implementation from the candidate package.
+For Release suite acceptance, run `scripts/install-native-test-runtime.ps1`
+with `-PackagePath $CandidatePackage -Version $CandidateVersion -Configuration Release`
+before discovery or runtime export. It validates the package's source, version,
+inventory and native groups, copies the current platform's actual packaged files,
+then verifies every copied hash. It records the package SHA-256 in the runtime
+receipt; regenerating equivalent native images does not establish package byte identity.
+For Debug acceptance, prepare matching Debug native assets and pass
+`-NativeAssetsDirectory` instead of `-PackagePath`. Debug suites exercise Debug
+images from the same source and version; they do not claim those images are the
+Release package bytes. The workflows seal each resulting complete runtime
+inventory before discovery and export. An already discovered or overlaid runtime
+is refused; use a new owned build location rather than replacing its identity.
 
 These commands do not replace the full acceptance matrix. Before release,
 require exact committed-head Debug and Release suites, original unchanged public
