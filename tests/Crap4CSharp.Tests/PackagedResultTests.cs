@@ -22,17 +22,22 @@ public sealed class PackagedResultTests : IDisposable
         Directory.CreateDirectory(packages);
         var configuration = typeof(PackagedResultTests).Assembly
             .GetCustomAttribute<AssemblyConfigurationAttribute>()!.Configuration;
+        var version = "0.1.0-handoff.g" + Guid.NewGuid().ToString("N");
+        var projectPath = Path.Combine(repository, "src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj");
+        var properties = new[] { "-p:UseArtifactsOutput=true", "-p:ArtifactsPath=" + Path.Combine(temporary, "compiler-artifacts"),
+            "-p:Version=" + version };
         var isolatedNuget = new Dictionary<string, string?>
         {
             ["NUGET_PACKAGES"] = packageCache,
             ["NUGET_HTTP_CACHE_PATH"] = Path.Combine(temporary, "nuget-http-cache")
         };
-        var pack = await Run("dotnet", ["pack", Path.Combine(repository, "src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj"),
-            "-c", configuration, "--no-restore", "-m:1", "-o", packages], repository, isolatedNuget);
+        AssertSuccess("candidate restore", await Run("dotnet", ["restore", projectPath, "--disable-parallel", "-nr:false", .. properties], repository));
+        var pack = await Run("dotnet", ["pack", projectPath,
+            "-c", configuration, "--no-restore", "-m:1", "-nr:false", "-o", packages, .. properties], repository);
         AssertSuccess("pack", pack);
         var nugetConfig = Write("NuGet.Config", $"<configuration><packageSources><clear /><add key=\"local\" value=\"{System.Security.SecurityElement.Escape(packages)}\" /></packageSources></configuration>");
         var install = await Run("dotnet", ["tool", "install", "--tool-path", tools, "--add-source", packages,
-            "--configfile", nugetConfig, "--no-cache", "Crap4CSharp.Tool"], repository, isolatedNuget);
+            "--configfile", nugetConfig, "--no-http-cache", "--version", version, "Crap4CSharp.Tool"], repository, isolatedNuget);
         AssertSuccess("install", install);
 
         var source = Write("Source.cs", "class C { int M() => 1; }");
@@ -48,8 +53,7 @@ public sealed class PackagedResultTests : IDisposable
         using (var document = JsonDocument.Parse(pass.Output))
         {
             Assert.Equal("1.0", document.RootElement.GetProperty("schemaVersion").GetString());
-            Assert.Equal(typeof(global::App).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion,
-                document.RootElement.GetProperty("toolVersion").GetString());
+            Assert.StartsWith(version, document.RootElement.GetProperty("toolVersion").GetString());
         }
 
         var missing = await Run(executable, ["--format", "json", "--coverage", "missing.xml", source], temporary);

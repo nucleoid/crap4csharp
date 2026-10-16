@@ -1,0 +1,37 @@
+<Project>
+  <!-- Complete intra-package groups: SDK103 selects one group at installation.
+       Keep the neutral implementation in any; never put a native image there. -->
+  <Target Name="IncludeCrapNativeToolGroups" BeforeTargets="PackTool"
+          Condition="'$(PackAsTool)' == 'true' and '$(CrapNativeToolAssetsRoot)' != ''">
+    <Error Condition="'$(RuntimeIdentifier)' != '' or '$(CreateRidSpecificToolPackages)' == 'true'"
+           Text="Native groups require one neutral tool package, not RID subpackages." />
+    <Error Condition="!Exists('$(CrapNativeToolAssetsRoot)/../manifest.json') or !Exists('$(CrapNativeToolAssetsRoot)/win-x64/Crap4CSharp.Tool.dll') or !Exists('$(CrapNativeToolAssetsRoot)/linux-x64/Crap4CSharp.Tool.dll')"
+           Text="Both complete prepared native asset groups and their manifest are required." />
+    <Error Condition="!Exists('$(_ToolsSettingsFilePath)')" Text="Tool settings must be generated before adding native groups." />
+    <!-- Fixed command; all variable paths travel as environment data, not shell text. -->
+    <Exec Command="pwsh -NoProfile -File assert-native-tool-assets.ps1" WorkingDirectory="$(MSBuildThisFileDirectory)"
+          EnvironmentVariables="CRAP4CSHARP_NATIVE_ASSETS=$(CrapNativeToolAssetsRoot)/..;CRAP4CSHARP_NATIVE_VERSION=$(Version);CRAP4CSHARP_NATIVE_CONFIGURATION=$(Configuration);CRAP4CSHARP_NATIVE_REPOSITORY=$(MSBuildProjectDirectory)/../..;CRAP4CSHARP_NATIVE_SDK=$(NETCoreSdkVersion)" />
+    <Copy SourceFiles="$(_ToolsSettingsFilePath)" DestinationFiles="$(IntermediateOutputPath)native-tool-settings/win-x64/DotnetToolSettings.xml" />
+    <Copy SourceFiles="$(_ToolsSettingsFilePath)" DestinationFiles="$(IntermediateOutputPath)native-tool-settings/linux-x64/DotnetToolSettings.xml" />
+    <Copy SourceFiles="$(CrapNativeToolAssetsRoot)/../manifest.json" DestinationFiles="$(IntermediateOutputPath)native-tool-assets.json" />
+    <ItemGroup>
+      <_CrapWindowsToolFile Include="$(CrapNativeToolAssetsRoot)/win-x64/**/*" />
+      <_CrapLinuxToolFile Include="$(CrapNativeToolAssetsRoot)/linux-x64/**/*" />
+      <TfmSpecificPackageFile Include="@(_CrapWindowsToolFile)">
+        <PackagePath>tools/net10.0/win-x64/</PackagePath>
+      </TfmSpecificPackageFile>
+      <TfmSpecificPackageFile Include="@(_CrapLinuxToolFile)">
+        <PackagePath>tools/net10.0/linux-x64/</PackagePath>
+      </TfmSpecificPackageFile>
+      <TfmSpecificPackageFile Include="$(IntermediateOutputPath)native-tool-settings/win-x64/DotnetToolSettings.xml">
+        <PackagePath>tools/net10.0/win-x64/</PackagePath>
+      </TfmSpecificPackageFile>
+      <TfmSpecificPackageFile Include="$(IntermediateOutputPath)native-tool-settings/linux-x64/DotnetToolSettings.xml">
+        <PackagePath>tools/net10.0/linux-x64/</PackagePath>
+      </TfmSpecificPackageFile>
+      <TfmSpecificPackageFile Include="$(IntermediateOutputPath)native-tool-assets.json">
+        <PackagePath>/</PackagePath>
+      </TfmSpecificPackageFile>
+    </ItemGroup>
+  </Target>
+</Project>

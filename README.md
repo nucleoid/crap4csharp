@@ -14,6 +14,24 @@ Coverage is a fraction from 0 through 1. A method violates the gate only when it
 
 Prerequisite: [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0).
 
+Use a committed local tool manifest pinned to the exact reviewed package version.
+Follow [onboarding](docs/onboarding.md) to prepare the independent
+[sample consumer](samples/LocalToolConsumer/README.md) and its controlled local feed.
+Candidate acceptance is pending; the sample's `0.1.0` pin is a template and does
+not identify a published release. From the prepared consumer directory:
+
+```bash
+dotnet tool restore --configfile nuget.config
+dotnet restore Consumer.slnx --disable-parallel
+dotnet tool run crap4csharp -- check --project Consumer.slnx --policy crap4csharp.policy.json --base "$ReviewedBase" --scope all --format json
+```
+
+Select the reviewed base before running the gate. Capture its current JSON result
+and exit code together; see [agent integration](docs/agent-integration.md).
+
+For development in this repository, an isolated tool-path installation is also
+available:
+
 ```bash
 dotnet pack src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj -c Release -o artifacts
 dotnet tool install --tool-path .tools --add-source artifacts Crap4CSharp.Tool
@@ -27,8 +45,9 @@ The option-only command remains the exact **`ordinary-methods-v1` legacy dialect
 test, Git, or other child process. Because syntax-only input has no trusted TFM/configuration
 provenance, its context is labeled `unknown`; distinct coverage documents are rejected instead of
 being optimistically unioned. Repeating the same byte-identical report is harmless. `check` can enforce an
-immutable-base repository policy against a complete, current-revalidated bundle; producing a fresh bundle and
-running restore/build/test/coverage in one command remains deferred.
+immutable-base repository policy against a complete, current-revalidated bundle. The supported fresh path now
+restores, binds once-only builds/tests and retains a safe replay bundle in one command; see [fresh check](docs/check.md)
+for support limits, nonreusable evidence and the separate shipping gates.
 
 ## Usage
 
@@ -71,12 +90,16 @@ crap4csharp analyze --syntax-only --ruleset ordinary-methods-v1 --coverage cover
 # Load exact local exemptions for inspection (never trusted approval)
 crap4csharp analyze --syntax-only --callable-exemptions exemptions.json --coverage coverage.xml src
 
+# Run the supported fresh graph with immutable-base policy and retain a NEW bundle directory.
+crap4csharp check --project tests/App.Tests/App.Tests.csproj \
+  --policy quality/crap-policy.json --base origin/main \
+  --artifact-output artifacts/crap-run --format json
+
 # Replay a retained, hash-bound bundle without the original checkout or child processes.
-# Bundle production is intentionally pending the project-aware check orchestrator (#10);
-# current releases consume externally prepared compatible bundles but do not create them.
 crap4csharp analyze --reuse-artifacts artifacts/crap-run/manifest.json --format json
 
-# Enforce policy/baseline/exemptions from one immutable merge-base against current-revalidated evidence.
+# Reuse prior tests only when the bundle has a COMPLETE current-revalidation recipe.
+# Fresh captured-only/nonreusable bundles are explicitly refused by this mode.
 # The caller (normally CI) owns the base ref; Crap4CSharp never infers or fetches one.
 crap4csharp check --reuse-artifacts artifacts/crap-run/manifest.json \
   --policy quality/crap-policy.json --base origin/main --format json
@@ -125,8 +148,8 @@ Ruleset details and the measured mapping matrix are documented in
 
 The repository also contains tested captured Git scope and changed-method selection adapters. Trusted reused
 `check` uses policy-owned `all`, `worktree`, or current-worktree `base` scope and an explicit `--base`. Public fresh
-execution plus general `--scope`, `--head`, `--source-state`, and `--granularity` selectors remains deferred. See
-[captured change scopes](docs/change-scopes.md).
+execution supports policy-owned current-worktree scope and `--granularity`; staged/head snapshot execution is
+explicitly refused, not materialized. See [fresh check](docs/check.md) and [captured change scopes](docs/change-scopes.md).
 
 Output is ordered by numeric CRAP score descending, followed by unknown (`N/A`) entries. Ties are deterministic by path and line.
 
@@ -144,7 +167,8 @@ closure and successful generating execution. See [artifact provenance](docs/prov
 Repository policy, immutable-base trust, component-wise debt ceilings, and the explicit candidate review workflow
 are documented in [repository policy and reviewed baselines](docs/policy.md). Baseline generation accepts only a
 supported current-revalidation recipe and never upgrades old captured-only bundles or treats candidate generation as
-approval. Full fresh `check` orchestration remains owned by issue #10.
+approval. Fresh `check` compiler/test binding is distinct from complete current-test reuse and baseline recipes;
+see [fresh check](docs/check.md).
 
 ## Exit codes
 
@@ -166,3 +190,14 @@ The sample under `samples/Fixture` provides an actual Coverlet collector integra
 ## License
 
 The independently authored code in this repository is licensed under the [MIT License](LICENSE). This license statement applies only to this repository's original work, not to the unlicensed behavioral reference described above.
+
+### Complete process-output capture limits
+
+The compatibility process runner captures at most 4,194,304 UTF-16 characters per
+stdout/stderr stream. Each stream is drained concurrently; oversized complete
+text is refused with `InvalidDataException` (stream, limit and observed count),
+never returned as a truncated successful protocol. Overflow is reported after
+EOF; a consumer that continues emitting remains subject to the operation deadline.
+This text route is not a byte-preserving binary-protocol adapter or a complete
+streaming-log API. Large check-command logging requires a separate bounded streaming-log API; this
+compatibility runner does not provide one.

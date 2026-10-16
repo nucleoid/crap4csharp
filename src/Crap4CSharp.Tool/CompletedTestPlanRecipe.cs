@@ -1,0 +1,138 @@
+using System.Text.Json;
+
+namespace Crap4CSharp.Core;
+
+// Required schedule identity only, NOT completed-test or reusable evidence. The
+// caller must independently reload the current graph/runners without build/test,
+// then separately bind compiler phases, outputs, successful TRX and coverage.
+internal static class CompletedTestPlanRecipe
+{
+    internal const string Kind = "completed-test-plan";
+    private const string Provider = "finite-sdk-completed-test-plan-v1";
+    private const int MaximumBytes = 256 * 1024;
+
+    internal static byte[] Capture(CheckExecutionPlan plan, string workspaceRoot,
+        string selectedRoot, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var root = Path.GetFullPath(workspaceRoot);
+        var selector = Path.GetFullPath(selectedRoot);
+        if (root != workspaceRoot || selector != selectedRoot || !Inside(root, selector)) throw Refuse();
+        var nodes = CompilerGraphExecution.ValidateAndFreeze(plan.PreparedGraph);
+        var bindings = plan.PreparedGraph.GraphContexts.ToDictionary(b => b.GraphId, StringComparer.Ordinal);
+        var required = nodes.Where(n => bindings[n.Id].IsTestProject).Select(n => n.Id).ToArray();
+        if (required.Length == 0 || !required.SequenceEqual(plan.Tests.Select(t => t.GraphId))) throw Refuse();
+        var graph = nodes.Select(node =>
+        {
+            token.ThrowIfCancellationRequested();
+            var binding = bindings[node.Id];
+            var context = binding.Context;
+            if (!Inside(root, node.ProjectPath)) throw Refuse();
+            return new
+            {
+                id = node.Id, project = PathKey(node.ProjectPath),
+                configuration = node.Configuration, platform = node.Platform, framework = node.TargetFramework,
+                dependencies = node.Dependencies.Order(StringComparer.Ordinal).ToArray(),
+                // Deterministic fingerprints are not encryption. Credential-like
+                // mapped property names are refused before this recipe is built.
+                propertiesHash = CanonicalIdentity.Set("completed-test-globals-v1", node.GlobalProperties.Select(p =>
+                    CanonicalIdentity.Tuple(p.Key.ToUpperInvariant(), p.Value))),
+                contextId = context.ContextId, test = binding.IsTestProject,
+                includeTests = context.ExclusionPolicy.IncludeTests, includeGenerated = context.ExclusionPolicy.IncludeGenerated,
+                language = context.LanguageVersion.ToString(), sourceKind = context.SourceKind.ToString(),
+                symbolsHash = CanonicalIdentity.Set("completed-test-symbols-v1", context.PreprocessorSymbols),
+                output = PathKey(context.EvaluatedTargetPath!),
+                intermediate = PathKey(context.EvaluatedIntermediateDirectory!),
+                referenceOutput = PathKey(context.EvaluatedReferenceAssemblyPath!)
+            };
+        }).ToArray();
+        var runners = plan.Tests.Select(r =>
+        {
+            token.ThrowIfCancellationRequested();
+            var node = nodes.Single(n => n.Id == r.GraphId);
+            if (!PathIdentityPolicy.Current.Comparer.Equals(node.ProjectPath, r.ProjectPath) ||
+                r.Configuration != node.Configuration || r.Platform != node.Platform || r.TargetFramework != node.TargetFramework ||
+                r.Runner != "VSTest" || r.TestSdkVersion != "18.0.1" || r.CollectorVersion != "6.0.4") throw Refuse();
+            return new { id = r.GraphId, project = PathKey(r.ProjectPath), configuration = r.Configuration,
+                platform = r.Platform, framework = r.TargetFramework, runner = r.Runner,
+                testSdk = r.TestSdkVersion, collector = r.CollectorVersion };
+        }).ToArray();
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(new { provider = Provider, workspace = PathKey(root),
+            selectedRoot = PathKey(selector), selectedRootLocator = RootLocator(root, selector), graph, runners, completedTestsAttested = false, reusableRecipe = false });
+        if (bytes.Length > MaximumBytes) throw Refuse();
+        token.ThrowIfCancellationRequested();
+        return bytes;
+    }
+
+    internal static void Validate(byte[] bytes, CheckExecutionPlan current, string workspaceRoot,
+        string selectedRoot, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        // Exact canonical recomputation accepts no duplicate/unknown fields or saved
+        // command strings, and avoids parsing an attacker-controlled recipe tree.
+        if (bytes is null || bytes.Length > MaximumBytes ||
+            !bytes.AsSpan().SequenceEqual(Capture(current, workspaceRoot, selectedRoot, token))) throw Refuse();
+        token.ThrowIfCancellationRequested();
+    }
+
+    // Resolves only a bounded current filesystem selector, NOT completed evidence.
+    // Before using its graph, callers still owe exact Validate and every compiler,
+    // test, artifact and coverage gate. Never infer roots from scored contexts.
+    internal static string ResolveSelectedRoot(byte[] bytes, string workspaceRoot, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        try
+        {
+            if (bytes is null || bytes.Length == 0 || bytes.Length > MaximumBytes ||
+                Path.GetFullPath(workspaceRoot) != workspaceRoot) throw Refuse();
+            using var document = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 8 });
+            var value = document.RootElement;
+            if (value.ValueKind != JsonValueKind.Object) throw Refuse();
+            var fields = new HashSet<string>(["provider", "workspace", "selectedRoot", "selectedRootLocator",
+                "graph", "runners", "completedTestsAttested", "reusableRecipe"], StringComparer.Ordinal);
+            foreach (var property in value.EnumerateObject())
+                if (!fields.Remove(property.Name)) throw Refuse();
+            if (fields.Count != 0 || value.GetProperty("provider").GetString() != Provider ||
+                value.GetProperty("workspace").GetString() != PathKey(workspaceRoot) ||
+                value.GetProperty("completedTestsAttested").GetBoolean() || value.GetProperty("reusableRecipe").GetBoolean()) throw Refuse();
+            var relative = value.GetProperty("selectedRootLocator").GetString();
+            if (string.IsNullOrWhiteSpace(relative) || relative.Length > 4096 || relative.Contains(':') ||
+                CanonicalIdentity.NormalizeLogicalPath(relative) != relative) throw Refuse();
+            var selector = Path.GetFullPath(Path.Combine(workspaceRoot, relative.Replace('/', Path.DirectorySeparatorChar)));
+            if (!Inside(workspaceRoot, selector) || RootLocator(workspaceRoot, selector) != relative ||
+                value.GetProperty("selectedRoot").GetString() != PathKey(selector) || !ArtifactBundle.IsRegularInput(selector)) throw Refuse();
+            // Check every selected path component, including the current root. A
+            // repository-relative declaration cannot authorize a reparse escape.
+            var path = selector;
+            while (true)
+            {
+                token.ThrowIfCancellationRequested();
+                if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw Refuse();
+                if (PathIdentityPolicy.Current.Comparer.Equals(path, workspaceRoot)) break;
+                path = Path.GetDirectoryName(path) ?? throw Refuse();
+            }
+            token.ThrowIfCancellationRequested();
+            return selector;
+        }
+        catch (Exception error) when (error is JsonException or InvalidOperationException or ArgumentException or
+            IOException or UnauthorizedAccessException or NotSupportedException)
+        { throw Refuse(); }
+    }
+
+    private static string RootLocator(string root, string selector)
+    {
+        var extension = Path.GetExtension(selector);
+        if (!new[] { ".csproj", ".sln", ".slnx" }.Contains(extension, StringComparer.OrdinalIgnoreCase)) throw Refuse();
+        var relative = Path.GetRelativePath(root, selector).Replace(Path.DirectorySeparatorChar, '/');
+        if (relative.Length > 4096 || relative.Contains(':') || CanonicalIdentity.NormalizeLogicalPath(relative) != relative) throw Refuse();
+        return relative;
+    }
+
+    private static bool Inside(string root, string path) => path.StartsWith(
+        Path.TrimEndingDirectorySeparator(root) + Path.DirectorySeparatorChar,
+        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+    private static string PathKey(string path) => CanonicalIdentity.Tuple("completed-test-plan-path-v1",
+        OperatingSystem.IsWindows() ? Path.GetFullPath(path).ToUpperInvariant() : Path.GetFullPath(path));
+    private static PolicyException Refuse() => new("provenance.completedTestPlanMismatch",
+        "Saved required-test plan differs from the independently evaluated current root, graph or runner schedule.");
+}

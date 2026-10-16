@@ -167,6 +167,27 @@ public sealed class CallableCliTests : IDisposable
         Assert.Equal(stamp, File.GetLastWriteTimeUtc(destination));
     }
 
+    [Theory]
+    [InlineData("--project", false)]
+    [InlineData("--project", true)]
+    [InlineData("--policy", false)]
+    [InlineData("--policy", true)]
+    [InlineData("--base", false)]
+    [InlineData("--base", true)]
+    public async Task FreshArgumentFailureWithConsumerSelectorDoesNotAuthorizeResultOutput(string selector, bool existing)
+    {
+        var prior = await Run(null, "check", "--format", "json");
+        var destination = Path.Combine(temporary, "context-result.json");
+        if (existing) File.WriteAllText(destination, prior.Output);
+        var result = await Run(null, "check", selector, "consumer", "--format", "json", "--output", destination);
+        Assert.Equal(1, result.ExitCode);
+        using var stdout = JsonDocument.Parse(result.Output);
+        Assert.Contains(stdout.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
+            check => check.GetProperty("reason").GetString() == "output.notWritten");
+        if (existing) Assert.Equal(prior.Output, File.ReadAllText(destination));
+        else Assert.False(File.Exists(destination));
+    }
+
     [Fact]
     public async Task ModernSyntaxOnlyRejectsDistinctReportsInsteadOfUnioningContexts()
     {
@@ -260,6 +281,12 @@ public sealed class CallableCliTests : IDisposable
         Assert.Contains("callables-v1", result.Output);
         Assert.Contains("--callable-exemptions", result.Output);
         Assert.Contains("analyze --syntax-only", result.Output);
+        Assert.Contains("check --project", result.Output);
+        Assert.Contains("--artifact-output", result.Output);
+        Assert.Contains("--build-artifacts", result.Output);
+        Assert.Contains("required tests still run", result.Output);
+        Assert.Contains("Fresh whole-run", result.Output);
+        Assert.Contains("local-unreviewed", result.Output);
     }
 
     [Fact]

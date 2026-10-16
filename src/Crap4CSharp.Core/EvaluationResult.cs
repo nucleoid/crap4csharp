@@ -180,7 +180,12 @@ public sealed record RunSection(
     int ExitCode)
 {
     public IReadOnlyList<CoverageRunEvidence> CoverageEvidence { get; init; } = [];
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<TestExecutionOutcomeResult>? TestOutcomes { get; init; }
 }
+
+public sealed record TestExecutionOutcomeResult(string ContextId, string Project, string Status,
+    int? ExitCode, string? ResultsDirectory, string? LogDirectory);
 
 public sealed record CoverageRunEvidence(
     string Id,

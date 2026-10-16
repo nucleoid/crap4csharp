@@ -94,4 +94,22 @@ public sealed class ProjectContextContractTests
         Assert.False(capability.CompiledInputBindingComplete);
         Assert.Equal("context.compiledInputDrift", capability.Limitation);
     }
+
+    [Fact]
+    public void MatchingCompiledBytesCannotPromoteUnresolvedProjectReferences()
+    {
+        var context = ProjectAnalysisContext.Create("App.csproj", "App", "net10.0", "Debug", "AnyCPU",
+            LanguageVersion.CSharp14, [], SourceCodeKind.Regular, [], [],
+            new ProjectExclusionPolicy(false, false), new ProjectAdapterIdentity("10.0.103", "18.0.11", "5.0.0"));
+        var assembly = typeof(ProjectContextContractTests).Assembly.Location;
+        var evidence = new CompiledInputEvidence(context.ContextId, assembly,
+            ProjectAnalysisContext.ContentHash(File.ReadAllBytes(assembly)), null, null, [], true, null);
+        Assert.True(CompiledInputCapture.Validate(context, evidence).CompiledInputBindingComplete);
+        var unresolved = context with { UnresolvedProjectReferencePaths = [Path.Combine(Path.GetTempPath(), "ambiguous.dll")] };
+        var refused = CompiledInputCapture.Validate(unresolved, evidence);
+        Assert.False(refused.DesignTimeComplete);
+        Assert.False(refused.CompiledInputBindingComplete);
+        Assert.False(refused.ReuseRecipeComplete);
+        Assert.Equal("context.projectReferenceUnproven", refused.Limitation);
+    }
 }

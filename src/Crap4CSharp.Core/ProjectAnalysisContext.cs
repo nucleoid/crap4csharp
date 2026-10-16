@@ -18,6 +18,8 @@ public sealed record ProjectSourceIdentity(
     public string? ResolvedPath { get; init; }
 }
 
+public sealed record ProjectPhaseInput(string Path, string Role, bool ExpectedGenerated);
+
 public sealed record ProjectSourceDocument(
     ProjectSourceIdentity Identity,
     string Text,
@@ -53,6 +55,41 @@ public sealed record ProjectAnalysisContext(
     ProjectContextCapabilities Capabilities)
 {
     public const string ProtocolVersion = "project-context-v1";
+
+    [JsonIgnore]
+    public string? ResolvedProjectPath { get; init; }
+
+    [JsonIgnore]
+    public string? EvaluatedTargetPath { get; init; }
+
+    [JsonIgnore]
+    public string? EvaluatedIntermediateDirectory { get; init; }
+
+    [JsonIgnore]
+    public string? EvaluatedReferenceAssemblyPath { get; init; }
+
+    // Complete physical Workspace document inventory, independent of public analysis exclusions.
+    // Generator-only syntax trees are not physical documents and require separate actual-build proof.
+    [JsonIgnore]
+    public IReadOnlyList<ProjectSourceIdentity> CompilerDocuments { get; init; } = [];
+
+    // Private unsupported-binding marker; public inclusion does not waive compiler proof.
+    [JsonIgnore]
+    public int GeneratorOnlyTreeCount { get; init; }
+
+    [JsonIgnore]
+    public IReadOnlyList<ProjectPhaseInput> PhaseInputs { get; init; } = [];
+
+    [JsonIgnore]
+    public IReadOnlyList<string> ReferencePaths { get; init; } = [];
+
+    // An unresolved SDK-owned path is inventory, never complete compiler evidence.
+    [JsonIgnore]
+    public IReadOnlyList<string> UnresolvedProjectReferencePaths { get; init; } = [];
+
+    // SDK/Workspace-selected project references; private physical transport only.
+    [JsonIgnore]
+    public IReadOnlyList<ProjectReferenceOutputIdentity> ProjectReferenceOutputs { get; init; } = [];
 
     [JsonIgnore]
     public IReadOnlyList<string> ProtectedPaths { get; init; } = [];
@@ -124,4 +161,5 @@ public sealed record ProjectAnalysisContext(
 }
 
 public sealed record ContextualSourceMethod(string ContextId, SourceMethod Method);
+public sealed record ProjectReferenceOutputIdentity(string ProjectPath, string OutputPath);
 public sealed record ContextualCoverageReport(string ContextId, IReadOnlyList<CoverageMethod> Methods);

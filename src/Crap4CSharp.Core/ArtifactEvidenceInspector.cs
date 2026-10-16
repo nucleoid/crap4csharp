@@ -12,7 +12,11 @@ public sealed record InspectedBuildEvidence(string ModuleIdentity, string Mvid, 
     IReadOnlyDictionary<string, string> Documents, string LanguageVersion, IReadOnlyList<string> PreprocessorSymbols,
     IReadOnlyList<InspectedMethodEvidence> Methods);
 public sealed record InspectedMethodEvidence(int MetadataToken, string TypeName, string MethodName,
-    IReadOnlyList<InspectedSequencePoint> SequencePoints);
+    IReadOnlyList<InspectedSequencePoint> SequencePoints)
+{
+    internal bool CompilerGenerated { get; init; }
+    internal IReadOnlyList<string>? ParameterTypes { get; init; }
+}
 public sealed record InspectedSequencePoint(string Document, int Offset, int StartLine, int StartColumn,
     int EndLine, int EndColumn);
 public sealed record InspectedTestEvidence(int Total, int Passed, int Failed, int Skipped,
@@ -90,8 +94,15 @@ public static class ArtifactEvidenceInspector
                             point.Offset, point.StartLine, point.StartColumn, point.EndLine, point.EndColumn);
                     }).ToArray();
                     if (points.Length > 0)
+                    {
+                        var generated = HasCompilerGeneratedAttribute(metadata, method.GetCustomAttributes()) ||
+                            HasCompilerGeneratedAttribute(metadata, type.GetCustomAttributes());
                         methods.Add(new InspectedMethodEvidence(MetadataTokens.GetToken(methodHandle), typeName,
-                            metadata.GetString(method.Name), points));
+                            metadata.GetString(method.Name), points)
+                        { CompilerGenerated = generated,
+                            ParameterTypes = generated || metadata.GetString(method.Name) == ".ctor"
+                                ? PortablePdbCallableMapper.ReadParameterTypes(metadata, method) : null });
+                    }
                 }
             }
             return new InspectedBuildEvidence(Path.GetFileNameWithoutExtension(moduleName), mvid, debugIdentity,
@@ -162,7 +173,7 @@ public static class ArtifactEvidenceInspector
             var root = document.Root?.Name.LocalName;
             return root switch
             {
-                "CoverageSession" => new("opencover", "sequence-point",
+                "CoverageSession" => new("opencover", OpenCoverCoordinates(document),
                     document.Descendants().Where(element => element.Name.LocalName == "Module")
                         .Select(module => module.Elements().FirstOrDefault(element =>
                             element.Name.LocalName is "ModuleName" or "FullName")?.Value)
@@ -180,21 +191,41 @@ public static class ArtifactEvidenceInspector
         { throw new InvalidDataException("Captured coverage XML is malformed.", exception); }
     }
 
+    private static string OpenCoverCoordinates(XDocument document)
+    {
+        var points = document.Descendants().Where(e => e.Name.LocalName == "SequencePoint").ToArray();
+        // OpenCover is a container, not proof of columns/IL offsets. The supported
+        // private line projection removes synthesized writer columns before capture.
+        return points.Length > 0 && points.All(p => p.Attribute("sc") is null && p.Attribute("ec") is null &&
+            p.Attribute("el") is null && p.Attribute("offset") is null &&
+            int.TryParse(p.Attribute("sl")?.Value, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var line) && line > 0)
+            ? "line" : "sequence-point";
+    }
+
     public static bool CoverageMatchesBuild(ImmutableArray<byte> bytes, string logicalPath,
         InspectedBuildEvidence build, IReadOnlyList<string> logicalSourcePaths, CapturedPathPolicy pathPolicy) =>
         CoverageMatchesBuildCancellable(bytes, logicalPath, build, logicalSourcePaths, pathPolicy, default);
 
     public static bool CoverageMatchesBuildCancellable(ImmutableArray<byte> bytes, string logicalPath,
         InspectedBuildEvidence build, IReadOnlyList<string> logicalSourcePaths, CapturedPathPolicy pathPolicy,
+        CancellationToken cancellationToken) =>
+        MatchedMethodTokens(bytes, logicalPath, build, logicalSourcePaths, pathPolicy, cancellationToken) is not null;
+
+    // Derived associations to independently inspected PE tokens, not assertions that
+    // the coverage writer observed those tokens. Share exactly the existing PDB matcher.
+    internal static IReadOnlyList<int>? MatchedMethodTokens(ImmutableArray<byte> bytes, string logicalPath,
+        InspectedBuildEvidence build, IReadOnlyList<string> logicalSourcePaths, CapturedPathPolicy pathPolicy,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         // A Coverlet document may contain every instrumented project in the test graph.
         // This artifact is bound to one manifest build, so foreign modules are neither
         // evidence for nor evidence against that build.
         var methods = CoverageReader.Read(bytes.AsSpan(), logicalPath)
             .Where(method => string.Equals(method.ModuleIdentity, build.ModuleIdentity, StringComparison.Ordinal))
             .ToArray();
-        if (methods.Length == 0) return false;
+        if (methods.Length == 0) return null;
         var pathIndex = new CapturedLogicalPathIndex(logicalSourcePaths, pathPolicy);
         var methodIndex = build.Methods.GroupBy(MethodKey, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
@@ -212,23 +243,23 @@ public static class ArtifactEvidenceInspector
                 counts[line] = counts.GetValueOrDefault(line) + 1;
         }
 
-        if (InspectCoverage(bytes).Format != "cobertura")
-            return methods.All(reported => MatchingMethodCount(reported, methodIndex, pathIndex,
-                reportedLineCounts, cancellationToken) == 1);
-
-        // Cobertura expands one relative filename against each captured <source> root.
-        // Those paths are alternatives for one observation, not independent methods.
-        // Exactly one alternative must resolve to exactly one PDB method.
-        foreach (var alternatives in methods.GroupBy(CoverageObservationKey, StringComparer.Ordinal))
+        var tokens = new HashSet<int>();
+        var groups = InspectCoverage(bytes).Format == "cobertura"
+            ? methods.GroupBy(CoverageObservationKey, StringComparer.Ordinal).Select(group => group.AsEnumerable())
+            : methods.Select(method => new[] { method }.AsEnumerable());
+        // Cobertura roots are alternatives for one observation. Other formats require
+        // one unique association per reported method. Never transfer ambiguous coverage.
+        foreach (var alternatives in groups)
         {
-            if (alternatives.Sum(reported =>
-                    MatchingMethodCount(reported, methodIndex, pathIndex, reportedLineCounts,
-                        cancellationToken)) != 1) return false;
+            var matches = alternatives.SelectMany(reported => MatchingMethods(reported, methodIndex,
+                pathIndex, reportedLineCounts, cancellationToken)).ToArray();
+            if (matches.Length != 1) return null;
+            tokens.Add(matches[0].MetadataToken);
         }
-        return true;
+        return Array.AsReadOnly(tokens.Order().ToArray());
     }
 
-    private static int MatchingMethodCount(CoverageMethod reported,
+    private static InspectedMethodEvidence[] MatchingMethods(CoverageMethod reported,
         IReadOnlyDictionary<string, InspectedMethodEvidence[]> methodIndex, CapturedLogicalPathIndex pathIndex,
         IReadOnlyDictionary<string, Dictionary<int, int>> reportedLineCounts, CancellationToken cancellationToken)
     {
@@ -240,8 +271,8 @@ public static class ArtifactEvidenceInspector
                 System.Globalization.NumberStyles.HexNumber,
                 System.Globalization.CultureInfo.InvariantCulture, out var token))
             candidates = candidates.Where(method => method.MetadataToken == token).ToArray();
-        return candidates.Count(method => PointsMatch(reported, method, pathIndex, reportedLineCounts,
-            cancellationToken));
+        return candidates.Where(method => PointsMatch(reported, method, pathIndex, reportedLineCounts,
+            cancellationToken)).ToArray();
     }
 
     private static string MethodKey(InspectedMethodEvidence method) => MethodKey(method.TypeName, method.MethodName);
@@ -273,6 +304,34 @@ public static class ArtifactEvidenceInspector
             if (!output.TryAdd(values[index], values[index + 1]))
                 throw new InvalidDataException("Captured PDB compilation-options record has duplicate keys.");
         return output;
+    }
+
+    private static bool HasCompilerGeneratedAttribute(MetadataReader reader, CustomAttributeHandleCollection attributes)
+    {
+        foreach (var handle in attributes)
+        {
+            var constructor = reader.GetCustomAttribute(handle).Constructor;
+            EntityHandle parent;
+            if (constructor.Kind == HandleKind.MemberReference)
+                parent = reader.GetMemberReference((MemberReferenceHandle)constructor).Parent;
+            else if (constructor.Kind == HandleKind.MethodDefinition)
+                parent = reader.GetMethodDefinition((MethodDefinitionHandle)constructor).GetDeclaringType();
+            else continue;
+            string name; string ns;
+            if (parent.Kind == HandleKind.TypeReference)
+            {
+                var type = reader.GetTypeReference((TypeReferenceHandle)parent);
+                name = reader.GetString(type.Name); ns = reader.GetString(type.Namespace);
+            }
+            else if (parent.Kind == HandleKind.TypeDefinition)
+            {
+                var type = reader.GetTypeDefinition((TypeDefinitionHandle)parent);
+                name = reader.GetString(type.Name); ns = reader.GetString(type.Namespace);
+            }
+            else continue;
+            if (name == "CompilerGeneratedAttribute" && ns == "System.Runtime.CompilerServices") return true;
+        }
+        return false;
     }
 
     private static string TypeName(MetadataReader reader, TypeDefinitionHandle handle)

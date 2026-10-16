@@ -66,6 +66,9 @@ public sealed record ManifestContext(string Id, string Project, string TargetFra
     public ManifestParseOptions? ParseOptions { get; init; }
     public ManifestPathPolicy? PathPolicy { get; init; }
     public ManifestCurrentRevalidation? CurrentRevalidation { get; init; }
+    public string? CoverageApplicability { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public bool IncludeGenerated { get; init; }
 }
 public sealed record ManifestCurrentRevalidation(string Provider, string Project, string AssemblyPath, string PdbPath)
 {
@@ -80,6 +83,10 @@ public sealed record ManifestInput(string Role, string LogicalPath, string Locat
     string? Encoding, bool Generated)
 {
     public string? RepositoryPath { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ReferenceAliases { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public bool? EmbedInteropTypes { get; init; }
 }
 public sealed record ManifestBuild(string Id, string ContextId, string ModuleIdentity, string AssemblySha256,
     string Mvid, string PdbSha256, string DebugIdentity);
@@ -138,6 +145,9 @@ public static class ManifestIdentity
             CanonicalIdentity.Tuple("parse-options", parse.LanguageVersion, parse.SourceKind),
             CanonicalIdentity.Tuple("path-policy", paths.CasePolicy)
         };
+        if (context.CoverageApplicability is not null)
+            values.Add(CanonicalIdentity.Tuple("semantic-coverage-applicability-v1", context.CoverageApplicability));
+        if (context.IncludeGenerated) values.Add(CanonicalIdentity.Tuple("include-generated-v1", "true"));
         values.AddRange(parse.PreprocessorSymbols.Select(value => CanonicalIdentity.Tuple("preprocessor-symbol", value)));
         values.AddRange(parse.Features.Select(pair => CanonicalIdentity.Tuple("parse-feature", pair.Key, pair.Value)));
         values.AddRange(paths.ReportRootMappings.Select(mapping =>
@@ -169,6 +179,10 @@ public static class ManifestIdentity
             CanonicalIdentity.Tuple("context", value.Id, value.Project, value.TargetFramework, value.Configuration,
                 value.Platform, value.SourceSetHash, value.ContextHash, value.InputClosureHash,
                 value.ActualCompilerBindingComplete.ToString(), value.ReuseRecipeComplete.ToString())));
+        values.AddRange(manifest.Contexts.Where(value => value.IncludeGenerated).Select(value =>
+            CanonicalIdentity.Tuple("include-generated-v1", value.Id, "true")));
+        values.AddRange(manifest.Contexts.Where(value => value.CoverageApplicability is not null).Select(value =>
+            CanonicalIdentity.Tuple("semantic-coverage-applicability-v1", value.Id, value.CoverageApplicability)));
         values.AddRange(manifest.Contexts.Where(value => value.CurrentRevalidation is not null).Select(value =>
             CanonicalIdentity.Tuple("current-revalidation", value.Id, value.CurrentRevalidation!.Provider,
                 value.CurrentRevalidation.Project, value.CurrentRevalidation.AssemblyPath,
@@ -219,7 +233,13 @@ public static class ManifestIdentity
         return unhashed with { ManifestHash = ManifestHash(unhashed) };
     }
 
-    private static string InputIdentity(ManifestInput input) => input.RepositoryPath is null
+    private static string InputIdentity(ManifestInput input) =>
+        input.ReferenceAliases is not null || input.EmbedInteropTypes is not null
+            ? CanonicalIdentity.Tuple("input-reference-properties-v1", InputIdentityWithoutReferenceProperties(input),
+                input.ReferenceAliases, input.EmbedInteropTypes?.ToString())
+            : InputIdentityWithoutReferenceProperties(input);
+
+    private static string InputIdentityWithoutReferenceProperties(ManifestInput input) => input.RepositoryPath is null
         ? CanonicalIdentity.Tuple("input", input.Role, input.LogicalPath, input.Locator,
             input.Length.ToString(System.Globalization.CultureInfo.InvariantCulture), input.Sha256,
             input.Encoding, input.Generated.ToString())
@@ -296,6 +316,26 @@ public static class ProvenanceVerifier
             reasons.Order(StringComparer.Ordinal).Distinct(StringComparer.Ordinal).ToArray());
     }
 
+    // Representation compatibility only: capture remains nonreusable and the actual
+    // semantic/compiler/test checks below are still mandatory.
+    private static bool CompleteSemanticEmptyDeclaration(ManifestContext context)
+    {
+        var recipe = context.CurrentRevalidation;
+        if (recipe is null || recipe.Provider != "finite-sdk-completed-tests-v1" ||
+            recipe.Project != context.Project || recipe.References is null || recipe.References.Count != 0)
+            return false;
+        static bool Canonical(string? path)
+        {
+            if (string.IsNullOrEmpty(path) || Path.IsPathRooted(path) || path.Contains('\\') ||
+                path.Contains(':') || path.Split('/').Any(part => part is "" or "." or "..")) return false;
+            try { return CanonicalIdentity.NormalizeLogicalPath(path) == path; }
+            catch (ArgumentException) { return false; }
+        }
+        return Canonical(recipe.Project) && Canonical(recipe.AssemblyPath) && Canonical(recipe.PdbPath) &&
+            recipe.AssemblyPath != recipe.PdbPath && recipe.AssemblyPath != recipe.Project &&
+            recipe.PdbPath != recipe.Project;
+    }
+
     private static List<string> StructuralReasons(RunManifest manifest,
         IReadOnlyDictionary<string, ImmutableArray<byte>> artifactBytes, string? requiredRuleset,
         CancellationToken cancellationToken)
@@ -354,7 +394,12 @@ public static class ProvenanceVerifier
                 artifact.ContextId == context.Id).ToArray();
             if (contextBuilds.Length == 0) reasons.Add(ProvenanceReasonCodes.BuildEvidenceMissing);
             if (contextExecutions.Length == 0) reasons.Add(ProvenanceReasonCodes.TestExecutionIncomplete);
-            if (contextCoverage.Length == 0 || context.Inputs.All(input => input.Role != "source"))
+            if (context.CoverageApplicability is not (null or "semantic-empty") ||
+                context.CoverageApplicability != "semantic-empty" &&
+                (contextCoverage.Length == 0 || context.Inputs.All(input => input.Role != "source")))
+                reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
+            if (context.CoverageApplicability == "semantic-empty" &&
+                (contextCoverage.Length != 0 || context.ReuseRecipeComplete && !CompleteSemanticEmptyDeclaration(context)))
                 reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
             if (context.Inputs.Where(input => input.Role == "source").Any(input =>
                     !string.Equals(input.Encoding, "utf-8", StringComparison.OrdinalIgnoreCase)))
@@ -408,7 +453,13 @@ public static class ProvenanceVerifier
                     !context.ParseOptions.PreprocessorSymbols.Order(StringComparer.Ordinal)
                         .SequenceEqual(inspected.PreprocessorSymbols, StringComparer.Ordinal))
                     reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
-                else inspectedBuilds[build.Id] = inspected;
+                else
+                {
+                    if (context.CoverageApplicability == "semantic-empty" &&
+                        !SemanticEligibility.ValidateEmptyCaptured(context, artifactBytes))
+                        reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete);
+                    inspectedBuilds[build.Id] = inspected;
+                }
             }
             catch (InvalidDataException) { reasons.Add(ProvenanceReasonCodes.ActualBindingIncomplete); }
             catch (ArgumentException) { reasons.Add(ProvenanceReasonCodes.InvalidLocator); }

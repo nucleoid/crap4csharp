@@ -6,6 +6,9 @@
 # dotenv files
 .env
 
+# Private handoff and test diagnostics; never include in source or CI uploads.
+/.handoff/
+
 # User-specific files
 *.rsuser
 *.suo

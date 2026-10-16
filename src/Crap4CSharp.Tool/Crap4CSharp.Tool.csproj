@@ -10,6 +10,9 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <RepositoryUrl>https://github.com/nucleoid/crap4csharp</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>csharp;dotnet-tool;coverage;maintainability;crap</PackageTags>
+    <PackageReleaseNotes>Unreleased candidate: project-aware post-task checks, captured replay and current revalidation. Exact-head Windows/Linux packaged acceptance and independent review are required before release. See docs/releases.md.</PackageReleaseNotes>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Crap4CSharp.Core/Crap4CSharp.Core.csproj" />
@@ -20,6 +23,9 @@
     <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="5.0.0" />
     <PackageReference Include="Microsoft.VisualStudio.SolutionPersistence" Version="1.0.52" />
     <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+    <None Include="../../ATTRIBUTION.md" Pack="true" PackagePath="/" />
     <InternalsVisibleTo Include="Crap4CSharp.Tests" />
   </ItemGroup>
+  <Import Project="../../scripts/native-tool-package.targets" />
 </Project>

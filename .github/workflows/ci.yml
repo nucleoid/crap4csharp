@@ -2,25 +2,265 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
-  test:
+  build:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
+      - name: Resolve exact acceptance SDK declaration
+        id: acceptance-sdk
+        shell: pwsh
+        run: |
+          . ./scripts/sdk-acceptance-contract.ps1
+          $version = Get-SuiteAcceptanceSdkVersion
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - uses: actions/setup-dotnet@v5
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
         with:
-          global-json-file: global.json
-      - run: dotnet restore Crap4CSharp.slnx
-      - run: dotnet build Crap4CSharp.slnx -c Release --no-restore
-      - run: dotnet test Crap4CSharp.slnx -c Release --no-build
+          dotnet-version: ${{ steps.acceptance-sdk.outputs.version }}
+      - name: Bind the exact SDK host for consumer processes
+        shell: pwsh
+        run: ./scripts/bind-acceptance-sdk-host.ps1
+      - run: dotnet restore Crap4CSharp.slnx --disable-parallel
+      - run: dotnet build Crap4CSharp.slnx -c Release --no-restore -m:1 -nr:false
+      # Tool packing needs obj metadata omitted from the portable runtime export.
+      - name: Prepare native groups, pack, and select the tested runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (& dotnet msbuild src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj -nologo -getProperty:Version).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve package version.' }
+          ./scripts/prepare-native-tool-assets.ps1 -Version $version -Configuration Release -OutputDirectory artifacts/native-assets
+          $native = (Resolve-Path artifacts/native-assets).Path
+          dotnet pack src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj -c Release --no-build --no-restore -m:1 -nr:false -o artifacts/package "-p:CrapNativeToolAssetsRoot=$native/tools"
+          if ($LASTEXITCODE -ne 0) { throw 'Native tool pack failed.' }
+          $packages = @(Get-ChildItem artifacts/package/*.nupkg)
+          if ($packages.Count -ne 1) { throw 'Expected one native tool package.' }
+          $package = $packages[0].FullName
+          ./scripts/assert-package-metadata.ps1 -PackagePath $package -ExpectedVersion $version -NativeAssetsDirectory $native
+          ./scripts/test-native-tool-preparation.ps1
+          ./scripts/test-native-tool-package.ps1 -PackagePath $package -ExpectedVersion $version
+          ./scripts/test-native-tool-pack-binding.ps1 -NativeAssetsDirectory $native -Version $version -OutputDirectory artifacts/native-pack-refusals
+          ./scripts/install-native-test-runtime.ps1 -NativeAssetsDirectory $native -Version $version -Configuration Release
+      - name: Export one bound Release runtime
+        shell: pwsh
+        run: ./scripts/export-suite-build.ps1 -Configuration Release -Commit $env:GITHUB_SHA -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputDirectory artifacts/suite-build
+      - name: Retain sanitized build identity on refusal
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-identity-refusal-${{ matrix.os }}-attempt-${{ github.run_attempt }}
+          path: artifacts/suite-build/identity.json
+          if-no-files-found: warn
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: suite-build-Release-${{ matrix.os }}-attempt-${{ github.run_attempt }}
+          path: |
+            artifacts/suite-build/build.json
+            artifacts/suite-build/identity.json
+            artifacts/suite-build/runtime.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  suite:
+    name: suite (${{ matrix.os }}, ${{ matrix.shard }})
+    needs: build
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v5
+      - name: Resolve exact acceptance SDK declaration
+        id: acceptance-sdk
+        shell: pwsh
+        run: |
+          . ./scripts/sdk-acceptance-contract.ps1
+          $version = Get-SuiteAcceptanceSdkVersion
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - uses: actions/setup-dotnet@v5
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
+        with:
+          dotnet-version: ${{ steps.acceptance-sdk.outputs.version }}
+      - name: Bind the exact SDK host for consumer processes
+        shell: pwsh
+        run: ./scripts/bind-acceptance-sdk-host.ps1
+      - name: Install exact .NET 9 consumer runtime
+        shell: pwsh
+        run: ./scripts/install-consumer-runtime.ps1 -DotnetRoot $env:DOTNET_ROOT -Version 9.0.20
+      - name: Record SDK and runtime inventory
+        run: dotnet --info
+      - name: Select newest published Release build generation
+        id: build-artifacts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/test-workflow-artifact-selection.ps1
+          ./scripts/select-workflow-artifact-ids.ps1 -Kind build -Configuration Release -RunnerOS '${{ matrix.os }}' -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputPath artifacts/build-artifact-selection.json
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6; includes the final metadata page
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          artifact-ids: ${{ steps.build-artifacts.outputs.ids }}
+          path: artifacts/downloaded-builds/${{ steps.build-artifacts.outputs.single-artifact-name }}
+      - name: Import the bound shared Release runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./scripts/select-suite-build.ps1 -Configuration Release -RunnerOS '${{ matrix.os }}' -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -InputDirectory artifacts/downloaded-builds -OutputDirectory artifacts/selected-build
+          ./scripts/import-suite-build.ps1 -Configuration Release -Commit $env:GITHUB_SHA -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -ArtifactDirectory artifacts/selected-build
+      - name: Run exact discovered Release partition
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./scripts/run-suite-partition.ps1 -Configuration Release -ShardCount 16 -ShardIndex ${{ matrix.shard }} -Commit $env:GITHUB_SHA -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -BuildManifestPath artifacts/selected-build/build.json -ResultsDirectory artifacts/test-results
+      - name: Retain sanitized partition diagnostic
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-Release-${{ matrix.os }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: |
+            artifacts/test-results/Release-${{ matrix.shard }}.partition.diagnostic.json
+            artifacts/test-results/Release-${{ matrix.shard }}.discovery.json.diagnostic.json
+            artifacts/build-artifact-selection.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Retain only sanitized partition receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: partition-Release-${{ matrix.os }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: artifacts/test-results/Release-${{ matrix.shard }}.partition.receipt.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  # Keep the two planned stable required check names. Success requires
+  # every shard and an exact complete-case union, then the real collector gates.
+  test:
+    needs: [build, suite]
+    if: ${{ always() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - name: Resolve exact acceptance SDK declaration
+        id: acceptance-sdk
+        shell: pwsh
+        run: |
+          . ./scripts/sdk-acceptance-contract.ps1
+          $version = Get-SuiteAcceptanceSdkVersion
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - uses: actions/setup-dotnet@v5
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/crap4csharp-dotnet
+        with:
+          dotnet-version: ${{ steps.acceptance-sdk.outputs.version }}
+      - name: Bind the exact SDK host for consumer processes
+        shell: pwsh
+        run: ./scripts/bind-acceptance-sdk-host.ps1
+      - name: Require every suite job to succeed
+        shell: pwsh
+        env:
+          SUITE_STATUS: ${{ needs.suite.result }}
+        run: |
+          if ($env:SUITE_STATUS -cne 'success') { throw 'Complete suite partitions did not all succeed.' }
+      - name: Install exact .NET 9 consumer runtime
+        shell: pwsh
+        run: ./scripts/install-consumer-runtime.ps1 -DotnetRoot $env:DOTNET_ROOT -Version 9.0.20
+      - name: Select newest published Release build generation
+        id: build-artifacts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/test-workflow-artifact-selection.ps1
+          ./scripts/select-workflow-artifact-ids.ps1 -Kind build -Configuration Release -RunnerOS '${{ matrix.os }}' -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputPath artifacts/build-artifact-selection.json
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6; includes the final metadata page
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          artifact-ids: ${{ steps.build-artifacts.outputs.ids }}
+          path: artifacts/downloaded-builds/${{ steps.build-artifacts.outputs.single-artifact-name }}
+      - name: Import the bound shared Release runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./scripts/select-suite-build.ps1 -Configuration Release -RunnerOS '${{ matrix.os }}' -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -InputDirectory artifacts/downloaded-builds -OutputDirectory artifacts/selected-build
+          ./scripts/import-suite-build.ps1 -Configuration Release -Commit $env:GITHUB_SHA -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -ArtifactDirectory artifacts/selected-build
+      - name: Select newest published generation for every required partition
+        id: partition-artifacts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/select-workflow-artifact-ids.ps1 -Kind partition -Configuration Release -RunnerOS '${{ matrix.os }}' -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputPath artifacts/partition-artifact-selection.json
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6; includes the final metadata page
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          artifact-ids: ${{ steps.partition-artifacts.outputs.ids }}
+          path: artifacts/partition-receipts
+      - name: Prove complete Release case union and runtime identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./scripts/test-sdk-acceptance-contract.ps1
+          ./scripts/test-suite-case-coverage.ps1
+          ./scripts/test-suite-identity.ps1
+          ./scripts/test-suite-identity-producer.ps1
+          ./scripts/test-suite-partitions.ps1
+          ./scripts/test-suite-partition-diagnostic.ps1
+          ./scripts/test-suite-partition-reruns.ps1
+          ./scripts/test-suite-discovery.ps1
+          ./scripts/test-suite-build-artifacts.ps1
+          New-Item -ItemType Directory -Force artifacts/test-results | Out-Null
+          ./scripts/write-suite-discovery.ps1 -AssemblyPath tests/Crap4CSharp.Tests/bin/Release/net10.0/Crap4CSharp.Tests.dll -OutputPath artifacts/test-results/Release.discovery.json
+          if ($LASTEXITCODE -ne 0) { throw 'Complete case discovery failed.' }
+          ./scripts/write-suite-identity.ps1 -Configuration Release -Commit $env:GITHUB_SHA -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -DiscoveryPath artifacts/test-results/Release.discovery.json -OutputPath artifacts/test-results/Release.expected.identity.json
+          ./scripts/select-suite-partition-receipts.ps1 -Configuration Release -RunnerOS '${{ matrix.os }}' -ShardCount 16 -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -InputDirectory artifacts/partition-receipts -OutputDirectory artifacts/selected-partition-receipts
+          ./scripts/assert-suite-partitions.ps1 -DiscoveryPath artifacts/test-results/Release.discovery.json -ShardCount 16 -ReceiptDirectory artifacts/selected-partition-receipts -ExpectedIdentityPath artifacts/test-results/Release.expected.identity.json -OutputPath artifacts/test-results/Release.partition-coverage.receipt.json
+      - name: Retain sanitized complete suite receipt and discovery diagnostic
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: suite-${{ matrix.os }}-attempt-${{ github.run_attempt }}
+          path: |
+            artifacts/test-results/Release.partition-coverage.receipt.json
+            artifacts/test-results/Release.discovery.json.diagnostic.json
+            artifacts/build-artifact-selection.json
+            artifacts/partition-artifact-selection.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Build top-level callable fixture
         run: dotnet build samples/CallableTopLevel/CallableTopLevel.csproj -c Release -m:1 -p:RestoreDisableParallel=true
       - name: Collect Debug callable coverage (OpenCover + Cobertura)
@@ -33,4 +273,3 @@ jobs:
       - name: Assert real callable coverage capability table
         shell: pwsh
         run: ./scripts/assert-callable-coverage.ps1 -RepoRoot $PWD -DebugResults artifacts/callable-debug -ReleaseResults artifacts/callable-release
-      - run: dotnet pack src/Crap4CSharp.Tool/Crap4CSharp.Tool.csproj -c Release --no-build -o artifacts

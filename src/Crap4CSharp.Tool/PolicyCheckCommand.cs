@@ -3,14 +3,18 @@ using Crap4CSharp.Core;
 
 internal static class PolicyCheckCommand
 {
-    public static async Task<ResultDocument> RunAsync(string manifestPath, string policyPath, string baseRef,
+    public static async Task<ResultDocument> RunAsync(string manifestPath, string policyPath, string? baseRef,
         string workingDirectory, string? outputPath, TimeSpan timeout, DateTimeOffset startedAt, TimeSpan duration,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, Action<Func<Task>>? retainTerminalProof = null)
     {
         var root = Path.GetFullPath(workingDirectory);
         var bundle = ArtifactBundle.Load(manifestPath, root);
         CurrentEvidenceAdapter.ValidateSupportedRecipes(bundle.Manifest);
         if (outputPath is not null) bundle.RejectOutputAlias(outputPath, root);
+        if (bundle.Manifest.Contexts[0].CurrentRevalidation!.Provider == CompletedRevalidationDeclaration.Provider)
+            return await CompletedPolicyCheck.RunAsync(bundle, policyPath, baseRef, root, outputPath,
+                timeout, startedAt, duration, cancellationToken, retainTerminalProof);
+        if (baseRef is null) throw new ArgumentException("Legacy reused check requires --base.");
         ValidateTrustedRevision(bundle.Manifest);
         var trusted = TrustedPolicyLoader.LoadFromBase(baseRef, policyPath, repositoryRoot: root,
             timeout: timeout, cancellationToken: cancellationToken);
@@ -130,13 +134,21 @@ internal static class PolicyCheckCommand
 
     internal static IEnumerable<PolicyObservation> PolicyObservations(ResultDocument result, RunManifest manifest,
         RepositoryPolicy policy, IReadOnlyDictionary<string, bool> selected)
+        => PolicyObservations(result, policy, selected,
+            (contextId, logicalPath) => RepositorySourcePath(manifest, contextId, logicalPath));
+
+    // The resolver supplies independently bound repository paths. Partial failed-test
+    // observations do not need, and must not fabricate, a successful run manifest.
+    internal static IEnumerable<PolicyObservation> PolicyObservations(ResultDocument result,
+        RepositoryPolicy policy, IReadOnlyDictionary<string, bool> selected,
+        Func<string, string, string> repositoryPath)
     {
         var callables = result.Evaluation.Callables ?? [];
         foreach (var callable in callables.Where(item => item.Applicability == "applicable" &&
                      item.CoverageReason != CoverageReasonCodes.AmbiguousCallableOwnership &&
-                     !Excluded(policy, RepositorySourcePath(manifest, item.ContextId, item.Path))))
+                     !Excluded(policy, repositoryPath(item.ContextId, item.Path))))
         {
-            var path = RepositorySourcePath(manifest, callable.ContextId, callable.Path);
+            var path = repositoryPath(callable.ContextId, callable.Path);
             yield return new PolicyObservation(callable.Kind is "Lambda" or "AnonymousMethod" or "lambda" or "anonymous-method"
                     ? "anonymous" : "method", callable.CallableId,
                 "crap.thresholdExceeded", callable.Ruleset, callable.ContextId, path, callable.BodyChecksum,
@@ -149,7 +161,7 @@ internal static class PolicyCheckCommand
         {
             var values = group.ToArray();
             var first = values[0];
-            var path = RepositorySourcePath(manifest, first.ContextId, first.Path);
+            var path = repositoryPath(first.ContextId, first.Path);
             if (Excluded(policy, path)) continue;
             yield return new PolicyObservation(values.All(item => item.Kind is "Lambda" or "AnonymousMethod" or "lambda" or "anonymous-method")
                     ? "anonymous" : "method", first.CallableId, "crap.thresholdExceeded",
@@ -162,7 +174,7 @@ internal static class PolicyCheckCommand
             var roots = callables.Where(item => item.CallableId == family.RootCallableId).ToArray();
             if (roots.Length != 1) throw new InvalidDataException("A callable family did not resolve uniquely.");
             var root = roots[0];
-            var path = RepositorySourcePath(manifest, root.ContextId, root.Path);
+            var path = repositoryPath(root.ContextId, root.Path);
             if (Excluded(policy, path)) continue;
             var familySelected = callables.Where(item => item.FamilyIds.Contains(family.FamilyId, StringComparer.Ordinal))
                 .Any(item => selected.GetValueOrDefault(item.ObservationId));
@@ -276,7 +288,7 @@ internal static class PolicyCheckCommand
             throw new PolicyException("exemption.malformed", "Trusted exemption contains missing, duplicate, or unknown keys.");
     }
 
-    private static FindingResult ToFinding(PolicyFinding finding, ResultDocument result, double threshold)
+    internal static FindingResult ToFinding(PolicyFinding finding, ResultDocument result, double threshold)
     {
         var family = (result.Evaluation.Families ?? []).FirstOrDefault(item => item.FamilyId == finding.EntityKey);
         var callable = (result.Evaluation.Callables ?? []).FirstOrDefault(item =>
@@ -371,7 +383,7 @@ internal static class PolicyCheckCommand
     private static string RepositorySourcePath(RunManifest manifest, string contextId, string logicalPath)
     {
         var context = manifest.Contexts.Single(item => item.Id == contextId);
-        var input = context.Inputs.Single(item => item.Role == "source" && !item.Generated &&
+        var input = context.Inputs.Single(item => item.Role == "source" && (!item.Generated || context.IncludeGenerated) &&
             item.LogicalPath == logicalPath);
         return CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input);
     }

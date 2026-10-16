@@ -11,6 +11,419 @@ public sealed class GitScopeTests : IDisposable
     public void Dispose() => fixture.Dispose();
 
     [Fact]
+    public async Task ConvertedCheckoutDoesNotWidenScopeAndStillDetectsSameTimestampConfigurationEdits()
+    {
+        var token = TestContext.Current.CancellationToken;
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        await Git("config", "core.autocrlf", "true");
+        Write("Code.cs", "class C {\n int M() => 42;\n}\n");
+        Write("Project.csproj", "<Project>\n<PropertyGroup><Value>42</Value></PropertyGroup>\n</Project>\n");
+        await Git("add", "."); await Git("commit", "--quiet", "-m", "base");
+        File.Delete(Path.Combine(temporary, "Code.cs"));
+        File.Delete(Path.Combine(temporary, "Project.csproj"));
+        await Git("checkout-index", "--all", "--force");
+        var index = File.ReadAllBytes(Path.Combine(temporary, ".git", "index"));
+        var request = new GitScopeRequest(ChangeScopeMode.Worktree);
+        var clean = await GitScopeResolver.CaptureAsync(request, temporary, TimeSpan.FromSeconds(30), token);
+        Assert.Equal(ScopeCompleteness.Complete, clean.Completeness);
+        Assert.All(clean.Files, file => { Assert.Empty(file.AddedRanges); Assert.Empty(file.DeletedRanges); });
+        var project = Path.Combine(temporary, "Project.csproj");
+        var timestamp = File.GetLastWriteTimeUtc(project);
+        File.WriteAllText(project, File.ReadAllText(project).Replace("42", "43", StringComparison.Ordinal));
+        File.SetLastWriteTimeUtc(project, timestamp);
+        var changed = await GitScopeResolver.CaptureAsync(request, temporary, TimeSpan.FromSeconds(30), token);
+        Assert.Equal(ScopeCompleteness.ContextIncomplete, changed.Completeness);
+        Assert.Equal(index, File.ReadAllBytes(Path.Combine(temporary, ".git", "index")));
+        await Git("update-index", "--skip-worktree", "Project.csproj");
+        var hidden = await Assert.ThrowsAsync<ScopeException>(() => GitScopeResolver.CaptureAsync(request, temporary,
+            TimeSpan.FromSeconds(30), token));
+        Assert.Equal("scope.hiddenIndexEntry", hidden.Reason);
+    }
+
+    [Fact]
+    public async Task LargerOpaqueQueryPreservesOriginalProtocolAllowanceAndCompleteGroups()
+    {
+        var paths = Enumerable.Range(0, 48).Select(i => "input" + i).ToArray();
+        var calls = new List<string[]>();
+        var consumed = new List<string>();
+        await GitScopeResolver.ReadOpaqueTreeBatchesAsync(paths, (batch, token) =>
+        {
+            token.ThrowIfCancellationRequested(); calls.Add(batch.ToArray());
+            if (batch.Count > 16) throw new ScopeException("scope.gitProtocolLimit", "bounded combined response");
+            return Task.FromResult(System.Text.Encoding.UTF8.GetBytes(string.Join('\n', batch)));
+        }, bytes => consumed.AddRange(System.Text.Encoding.UTF8.GetString(bytes).Split('\n')),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(paths, calls[0]);
+        Assert.Equal(4, calls.Count);
+        Assert.Equal(paths, calls.Skip(1).SelectMany(c => c));
+        Assert.Equal(paths, consumed);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OpaqueQueryCancellationAndOtherFailuresNeverRetryOrConsume(bool cancellation)
+    {
+        var calls = 0; var consumed = false;
+        Task Run() => GitScopeResolver.ReadOpaqueTreeBatchesAsync(Enumerable.Range(0, 48).Select(i => "input" + i).ToArray(),
+            (_, _) =>
+            {
+                calls++;
+                if (cancellation) throw new OperationCanceledException();
+                throw new ScopeException("scope.gitFailed", "actual Git failure");
+            }, _ => consumed = true, TestContext.Current.CancellationToken);
+        if (cancellation) await Assert.ThrowsAsync<OperationCanceledException>(Run);
+        else Assert.Equal("scope.gitFailed", (await Assert.ThrowsAsync<ScopeException>(Run)).Reason);
+        Assert.Equal(1, calls); Assert.False(consumed);
+    }
+
+    [Fact]
+    public async Task CancelledFallbackResponseCannotBecomeAcceptedOpaqueEvidence()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var calls = 0; var consumed = false;
+        await Assert.ThrowsAsync<OperationCanceledException>(() => GitScopeResolver.ReadOpaqueTreeBatchesAsync(
+            Enumerable.Range(0, 48).Select(i => "input" + i).ToArray(), (batch, _) =>
+            {
+                calls++;
+                if (batch.Count > 16) throw new ScopeException("scope.gitProtocolLimit", "combined response");
+                cancellation.Cancel();
+                return Task.FromResult(Array.Empty<byte>());
+            }, _ => consumed = true, cancellation.Token));
+        Assert.Equal(2, calls); Assert.False(consumed);
+    }
+
+    [Fact]
+    public async Task ManyBundlePathsCannotHideADeletedBaselineGitlink()
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("Readme.txt", "base");
+        await Git("add", ".");
+        await Git("commit", "--quiet", "-m", "base");
+        var head = (await Git("rev-parse", "HEAD")).StandardOutput.Trim();
+        await Git("update-index", "--add", "--cacheinfo", "160000", head, "nested");
+        await Git("commit", "--quiet", "-m", "baseline gitlink");
+        await Git("update-index", "--force-remove", "nested");
+        for (var i = 0; i < 192; i++) Write($"bundle/inputs/{i:x64}.bin", "owned fixture");
+        var index = File.ReadAllBytes(Path.Combine(temporary, ".git", "index"));
+        var scope = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Base, "HEAD"),
+            temporary, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        Assert.Empty(scope.Files);
+        Assert.Equal(ScopeCompleteness.ContextIncomplete, scope.Completeness);
+        Assert.Contains("scope.changedDirectoryOrGitlink:nested", scope.Diagnostics);
+        Assert.Equal(index, File.ReadAllBytes(Path.Combine(temporary, ".git", "index")));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OwnedStatlessIndexRejectsLengthAndPreservedTimestampByteChanges(bool changeLength)
+    {
+        await Git("init", "--quiet");
+        Write("Code.cs", "class C {}\n");
+        await Git("add", "--", "Code.cs");
+        var opening = await Git("ls-files", "--stage", "-z", "--");
+        using var owned = await GitScopeResolver.GitScratchIndex.CreateAsync(temporary,
+            System.Text.Encoding.UTF8.GetBytes(opening.StandardOutput), TimeSpan.FromSeconds(10),
+            TestContext.Current.CancellationToken);
+        owned.Validate(TestContext.Current.CancellationToken);
+        var bytes = File.ReadAllBytes(owned.IndexPath);
+        var timestamp = File.GetLastWriteTimeUtc(owned.IndexPath);
+        if (changeLength) bytes = [.. bytes, 0];
+        else bytes[^1] ^= 1;
+        File.WriteAllBytes(owned.IndexPath, bytes);
+        File.SetLastWriteTimeUtc(owned.IndexPath, timestamp);
+        var error = Assert.Throws<ScopeException>(() => owned.Validate(TestContext.Current.CancellationToken));
+        Assert.Equal("scope.changedDuringCapture", error.Reason);
+    }
+
+    [Fact]
+    public async Task OwnedStatlessIndexStaysStatlessAcrossIndependentDiffsAndHonorsCancellation()
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("Code.cs", "class C { int M() => 1; }\n");
+        await Git("add", ".");
+        await Git("commit", "--quiet", "-m", "base");
+        var consumerIndex = File.ReadAllBytes(Path.Combine(temporary, ".git", "index"));
+        var opening = await Git("ls-files", "--stage", "-z", "--");
+        string ownedPath;
+        using (var owned = await GitScopeResolver.GitScratchIndex.CreateAsync(temporary,
+            System.Text.Encoding.UTF8.GetBytes(opening.StandardOutput), TimeSpan.FromSeconds(10),
+            TestContext.Current.CancellationToken))
+        {
+            ownedPath = owned.IndexPath;
+            for (var observation = 0; observation < 2; observation++)
+            {
+                var result = await ProcessRunner.RunWithEnvironmentAsync("git",
+                    ["--no-optional-locks", "diff-index", "--name-status", "-z", "HEAD", "--"], temporary,
+                    TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken, owned.Environment);
+                Assert.Equal(0, result.ExitCode);
+                owned.Validate(TestContext.Current.CancellationToken);
+                var source = Path.Combine(temporary, "Code.cs");
+                var time = File.GetLastWriteTimeUtc(source);
+                Write("Code.cs", "class C { int M() => 2; }\n");
+                File.SetLastWriteTimeUtc(source, time);
+            }
+            using var cancelled = new CancellationTokenSource();
+            cancelled.Cancel();
+            Assert.Throws<OperationCanceledException>(() => owned.Validate(cancelled.Token));
+        }
+        Assert.False(File.Exists(ownedPath));
+        Assert.Equal(consumerIndex, File.ReadAllBytes(Path.Combine(temporary, ".git", "index")));
+    }
+
+    [Theory]
+    [InlineData(1000)]
+    [InlineData(5000)]
+    public async Task LargeStatlessScopeRetainsRawSourceAndFilteredInputIdentity(int fileCount)
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        await Git("config", "core.autocrlf", "false");
+        for (var index = 0; index < fileCount; index++)
+            Write($"Source/File{index:D5}.cs", $"class C{index} {{ int M() => 42; }}\n");
+        for (var index = 0; index < 64; index++) Write($"Config/Input{index:D3}.props", "<Project />\n");
+        await GitWithTimeout(TimeSpan.FromSeconds(180), "add", ".");
+        await GitWithTimeout(TimeSpan.FromSeconds(180), "commit", "--quiet", "-m", "base");
+        var indexPath = Path.Combine(temporary, ".git", "index");
+        var originalIndex = File.ReadAllBytes(indexPath);
+        var request = new GitScopeRequest(ChangeScopeMode.Base, "HEAD");
+        var token = TestContext.Current.CancellationToken;
+        var clean = await GitScopeResolver.CaptureAsync(request, temporary, TimeSpan.FromSeconds(180), token);
+        Assert.Empty(clean.Files);
+        Assert.Equal(ScopeCompleteness.Complete, clean.Completeness);
+
+        var sourcePath = "Source/File00000.cs";
+        var physical = Path.Combine(temporary, sourcePath);
+        var timestamp = File.GetLastWriteTimeUtc(physical);
+        Write(sourcePath, "class C0 { int M() => 43; }\n");
+        File.SetLastWriteTimeUtc(physical, timestamp);
+        var changed = await GitScopeResolver.CaptureAsync(request, temporary, TimeSpan.FromSeconds(180), token);
+        var file = Assert.Single(changed.Files);
+        Assert.Equal(sourcePath, file.NewPath);
+        Assert.Equal("class C0 { int M() => 42; }\n", file.OldSource!.Text);
+        Assert.Equal("class C0 { int M() => 43; }\n", file.NewSource!.Text);
+        Assert.NotEqual(file.OldIdentity, file.NewIdentity);
+        Assert.Equal(ScopeCompleteness.Complete, changed.Completeness);
+
+        var props = Path.Combine(temporary, "Config/Input000.props");
+        var propsTimestamp = File.GetLastWriteTimeUtc(props);
+        Write("Config/Input000.props", "<Project/> \n");
+        File.SetLastWriteTimeUtc(props, propsTimestamp);
+        var filtered = await GitScopeResolver.CaptureAsync(request, temporary, TimeSpan.FromSeconds(180), token);
+        Assert.Single(filtered.Files);
+        Assert.Equal(ScopeCompleteness.ContextIncomplete, filtered.Completeness);
+        Assert.Equal(originalIndex, File.ReadAllBytes(indexPath));
+    }
+
+    [Fact]
+    public async Task BatchFramingDoesNotLowerTheExistingPerBlobProtocolAllowance()
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        await Git("config", "core.autocrlf", "false");
+        Write("Large A.cs", "//" + new string('x', 9 * 1024 * 1024));
+        Write("Large B.cs", "//" + new string('y', 9 * 1024 * 1024));
+        await Git("add", ".");
+        await Git("commit", "--quiet", "-m", "base");
+        var scope = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Worktree), temporary,
+            TimeSpan.FromSeconds(180), TestContext.Current.CancellationToken);
+        Assert.Empty(scope.Files);
+        Assert.Equal(ScopeCompleteness.Complete, scope.Completeness);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BoundedFileReadsKeepRecordOrderWhenLaterUntrackedInputFailsFirst(bool firstLineMap)
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("A.cs", "class A { }");
+        await Git("add", "--", "A.cs");
+        await Git("commit", "--quiet", "-m", "base");
+        var indexPath = Path.Combine(temporary, ".git", "index");
+        var originalIndex = File.ReadAllBytes(indexPath);
+        Write("A.cs", firstLineMap ? "// separator\u2028class A { }" : "class A { }\0");
+        Write("Z.cs", firstLineMap ? "class Z { }\0" : "// separator\u2028class Z { }");
+        var token = TestContext.Current.CancellationToken;
+        if (firstLineMap)
+        {
+            var error = await Assert.ThrowsAsync<ScopeException>(() => GitScopeResolver.CaptureAsync(
+                new GitScopeRequest(ChangeScopeMode.Worktree), temporary, TimeSpan.FromSeconds(30), token));
+            Assert.Equal("scope.lineMapIncompatible", error.Reason);
+            Assert.Contains("A.cs", error.Message);
+        }
+        else
+        {
+            var error = await Assert.ThrowsAsync<InvalidDataException>(() => GitScopeResolver.CaptureAsync(
+                new GitScopeRequest(ChangeScopeMode.Worktree), temporary, TimeSpan.FromSeconds(30), token));
+            Assert.Contains("A.cs", error.Message);
+        }
+        Assert.Equal(originalIndex, File.ReadAllBytes(indexPath));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ConcurrentOpeningFailuresKeepOriginalRefusalPrecedence(bool unborn)
+    {
+        await Git("init", "--quiet");
+        if (!unborn)
+        {
+            await Git("config", "user.email", "scope@example.invalid");
+            await Git("config", "user.name", "Scope Test");
+            Write("Code.cs", "class C { int M() => 1; }");
+            await Git("add", "Code.cs");
+            await Git("commit", "--quiet", "-m", "base");
+            await Git("update-index", "--skip-worktree", "Code.cs");
+        }
+        // The missing base fails concurrently with an earlier HEAD/hidden-index
+        // refusal. Read scheduling must not change the diagnostic or index.
+        var indexPath = Path.Combine(temporary, ".git", "index");
+        var originalIndex = File.Exists(indexPath) ? File.ReadAllBytes(indexPath) : null;
+        var error = await Assert.ThrowsAsync<ScopeException>(() => GitScopeResolver.CaptureAsync(
+            new GitScopeRequest(ChangeScopeMode.Base, "missing-base"), temporary,
+            TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+        Assert.Equal(unborn ? "scope.unbornHead" : "scope.hiddenIndexEntry", error.Reason);
+        if (originalIndex is null) Assert.False(File.Exists(indexPath));
+        else Assert.Equal(originalIndex, File.ReadAllBytes(indexPath));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ChangedOrDeletedGitlinkWidensScopeWithoutHashingItsDirectory(bool deleted)
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("Code.cs", "class C { int M() => 1; }");
+        await Git("add", "Code.cs");
+        var module = Path.Combine(temporary, "Module");
+        Directory.CreateDirectory(module);
+        async Task<string> ModuleGit(params string[] arguments)
+        {
+            var result = await ProcessRunner.RunAsync("git", arguments, module, TimeSpan.FromSeconds(15),
+                TestContext.Current.CancellationToken);
+            Assert.True(result.ExitCode == 0, result.StandardError);
+            return result.StandardOutput.Trim();
+        }
+        await ModuleGit("init", "--quiet");
+        await ModuleGit("config", "user.email", "module@example.invalid");
+        await ModuleGit("config", "user.name", "Module Test");
+        Write("Module/Code.cs", "class Dependency { int M() => 1; }");
+        await ModuleGit("add", "Code.cs");
+        await ModuleGit("commit", "--quiet", "-m", "module base");
+        var moduleHead = await ModuleGit("rev-parse", "HEAD");
+        await Git("update-index", "--add", "--cacheinfo", "160000," + moduleHead + ",Module");
+        await Git("commit", "--quiet", "-m", "base with gitlink");
+        if (deleted) await Git("rm", "--cached", "Module");
+        else
+        {
+            Write("Module/Code.cs", "class Dependency { int M() => 2; }");
+            await ModuleGit("add", "Code.cs");
+            await ModuleGit("commit", "--quiet", "-m", "module change");
+        }
+        var index = Path.Combine(temporary, ".git", "index");
+        var before = File.ReadAllBytes(index);
+        var scope = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Base, "HEAD"),
+            temporary, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        Assert.Empty(scope.Files);
+        Assert.Equal(ScopeCompleteness.ContextIncomplete, scope.Completeness);
+        Assert.Contains("scope.changedDirectoryOrGitlink:Module", scope.Diagnostics);
+        Assert.Equal(before, File.ReadAllBytes(index));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task StatlessWorktreeComparisonDistinguishesCleanInputsFromPreservedTimestampEdits(bool baseScope)
+    {
+        await Git("init", "--quiet");
+        await Git("config", "user.email", "scope@example.invalid");
+        await Git("config", "user.name", "Scope Test");
+        Write("Code.cs", "class C { int M() => 42; }");
+        Write("App.csproj", "<Project />");
+        Write("policy.json", "{}");
+        Write("Tests/Tests.cs", "class Tests {}");
+        await Git("add", ".");
+        await Git("commit", "--quiet", "-m", "base");
+        var indexPath = Path.Combine(temporary, ".git", "index");
+        var originalIndex = File.ReadAllBytes(indexPath);
+        var request = new GitScopeRequest(baseScope ? ChangeScopeMode.Base : ChangeScopeMode.Worktree,
+            baseScope ? "HEAD" : null);
+        var clean = await GitScopeResolver.CaptureAsync(request, temporary, TimeSpan.FromSeconds(30),
+            TestContext.Current.CancellationToken);
+        Assert.Empty(clean.Files);
+        Assert.Equal(ScopeCompleteness.Complete, clean.Completeness);
+        Assert.DoesNotContain(clean.Diagnostics, d => d.StartsWith("scope.unclassifiedChangedInput:", StringComparison.Ordinal));
+        Assert.Equal(originalIndex, File.ReadAllBytes(indexPath));
+
+        var source = Path.Combine(temporary, "Code.cs");
+        var timestamp = File.GetLastWriteTimeUtc(source);
+        File.WriteAllText(source, "class C { int M() => 43; }");
+        File.SetLastWriteTimeUtc(source, timestamp);
+        var changed = await GitScopeResolver.CaptureAsync(request, temporary, TimeSpan.FromSeconds(30),
+            TestContext.Current.CancellationToken);
+        Assert.Equal("Code.cs", Assert.Single(changed.Files).NewPath);
+        Assert.Equal(ScopeCompleteness.Complete, changed.Completeness);
+        Assert.DoesNotContain(changed.Diagnostics, d => d.StartsWith("scope.unclassifiedChangedInput:", StringComparison.Ordinal));
+        Assert.Equal(originalIndex, File.ReadAllBytes(indexPath));
+
+        var project = Path.Combine(temporary, "App.csproj");
+        var projectTimestamp = File.GetLastWriteTimeUtc(project);
+        var projectLength = new FileInfo(project).Length;
+        File.WriteAllText(project, "<Project/> ");
+        Assert.Equal(projectLength, new FileInfo(project).Length);
+        File.SetLastWriteTimeUtc(project, projectTimestamp);
+        var contextChanged = await GitScopeResolver.CaptureAsync(request, temporary, TimeSpan.FromSeconds(30),
+            TestContext.Current.CancellationToken);
+        Assert.Equal("Code.cs", Assert.Single(contextChanged.Files).NewPath);
+        Assert.Equal(ScopeCompleteness.ContextIncomplete, contextChanged.Completeness);
+        Assert.Equal(new[] { "scope.unclassifiedChangedInput:App.csproj" },
+            contextChanged.Diagnostics.Where(d => d.StartsWith("scope.unclassifiedChangedInput:", StringComparison.Ordinal)));
+        Assert.Equal(originalIndex, File.ReadAllBytes(indexPath));
+    }
+
+    [Fact]
+    public async Task StagedGitBlobBeyondProtocolLimitRefusesRatherThanRetainingUnboundedResponse()
+    {
+        await Git("init", "--quiet");
+        Write("Oversized.cs", "//" + new string('x', 16777216));
+        await Git("add", "--", "Oversized.cs");
+        var failure = await Assert.ThrowsAsync<ScopeException>(() => GitScopeResolver.CaptureAsync(
+            new GitScopeRequest(ChangeScopeMode.Staged), temporary, TimeSpan.FromSeconds(15),
+            TestContext.Current.CancellationToken));
+        Assert.Equal("scope.gitProtocolLimit", failure.Reason);
+        Assert.Contains("16777216", failure.Message);
+    }
+
+    [Fact]
+    public async Task UnbornStagedGitScopePreservesExactUtf8BytesAndUnusualPath()
+    {
+        await Git("init", "--quiet");
+        string name = OperatingSystem.IsWindows() ? "unicode space é.cs" : "unicode space é\nfile.cs";
+        const string source = "// café 😀\nclass C { string M() => \"é\"; }\n";
+        Write(name, source);
+        await Git("add", "--", name);
+        var scope = await GitScopeResolver.CaptureAsync(new GitScopeRequest(ChangeScopeMode.Staged),
+            temporary, TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken);
+        var file = Assert.Single(scope.Files);
+        Assert.Equal(name, file.NewPath);
+        Assert.Equal(source, file.NewSource!.Text);
+    }
+
+    [Fact]
     public async Task BaseHeadCapturesCommittedBytesAndIgnoresDirtyWorktree()
     {
         await Git("init", "--quiet");
@@ -609,8 +1022,11 @@ public sealed class GitScopeTests : IDisposable
     }
 
     private async Task<ProcessResult> Git(params string[] arguments)
+        => await GitWithTimeout(TimeSpan.FromSeconds(10), arguments);
+
+    private async Task<ProcessResult> GitWithTimeout(TimeSpan timeout, params string[] arguments)
     {
-        var result = await ProcessRunner.RunAsync("git", arguments, temporary, TimeSpan.FromSeconds(10), CancellationToken.None);
+        var result = await ProcessRunner.RunAsync("git", arguments, temporary, timeout, TestContext.Current.CancellationToken);
         Assert.True(result.ExitCode == 0, result.StandardError);
         return result;
     }

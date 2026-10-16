@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -27,21 +26,38 @@ internal static partial class GitScopeResolver
 
         var capturesWorktree = request.Mode == ChangeScopeMode.Worktree ||
             request.Mode == ChangeScopeMode.Base && request.SourceState == ScopeSourceState.Worktree;
-        var currentHead = await ResolveCurrentHeadOrUnborn(root, timeout, cancellationToken);
+        // All opening reads depend only on the resolved root. They retain
+        // independent observations; await every owned cleanup before applying
+        // the same HEAD/unborn -> index/conflicts/hidden -> base/head precedence.
+        var currentHeadRead = ResolveCurrentHeadOrUnborn(root, timeout, cancellationToken);
+        var indexRead = IndexIdentity(root, timeout, cancellationToken);
+        var conflictsRead = EnsureNoConflicts(root, timeout, cancellationToken);
+        var hiddenRead = capturesWorktree ? EnsureNoHiddenIndexEntries(root, timeout, cancellationToken) : Task.CompletedTask;
+        var baseRead = request.Mode == ChangeScopeMode.Base
+            ? ResolveCommit(root, request.BaseRef!, timeout, cancellationToken) : Task.FromResult(string.Empty);
+        var selectedHeadRead = request.Mode == ChangeScopeMode.Base
+            ? ResolveCommit(root, request.HeadRef ?? "HEAD", timeout, cancellationToken) : Task.FromResult(string.Empty);
+        try { await Task.WhenAll(currentHeadRead, indexRead, conflictsRead, hiddenRead, baseRead, selectedHeadRead); }
+        catch
+        {
+            // Each settled task is reawaited in original refusal order below.
+            // This catch never accepts a failed read or leaves a child running.
+        }
+        var currentHead = await currentHeadRead;
         if (request.Mode == ChangeScopeMode.Base && currentHead is null)
             throw new ScopeException("scope.unbornHead", "base scope requires an existing HEAD commit.");
-        var indexBefore = await IndexIdentity(root, timeout, cancellationToken);
-        await EnsureNoConflicts(root, timeout, cancellationToken);
-        if (capturesWorktree)
-            await EnsureNoHiddenIndexEntries(root, timeout, cancellationToken);
+        await SettleReads(indexRead, conflictsRead, hiddenRead);
+        await SettleReads(baseRead, selectedHeadRead);
+        var openingIndex = await indexRead;
+        var indexBefore = openingIndex.Identity;
 
         string? resolvedBase = null;
         string? resolvedHead = currentHead;
         string? mergeBase = null;
         if (request.Mode == ChangeScopeMode.Base)
         {
-            resolvedBase = await ResolveCommit(root, request.BaseRef!, timeout, cancellationToken);
-            resolvedHead = await ResolveCommit(root, request.HeadRef ?? "HEAD", timeout, cancellationToken);
+            resolvedBase = await baseRead;
+            resolvedHead = await selectedHeadRead;
             var mergeResult = await Git(root, timeout, cancellationToken,
                 ["merge-base", "--all", resolvedBase, resolvedHead], allowFailure: true);
             var mergeBases = mergeResult.ExitCode == 0 ? NullOrLineValues(mergeResult) : [];
@@ -57,28 +73,55 @@ internal static partial class GitScopeResolver
         var emptyTree = currentHead is null ? Text(await Git(root, timeout, cancellationToken,
             ["hash-object", "-t", "tree", "--stdin"], [])).Trim() : null;
         var baseline = request.Mode == ChangeScopeMode.Base ? mergeBase! : currentHead ?? emptyTree!;
-        var records = await ReadChanges(request, root, baseline, resolvedHead, timeout, cancellationToken);
+        using var scratchIndex = capturesWorktree
+            ? await GitScratchIndex.CreateAsync(root, openingIndex.Bytes, timeout, cancellationToken) : null;
+        var records = await ReadChanges(request, root, baseline, resolvedHead, timeout, cancellationToken, scratchIndex);
         var files = new List<ChangedFile>();
         var verificationFiles = new List<ChangedFile>();
-        foreach (var record in records.Where(record => Eligible(record.OldPath) || Eligible(record.NewPath)))
+        var blobInventory = capturesWorktree && records.Any(record => record.OldPath is not null && Eligible(record.OldPath))
+            ? await ReadBlobInventory(root, baseline, timeout, cancellationToken) : null;
+        // Independent file reads use bounded waves. Interpret them in the original
+        // record order, and settle every owned read on refusal. HEAD/index and
+        // closing worktree membership/byte checks remain independent and fresh.
+        foreach (var batch in records.Where(record => Eligible(record.OldPath) || Eligible(record.NewPath)).Chunk(64))
         {
-            var captured = await CaptureFile(request, root, baseline, resolvedHead, record, timeout, cancellationToken);
-            verificationFiles.Add(captured);
-            var file = NormalizeEligibility(captured);
-            if (file is null) continue;
-            if (file.Kind == ScopeChangeKind.Modified && file.OldIdentity == file.NewIdentity) continue;
-            files.Add(file);
+            var blobs = blobInventory is null ? null : await ReadBlobBatch(root, batch, blobInventory, timeout, cancellationToken);
+            foreach (var wave in batch.Chunk(2))
+            {
+                var reads = wave.Select(record => CaptureFile(request, root, baseline, resolvedHead, record, timeout, cancellationToken, blobs)).ToArray();
+                try
+                {
+                    foreach (var read in reads)
+                    {
+                        var captured = await read;
+                        verificationFiles.Add(captured);
+                        var file = NormalizeEligibility(captured);
+                        if (file is null) continue;
+                        if (file.Kind == ScopeChangeKind.Modified && file.OldIdentity == file.NewIdentity) continue;
+                        files.Add(file);
+                    }
+                }
+                catch
+                {
+                    try { await Task.WhenAll(reads); }
+                    catch { /* Preserve original record-order refusal after cleanup. */ }
+                    throw;
+                }
+            }
         }
         files = CoalesceExactWorktreeRenames(files);
 
         if (capturesWorktree)
         {
-            var recordsAfter = await ReadChanges(request, root, baseline, resolvedHead, timeout, cancellationToken);
+            var recordsAfter = await ReadChanges(request, root, baseline, resolvedHead, timeout, cancellationToken, scratchIndex);
             if (!records.SequenceEqual(recordsAfter))
                 throw new ScopeException("scope.changedDuringCapture", "the set of worktree changes changed during capture.");
         }
-        var currentHeadAfter = await ResolveCurrentHeadOrUnborn(root, timeout, cancellationToken);
-        var indexAfter = await IndexIdentity(root, timeout, cancellationToken);
+        var closingHeadRead = ResolveCurrentHeadOrUnborn(root, timeout, cancellationToken);
+        var closingIndexRead = IndexIdentity(root, timeout, cancellationToken);
+        await SettleReads(closingHeadRead, closingIndexRead);
+        var currentHeadAfter = await closingHeadRead;
+        var indexAfter = (await closingIndexRead).Identity;
         if (currentHead != currentHeadAfter || indexBefore != indexAfter)
             throw new ScopeException("scope.changedDuringCapture", "HEAD or index changed during capture.");
         if (capturesWorktree)
@@ -92,8 +135,11 @@ internal static partial class GitScopeResolver
         var filteredPaths = records.SelectMany(record => new[] { record.OldPath, record.NewPath })
             .Where(path => path is not null && !Eligible(path)).Select(path => path!)
             .Distinct(PathComparer()).Order(PathComparer()).ToArray();
+        var opaqueDirectories = await ChangedOpaqueDirectories(records, root, baseline, openingIndex.Bytes,
+            timeout, cancellationToken);
         var contextIncomplete = records.Any(record => ContextInput(record.OldPath) || ContextInput(record.NewPath)) ||
-            filteredPaths.Any(BuildRelevantFilteredInput);
+            filteredPaths.Any(BuildRelevantFilteredInput) || opaqueDirectories.Count > 0;
+        diagnostics.AddRange(opaqueDirectories.Select(path => "scope.changedDirectoryOrGitlink:" + path));
         foreach (var path in filteredPaths)
         {
             diagnostics.Add(path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)
@@ -116,8 +162,93 @@ internal static partial class GitScopeResolver
             contextIncomplete ? ScopeCompleteness.ContextIncomplete : ScopeCompleteness.Complete);
     }
 
+    // A gitlink is not a blob. Changed nested repositories may contain compiler
+    // inputs, so retain their uncertainty and widen rather than guess no impact.
+    private static async Task<IReadOnlyList<string>> ChangedOpaqueDirectories(IReadOnlyList<PathChange> records,
+        string root, string baseline, byte[] openingIndex, TimeSpan timeout, CancellationToken token)
+    {
+        var paths = records.SelectMany(record => new[] { record.OldPath, record.NewPath })
+            .Where(path => path is not null && !Eligible(path)).Select(path => path!)
+            .Distinct(StringComparer.Ordinal).ToHashSet(StringComparer.Ordinal);
+        if (paths.Count == 0) return [];
+        var opaque = paths.Where(path => Directory.Exists(Path.Combine(root, path)))
+            .ToHashSet(StringComparer.Ordinal);
+        void AddGitlinks(byte[] bytes)
+        {
+            foreach (var entry in SplitNull(bytes))
+            {
+                token.ThrowIfCancellationRequested();
+                if (!entry.StartsWith("160000 ", StringComparison.Ordinal)) continue;
+                var separator = entry.IndexOf('\t');
+                if (separator < 0) throw new ScopeException("scope.malformedDiff", "Gitlink identity has no path.");
+                var path = entry[(separator + 1)..];
+                if (paths.Contains(path)) opaque.Add(path);
+            }
+        }
+        AddGitlinks(openingIndex);
+        await ReadOpaqueTreeBatchesAsync(paths.ToArray(), async (batch, ct) =>
+            (await Git(root, timeout, ct, new[] { "ls-tree", "-r", "-z", "--full-tree", baseline, "--" }
+                .Concat(batch.Select(path => ":(literal)" + path)).ToArray())).Output, AddGitlinks, token);
+        return opaque.Order(StringComparer.Ordinal).ToArray();
+    }
+
+    // Group whole original sixteen-path queries. A larger response may exceed
+    // the existing per-command protocol allowance: retry its exact original
+    // groups, never truncate, lower the allowance, or reuse a closing observation.
+    internal static async Task ReadOpaqueTreeBatchesAsync(IReadOnlyList<string> paths,
+        Func<IReadOnlyList<string>, CancellationToken, Task<byte[]>> read,
+        Action<byte[]> consume, CancellationToken token)
+    {
+        var batch = new List<string>(128);
+        long characters = 1024; // Reserve executable and fixed argument overhead.
+        foreach (var original in paths.Chunk(16))
+        {
+            token.ThrowIfCancellationRequested();
+            var added = original.Sum(path => 2L * (path.Length + ":(literal)".Length) + 3);
+            if (batch.Count > 0 && (batch.Count + original.Length > 128 || characters + added > 24000))
+            {
+                await ReadBatch(); batch.Clear(); characters = 1024;
+            }
+            batch.AddRange(original); characters += added;
+        }
+        if (batch.Count > 0) await ReadBatch();
+
+        async Task ReadBatch()
+        {
+            token.ThrowIfCancellationRequested();
+            byte[] bytes;
+            try { bytes = await read(batch.ToArray(), token); }
+            catch (ScopeException error) when (error.Reason == "scope.gitProtocolLimit" && batch.Count > 16)
+            {
+                foreach (var original in batch.Chunk(16))
+                {
+                    token.ThrowIfCancellationRequested();
+                    var part = await read(original, token);
+                    token.ThrowIfCancellationRequested();
+                    consume(part);
+                }
+                token.ThrowIfCancellationRequested();
+                return;
+            }
+            token.ThrowIfCancellationRequested();
+            consume(bytes);
+        }
+    }
+
+    private static async Task SettleReads(params Task[] reads)
+    {
+        try { await Task.WhenAll(reads); }
+        catch
+        {
+            // When several reads fail, retain their declaration-order failure
+            // precedence after all processes have completed their owned cleanup.
+            foreach (var read in reads) await read;
+            throw;
+        }
+    }
+
     private static async Task<IReadOnlyList<PathChange>> ReadChanges(GitScopeRequest request, string root, string baseline,
-        string? resolvedHead, TimeSpan timeout, CancellationToken cancellationToken)
+        string? resolvedHead, TimeSpan timeout, CancellationToken cancellationToken, GitScratchIndex? scratchIndex)
     {
         var capturesWorktree = request.Mode == ChangeScopeMode.Worktree ||
             request.Mode == ChangeScopeMode.Base && request.SourceState == ScopeSourceState.Worktree;
@@ -126,7 +257,47 @@ internal static partial class GitScopeResolver
         arguments.Add(baseline);
         if (request.Mode == ChangeScopeMode.Base && request.SourceState == ScopeSourceState.Head) arguments.Add(resolvedHead!);
         arguments.Add("--");
-        var changes = ParseNameStatus((await Git(root, timeout, cancellationToken, arguments)).Output);
+        List<PathChange> changes;
+        if (capturesWorktree)
+        {
+            // Reconstruct the same semantic index without its stat cache. Git must
+            // inspect bytes even for same-size edits with restored timestamps.
+            // The consumer's index, flags and staged identities remain untouched.
+            if (scratchIndex is null) throw new InvalidOperationException("Worktree capture requires its owned statless index.");
+            scratchIndex.Validate(cancellationToken);
+            {
+                changes = ParseNameStatus((await Git(root, timeout, cancellationToken, arguments,
+                    environment: scratchIndex.Environment)).Output);
+                scratchIndex.Validate(cancellationToken);
+                // A statless index conservatively reports unchanged files as
+                // modified. Eligible sources are already compared using raw
+                // captured bytes below. Apply the same distinction to filtered
+                // inputs before deciding that project/configuration changes
+                // widen the scope. --no-filters preserves physical newline and
+                // filter differences that ordinary git diff can hide. Configuration-only
+                // CRLF separators are equivalent for scope selection; physical
+                // compiler inputs still retain their exact byte identities.
+                var unchanged = new HashSet<string>(StringComparer.Ordinal);
+                var candidates = changes.Where(change => change.Kind == ScopeChangeKind.Modified &&
+                    !Eligible(change.NewPath) && change.OldPath == change.NewPath && change.NewPath is not null &&
+                    (File.GetAttributes(Path.Combine(root, change.NewPath)) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) == 0)
+                    .Select(change => change.NewPath!).Distinct(StringComparer.Ordinal).ToArray();
+                var inventory = candidates.Length == 0 ? null : await ReadBlobInventory(root, baseline, timeout, cancellationToken);
+                foreach (var path in candidates)
+                {
+                    // Non-blob transitions remain uncertain/changed. For ordinary
+                    // blobs retain raw --no-filters semantics without one child
+                    // pair per 16 paths. Closing capture independently repeats it.
+                    if (inventory!.TryGetValue(path, out var oldBlob) &&
+                        (await RawWorktreeBlobIdentity(Path.Combine(root, path), oldBlob.Identity.Length, cancellationToken) == oldBlob.Identity ||
+                         (ContextInput(path) || Path.GetExtension(path).ToLowerInvariant() is ".resx" or ".rsp") &&
+                         await ConfigurationLineEndingIdentity(Path.Combine(root, path), oldBlob.Identity.Length, cancellationToken) == oldBlob.Identity))
+                        unchanged.Add(path);
+                }
+                changes = changes.Where(change => change.NewPath is null || !unchanged.Contains(change.NewPath)).ToList();
+            }
+        }
+        else changes = ParseNameStatus((await Git(root, timeout, cancellationToken, arguments)).Output);
 
         if (request.Mode == ChangeScopeMode.Worktree || request.Mode == ChangeScopeMode.Base && request.SourceState == ScopeSourceState.Worktree)
         {
@@ -137,8 +308,83 @@ internal static partial class GitScopeResolver
         return changes;
     }
 
+    // Only the immutable opening semantic index is reused. Every diff, raw
+    // worktree read, HEAD/index observation and closing byte proof remains fresh.
+    // Byte checks ensure a command cannot introduce a stat cache between reads.
+    internal sealed class GitScratchIndex : IDisposable
+    {
+        private readonly DirectoryInfo directory;
+        private readonly byte[] identity;
+        private readonly long length;
+        internal string IndexPath { get; }
+        internal IReadOnlyDictionary<string, string> Environment { get; }
+
+        private GitScratchIndex(DirectoryInfo directory, byte[] identity, long length)
+        {
+            this.directory = directory; this.identity = identity; this.length = length;
+            IndexPath = Path.Combine(directory.FullName, "index");
+            Environment = new Dictionary<string, string> { ["GIT_INDEX_FILE"] = IndexPath };
+        }
+
+        internal static async Task<GitScratchIndex> CreateAsync(string root, byte[] openingIndex,
+            TimeSpan timeout, CancellationToken token)
+        {
+            var owned = Directory.CreateTempSubdirectory("crap4csharp-git-index-");
+            try
+            {
+                var path = Path.Combine(owned.FullName, "index");
+                await Git(root, timeout, token, ["update-index", "-z", "--index-info"], openingIndex,
+                    environment: new Dictionary<string, string> { ["GIT_INDEX_FILE"] = path });
+                var length = new FileInfo(path).Length;
+                return new(owned, ReadIdentity(path, length, token), length);
+            }
+            catch { Remove(owned); throw; }
+        }
+
+        internal void Validate(CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            if ((File.GetAttributes(directory.FullName) & FileAttributes.ReparsePoint) != 0 ||
+                !ReadIdentity(IndexPath, length, token).AsSpan().SequenceEqual(identity))
+                throw new ScopeException("scope.changedDuringCapture", "The invocation-owned statless index changed during capture.");
+        }
+
+        private static byte[] ReadIdentity(string path, long expectedLength, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            if ((File.GetAttributes(path) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0)
+                throw new ScopeException("scope.changedDuringCapture", "The invocation-owned index is not a regular file.");
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan);
+            if (stream.Length != expectedLength) throw Changed();
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            var buffer = new byte[65536];
+            long total = 0;
+            int count;
+            while ((count = stream.Read(buffer)) != 0)
+            {
+                token.ThrowIfCancellationRequested();
+                total += count;
+                if (total > expectedLength) throw Changed();
+                hash.AppendData(buffer.AsSpan(0, count));
+            }
+            if (total != expectedLength || stream.Length != expectedLength) throw Changed();
+            token.ThrowIfCancellationRequested();
+            return hash.GetHashAndReset();
+            static ScopeException Changed() => new("scope.changedDuringCapture", "The invocation-owned statless index length changed during capture.");
+        }
+
+        public void Dispose() => Remove(directory);
+        private static void Remove(DirectoryInfo owned)
+        {
+            try { owned.Delete(recursive: true); }
+            catch (IOException) { /* Preserve only this invocation's scratch on failed cleanup. */ }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
     private static async Task<ChangedFile> CaptureFile(GitScopeRequest request, string root, string baseline,
-        string? resolvedHead, PathChange record, TimeSpan timeout, CancellationToken cancellationToken)
+        string? resolvedHead, PathChange record, TimeSpan timeout, CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, GitBlobBytes>? blobs = null)
     {
         CapturedSource? oldSource = null;
         CapturedSource? newSource = null;
@@ -148,31 +394,31 @@ internal static partial class GitScopeResolver
         string? newObjectIdentity = null;
         if (record.OldPath is not null && record.Kind != ScopeChangeKind.Added)
         {
-            var bytes = (await Git(root, timeout, cancellationToken, ["show", $"{baseline}:{record.OldPath}"])).Output;
-            oldSource = Capture(record.OldPath, bytes);
-            EnsureCompatibleLineMap(oldSource);
+            if (blobs is not null && blobs.TryGetValue(record.OldPath, out var blob))
+            {
+                oldSource = Capture(record.OldPath, blob.Bytes);
+                EnsureCompatibleLineMap(oldSource);
+                oldObjectIdentity = blob.Identity;
+            }
+            else
+                (oldSource, oldObjectIdentity) = await CaptureBlob(root, $"{baseline}:{record.OldPath}", record.OldPath, timeout, cancellationToken);
             oldIdentity = oldSource.ContentIdentity;
-            oldObjectIdentity = await BlobIdentity(root, $"{baseline}:{record.OldPath}", timeout, cancellationToken);
         }
         if (record.NewPath is not null && record.Kind != ScopeChangeKind.Deleted)
         {
-            byte[] bytes;
             if (request.Mode == ChangeScopeMode.Staged)
             {
-                bytes = (await Git(root, timeout, cancellationToken, ["show", $":{record.NewPath}"])).Output;
-                newObjectIdentity = await BlobIdentity(root, $":{record.NewPath}", timeout, cancellationToken);
+                (newSource, newObjectIdentity) = await CaptureBlob(root, $":{record.NewPath}", record.NewPath, timeout, cancellationToken);
             }
             else if (request.Mode == ChangeScopeMode.Base && request.SourceState == ScopeSourceState.Head)
             {
-                bytes = (await Git(root, timeout, cancellationToken, ["show", $"{resolvedHead}:{record.NewPath}"])).Output;
-                newObjectIdentity = await BlobIdentity(root, $"{resolvedHead}:{record.NewPath}", timeout, cancellationToken);
+                (newSource, newObjectIdentity) = await CaptureBlob(root, $"{resolvedHead}:{record.NewPath}", record.NewPath, timeout, cancellationToken);
             }
             else
             {
-                bytes = await File.ReadAllBytesAsync(Path.Combine(root, record.NewPath), cancellationToken);
+                newSource = Capture(record.NewPath, await File.ReadAllBytesAsync(Path.Combine(root, record.NewPath), cancellationToken));
+                EnsureCompatibleLineMap(newSource);
             }
-            newSource = Capture(record.NewPath, bytes);
-            EnsureCompatibleLineMap(newSource);
             newIdentity = newSource.ContentIdentity;
         }
 
@@ -332,15 +578,15 @@ internal static partial class GitScopeResolver
         {
             if (entry.Length < 3 || entry[1] != ' ') continue;
             var path = entry[2..];
-            if ((entry[0] == 'S' || char.IsLower(entry[0])) && (Eligible(path) || ContextInput(path)))
+            if ((entry[0] == 'S' || char.IsLower(entry[0])) && (Eligible(path) || BuildRelevantFilteredInput(path)))
                 throw new ScopeException("scope.hiddenIndexEntry", $"{path} is marked skip-worktree or assume-unchanged.");
         }
     }
 
-    private static async Task<string> IndexIdentity(string root, TimeSpan timeout, CancellationToken cancellationToken)
+    private static async Task<GitIndexObservation> IndexIdentity(string root, TimeSpan timeout, CancellationToken cancellationToken)
     {
         var bytes = (await Git(root, timeout, cancellationToken, ["ls-files", "--stage", "-z", "--"])).Output;
-        return "sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        return new("sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(), bytes);
     }
 
     private static async Task<string?> TryResolveCommit(string root, string reference, TimeSpan timeout, CancellationToken cancellationToken)
@@ -374,20 +620,41 @@ internal static partial class GitScopeResolver
         await TryResolveCommit(root, reference, timeout, cancellationToken)
         ?? throw new ScopeException("scope.invalidRef", $"'{reference}' does not resolve to a commit.");
 
+    private static async Task<(CapturedSource Source, string ObjectIdentity)> CaptureBlob(string root, string spec,
+        string path, TimeSpan timeout, CancellationToken token)
+    {
+        // Independent read-only observations, no cache or removed closing proof.
+        // Keep content/line-map failure precedence and settle both processes.
+        var content = Git(root, timeout, token, ["show", spec]);
+        var identity = BlobIdentity(root, spec, timeout, token);
+        try
+        {
+            var source = Capture(path, (await content).Output);
+            EnsureCompatibleLineMap(source);
+            return (source, await identity);
+        }
+        catch
+        {
+            try { await Task.WhenAll(content, identity); }
+            catch { /* Preserve the original content/identity failure after cleanup. */ }
+            throw;
+        }
+    }
+
     private static async Task<string> BlobIdentity(string root, string spec, TimeSpan timeout, CancellationToken cancellationToken) =>
         Text(await Git(root, timeout, cancellationToken, ["rev-parse", "--verify", "--end-of-options", spec])).Trim();
 
     private static bool Eligible(string? path) => path is not null && SourceDiscovery.IsSource(path) &&
         !SourceDiscovery.IsExcludedByDirectory(path, ".");
 
-    private static bool ContextInput(string? path) => path is not null &&
+    internal static bool ContextInput(string? path) => path is not null &&
         (Path.GetExtension(path).ToLowerInvariant() is ".csproj" or ".sln" or ".slnx" or ".props" or ".targets" ||
          Path.GetFileName(path).Equals("global.json", StringComparison.OrdinalIgnoreCase) ||
          Path.GetFileName(path).Equals("nuget.config", StringComparison.OrdinalIgnoreCase) ||
          Path.GetFileName(path).Equals(".editorconfig", StringComparison.OrdinalIgnoreCase) ||
          Path.GetFileName(path).Equals(".globalconfig", StringComparison.OrdinalIgnoreCase));
 
-    private static bool BuildRelevantFilteredInput(string path) =>
+    internal static bool BuildRelevantFilteredInput(string path) =>
         ContextInput(path) ||
         path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) && !IsExcludedTestSource(path) ||
         Path.GetExtension(path).ToLowerInvariant() is ".rsp" or ".resx";
@@ -453,47 +720,35 @@ internal static partial class GitScopeResolver
     private static string Text(GitResult result) => new UTF8Encoding(false, true).GetString(result.Output);
 
     private static async Task<GitResult> Git(string workingDirectory, TimeSpan timeout, CancellationToken cancellationToken,
-        IReadOnlyList<string> arguments, byte[]? input = null, bool allowFailure = false)
+        IReadOnlyList<string> arguments, byte[]? input = null, bool allowFailure = false,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
-        var startInfo = new ProcessStartInfo("git")
+        ProcessProtocolResult captured;
+        try
         {
-            WorkingDirectory = workingDirectory,
-            RedirectStandardInput = input is not null,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        };
-        startInfo.Environment["GIT_OPTIONAL_LOCKS"] = "0";
-        foreach (var argument in SafeGitPrefix.Concat(arguments)) startInfo.ArgumentList.Add(argument);
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start git.");
-        if (input is not null)
-        {
-            await process.StandardInput.BaseStream.WriteAsync(input, cancellationToken);
-            process.StandardInput.Close();
+            var childEnvironment = new Dictionary<string, string> { ["GIT_OPTIONAL_LOCKS"] = "0" };
+            if (environment is not null)
+                foreach (var pair in environment) childEnvironment.Add(pair.Key, pair.Value);
+            captured = await ProcessRunner.RunProtocolAsync("git", SafeGitPrefix.Concat(arguments),
+                workingDirectory, timeout, cancellationToken, maximumBytesPerStream: 16777216,
+                standardInput: input is null ? null : new ReadOnlyMemory<byte>(input),
+                environment: childEnvironment);
         }
-        await using var output = new MemoryStream();
-        var outputTask = process.StandardOutput.BaseStream.CopyToAsync(output);
-        var errorTask = process.StandardError.ReadToEndAsync();
-        using var timeoutSource = new CancellationTokenSource(timeout);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
-        try { await process.WaitForExitAsync(linked.Token); }
-        catch (OperationCanceledException)
+        catch (InvalidDataException exception)
         {
-            if (!process.HasExited) process.Kill(entireProcessTree: true);
-            await process.WaitForExitAsync(CancellationToken.None);
-            await Task.WhenAll(outputTask, errorTask);
-            if (cancellationToken.IsCancellationRequested) throw;
-            throw new ProcessTimeoutException("git", timeout);
+            throw new ScopeException("scope.gitProtocolLimit", "Git response exceeded the complete bounded protocol limit: " +
+                exception.Message, exception);
         }
-        await outputTask;
-        var error = await errorTask;
-        var result = new GitResult(process.ExitCode, output.ToArray(), error);
+        // Preserve raw stdout bytes (NUL-delimited paths/blobs); decode only diagnostics.
+        string error = Encoding.UTF8.GetString(captured.StandardError);
+        var result = new GitResult(captured.ExitCode, captured.StandardOutput, error);
         if (!allowFailure && result.ExitCode != 0)
             throw new ScopeException("scope.gitFailed", $"git {arguments[0]} failed: {error.Trim()}");
         return result;
     }
 
     private sealed record GitResult(int ExitCode, byte[] Output, string Error);
+    private sealed record GitIndexObservation(string Identity, byte[] Bytes);
     private sealed record PathChange(ScopeChangeKind Kind, string? OldPath, string? NewPath);
 
     [GeneratedRegex(@"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@", RegexOptions.Multiline | RegexOptions.CultureInvariant)]

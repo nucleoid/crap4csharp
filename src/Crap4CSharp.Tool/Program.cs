@@ -7,8 +7,20 @@ using Crap4CSharp.Core;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 
+if (args.Length == 3 && args[0] == TestChildEvidence.Command)
+    return await TestChildEvidenceBootstrap.RunAsync(args[1], args[2], CancellationToken.None);
+
+if (args.Length == 3 && args[0] == CompilerEvidence.Command)
+    return await CompilerEvidenceBootstrap.RunAsync(args[1], args[2], CancellationToken.None);
+
 if (args.Length == 3 && args[0] == ProjectContextLoader.LoaderCommand)
     return await MsBuildLoaderBootstrap.RunAsync(args[1], args[2], CancellationToken.None);
+
+if (args.Length == 3 && args[0] == SdkIdentityProbe.Command)
+    return await SdkIdentityProbe.RunWorkerAsync(args[1], args[2]);
+
+if (args.Length == 3 && args[0] == WarmAcquisitionDiagnosticBootstrap.Command)
+    return await WarmAcquisitionDiagnosticBootstrap.RunAsync(args[1], args[2]);
 
 using var cancellationSource = new CancellationTokenSource();
 ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
@@ -28,6 +40,7 @@ finally
 
 internal static class App
 {
+    internal const bool DefaultNativeSdkIdentity = true;
     internal delegate Task<ProcessResult> ProcessExecutor(string fileName, IEnumerable<string> arguments,
         string workingDirectory, TimeSpan timeout, CancellationToken cancellationToken);
 
@@ -37,22 +50,41 @@ internal static class App
         Usage:
           crap4csharp [options] [file-or-directory ...]
           crap4csharp analyze --syntax-only [options] [file-or-directory ...]
+          crap4csharp check --project <path> --policy <path> [--base <ref> | --scope all] [options]
           crap4csharp check --reuse-artifacts <manifest> --policy <path> --base <ref> [options]
           crap4csharp baseline create|update --policy <path> --reuse-artifacts <manifest> --output <candidate>
+          crap4csharp cleanup --private-diagnostics <exact-root> [--older-than-days <n>]
 
         Options:
           --coverage <xml>   Use an OpenCover or Cobertura/Coverlet XML report; repeatable.
-                             Supplying coverage skips dotnet test.
+                             Legacy inspection skips dotnet test; fresh check rejects supplied XML.
           --coverage-path-map <report-root> <local-root>
                              Translate an absolute report root to an existing selected-source
                              directory; repeatable. Longest component prefix wins.
           --coverage-path-case <auto|sensitive|insensitive>
                              Compare foreign report roots using dialect defaults (auto), or the
                              explicit policy. Local source identity is unchanged.
-          --project <path>   Solution or project passed to dotnet test.
+          --project <path>   Selected solution/project; fresh check must include all policy targets.
+          --configuration <name>
+                             Fresh policy-permitted build configuration.
+          --framework <tfm>  Fresh policy-permitted target framework; repeatable.
+          --scope <mode>     Fresh all/worktree/base scope; staged execution is rejected.
+          --head <ref>       Fresh base scope requires the current HEAD.
+          --source-state <worktree|head>
+                             Fresh check executes worktree only; head execution is rejected.
+          --granularity <method|file>
+                             Fresh changed-scope selector (default: method).
+          --include-tests / --include-generated
+                             Fresh inclusion requires explicit policy permission.
+          --artifact-output <new-directory>
+                             Retain a fresh replay bundle; destination must not exist.
+          --no-restore       Fresh check requires already prepared restore assets.
+          --no-build         Fresh check skips compilation only with --build-artifacts.
+          --build-artifacts <manifest>
+                             Revalidate prior compiler binding; required tests still run.
           --threshold <n>    Fail when a known CRAP score is strictly greater than n (default: 8).
           --timeout-seconds <n>
-                             Maximum time for each external command (default: 300; max: 86400).
+                             Fresh whole-run / legacy per-command bound (default: 300; max: 86400).
           --allow-missing-coverage
                              Legacy ordinary-methods-v1 inspection opt-out for N/A methods.
                              Not accepted by callables-v1.
@@ -64,24 +96,33 @@ internal static class App
                              local input and cannot approve enforcement by themselves.
           --syntax-only      Analyze captured source and coverage without launching child processes.
           --reuse-artifacts <manifest>
-                             Replay a hash-bound captured bundle without loading projects or running processes.
-          --policy <path>    Repository policy path resolved from the immutable merge-base for check.
+                             Analyze: captured replay without child processes.
+                             Check: current revalidation; requires complete reusable evidence.
+          --policy <path>    Check policy from immutable base; non-Git all scope is local-unreviewed.
           --base <ref>       CI-authorized base ref used to resolve trusted policy and changed scope.
           --format <value>   Render human (default) or json output.
           --output <path>    Atomically write the versioned JSON result document to path.
+          --private-diagnostics <exact-root>
+                             Cleanup only: remove one aged, inactive marked private temp root.
+          --older-than-days <n>
+                             Cleanup only: minimum root/marker/completion age (default: 7).
           -h, --help         Show help and perform no discovery, tests, or writes.
 
         Exit codes: 0 success, 1 usage/operational failure, 2 threshold exceeded.
         """;
 
     public static async Task<int> RunAsync(string[] args, string workingDirectory, TextWriter output, TextWriter error,
-        CancellationToken cancellationToken, ProcessExecutor? processExecutor = null)
+        CancellationToken cancellationToken, ProcessExecutor? processExecutor = null,
+        Func<CancellationToken, Task>? beforeTerminalPublication = null, CompletedProofTiming? freshTiming = null,
+        bool nativeSdkIdentityProbe = DefaultNativeSdkIdentity, Action<string>? onFreshStagingCreated = null)
     {
         if (args.Any(arg => arg is "--help" or "-h")) { await output.WriteLineAsync(Help); return 0; }
+        if (args.Length > 0 && args[0] == "cleanup")
+            return await PrivateDiagnosticsCleanup.RunAsync(args, output, error, cancellationToken);
         if (args.Length > 0 && args[0] == "baseline")
             return await BaselineCommand.RunAsync(args, workingDirectory, output, error, cancellationToken);
         if (args.Length > 0 && args[0] is "analyze" or "check")
-            return await RunCallableCommandAsync(args, workingDirectory, output, error, cancellationToken);
+            return await RunCallableCommandAsync(args, workingDirectory, output, error, cancellationToken, beforeTerminalPublication, freshTiming, nativeSdkIdentityProbe, onFreshStagingCreated);
 
         var startedAt = DateTimeOffset.UtcNow;
         var stopwatch = Stopwatch.StartNew();
@@ -184,36 +225,120 @@ internal static class App
     }
 
     private static async Task<int> RunCallableCommandAsync(string[] args, string workingDirectory,
-        TextWriter output, TextWriter error, CancellationToken cancellationToken)
+        TextWriter output, TextWriter error, CancellationToken cancellationToken,
+        Func<CancellationToken, Task>? beforeTerminalPublication, CompletedProofTiming? freshTiming, bool nativeSdkIdentityProbe,
+        Action<string>? onFreshStagingCreated)
     {
         var startedAt = DateTimeOffset.UtcNow;
         var stopwatch = Stopwatch.StartNew();
         ModernOptions? options = null;
+        FreshFailureOutputProof? failureOutputProof = null;
+        string? privateDiagnostics = null;
+        PrivateDiagnosticLease? privateDiagnosticLease = null;
+        Func<Task>? terminalProof = null;
+        SerializedFreshTerminal? serializedFreshTerminal = null;
+        Func<Exception, ResultDocument>? freshTerminalFailure = null;
         try
         {
-            options = ParseModern(args);
-            if (options.Command == "check" && options.Ruleset == ComplexityRules.OrdinaryMethodsV1)
-                throw new ArgumentException("check requires callables-v1; ordinary-methods-v1 is available through the legacy option-only invocation.");
+            options = ParseModern(args, out options);
+            ResultDocument? freshResult = null;
+            FreshCheckPreparation? freshPreparation = null;
             if (options.Command == "check" && options.ReuseArtifacts is null)
-                throw new ArgumentException("check callables-v1 currently requires --reuse-artifacts, --policy, and --base.");
-            cancellationToken.ThrowIfCancellationRequested();
-            if (options.Command == "check" && options.Output is not null)
+            {
+                var request = new FreshCheckRequest(options.Project, options.Policy!, options.Base, options.Scope,
+                    options.Head, options.SourceState, options.Granularity, options.Output, options.ArtifactOutput,
+                    options.NoRestore, options.NoBuild, options.BuildArtifacts,
+                    new PolicyOverrides(Threshold: options.ThresholdExplicit ? options.Threshold : null,
+                        Frameworks: options.Frameworks.Count == 0 ? null : options.Frameworks,
+                        Configuration: options.Configuration, ExemptionFile: options.Exemptions,
+                        IncludeTests: options.IncludeTests, IncludeGenerated: options.IncludeGenerated), options.Timeout)
+                { WarmPostBuildProbe = true, NativeSdkIdentityProbe = nativeSdkIdentityProbe };
+                // This parent-only flag selects fresh graph acquisition AFTER once builds.
+                // Cold preparation, metadata and runner discovery remain ordinary.
+                freshPreparation = await FreshCheckCommand.RunAsync(request, workingDirectory, startedAt, cancellationToken,
+                    proof => failureOutputProof = proof, directory =>
+                    {
+                        privateDiagnostics = directory;
+                        privateDiagnosticLease = new PrivateDiagnosticLease(directory, ToolVersion);
+                    },
+                    proof => terminalProof = proof, refusal => freshTerminalFailure = refusal, freshTiming, onFreshStagingCreated);
+                freshResult = freshPreparation.ImmediateResult;
+            }
+            // Fresh execution has already materialized the graceful cancellation
+            // terminal, including actual completed/interrupted/not-run contexts.
+            // Do not replace it with a generic exception terminal and lose evidence.
+            // Early fresh failures and nonfresh paths still use exception handling.
+            if (freshResult is null) cancellationToken.ThrowIfCancellationRequested();
+            // A failed fresh terminal already contains actual child outcomes. Its
+            // destination may have become consumer data during that child; let the
+            // guarded write path below refuse it without discarding those outcomes.
+            // Success and nonfresh paths retain their existing consumer-file guard.
+            if (options.Command == "check" && options.Output is not null &&
+                (freshPreparation is null || freshPreparation.IntendedExitCode != 1))
                 OutputDestinationSafety.RejectExistingConsumerFile(options.Output, workingDirectory);
-            var result = options.Command == "check"
+            if (freshPreparation?.RequiresWriterProof == true)
+            {
+                // Preparation is not completed/reusable evidence. The owner-approved
+                // terminal seam now precedes the ONE complete writer proof.
+                if (beforeTerminalPublication is not null) await beforeTerminalPublication(cancellationToken);
+                serializedFreshTerminal = await freshPreparation.CompleteAtWriterAsync(proven =>
+                {
+                    // Pure synchronous formatting only: no consumer callbacks or
+                    // awaits between the final physical closings and guarded commit.
+                    proven = AttachPrivateDiagnostics(proven, privateDiagnostics);
+                    var finalDuration = stopwatch.Elapsed;
+                    proven = proven with { Run = proven.Run with
+                        { FinishedAt = startedAt + finalDuration, DurationMilliseconds = finalDuration.TotalMilliseconds } };
+                    return new SerializedFreshTerminal(proven, ResultWriter.Serialize(proven));
+                });
+                freshResult = serializedFreshTerminal.Result;
+            }
+            var result = freshResult ?? (options.Command == "check"
                 ? await PolicyCheckCommand.RunAsync(options.ReuseArtifacts!, options.Policy!, options.Base!,
-                    workingDirectory, options.Output, options.Timeout, startedAt, stopwatch.Elapsed, cancellationToken)
+                    workingDirectory, options.Output, options.Timeout, startedAt, stopwatch.Elapsed, cancellationToken,
+                    proof => terminalProof = proof)
                 : options.ReuseArtifacts is not null
                 ? AnalyzeCommand.Replay(options.ReuseArtifacts, workingDirectory, options.Output,
                     startedAt, stopwatch.Elapsed, cancellationToken)
                 : options.Ruleset == ComplexityRules.OrdinaryMethodsV1
                 ? await AnalyzeLegacyCapturedInputsAsync(options, workingDirectory, startedAt, stopwatch, cancellationToken)
-                : AnalyzeCapturedInputs(options, workingDirectory, startedAt, stopwatch);
+                : AnalyzeCapturedInputs(options, workingDirectory, startedAt, stopwatch));
+            if (serializedFreshTerminal is null) result = AttachPrivateDiagnostics(result, privateDiagnostics);
+            var writeResult = true;
+            if (freshResult is not null && result.Run.ExitCode == 1 && options.Output is not null)
+            {
+                // Raw failed/interrupted tests return an evidence-bearing terminal
+                // rather than throwing. Apply the same final destination proof,
+                // without replacing their actual outcomes with a generic exception.
+                writeResult = false;
+                if (failureOutputProof is not null)
+                {
+                    try { await failureOutputProof.ValidateAsync(cancellationToken, options.Timeout - stopwatch.Elapsed); writeResult = true; }
+                    catch (Exception aliasException) when (IsHandled(aliasException)) { }
+                }
+                if (!writeResult)
+                    result = result with
+                    {
+                        Evaluation = result.Evaluation with
+                        {
+                            Checks = result.Evaluation.Checks.Concat(
+                                [new CheckResult("output", "operationalError", "output.notWritten", true)]).ToArray()
+                        }
+                    };
+            }
             // Capture terminal timing after replay/current revalidation, not before awaiting it.
             var duration = stopwatch.Elapsed;
-            result = result with { Run = result.Run with
-                { FinishedAt = startedAt + duration, DurationMilliseconds = duration.TotalMilliseconds } };
-            var json = ResultWriter.Serialize(result);
-            if (options.Output is not null)
+            if (serializedFreshTerminal is null)
+                result = result with { Run = result.Run with
+                    { FinishedAt = startedAt + duration, DurationMilliseconds = duration.TotalMilliseconds } };
+            var json = serializedFreshTerminal?.Json ?? ResultWriter.Serialize(result);
+            // Invocation-local deterministic acceptance seam; null changes no normal behavior.
+            if (serializedFreshTerminal is null && beforeTerminalPublication is not null) await beforeTerminalPublication(cancellationToken);
+            // A complete saved check must still match ALL required test/compiler/
+            // physical/trust/ORIGINAL revision inputs at the actual outer writer.
+            // On refusal, discard the serialized success and emit only failure.
+            if (terminalProof is not null) await terminalProof();
+            if (options.Output is not null && writeResult)
             {
                 var inputs = options.Inputs.Concat(options.Coverage)
                     .Concat(options.ReuseArtifacts is null ? [] : [options.ReuseArtifacts])
@@ -231,17 +356,22 @@ internal static class App
         catch (Exception exception) when (IsHandled(exception))
         {
             var reason = exception is PolicyException policyException ? policyException.Code :
+                exception is ScopeException scopeException ? scopeException.Reason :
+                exception is ProjectContextException contextException ? contextException.Reason :
                 exception is BaselineException baselineException ? baselineException.Code :
                 exception is DecoderFallbackException && options?.ReuseArtifacts is not null ? "artifact.invalid" :
                 exception is ArgumentException ? "arguments.invalid" :
                 exception is InvalidDataException ? "artifact.invalid" :
-                exception is OperationCanceledException ? "run.cancelled" : "execution.failed";
+                exception is OperationCanceledException ? "run.cancelled" :
+                exception is ProcessTimeoutException ? "run.timedOut" : "execution.failed";
             var ruleset = options?.Ruleset ?? PreDetectValue(args, "--ruleset") switch
             {
                 ComplexityRules.OrdinaryMethodsV1 => ComplexityRules.OrdinaryMethodsV1,
                 _ => ComplexityRules.CallablesV1
             };
-            var result = BuildCallableFailure(args[0], ruleset, reason, startedAt, stopwatch.Elapsed);
+            var result = AttachPrivateDiagnostics(
+                freshTerminalFailure?.Invoke(exception) ??
+                BuildCallableFailure(args[0], ruleset, reason, startedAt, stopwatch.Elapsed), privateDiagnostics);
             var format = options?.Format ?? (HasJsonIntent(args) ? "json" : "human");
             var destination = options?.Output ?? PreDetectValue(args, "--output");
             var mayWrite = false;
@@ -275,6 +405,25 @@ internal static class App
                 }
                 else mayWrite = IsAbsentOutputDestination(destination, workingDirectory);
             }
+            // Fully parsed argument failures without a declared consumer context may
+            // write a new/prior result through the guards above. Once any project or
+            // trust selector is present, preflight failure cannot prove evaluated
+            // source/import/output alias safety: retain stdout-only diagnostics.
+            var contextFreeArgumentFailure = exception is ArgumentException && options is
+                { Command: "check", ReuseArtifacts: null, Project: null, Policy: null, Base: null } &&
+                options.Inputs.Count == 0 && options.Coverage.Count == 0;
+            if (args[0] == "check" && (options?.ReuseArtifacts is null) &&
+                !args.Contains("--reuse-artifacts", StringComparer.Ordinal) && !contextFreeArgumentFailure)
+                mayWrite = false;
+            if (!protectedAliasFailure && destination is not null && failureOutputProof is not null)
+            {
+                try
+                {
+                    await failureOutputProof.ValidateAsync(cancellationToken, options!.Timeout - stopwatch.Elapsed);
+                    mayWrite = true;
+                }
+                catch (Exception aliasException) when (IsHandled(aliasException)) { mayWrite = false; }
+            }
             if (destination is not null && !mayWrite)
                 result = result with
                 {
@@ -302,10 +451,26 @@ internal static class App
             await error.WriteLineAsync($"error: {exception.Message}");
             return 1;
         }
+        finally { privateDiagnosticLease?.Dispose(); }
     }
 
-    private static ModernOptions ParseModern(string[] args)
+    private static ResultDocument AttachPrivateDiagnostics(ResultDocument result, string? directory)
     {
+        if (directory is null) return result;
+        // Only the exact allocation callback supplies this locator. It is not
+        // inferred from consumer argv, existing directories or an earlier run.
+        // Diagnostics are explicitly retained until user-directed cleanup and do
+        // not attest completed/reusable evidence, even on successful execution.
+        return result with { Run = result.Run with
+        {
+            DiagnosticLocations = result.Run.DiagnosticLocations.Concat([directory]).Distinct(StringComparer.Ordinal).ToArray(),
+            Artifacts = result.Run.Artifacts.Concat([new RunArtifact("private-diagnostics", directory, "retained", false, false)]).ToArray()
+        } };
+    }
+
+    private static ModernOptions ParseModern(string[] args, out ModernOptions? parsedCheck)
+    {
+        parsedCheck = null;
         var options = new ModernOptions { Command = args[0] };
         var seen = new HashSet<string>(StringComparer.Ordinal);
         for (var index = 1; index < args.Length; index++)
@@ -319,6 +484,40 @@ internal static class App
             }
             switch (arg)
             {
+                case "--scope":
+                    if (!seen.Add(arg)) throw new ArgumentException("--scope may be specified only once.");
+                    options.Scope = Value(); break;
+                case "--head":
+                    if (!seen.Add(arg)) throw new ArgumentException("--head may be specified only once.");
+                    options.Head = Value(); break;
+                case "--source-state":
+                    if (!seen.Add(arg)) throw new ArgumentException("--source-state may be specified only once.");
+                    options.SourceState = Value(); break;
+                case "--granularity":
+                    if (!seen.Add(arg)) throw new ArgumentException("--granularity may be specified only once.");
+                    options.Granularity = Value(); break;
+                case "--configuration":
+                    if (!seen.Add(arg)) throw new ArgumentException("--configuration may be specified only once.");
+                    options.Configuration = Value(); break;
+                case "--framework": options.Frameworks.Add(Value()); break;
+                case "--include-tests":
+                    if (!seen.Add(arg)) throw new ArgumentException("--include-tests may be specified only once.");
+                    options.IncludeTests = true; break;
+                case "--include-generated":
+                    if (!seen.Add(arg)) throw new ArgumentException("--include-generated may be specified only once.");
+                    options.IncludeGenerated = true; break;
+                case "--artifact-output":
+                    if (!seen.Add(arg)) throw new ArgumentException("--artifact-output may be specified only once.");
+                    options.ArtifactOutput = Value(); break;
+                case "--build-artifacts":
+                    if (!seen.Add(arg)) throw new ArgumentException("--build-artifacts may be specified only once.");
+                    options.BuildArtifacts = Value(); break;
+                case "--no-restore":
+                    if (!seen.Add(arg)) throw new ArgumentException("--no-restore may be specified only once.");
+                    options.NoRestore = true; break;
+                case "--no-build":
+                    if (!seen.Add(arg)) throw new ArgumentException("--no-build may be specified only once.");
+                    options.NoBuild = true; break;
                 case "--syntax-only": options.SyntaxOnly = true; break;
                 case "--reuse-artifacts":
                     if (!seen.Add(arg)) throw new ArgumentException("--reuse-artifacts may be specified only once.");
@@ -373,6 +572,7 @@ internal static class App
                         !double.IsFinite(threshold) || threshold < 0)
                         throw new ArgumentException("Threshold must be a finite non-negative number.");
                     options.Threshold = threshold;
+                    options.ThresholdExplicit = true;
                     break;
                 case "--allow-missing-coverage": options.AllowMissingCoverage = true; break;
                 case "--format":
@@ -390,10 +590,28 @@ internal static class App
                     break;
             }
         }
+        // Expose only a fully token-parsed check for guarded argument-error output;
+        // duplicate/missing/unknown tokens still cannot authorize an overwrite.
+        if (options.Command == "check") parsedCheck = options;
+        if (options.Command == "check" && options.Ruleset == ComplexityRules.OrdinaryMethodsV1)
+            throw new ArgumentException("check requires callables-v1; ordinary-methods-v1 is available through the legacy option-only invocation.");
         if (options.Ruleset is not (ComplexityRules.CallablesV1 or ComplexityRules.OrdinaryMethodsV1))
             throw new ArgumentException($"Unknown ruleset '{options.Ruleset}'.");
         if (options.Ruleset == ComplexityRules.CallablesV1 && options.AllowMissingCoverage)
             throw new ArgumentException("--allow-missing-coverage is only available with ordinary-methods-v1.");
+        var freshSelectors = new[] { "--scope", "--head", "--source-state", "--granularity", "--configuration", "--framework",
+            "--include-tests", "--include-generated", "--artifact-output", "--build-artifacts", "--no-restore", "--no-build" };
+        if ((options.Command != "check" || options.ReuseArtifacts is not null) && args.Any(freshSelectors.Contains))
+            throw new ArgumentException("Fresh execution selectors cannot be combined with analyze or --reuse-artifacts.");
+        if (options.Command == "check" && options.ReuseArtifacts is null)
+        {
+            if (options.Policy is null) throw new ArgumentException("Fresh check requires --policy.");
+            if (options.Base is null && options.Scope != "all")
+                throw new ArgumentException("Fresh check requires --base unless explicit --scope all selects local-unreviewed policy.");
+            if (options.SyntaxOnly || options.Inputs.Count != 0 || options.Coverage.Count != 0 || options.AllowMissingCoverage ||
+                options.CoveragePathMappings.Count != 0 || seen.Contains("--coverage-path-case"))
+                throw new ArgumentException("Fresh check does not accept supplied source/coverage/syntax inputs or unsupported path mappings.");
+        }
         if (options.ReuseArtifacts is not null)
         {
             if (options.SyntaxOnly || options.Inputs.Count > 0 || options.Coverage.Count > 0 ||
@@ -401,8 +619,8 @@ internal static class App
                 options.Exemptions is not null || options.Project is not null || options.AllowMissingCoverage ||
                 seen.Contains("--ruleset") || seen.Contains("--threshold"))
                 throw new ArgumentException("--reuse-artifacts cannot be combined with live source, project, coverage, mapping, case, syntax-only, or exemption inputs.");
-            if (options.Command == "check" && (options.Policy is null || options.Base is null))
-                throw new ArgumentException("check --reuse-artifacts requires --policy and --base.");
+            if (options.Command == "check" && options.Policy is null)
+                throw new ArgumentException("check --reuse-artifacts requires --policy; Git evidence additionally requires --base.");
             if (options.Command == "analyze" && (options.Policy is not null || options.Base is not null))
                 throw new ArgumentException("--policy and --base are available only with check.");
         }
@@ -600,7 +818,8 @@ internal static class App
         };
         var run = new RunSection(Guid.NewGuid().ToString("D"), startedAt, DateTimeOffset.UtcNow,
             duration.TotalMilliseconds, [], [], [],
-            new CancellationDetails(reason == "run.cancelled", false, reason == "run.cancelled" ? reason : null),
+            new CancellationDetails(reason == "run.cancelled", reason == "run.timedOut",
+                reason is "run.cancelled" or "run.timedOut" ? reason : null),
             reason == "run.cancelled" ? "cancelled" : "operationalError", 1);
         return new ResultDocument(ResultContract.SchemaVersion, ToolVersion, ruleset, evaluation, run);
     }
@@ -655,6 +874,8 @@ internal static class App
         foreach (var error in result.Evaluation.ExemptionErrors ?? [])
             output.WriteLine($"  exemption error: {error}");
         output.WriteLine($"Decision: {result.Evaluation.Decision.PolicyDecision} ({result.Evaluation.Decision.Reason}); exit={result.Run.ExitCode}");
+        foreach (var artifact in result.Run.Artifacts.Where(a => a.Kind == "private-diagnostics"))
+            output.WriteLine($"Private diagnostics (may contain secrets; retained until user cleanup): {artifact.Path}");
     }
 
     private static Options Parse(string[] args)
@@ -1055,7 +1276,7 @@ internal static class App
         }
     }
 
-    private static string ToolVersion => typeof(App).Assembly
+    internal static string ToolVersion => typeof(App).Assembly
         .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
         ?? typeof(App).Assembly.GetName().Version?.ToString()
         ?? "unknown";
@@ -1237,6 +1458,19 @@ internal static class App
         public string? Project { get; set; }
         public string? Policy { get; set; }
         public string? Base { get; set; }
+        public string? Scope { get; set; }
+        public string? Head { get; set; }
+        public string SourceState { get; set; } = "worktree";
+        public string Granularity { get; set; } = "method";
+        public string? Configuration { get; set; }
+        public List<string> Frameworks { get; } = [];
+        public bool? IncludeTests { get; set; }
+        public bool? IncludeGenerated { get; set; }
+        public string? ArtifactOutput { get; set; }
+        public string? BuildArtifacts { get; set; }
+        public bool NoRestore { get; set; }
+        public bool NoBuild { get; set; }
+        public bool ThresholdExplicit { get; set; }
         public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(300);
         public double Threshold { get; set; } = 8;
         public bool AllowMissingCoverage { get; set; }

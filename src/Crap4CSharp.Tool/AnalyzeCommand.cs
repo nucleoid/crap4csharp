@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Collections.Immutable;
 using Crap4CSharp.Core;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -16,14 +17,31 @@ internal static class AnalyzeCommand
     internal static ResultDocument Replay(ArtifactBundle bundle, string workingDirectory,
         DateTimeOffset startedAt, TimeSpan duration, CancellationToken cancellationToken, bool allSources = false,
         double? thresholdOverride = null)
+        => ReplayCore(bundle.Manifest, bundle.Bytes, bundle.ManifestPath, workingDirectory, startedAt,
+            duration, cancellationToken, allSources, thresholdOverride);
+
+    internal static ResultDocument ReplayCaptured(RunManifest manifest,
+        IReadOnlyDictionary<string, ImmutableArray<byte>> artifactBytes, string workingDirectory,
+        DateTimeOffset startedAt, TimeSpan duration, CancellationToken cancellationToken, bool allSources,
+        double thresholdOverride)
     {
-        var manifest = bundle.Manifest;
-        var provenance = ProvenanceVerifier.VerifyCaptureCancellable(manifest, bundle.Bytes, null, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        ArtifactBundle.ValidateCapturedMemory(manifest, artifactBytes);
+        return ReplayCore(manifest, artifactBytes, null, workingDirectory, startedAt, duration,
+            cancellationToken, allSources, thresholdOverride);
+    }
+
+    private static ResultDocument ReplayCore(RunManifest manifest,
+        IReadOnlyDictionary<string, ImmutableArray<byte>> artifactBytes, string? manifestPath,
+        string workingDirectory, DateTimeOffset startedAt, TimeSpan duration,
+        CancellationToken cancellationToken, bool allSources, double? thresholdOverride)
+    {
+        var provenance = ProvenanceVerifier.VerifyCaptureCancellable(manifest, artifactBytes, null, cancellationToken);
         // Once byte verification has failed, do not parse secondary policy/scope
         // artifacts: their failure must not replace the verifier's precise reasons.
         (CapturedScope Scope, CapturedPolicy Policy) capturedEvaluation = provenance.Status == ProvenanceStatus.Invalid
             ? (new CapturedScope([]), new CapturedPolicy(8, false))
-            : CapturedEvaluationInputs.Read(bundle);
+            : CapturedEvaluationInputs.Read(manifest, artifactBytes);
         var threshold = thresholdOverride ?? capturedEvaluation.Policy.Threshold;
         var scopedSources = capturedEvaluation.Scope.Sources.ToHashSet(StringComparer.Ordinal);
         var partitions = new List<ReplayPartition>();
@@ -31,30 +49,42 @@ internal static class AnalyzeCommand
         {
             foreach (var context in manifest.Contexts.OrderBy(item => item.Id, StringComparer.Ordinal))
             {
-                var sourceInputs = context.Inputs.Where(input => input.Role == "source" && !input.Generated &&
+                var sourceInputs = context.Inputs.Where(input => input.Role == "source" && (!input.Generated || context.IncludeGenerated) &&
                         (allSources || scopedSources.Contains(input.RepositoryPath is null ? input.LogicalPath :
                             CapturedEvaluationInputs.DeclaredRepositorySourcePath(context, input))))
                     .OrderBy(input => input.LogicalPath, StringComparer.Ordinal).ToArray();
                 var sources = sourceInputs.Select(input =>
                 {
-                    if (!bundle.Bytes.TryGetValue(input.Locator, out var bytes))
+                    if (!artifactBytes.TryGetValue(input.Locator, out var bytes))
                         throw new InvalidDataException($"Captured source is missing: {input.LogicalPath}");
                     return CapturedSource.Create(input.LogicalPath, bytes.AsSpan());
                 }).ToArray();
                 var parseOptions = ParseOptions(context.ParseOptions!);
+                var compilerTrees = context.Inputs.Where(i => i.Role is "source" or "compiler-source").Select(input =>
+                {
+                    if (!artifactBytes.TryGetValue(input.Locator, out var content))
+                        throw new InvalidDataException("Captured compiler source is missing.");
+                    var captured = CapturedSource.Create(input.LogicalPath, content.AsSpan());
+                    return CSharpSyntaxTree.ParseText(captured.Text, parseOptions, input.LogicalPath);
+                }).ToArray();
                 var pathPolicy = PathPolicy(context.PathPolicy!);
                 var references = context.Inputs.Where(input => input.Role == "reference")
                     .OrderBy(input => input.LogicalPath, StringComparer.Ordinal).Select(input =>
                     {
-                        if (!bundle.Bytes.TryGetValue(input.Locator, out var bytes))
+                        if (!artifactBytes.TryGetValue(input.Locator, out var bytes))
                             throw new InvalidDataException($"Captured reference is missing: {input.LogicalPath}");
-                        try { return MetadataReference.CreateFromImage(bytes); }
+                        try { return CompilerReferenceSnapshot.CapturedReference(input, bytes); }
                         catch (BadImageFormatException exception)
                         { throw new InvalidDataException($"Captured reference is not a valid managed assembly: {input.LogicalPath}", exception); }
                     }).ToArray();
                 var groups = manifest.Artifacts.Where(item => item.Kind == "coverage" && item.ContextId == context.Id)
                     .GroupBy(item => item.BuildId!, StringComparer.Ordinal)
                     .OrderBy(group => group.Key, StringComparer.Ordinal).ToArray();
+                if (context.CoverageApplicability == "semantic-empty")
+                {
+                    partitions.Add(EmptyPartition(context.Id, context));
+                    continue; // independently validated source inventory, never inferred zero coverage
+                }
                 foreach (var group in groups)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -62,14 +92,14 @@ internal static class AnalyzeCommand
                     var partitionId = groups.Length == 1 ? context.Id : $"{context.Id}@{build.Id}";
                     var coverage = group.OrderBy(item => item.Id, StringComparer.Ordinal).Select(item =>
                     {
-                        if (!bundle.Bytes.TryGetValue(item.Locator, out var bytes))
+                        if (!artifactBytes.TryGetValue(item.Locator, out var bytes))
                             throw new InvalidDataException($"Captured coverage is missing: {item.Id}");
                         return new CapturedCoverage(item.Locator, bytes, item.Format!, item.CoordinateKind!);
                     }).ToArray();
                     partitions.Add(sources.Length == 0
                         ? EmptyPartition(partitionId, context)
                         : manifest.Producer.ComplexityRuleset == ComplexityRules.CallablesV1
-                            ? EvaluateCallables(partitionId, context, build, sources, coverage, references, parseOptions, pathPolicy, threshold)
+                            ? EvaluateCallables(partitionId, context, build, sources, coverage, references, parseOptions, pathPolicy, threshold, compilerTrees)
                             : EvaluateOrdinary(partitionId, context, build, sources, coverage, parseOptions, pathPolicy,
                                 threshold, provenance, capturedEvaluation.Policy.AllowMissingCoverage, cancellationToken));
                 }
@@ -129,7 +159,7 @@ internal static class AnalyzeCommand
             CoveragePathPolicy = PathPolicyResult(manifest.Contexts)
         };
         var run = new RunSection(Guid.NewGuid().ToString("D"), startedAt, startedAt + duration, duration.TotalMilliseconds,
-            [], [], [new RunArtifact("manifest", bundle.ManifestPath, "retained", true, provenance.Reusable)],
+            [], [], manifestPath is null ? [] : [new RunArtifact("manifest", manifestPath, "retained", true, provenance.Reusable)],
             new CancellationDetails(false, false, null), operational ? "operationalError" : "completed", exit);
         return new ResultDocument(ResultContract.SchemaVersion, ToolVersion, manifest.Producer.ComplexityRuleset, evaluation, run);
     }
@@ -157,17 +187,24 @@ internal static class AnalyzeCommand
     private static ReplayPartition EvaluateCallables(string contextId, ManifestContext manifestContext,
         ManifestBuild build, IReadOnlyList<CapturedSource> sources, IReadOnlyList<CapturedCoverage> coverage,
         IReadOnlyList<MetadataReference> references, CSharpParseOptions parseOptions,
-        CapturedPathPolicy pathPolicy, double threshold)
+        CapturedPathPolicy pathPolicy, double threshold, IReadOnlyList<SyntaxTree> compilerTrees)
+        => EvaluateBoundCallables(new CallableAnalysisContext(manifestContext.Project, manifestContext.TargetFramework,
+            manifestContext.Configuration, manifestContext.Platform, contextId, parseOptions), manifestContext.SourceSetHash,
+            build.ModuleIdentity, sources, coverage, references, pathPolicy, threshold, compilerTrees);
+
+    internal static ReplayPartition EvaluateBoundCallables(CallableAnalysisContext context, string sourceSetHash,
+        string moduleIdentity, IReadOnlyList<CapturedSource> sources, IReadOnlyList<CapturedCoverage> coverage,
+        IReadOnlyList<MetadataReference> references, CapturedPathPolicy pathPolicy, double threshold,
+        IReadOnlyList<SyntaxTree> compilerTrees)
     {
-        var context = new CallableAnalysisContext(manifestContext.Project, manifestContext.TargetFramework,
-            manifestContext.Configuration, manifestContext.Platform, contextId, parseOptions);
+        var contextId = context.ContextId;
         var inventory = CallableInventory.Merge(sources.Select(source =>
-            CallableInventory.Analyze(source.Text, source.LogicalPath, context, references)).ToArray());
+            CallableInventory.Analyze(source.Text, source.LogicalPath, context, references, compilerTrees)).ToArray());
         var sourcePaths = sources.Select(source => source.LogicalPath).ToArray();
         var reports = coverage.SelectMany(report => CapturedLogicalPathResolver.ResolveMethods(
                 CoverageReader.Read(report.Bytes.AsSpan(), report.LogicalPath), sourcePaths, pathPolicy))
             .Select(method => method with { ContextId = contextId }).ToArray();
-        var resolution = CallableCoverageResolver.Resolve(inventory, reports, build.ModuleIdentity);
+        var resolution = CallableCoverageResolver.Resolve(inventory, reports, moduleIdentity);
         var observations = resolution.Observations.ToDictionary(item => item.ObservationId!, StringComparer.Ordinal);
         var families = CallableFamilyEvaluator.Evaluate(inventory, resolution.Observations, threshold);
         var callables = inventory.Callables.Select(item =>
@@ -203,8 +240,8 @@ internal static class AnalyzeCommand
                 contextId, root.Path, family.FamilyId, null, span, family.Complexity, family.Coverage, family.Crap,
                 null, threshold, "gt", "fail", []);
         })).OrderBy(item => item.Id, StringComparer.Ordinal).ToArray();
-        return new ReplayPartition(contextId, manifestContext.Project, manifestContext.TargetFramework,
-            manifestContext.Configuration, manifestContext.Platform, manifestContext.SourceSetHash,
+        return new ReplayPartition(contextId, context.Project, context.TargetFramework,
+            context.Configuration, context.Platform, sourceSetHash,
             metrics, findings, callables, families, resolution.Diagnostics);
     }
 
@@ -248,7 +285,7 @@ internal static class AnalyzeCommand
     private static string ToolVersion => typeof(AnalyzeCommand).Assembly
         .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
 
-    private sealed record ReplayPartition(string ContextId, string? Project, string? TargetFramework,
+    internal sealed record ReplayPartition(string ContextId, string? Project, string? TargetFramework,
         string? Configuration, string? Platform, string? SourceSetHash, IReadOnlyList<MetricResult> Metrics,
         IReadOnlyList<FindingResult> Findings, IReadOnlyList<CallableResult> Callables,
         IReadOnlyList<CallableFamilyMetric> Families, IReadOnlyList<CoverageDiagnostic> Diagnostics);

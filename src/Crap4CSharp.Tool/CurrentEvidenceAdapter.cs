@@ -7,9 +7,11 @@ internal static class CurrentEvidenceAdapter
 
     internal static void ValidateSupportedRecipes(RunManifest manifest)
     {
-        if (manifest.Contexts.Count == 0 || manifest.Contexts.Any(context =>
+        var provider = manifest.Contexts.FirstOrDefault()?.CurrentRevalidation?.Provider;
+        if (provider is not (SupportedRecipeProvider or CompletedRevalidationDeclaration.Provider) ||
+            manifest.Contexts.Count == 0 || manifest.Contexts.Any(context =>
             !context.ReuseRecipeComplete || context.CurrentRevalidation is null ||
-            context.CurrentRevalidation.Provider != SupportedRecipeProvider))
+            context.CurrentRevalidation.Provider != provider))
             throw new PolicyException("provenance.revalidationRecipeUnsupported",
                 "Current evidence reuse requires a complete supported current-revalidation recipe for every context. Capture new evidence; historical bundles remain available for offline analyze.");
     }
@@ -61,6 +63,12 @@ internal static class CurrentEvidenceAdapter
         TimeSpan timeout, CancellationToken cancellationToken)
     {
         ValidateSupportedRecipes(manifest);
+        // A manifest-only call must never interpret complete-provider hash-only
+        // metadata as the legacy recipe. Its actual bundle and current preflight
+        // are mandatory inputs to the independent complete proof.
+        if (manifest.Contexts.Any(context => context.CurrentRevalidation!.Provider != SupportedRecipeProvider))
+            throw new PolicyException("provenance.revalidationRecipeUnsupported",
+                "Completed evidence revalidation requires the actual bundle and independently acquired current preflight.");
         var basic = Capture(manifest, workspaceRoot, gitTimeout: timeout);
         var root = Path.GetFullPath(workspaceRoot);
         var hashes = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -157,6 +165,74 @@ internal static class CurrentEvidenceAdapter
         return basic with { Inputs = verifiedInputs.Values.OrderBy(input => input.LogicalPath, StringComparer.Ordinal).ToArray(),
             ContextHashes = hashes, MembershipRecipeRevalidated = true,
             ProtectedPaths = protectedPaths.Order(StringComparer.Ordinal).ToArray() };
+    }
+
+    // Shared bundle-aware entry point. Provider declarations only select a gate;
+    // they cannot manufacture its successful current/compiler/test observation.
+    internal static Task<CurrentEvidence> CaptureSupportedAsync(ArtifactBundle bundle,
+        FreshCheckPreflight preflight, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        ValidateSupportedRecipes(bundle.Manifest);
+        return bundle.Manifest.Contexts[0].CurrentRevalidation!.Provider == CompletedRevalidationDeclaration.Provider
+            ? CaptureCompletedAsync(bundle, preflight, token)
+            : CaptureSupportedAsync(bundle.Manifest, preflight.Root, preflight.Request.Timeout, token);
+    }
+
+    // A private observation does not advertise a reusable recipe. The complete
+    // validator independently recomputes every declaration before projection.
+    internal static async Task<CurrentEvidence> CaptureCompletedAsync(ArtifactBundle bundle,
+        FreshCheckPreflight preflight, CancellationToken token,
+        Func<CancellationToken, Task>? beforeFinalValidation = null)
+    {
+        var compiler = await SavedCompletedProof.ValidateAsync(bundle, preflight, token, beforeFinalValidation);
+        return ProjectCompleted(bundle, preflight, compiler, token);
+    }
+
+    // Projection only: caller must first independently validate the complete proof.
+    internal static CurrentEvidence ProjectCompleted(ArtifactBundle bundle, FreshCheckPreflight preflight,
+        CompilerGraphPhaseResult compiler, CancellationToken token)
+    {
+        var paths = new HashSet<string>(PathIdentityPolicy.Current.Comparer);
+        foreach (var binding in compiler.FinalGraph.GraphContexts)
+        {
+            token.ThrowIfCancellationRequested();
+            var context = binding.Context;
+            paths.Add(binding.ProjectPath);
+            foreach (var path in context.ProtectedPaths.Concat(context.PhaseInputs.Select(input => input.Path))
+                .Concat(context.CompilerDocuments.Select(document => document.ResolvedPath!))
+                .Concat(new[] { context.EvaluatedTargetPath!, Path.ChangeExtension(context.EvaluatedTargetPath!, ".pdb"),
+                    context.EvaluatedReferenceAssemblyPath! }).Where(path => !string.IsNullOrEmpty(path)))
+                paths.Add(Path.GetFullPath(path));
+        }
+        foreach (var observation in compiler.Observations)
+        {
+            paths.Add(observation.Assembly!.Path);
+            paths.Add(observation.Pdb!.Path);
+            foreach (var path in CompilerReferenceSnapshot.ResolvePaths(observation, token))
+                paths.Add(Path.GetFullPath(path));
+        }
+        var inputs = bundle.Manifest.Contexts.SelectMany(context => context.Inputs).Where(input => !input.Generated)
+            .GroupBy(input => input.Role + "\n" + (input.RepositoryPath ?? input.LogicalPath), StringComparer.Ordinal)
+            .Select(group => group.First()).Select(input => new CurrentInputEvidence(input.Role, input.LogicalPath,
+                input.Length, input.Sha256) { RepositoryPath = input.RepositoryPath }).ToArray();
+        var hashes = bundle.Manifest.Contexts.ToDictionary(context => context.Id,
+            context => ManifestIdentity.ContextHash(context, ManifestIdentity.SourceSetHash(context),
+                ManifestIdentity.InputClosureHash(context)), StringComparer.Ordinal);
+        // Independently observed current preflight may include proven build outputs
+        // absent from the captured ORIGINAL pre-build selection. Normalize only the
+        // regated evaluated output footprint, preserving HEAD/base/index and all
+        // outside-output changes. Never copy or rewrite the captured revision hash.
+        var bundleFiles = SavedBundleFootprint.Validate(bundle, preflight.Root, paths.ToArray(), token);
+        var state = preflight.GitSnapshot is { } git
+            ? FreshGitProof.Identity(git, SavedCompletedProof.OutputFootprint(compiler), bundleFiles) :
+            SavedLocalMembership.Observe(bundle, preflight, SavedCompletedProof.OutputFootprint(compiler), token, bundleFiles);
+        compiler.RetainedProof!.ValidateCurrent(token);
+        _ = SavedBundleFootprint.Validate(bundle, preflight.Root, paths.ToArray(), token);
+        token.ThrowIfCancellationRequested();
+        return new(CanonicalIdentity.Tuple("fresh-repository", preflight.Root),
+            CanonicalIdentity.Tuple("fresh-workspace", preflight.Root), preflight.GitSnapshot?.Revision.CurrentHead,
+            inputs, hashes, true, state) { ProtectedPaths = paths.Order(StringComparer.Ordinal).ToArray() };
     }
 
     private static string NormalizeRecipePath(string value)

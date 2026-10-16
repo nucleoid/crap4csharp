@@ -190,6 +190,9 @@ public static class PortablePdbCallableMapper
     private static PortablePdbMappingResult Unsupported(string reason, Guid? mvid = null, string? pdbId = null) =>
         new("unsupported", reason, null, null, null, mvid, pdbId);
 
+    internal static IReadOnlyList<string> ReadParameterTypes(MetadataReader reader, MethodDefinition method)
+        => method.DecodeSignature(new TypeProvider(), (object?)null).ParameterTypes;
+
     private sealed class TypeProvider : ISignatureTypeProvider<string, object?>
     {
         public string GetArrayType(string elementType, ArrayShape shape) => elementType + "[" + new string(',', shape.Rank - 1) + "]";

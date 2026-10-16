@@ -75,7 +75,7 @@ public sealed record CallableInventoryResult(
 public static class CallableInventory
 {
     public static CallableInventoryResult Analyze(string text, string logicalPath, CallableAnalysisContext context,
-        IEnumerable<MetadataReference>? references = null)
+        IEnumerable<MetadataReference>? references = null, IEnumerable<SyntaxTree>? additionalTrees = null)
     {
         ArgumentNullException.ThrowIfNull(text);
         ArgumentException.ThrowIfNullOrWhiteSpace(logicalPath);
@@ -84,8 +84,33 @@ public static class CallableInventory
         var errors = tree.GetDiagnostics().Where(item => item.Severity == DiagnosticSeverity.Error).ToArray();
         if (errors.Length > 0) throw new InvalidDataException(errors[0].ToString());
         var root = tree.GetCompilationUnitRoot();
-        var semanticModel = CSharpCompilation.Create("Crap4CSharp.CallableInventory", [tree], references ?? [])
+        var auxiliary = (additionalTrees ?? []).Where(t => t.FilePath != logicalPath).ToArray();
+        foreach (var other in auxiliary)
+            if (other.GetDiagnostics().Any(d => d.Severity == DiagnosticSeverity.Error))
+                throw new InvalidDataException("Captured compiler-source closure has syntax errors.");
+        var semanticModel = CSharpCompilation.Create("Crap4CSharp.CallableInventory", [tree, .. auxiliary], references ?? [])
             .GetSemanticModel(tree);
+        return AnalyzeTree(text, logicalPath, context, tree, semanticModel);
+    }
+
+    // A boundary-local compilation over freshly captured immutable inputs. It is
+    // never retained across physical revalidation boundaries.
+    internal static CallableInventoryResult AnalyzeCaptured(CapturedSource source,
+        CallableAnalysisContext context, CSharpCompilation compilation)
+    {
+        var tree = compilation.SyntaxTrees.Single(t => t.FilePath == source.LogicalPath);
+        if (!tree.Options.Equals(context.ParseOptions) || tree.GetText().ToString() != source.Text)
+            throw new InvalidDataException("Captured source differs from the current semantic closure.");
+        foreach (var other in compilation.SyntaxTrees)
+            if (other.GetDiagnostics().Any(d => d.Severity == DiagnosticSeverity.Error))
+                throw new InvalidDataException("Captured compiler-source closure has syntax errors.");
+        return AnalyzeTree(source.Text, source.LogicalPath, context, tree, compilation.GetSemanticModel(tree));
+    }
+
+    private static CallableInventoryResult AnalyzeTree(string text, string logicalPath,
+        CallableAnalysisContext context, SyntaxTree tree, SemanticModel semanticModel)
+    {
+        var root = tree.GetCompilationUnitRoot();
         var contentIdentity = ProjectAnalysisContext.ContentHash(text);
         var candidates = Discover(root, tree).OrderBy(item => item.Span.Start).ThenByDescending(item => item.Span.Length)
             .ThenBy(item => IsMemberInitializer(item.Kind) ? 0 : 1).ThenBy(item => item.Kind).ToList();
