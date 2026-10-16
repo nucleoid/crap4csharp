@@ -11,6 +11,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build:
@@ -112,9 +113,20 @@ jobs:
         run: ./scripts/install-consumer-runtime.ps1 -DotnetRoot $env:DOTNET_ROOT -Version 9.0.20
       - name: Record SDK and runtime inventory
         run: dotnet --info
+      - name: Select newest published Release build generation
+        id: build-artifacts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/test-workflow-artifact-selection.ps1
+          ./scripts/select-workflow-artifact-ids.ps1 -Kind build -Configuration Release -RunnerOS '${{ matrix.os }}' -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputPath artifacts/build-artifact-selection.json
       - uses: actions/download-artifact@v4
         with:
-          pattern: suite-build-Release-${{ matrix.os }}-attempt-*
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          artifact-ids: ${{ steps.build-artifacts.outputs.ids }}
           path: artifacts/downloaded-builds
       - name: Import the bound shared Release runtime
         shell: pwsh
@@ -183,9 +195,20 @@ jobs:
       - name: Install exact .NET 9 consumer runtime
         shell: pwsh
         run: ./scripts/install-consumer-runtime.ps1 -DotnetRoot $env:DOTNET_ROOT -Version 9.0.20
+      - name: Select newest published Release build generation
+        id: build-artifacts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/test-workflow-artifact-selection.ps1
+          ./scripts/select-workflow-artifact-ids.ps1 -Kind build -Configuration Release -RunnerOS '${{ matrix.os }}' -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputPath artifacts/build-artifact-selection.json
       - uses: actions/download-artifact@v4
         with:
-          pattern: suite-build-Release-${{ matrix.os }}-attempt-*
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          artifact-ids: ${{ steps.build-artifacts.outputs.ids }}
           path: artifacts/downloaded-builds
       - name: Import the bound shared Release runtime
         shell: pwsh
@@ -193,9 +216,18 @@ jobs:
           $ErrorActionPreference = 'Stop'
           ./scripts/select-suite-build.ps1 -Configuration Release -RunnerOS '${{ matrix.os }}' -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -InputDirectory artifacts/downloaded-builds -OutputDirectory artifacts/selected-build
           ./scripts/import-suite-build.ps1 -Configuration Release -Commit $env:GITHUB_SHA -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -ArtifactDirectory artifacts/selected-build
+      - name: Select newest published generation for every required partition
+        id: partition-artifacts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/select-workflow-artifact-ids.ps1 -Kind partition -Configuration Release -RunnerOS '${{ matrix.os }}' -WorkflowRun $env:GITHUB_RUN_ID -WorkflowAttempt $env:GITHUB_RUN_ATTEMPT -OutputPath artifacts/partition-artifact-selection.json
       - uses: actions/download-artifact@v4
         with:
-          pattern: partition-Release-${{ matrix.os }}-*
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          artifact-ids: ${{ steps.partition-artifacts.outputs.ids }}
           path: artifacts/partition-receipts
       - name: Prove complete Release case union and runtime identity
         shell: pwsh
