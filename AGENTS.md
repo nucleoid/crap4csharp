@@ -9,9 +9,9 @@ This repository contains a .NET 10 global/local tool and its focused core librar
 Always make the repository-local SDK available for commands in this environment:
 
 ```bash
-PATH=/home/fuego/.dotnet:$PATH dotnet restore Crap4CSharp.slnx --disable-parallel
-PATH=/home/fuego/.dotnet:$PATH dotnet build Crap4CSharp.slnx -c Release --no-restore -m:1
-PATH=/home/fuego/.dotnet:$PATH dotnet test Crap4CSharp.slnx -c Release --no-build -m:1
+PATH=$HOME/.dotnet:$PATH dotnet restore Crap4CSharp.slnx --disable-parallel
+PATH=$HOME/.dotnet:$PATH dotnet build Crap4CSharp.slnx -c Release --no-restore -m:1
+PATH=$HOME/.dotnet:$PATH dotnet test Crap4CSharp.slnx -c Release --no-build -m:1
 ```
 
 ## Guardrails
