@@ -10,7 +10,9 @@ public sealed class FreshCheckExecutionTests
     [InlineData(false)]
     [InlineData(true)]
     public Task IncludedTestOutcomesJoinPublicScoredContextsAfterSuccessOrFailure(bool failing)
-        => RunCase(failing, false, policyScope: "all", local: true, partial: failing, includeTests: true);
+        // Exercise the real managed SDK/build/test/coverage route; native SDK
+        // identity certification remains the separate existing native controls.
+        => RunCase(failing, false, policyScope: "all", local: true, partial: failing, includeTests: true, nativeSdkIdentity: false);
 
     [Theory]
     [InlineData(false)]
