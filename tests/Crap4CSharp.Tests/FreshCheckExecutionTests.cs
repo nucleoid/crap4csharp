@@ -2321,7 +2321,9 @@ public sealed class FreshCheckExecutionTests
             var testOutcome = Assert.Single(terminal.RootElement.GetProperty("run").GetProperty("testOutcomes").EnumerateArray());
             Assert.Equal(testContext.GetProperty("id").GetString(), testOutcome.GetProperty("contextId").GetString());
             Assert.Contains(terminal.RootElement.GetProperty("evaluation").GetProperty("callables").EnumerateArray(),
-                callable => callable.GetProperty("path").GetString() == "Tests/Tests.cs" &&
+                callable => callable.GetProperty("path").GetString() == "Tests.cs" &&
+                    callable.GetProperty("kind").GetString() == "Method" &&
+                    callable.GetProperty("semanticSignature").GetString() == "System.Void Once::Test()" &&
                     callable.GetProperty("contextId").GetString() == testOutcome.GetProperty("contextId").GetString());
         }
         if (writerOrdering)
