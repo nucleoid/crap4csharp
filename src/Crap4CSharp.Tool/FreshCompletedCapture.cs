@@ -41,13 +41,15 @@ internal static class FreshCompletedCapture
                 CanonicalIdentity.NormalizeLogicalPath(path) != path) throw Refuse();
             return path;
         }
+        var logicalIds = execution.Compiler.FinalGraph.BuildGraph.ToDictionary(n => n.Id,
+            n => LogicalContextIdentity.Create(root, n), StringComparer.Ordinal);
         var manifest = ManifestIdentity.Seal(captured.Manifest with
         {
             Contexts = captured.Manifest.Contexts.Select(context =>
             {
                 token.ThrowIfCancellationRequested();
                 var matches = execution.Compiler.FinalGraph.GraphContexts.Where(binding =>
-                    binding.GraphId == context.Id).ToArray();
+                    logicalIds[binding.GraphId] == context.Id).ToArray();
                 if (matches.Length != 1) throw Refuse();
                 var binding = matches[0];
                 var assembly = binding.Context.EvaluatedTargetPath ?? throw Refuse();

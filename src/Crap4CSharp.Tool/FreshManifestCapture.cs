@@ -40,6 +40,7 @@ internal static class FreshManifestCapture
                 await RegateAsync(execution, cancellation, timing, "public.capture.initialRegate");
         var graph = execution.Compiler.FinalGraph;
         var bindings = graph.GraphContexts.ToDictionary(b => b.GraphId, StringComparer.Ordinal);
+        var logicalIds = graph.BuildGraph.ToDictionary(n => n.Id, n => LogicalContextIdentity.Create(preflight.Root, n), StringComparer.Ordinal);
         var observations = execution.Compiler.ByGraphId();
         var referenceEdges = CompilerReferenceGraph.Observe(graph, cancellation);
         var bytes = new Dictionary<string, ImmutableArray<byte>>(StringComparer.Ordinal);
@@ -128,6 +129,7 @@ internal static class FreshManifestCapture
         foreach (var binding in graph.GraphContexts.Where(b => !b.IsTestProject || b.Context.ExclusionPolicy.IncludeTests))
         {
             cancellation.ThrowIfCancellationRequested();
+            var contextId = logicalIds[binding.GraphId];
             var context = binding.Context; var observation = observations[binding.GraphId];
             CompilerOutputBinding.Validate(context, observation, cancellation);
             var assembly = ReadCaptured(observation.Assembly!.Path, ref readTotal, cancellation);
@@ -178,7 +180,7 @@ internal static class FreshManifestCapture
             var metadataReferences = inputs.Where(i => i.Role == "reference").Select(i =>
                 CompilerReferenceSnapshot.CapturedReference(i, bytes[i.Locator])).ToArray();
             var analysis = new CallableAnalysisContext(RepositoryPath(binding.ProjectPath), context.TargetFramework, context.Configuration,
-                context.Platform, binding.GraphId, context.ParseOptions);
+                context.Platform, contextId, context.ParseOptions);
             // This compilation belongs only to these captured bytes and this
             // context. Later current boundaries rebuild their own compilation.
             var compilation = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
@@ -199,7 +201,7 @@ internal static class FreshManifestCapture
                 .Select(i => CapturedSource.Create(i.LogicalPath, bytes[i.Locator].AsSpan())).ToArray();
             var semanticEmpty = !eligibleSources.Any(source => Inventory(source).Callables
                 .Any(callable => callable.Applicability == CallableApplicability.Applicable));
-            var captured = new ManifestContext(binding.GraphId, RepositoryPath(binding.ProjectPath), context.TargetFramework,
+            var captured = new ManifestContext(contextId, RepositoryPath(binding.ProjectPath), context.TargetFramework,
                 context.Configuration, context.Platform, "", "", "", true, false, inputs)
             {
                 CoverageApplicability = semanticEmpty ? "semantic-empty" : null,
@@ -212,11 +214,11 @@ internal static class FreshManifestCapture
             contexts.Add(captured);
             var buildId = "build-" + binding.GraphId;
             Artifact(buildId + "-closure", "compiler-input-closure", ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(new
-                { provider = "validated-csc-inputs-v1", metadata = phaseIdentities, reusableRecipe = false })), binding.GraphId, buildId, format: "json");
-            builds.Add(new(buildId, binding.GraphId, inspected.ModuleIdentity, CanonicalIdentity.Sha256(assembly.AsSpan()),
+                { provider = "validated-csc-inputs-v1", metadata = phaseIdentities, reusableRecipe = false })), contextId, buildId, format: "json");
+            builds.Add(new(buildId, contextId, inspected.ModuleIdentity, CanonicalIdentity.Sha256(assembly.AsSpan()),
                 inspected.Mvid, CanonicalIdentity.Sha256(pdb.AsSpan()), inspected.DebugIdentity));
-            Artifact(buildId + "-pe", "assembly", assembly, binding.GraphId, buildId);
-            Artifact(buildId + "-pdb", "pdb", pdb, binding.GraphId, buildId);
+            Artifact(buildId + "-pe", "assembly", assembly, contextId, buildId);
+            Artifact(buildId + "-pdb", "pdb", pdb, contextId, buildId);
             bool Reaches(string id, HashSet<string> seen)
             {
                 if (id == binding.GraphId) return true;
@@ -234,21 +236,21 @@ internal static class FreshManifestCapture
                 var trx = TestResultBinding.ReadTrx(Path.Combine(invocation.ResultsDirectory, "tests.trx"), cancellation);
                 var counters = ArtifactEvidenceInspector.InspectTrx(trx);
                 var id = "test-" + binding.GraphId + "-" + report.GraphId;
-                executions.Add(new(id, binding.GraphId, buildId, true, invocation.Process.ExitCode,
+                executions.Add(new(id, contextId, buildId, true, invocation.Process.ExitCode,
                     counters.Total, counters.Passed, counters.Failed, counters.Skipped)
                 {
                     TestProject = RepositoryPath(invocation.ProjectPath), TestModuleIdentity = tested.ModuleIdentity,
                     TestAssemblySha256 = CanonicalIdentity.Sha256(testPe.AsSpan()), TestMvid = tested.Mvid,
                     TestPdbSha256 = CanonicalIdentity.Sha256(testPdb.AsSpan()), TestDebugIdentity = tested.DebugIdentity
                 });
-                Artifact(id + "-trx", "test-result", trx, binding.GraphId, buildId, id, "trx");
-                Artifact(id + "-pe", "test-assembly", testPe, binding.GraphId, buildId, id);
-                Artifact(id + "-pdb", "test-pdb", testPdb, binding.GraphId, buildId, id);
+                Artifact(id + "-trx", "test-result", trx, contextId, buildId, id, "trx");
+                Artifact(id + "-pe", "test-assembly", testPe, contextId, buildId, id);
+                Artifact(id + "-pdb", "test-pdb", testPdb, contextId, buildId, id);
                 if (!semanticEmpty)
                     Artifact(id + "-coverage", "coverage", report.Modules.Single(m => m.GraphId == binding.GraphId).LineProjection,
-                        binding.GraphId, buildId, id, "opencover", "line");
+                        contextId, buildId, id, "opencover", "line");
                 Artifact(id + "-child", "test-child-build", TestChildEvidenceExport.Capture(invocation,
-                    execution.Tests.Outcomes.Single(o => o.GraphId == report.GraphId), cancellation), binding.GraphId, buildId, id, "json");
+                    execution.Tests.Outcomes.Single(o => o.GraphId == report.GraphId), cancellation), contextId, buildId, id, "json");
             }
         }
         // Preserve required test Csc inputs too, without making excluded tests scored

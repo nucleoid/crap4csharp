@@ -845,7 +845,7 @@ public sealed class FreshCheckExecutionTests
                     {
                         Contexts = captured.Manifest.Contexts.Select(context =>
                         {
-                            var binding = currentGraph.GraphContexts.Single(b => b.GraphId == context.Id);
+                            var binding = currentGraph.GraphContexts.Single(b => LogicalContextIdentity.Create(fixture.Path, currentGraph.BuildGraph.Single(n => n.Id == b.GraphId)) == context.Id);
                             string Relative(string path) => Path.GetRelativePath(fixture.Path, path).Replace('\\', '/');
                             return context with { ReuseRecipeComplete = true, CurrentRevalidation = new(
                                 "finite-sdk-completed-tests-v1", Relative(binding.ProjectPath),
@@ -882,7 +882,7 @@ public sealed class FreshCheckExecutionTests
                     Assert.All(warm.FinalGraph.GraphContexts, b => Assert.Equal(includeGenerated, b.Context.ExclusionPolicy.IncludeGenerated));
                     var scored = Assert.Single(bundle.Manifest.Contexts);
                     var production = Assert.Single(warm.FinalGraph.GraphContexts, b => !b.IsTestProject);
-                    Assert.Equal(production.GraphId, scored.Id);
+                    Assert.Equal(LogicalContextIdentity.Create(fixture.Path, warm.FinalGraph.BuildGraph.Single(n => n.Id == production.GraphId)), scored.Id);
                     Assert.Equal(emptyEligible ? "semantic-empty" : null, scored.CoverageApplicability);
                     Assert.Equal(includeGenerated, scored.IncludeGenerated);
                     Assert.False(scored.ReuseRecipeComplete);
@@ -1533,6 +1533,19 @@ public sealed class FreshCheckExecutionTests
                 if (contextOnly)
                 {
                     var imported = FreshPriorBuild.Load(bundle, currentPlan.PreparedGraph, fixture.Path, token);
+                    // A matching public selector never authorizes prior evidence in
+                    // another physical workspace. The original import above is the
+                    // positive control, so unrelated missing inputs cannot pass this.
+                    using (var foreign = TestDirectory.Create("crap4csharp-foreign-prior-root"))
+                    {
+                        foreach (var node in currentPlan.PreparedGraph.BuildGraph)
+                        {
+                            var relocated = node with { ProjectPath = Path.GetFullPath(Path.GetRelativePath(fixture.Path, node.ProjectPath), foreign.Path) };
+                            Assert.Equal(LogicalContextIdentity.Create(fixture.Path, node), LogicalContextIdentity.Create(foreign.Path, relocated));
+                        }
+                        Assert.Equal("check.priorBuildInvalid", Assert.Throws<PolicyException>(() =>
+                            FreshPriorBuild.Load(bundle, currentPlan.PreparedGraph, foreign.Path, token)).Code);
+                    }
                     var currentCompiler = await CompilerGraphExecution.RunBoundAsync(reloadRequest, currentPlan.PreparedGraph,
                         (node, cancellation) => { cancellation.ThrowIfCancellationRequested(); return Task.FromResult(imported[node.Id]); }, token);
                     ValidateEligibilityContexts(bundle, currentCompiler, fixture.Path, emptyEligible, includeGenerated, token);
@@ -1572,7 +1585,7 @@ public sealed class FreshCheckExecutionTests
                                 Agree(bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Contexts = [changed] }) })).Code);
                         Agree(bundle);
                         var savedContext = bundle.Manifest.Contexts.Single();
-                        var scoredBinding = currentCompiler.FinalGraph.GraphContexts.Single(b => b.GraphId == savedContext.Id);
+                        var scoredBinding = currentCompiler.FinalGraph.GraphContexts.Single(b => LogicalContextIdentity.Create(fixture.Path, currentCompiler.FinalGraph.BuildGraph.Single(n => n.Id == b.GraphId)) == savedContext.Id);
                         string EvaluatedPath(string path) => Path.GetRelativePath(fixture.Path, path).Replace('\\', '/');
                         var declared = savedContext with { ReuseRecipeComplete = true, CurrentRevalidation = new(
                             "finite-sdk-completed-tests-v1", EvaluatedPath(scoredBinding.ProjectPath),

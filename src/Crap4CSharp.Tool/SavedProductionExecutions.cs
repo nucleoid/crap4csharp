@@ -45,11 +45,12 @@ internal static class SavedProductionExecutions
         {
             var nodes = CompilerGraphExecution.ValidateAndFreeze(compiler.FinalGraph).ToDictionary(n => n.Id, StringComparer.Ordinal);
             var bindings = compiler.FinalGraph.GraphContexts.ToDictionary(b => b.GraphId, StringComparer.Ordinal);
+            var logicalIds = nodes.ToDictionary(p => p.Key, p => LogicalContextIdentity.Create(root, p.Value), StringComparer.Ordinal);
             var observed = compiler.ByGraphId();
             var referenceEdges = CompilerReferenceGraph.Observe(compiler.FinalGraph, token);
             var production = bindings.Values.Where(b => !b.IsTestProject || b.Context.ExclusionPolicy.IncludeTests).ToArray();
             if (bundle.Manifest.Contexts.Count != production.Length ||
-                !bundle.Manifest.Contexts.Select(c => c.Id).ToHashSet(StringComparer.Ordinal).SetEquals(production.Select(b => b.GraphId)) ||
+                !bundle.Manifest.Contexts.Select(c => c.Id).ToHashSet(StringComparer.Ordinal).SetEquals(production.Select(b => logicalIds[b.GraphId])) ||
                 bundle.Manifest.Builds.Count != production.Length) throw Refuse();
             var expectedExecutions = new HashSet<string>(StringComparer.Ordinal);
             var expectedArtifacts = new HashSet<string>(StringComparer.Ordinal);
@@ -57,11 +58,12 @@ internal static class SavedProductionExecutions
             foreach (var binding in production)
             {
                 token.ThrowIfCancellationRequested();
-                var context = bundle.Manifest.Contexts.Single(c => c.Id == binding.GraphId);
+                var contextId = logicalIds[binding.GraphId];
+                var context = bundle.Manifest.Contexts.Single(c => c.Id == contextId);
                 if (context.Project != Logical(binding.ProjectPath) || context.Configuration != binding.Context.Configuration ||
                     context.TargetFramework != binding.Context.TargetFramework || context.Platform != binding.Context.Platform) throw Refuse();
                 var buildId = "build-" + binding.GraphId;
-                var build = bundle.Manifest.Builds.Single(b => b.ContextId == binding.GraphId);
+                var build = bundle.Manifest.Builds.Single(b => b.ContextId == contextId);
                 var observation = observed[binding.GraphId];
                 CompilerOutputBinding.Validate(binding.Context, observation, token);
                 var pe = CompilerOutputBinding.Read(observation.Assembly!.Path, ref total, token);
@@ -82,7 +84,7 @@ internal static class SavedProductionExecutions
                     var execution = bundle.Manifest.Executions.Single(e => e.Id == id);
                     var trx = Bytes(saved.Trx); var testPe = Bytes(saved.Assembly); var testPdb = Bytes(saved.Pdb);
                     var counters = ArtifactEvidenceInspector.InspectTrx(trx);
-                    if (execution.ContextId != binding.GraphId || execution.BuildId != buildId || !execution.Completed || execution.ExitCode != 0 ||
+                    if (execution.ContextId != contextId || execution.BuildId != buildId || !execution.Completed || execution.ExitCode != 0 ||
                         execution.TotalTests != counters.Total || execution.PassedTests != counters.Passed || execution.FailedTests != counters.Failed ||
                         execution.SkippedTests != counters.Skipped || execution.TestProject != saved.Project || execution.TestModuleIdentity != saved.ModuleIdentity ||
                         execution.TestMvid != saved.Mvid || execution.TestDebugIdentity != saved.DebugIdentity ||
@@ -109,7 +111,7 @@ internal static class SavedProductionExecutions
                 {
                     if (!expectedArtifacts.Add(id)) throw Refuse();
                     var artifact = bundle.Manifest.Artifacts.Single(a => a.Id == id);
-                    if (artifact.Kind != kind || artifact.ContextId != binding.GraphId || artifact.BuildId != buildId ||
+                    if (artifact.Kind != kind || artifact.ContextId != contextId || artifact.BuildId != buildId ||
                         artifact.ExecutionId != execution || artifact.Format != format || artifact.CoordinateKind != coordinates) throw Refuse();
                     return Bytes(id);
                 }

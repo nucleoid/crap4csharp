@@ -7,6 +7,10 @@ Crap4CSharp has two deliberately different analysis contexts:
 
 Project loading never falls back to syntax-only analysis. A missing SDK, restore assets, project, target framework, reference pack, build host, source path, or generated-source capability is an operational context failure.
 
+Fresh-check public callable `contextId` selectors use the complete repository-relative project role, target framework, configuration/platform and every mapped global property. Property names are case-insensitive; values remain exact, including path-valued custom globals. Relocating an otherwise identical checkout therefore preserves the selector when those globals agree. Distinct full project roles or mapped values remain distinct. No physical-prefix rewriting is performed.
+
+This selector is separate from the private physical graph identity. Compiler/output ownership, root mappings, current context hashes, prior-build workspace/fingerprint comparisons and completed-test replay remain bound to the actual physical workspace. Matching public selectors do not authorize foreign-workspace replay. The new selector changes IDs from earlier candidates that exported physical graph IDs; regenerate evidence with the new pinned producer rather than rewriting historical reports or baseline keys. Packaged relocation acceptance remains required.
+
 ## Preparation and execution boundary
 
 The loader does not restore, build, add packages, run tests or write consumer source. It may construct an in-memory Roslyn workspace. Callers first restore the consumer's already-declared dependencies. The fresh-check orchestrator uses `ProjectBuildPreparation` for serialized restore and non-incremental `--no-restore -m:1` builds. MSBuild evaluation and design-time targets can execute imported logic, as described below.

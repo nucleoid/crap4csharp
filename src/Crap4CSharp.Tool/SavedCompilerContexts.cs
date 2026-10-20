@@ -22,10 +22,11 @@ internal static class SavedCompilerContexts
             using (timing?.StartSynchronous(prefix + ".compiler.retainedOpening"))
                 compiler.RetainedProof.ValidateCurrent(token);
             var bindings = compiler.FinalGraph.GraphContexts;
+            var logicalIds = compiler.FinalGraph.BuildGraph.ToDictionary(n => n.Id, n => LogicalContextIdentity.Create(root, n), StringComparer.Ordinal);
             var observations = compiler.ByGraphId();
             var scored = bindings.Where(b => !b.IsTestProject || b.Context.ExclusionPolicy.IncludeTests).ToArray();
             if (bundle.Manifest.Contexts.Count != scored.Length ||
-                !bundle.Manifest.Contexts.Select(c => c.Id).ToHashSet(StringComparer.Ordinal).SetEquals(scored.Select(b => b.GraphId))) throw Refuse();
+                !bundle.Manifest.Contexts.Select(c => c.Id).ToHashSet(StringComparer.Ordinal).SetEquals(scored.Select(b => logicalIds[b.GraphId]))) throw Refuse();
             long total = 0;
             var reads = new CompilerByteReadScope(token);
             var testArtifacts = new HashSet<string>(StringComparer.Ordinal);
@@ -81,7 +82,8 @@ internal static class SavedCompilerContexts
                         { provider = "validated-csc-inputs-v1", project = Logical(binding.ProjectPath), inputs = identities, reusableRecipe = false }), "json");
                     continue;
                 }
-                var saved = bundle.Manifest.Contexts.Single(c => c.Id == binding.GraphId);
+                var contextId = logicalIds[binding.GraphId];
+                var saved = bundle.Manifest.Contexts.Single(c => c.Id == contextId);
                 if (saved.CurrentRevalidation is not null || saved.ReuseRecipeComplete)
                     CompletedRevalidationDeclaration.Validate(saved, Logical(binding.ProjectPath),
                         Logical(current.EvaluatedTargetPath!), Logical(Path.ChangeExtension(current.EvaluatedTargetPath!, ".pdb")));
@@ -115,7 +117,7 @@ internal static class SavedCompilerContexts
                 var eligible = documents.Where(d => !d.Input.Generated || current.ExclusionPolicy.IncludeGenerated)
                     .Select(d => CapturedSource.Create(d.Input.LogicalPath, d.Bytes.AsSpan())).ToArray();
                 var analysis = new CallableAnalysisContext(Logical(binding.ProjectPath), current.TargetFramework, current.Configuration,
-                    current.Platform, binding.GraphId, current.ParseOptions);
+                    current.Platform, contextId, current.ParseOptions);
                 MetadataReference[] metadata;
                 using (timing?.StartSynchronous(prefix + ".compiler.metadata"))
                     metadata = references.Select(r => CompilerReferenceSnapshot.CapturedReference(r.Input, r.Bytes)).ToArray();
@@ -150,7 +152,7 @@ internal static class SavedCompilerContexts
                         length = content.Length, sha256 = CanonicalIdentity.Sha256(content.AsSpan()), generated = phase.ExpectedGenerated });
                 }
                 var closure = bundle.Manifest.Artifacts.Single(a => a.Id == "build-" + binding.GraphId + "-closure");
-                if (closure.Kind != "compiler-input-closure" || closure.ContextId != binding.GraphId || closure.BuildId != "build-" + binding.GraphId ||
+                if (closure.Kind != "compiler-input-closure" || closure.ContextId != contextId || closure.BuildId != "build-" + binding.GraphId ||
                     closure.ExecutionId is not null || closure.Format != "json" || closure.CoordinateKind is not null) throw Refuse();
                 Match(closure, Json(new { provider = "validated-csc-inputs-v1", metadata = phaseIdentities, reusableRecipe = false }));
             }
