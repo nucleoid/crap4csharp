@@ -267,9 +267,7 @@ internal static class FreshCheckCommand
             {
                 Status = complete ? "completed" : "operationalError", ExitCode = policy.Evaluation.ExitCode,
                 Artifacts = [new("manifest", manifest, "retained", complete, complete && (proof?.Reusable ?? false))],
-                TestOutcomes = evidence.Tests.Outcomes.Select(o => new TestExecutionOutcomeResult(o.GraphId,
-                    evidence.Plan.Tests.Single(t => t.GraphId == o.GraphId).ProjectPath, o.State, o.Process?.ExitCode,
-                    o.ResultsDirectory, o.LogDirectory)).ToArray()
+                TestOutcomes = FreshTestOutcomeProjection.Create(evidence)
             }
         };
         if (completeAtWriter is not null)

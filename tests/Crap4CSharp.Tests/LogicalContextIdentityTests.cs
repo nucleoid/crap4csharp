@@ -18,6 +18,22 @@ public sealed class LogicalContextIdentityTests
         var a = Assert.Single(left.BuildGraph); var b = Assert.Single(right.BuildGraph);
         Assert.NotEqual(a.Id, b.Id);
         Assert.Equal(LogicalContextIdentity.Create(first.Path, a), LogicalContextIdentity.Create(second.Path, b));
+        foreach (var state in new[] { "completed", "failed", "interrupted" })
+        {
+            // Result projection DATA only; real graph discovery above supplies
+            // the roles. These rows do not assert a native test invocation.
+            IReadOnlyList<TestExecutionOutcomeResult> Project(string root, ProjectBuildGraphNode node)
+                => FreshTestOutcomeProjection.Create(root, [node],
+                    [new(node.Id, node.ProjectPath, node.Configuration, node.Platform, node.TargetFramework, "VSTest", "18.0.1", "6.0.4")],
+                    [new(node.Id, state, null, null, null)]);
+            var leftOutcome = Assert.Single(Project(first.Path, a));
+            var rightOutcome = Assert.Single(Project(second.Path, b));
+            Assert.Equal(leftOutcome.ContextId, rightOutcome.ContextId);
+            Assert.Equal(LogicalContextIdentity.Create(first.Path, a), leftOutcome.ContextId);
+            Assert.NotEqual(a.Id, leftOutcome.ContextId);
+            Assert.Equal(state, leftOutcome.Status); Assert.Null(leftOutcome.ExitCode);
+            Assert.Equal(a.ProjectPath, leftOutcome.Project);
+        }
         // Custom mapped paths are not guessed to be interchangeable just because
         // each happens to start with its checkout root.
         var leftGlobals = a.GlobalProperties.ToDictionary(p => p.Key, p => p.Value);
@@ -26,6 +42,19 @@ public sealed class LogicalContextIdentityTests
         rightGlobals["CustomOutputRoot"] = second.Path;
         Assert.NotEqual(LogicalContextIdentity.Create(first.Path, a with { GlobalProperties = leftGlobals }),
             LogicalContextIdentity.Create(second.Path, b with { GlobalProperties = rightGlobals }));
+    }
+
+    [Fact]
+    public void MixedCaseRepositoryRoleHasTheSamePinnedSelectorOnEveryOperatingSystem()
+    {
+        using var root = TestDirectory.Create("crap-context-mixed-case");
+        var node = Node(root.Path, "src/MixedCase/Example.csproj", new Dictionary<string, string> { ["Flavor"] = "Exact" });
+        // Hash of the complete v1 selector with the exact mixed-case role and
+        // mapped value. This expectation is shared by Windows and Linux CI.
+        Assert.Equal("a83d1e8658cd9bb065e47e8546d2e657fb8d3942b5fd8b99eac68b2d50ef40c7",
+            LogicalContextIdentity.Create(root.Path, node));
+        Assert.NotEqual(LogicalContextIdentity.Create(root.Path, node), LogicalContextIdentity.Create(root.Path,
+            node with { ProjectPath = Path.Combine(root.Path, "src", "MIXEDCASE", "Example.csproj") }));
     }
 
     [Fact]

@@ -62,6 +62,8 @@ internal static class SavedProductionExecutions
                 var context = bundle.Manifest.Contexts.Single(c => c.Id == contextId);
                 if (context.Project != Logical(binding.ProjectPath) || context.Configuration != binding.Context.Configuration ||
                     context.TargetFramework != binding.Context.TargetFramework || context.Platform != binding.Context.Platform) throw Refuse();
+                // Security boundary: keep build/execution/artifact IDs bound to
+                // the current physical graph even when public selectors match.
                 var buildId = "build-" + binding.GraphId;
                 var build = bundle.Manifest.Builds.Single(b => b.ContextId == contextId);
                 var observation = observed[binding.GraphId];

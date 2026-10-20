@@ -30,8 +30,7 @@ internal static class FreshFailureResult
             tests.Failure is PolicyException policy ? policy.Code : tests.Failure is ScopeException scope ? scope.Reason :
             tests.Count == evidence.Plan.Tests.Count && tests.All(t => t.Process.ExitCode == 0)
                 ? "provenance.postTestEvidenceUnproven" : "tests.incomplete";
-        var outcomes = tests.Outcomes.Select(o => new TestExecutionOutcomeResult(o.GraphId,
-            evidence.Plan.Tests.Single(t => t.GraphId == o.GraphId).ProjectPath, o.State, o.Process?.ExitCode, o.ResultsDirectory, o.LogDirectory)).ToArray();
+        var outcomes = FreshTestOutcomeProjection.Create(evidence);
         var artifacts = tests.Outcomes.SelectMany(o => new[]
         {
             o.ResultsDirectory is null ? null : new RunArtifact("partial-test-results", o.ResultsDirectory, "retained", false, false),

@@ -9,6 +9,12 @@ public sealed class FreshCheckExecutionTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public Task IncludedTestOutcomesJoinPublicScoredContextsAfterSuccessOrFailure(bool failing)
+        => RunCase(failing, false, policyScope: "all", local: true, partial: failing, includeTests: true);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public Task ColdPublicFreshCheckRestoresBuildsAndTestsOnceAndRetainsBoundArtifacts(bool failing)
         => RunCase(failing, false, publicTiming: true);
 
@@ -446,7 +452,7 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, false, policyScope: "all", publicTiming: true, writerOrdering: true);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false, bool warmPostBuild = false, bool warmSaved = false, bool warmSavedEligibility = false, bool nativeSdkIdentity = global::App.DefaultNativeSdkIdentity, bool privateArtifactOnly = false, bool aliasedReference = false, bool localIncremental = false, bool lateLocalJson = false, string? writerProbe = null, bool writerOrdering = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false, bool warmPostBuild = false, bool warmSaved = false, bool warmSavedEligibility = false, bool nativeSdkIdentity = global::App.DefaultNativeSdkIdentity, bool privateArtifactOnly = false, bool aliasedReference = false, bool localIncremental = false, bool lateLocalJson = false, string? writerProbe = null, bool writerOrdering = false, bool includeTests = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -592,7 +598,7 @@ public sealed class FreshCheckExecutionTests
                 return value;
             }
             var request = new FreshCheckRequest(standaloneTest ? "Root.slnx" : "Tests/Tests.csproj", "policy.json", local ? null : "HEAD", local || newPreflight ? "all" : null, null, "worktree", granularity,
-                null, "bundle", false, false, null, new PolicyOverrides(IncludeGenerated: includeGenerated ? true : null), TimeSpan.FromMinutes(3))
+                null, "bundle", false, false, null, new PolicyOverrides(IncludeTests: includeTests ? true : null, IncludeGenerated: includeGenerated ? true : null), TimeSpan.FromMinutes(3))
                 { WarmPostBuildProbe = warmPostBuild || nativeSdkIdentity, NativeSdkIdentityProbe = nativeSdkIdentity };
             var preflight = await MeasureAsync("trustedPreflight", () => FreshCheckPreflightLoader.LoadAsync(request, fixture.Path, token));
             var evidence = await MeasureAsync("executionComposite", () => FreshCheckExecution.RunAsync(preflight, token));
@@ -601,6 +607,16 @@ public sealed class FreshCheckExecutionTests
             Assert.Equal(standaloneTest ? 3 : 2, evidence.Compiler.Observations.Count);
             Assert.Equal(standaloneTest ? 2 : 1, evidence.Tests.Count);
             Assert.Equal(standaloneTest ? 2 : 1, evidence.Tests.Outcomes.Count);
+            var publicOutcomes = FreshTestOutcomeProjection.Create(evidence);
+            Assert.Equal(evidence.Tests.Outcomes.Count, publicOutcomes.Count);
+            foreach (var observed in evidence.Tests.Outcomes)
+            {
+                var node = evidence.Compiler.FinalGraph.BuildGraph.Single(n => n.Id == observed.GraphId);
+                var projected = publicOutcomes.Single(o => o.Project == node.ProjectPath);
+                Assert.Equal(LogicalContextIdentity.Create(fixture.Path, node), projected.ContextId);
+                Assert.NotEqual(observed.GraphId, projected.ContextId);
+                Assert.Equal(observed.State, projected.Status); Assert.Equal(observed.Process?.ExitCode, projected.ExitCode);
+            }
             FreshCapturedBundle? measuredCapture = null;
             if (failing)
             {
@@ -612,6 +628,7 @@ public sealed class FreshCheckExecutionTests
                 Assert.Equal(1, rawFailure.Run.ExitCode);
                 Assert.Contains(rawFailure.Evaluation.Checks, c => c.Name == "testExecution" && c.Status == "fail");
                 var outcome = Assert.Single(rawFailure.Run.TestOutcomes!);
+                Assert.Equal(Assert.Single(publicOutcomes).ContextId, outcome.ContextId);
                 Assert.Equal("failed", outcome.Status); Assert.Equal(evidence.Tests[0].Process.ExitCode, outcome.ExitCode);
                 Assert.All(rawFailure.Run.Artifacts, a => { Assert.False(a.Complete); Assert.False(a.Reusable); });
                 Assert.DoesNotContain(rawFailure.Run.Artifacts, a => a.Kind == "manifest");
@@ -2123,6 +2140,7 @@ public sealed class FreshCheckExecutionTests
         string[] baseArgs = local ? [] : ["--base", "HEAD"];
         string[] publicArgs = ["check", "--project", standaloneTest ? "Root.slnx" : "Tests/Tests.csproj", "--policy", "policy.json", .. baseArgs,
             "--artifact-output", "bundle", "--format", "json", "--timeout-seconds", completedReuse || freshTerminalCancellation ? "600" : "180", "--granularity", granularity, "--scope", policyScope];
+        if (includeTests) publicArgs = [.. publicArgs, "--include-tests"];
         if (privateArtifactOnly)
         {
             var artifactOption = Array.IndexOf(publicArgs, "--artifact-output");
@@ -2282,6 +2300,16 @@ public sealed class FreshCheckExecutionTests
             TestValidationOutput.WriteOptionalProfile("strict-public", timingJson);
         }
         using var terminal = JsonDocument.Parse(output.ToString());
+        if (includeTests)
+        {
+            var testContext = Assert.Single(terminal.RootElement.GetProperty("evaluation").GetProperty("contexts").EnumerateArray(),
+                context => context.GetProperty("project").GetString() == "Tests/Tests.csproj");
+            var testOutcome = Assert.Single(terminal.RootElement.GetProperty("run").GetProperty("testOutcomes").EnumerateArray());
+            Assert.Equal(testContext.GetProperty("id").GetString(), testOutcome.GetProperty("contextId").GetString());
+            Assert.Contains(terminal.RootElement.GetProperty("evaluation").GetProperty("callables").EnumerateArray(),
+                callable => callable.GetProperty("path").GetString() == "Tests/Tests.cs" &&
+                    callable.GetProperty("contextId").GetString() == testOutcome.GetProperty("contextId").GetString());
+        }
         if (writerOrdering)
         {
             var evaluation = terminal.RootElement.GetProperty("evaluation");
@@ -2429,6 +2457,14 @@ public sealed class FreshCheckExecutionTests
             Assert.True(exit == (thresholdViolation ? 2 : 0), errors + Environment.NewLine + output);
             Assert.True(File.Exists(Path.Combine(fixture.Path, "bundle", "manifest.json")));
             var bundle = ArtifactBundle.Load(Path.Combine(fixture.Path, "bundle", "manifest.json"), fixture.Path);
+            var requiredInventory = bundle.Manifest.Artifacts.Single(a => a.Kind == "required-test-inventory");
+            using (var inventory = JsonDocument.Parse(bundle.Bytes[requiredInventory.Locator].AsSpan().ToArray()))
+            {
+                var physicalTestIds = inventory.RootElement.GetProperty("tests").EnumerateArray()
+                    .Select(t => t.GetProperty("graphId").GetString()).ToHashSet(StringComparer.Ordinal);
+                Assert.All(terminal.RootElement.GetProperty("run").GetProperty("testOutcomes").EnumerateArray(),
+                    outcome => Assert.DoesNotContain(outcome.GetProperty("contextId").GetString(), physicalTestIds));
+            }
             Assert.Contains(bundle.Manifest.Artifacts, a => a.Kind == "test-child-build");
             Assert.DoesNotContain(bundle.Manifest.Artifacts, a => a.Kind == "binlog");
             if (thresholdViolation)
@@ -2682,8 +2718,10 @@ public sealed class FreshCheckExecutionTests
                     secondTerminal.RootElement.GetProperty("evaluation").GetProperty("provenance").GetProperty("basis").GetString());
                 var recipeArtifact = Assert.Single(bundle.Manifest.Artifacts, a => a.Kind == FreshPriorBuild.Kind);
                 using var recipe = JsonDocument.Parse(bundle.Bytes[recipeArtifact.Locator].ToArray());
+                var physicalBuildId = bundle.Manifest.Builds.Single(b => b.ContextId == bundle.Manifest.Contexts.Single().Id).Id;
+                Assert.StartsWith("build-", physicalBuildId);
                 var savedNode = recipe.RootElement.GetProperty("nodes").EnumerateArray().Single(n =>
-                    n.GetProperty("id").GetString() == bundle.Manifest.Contexts.Single().Id);
+                    n.GetProperty("id").GetString() == physicalBuildId["build-".Length..]);
                 string SavedOutput(string name) => Path.GetFullPath(savedNode.GetProperty(name).GetProperty("path")
                     .GetProperty("relative").GetString()!, fixture.Path);
                 async Task RejectMutation(string name, string path, bool add = false)
@@ -2815,6 +2853,15 @@ public sealed class FreshCheckExecutionTests
             => Refuse(bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Contexts = [changed] }) });
         Agree(bundle);
         var context = Assert.Single(bundle.Manifest.Contexts);
+        var physicalClosure = bundle.Manifest.Artifacts.Single(a => a.Kind == "compiler-input-closure");
+        var logicalClosureId = "build-" + context.Id + "-closure";
+        Assert.NotEqual(physicalClosure.Id, logicalClosureId);
+        // Keep the complete actual bytes and public selector. Changing only
+        // the physical closure ID must still fail this compiler boundary.
+        var renamedClosure = ManifestIdentity.Seal(bundle.Manifest with { Artifacts = bundle.Manifest.Artifacts
+            .Select(a => a.Id == physicalClosure.Id ? a with { Id = logicalClosureId } : a).ToArray() });
+        Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(renamedClosure, bundle.Bytes).Status);
+        Refuse(bundle with { Manifest = renamedClosure });
         Assert.Equal(empty ? "semantic-empty" : null, context.CoverageApplicability);
         Assert.Equal(generated, context.IncludeGenerated);
         Assert.False(context.ReuseRecipeComplete);

@@ -151,6 +151,8 @@ internal static class SavedCompilerContexts
                     phaseIdentities.Add(new { role = phase.Role, logicalPath = inside ? relative : "external/" + CanonicalIdentity.Tuple("phase-path", phase.Role, phase.Path),
                         length = content.Length, sha256 = CanonicalIdentity.Sha256(content.AsSpan()), generated = phase.ExpectedGenerated });
                 }
+                // Security boundary: these physical graph IDs bind this saved
+                // closure to the current workspace, independently of public IDs.
                 var closure = bundle.Manifest.Artifacts.Single(a => a.Id == "build-" + binding.GraphId + "-closure");
                 if (closure.Kind != "compiler-input-closure" || closure.ContextId != contextId || closure.BuildId != "build-" + binding.GraphId ||
                     closure.ExecutionId is not null || closure.Format != "json" || closure.CoordinateKind is not null) throw Refuse();

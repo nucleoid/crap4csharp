@@ -13,7 +13,8 @@ internal static class LogicalContextIdentity
         var role = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(node.ProjectPath));
         if (Path.IsPathRooted(role)) throw new ArgumentException("Context project is outside its bound root.");
         role = CanonicalIdentity.NormalizeLogicalPath(role);
-        if (OperatingSystem.IsWindows()) role = role.ToUpperInvariant();
+        // Public repository roles retain their evaluated spelling on every OS,
+        // as CallableId does. Physical path comparison still uses its own policy.
         MappedGlobalPrivacy.Validate(node.GlobalProperties);
         var globals = node.GlobalProperties.OrderBy(p => p.Key, StringComparer.OrdinalIgnoreCase)
             .Select(p => new[] { p.Key.ToUpperInvariant(), p.Value }).ToArray();

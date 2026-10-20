@@ -9,7 +9,11 @@ Project loading never falls back to syntax-only analysis. A missing SDK, restore
 
 Fresh-check public callable `contextId` selectors use the complete repository-relative project role, target framework, configuration/platform and every mapped global property. Property names are case-insensitive; values remain exact, including path-valued custom globals. Relocating an otherwise identical checkout therefore preserves the selector when those globals agree. Distinct full project roles or mapped values remain distinct. No physical-prefix rewriting is performed.
 
+Public test outcomes use that same selector, including failed or interrupted outcomes. Project-role spelling is preserved on every operating system, as it is for callable IDs; there is no Windows-only case folding. This requires the same evaluated repository-relative spelling. Differently cased solution or project-reference aliases are not declared equivalent by this selector. Physical path ownership keeps its separate operating-system path comparison policy.
+
 This selector is separate from the private physical graph identity. Compiler/output ownership, root mappings, current context hashes, prior-build workspace/fingerprint comparisons and completed-test replay remain bound to the actual physical workspace. Matching public selectors do not authorize foreign-workspace replay. The new selector changes IDs from earlier candidates that exported physical graph IDs; regenerate evidence with the new pinned producer rather than rewriting historical reports or baseline keys. Packaged relocation acceptance remains required.
+
+The result and manifest producer versions come from the built assembly's `AssemblyInformationalVersion`. Candidate packaging must pin that metadata to the actual complete source revision; the shared `0.1.0` development package version alone does not identify a selector implementation. Regenerate evidence produced with earlier physical or Windows-case-folded selectors; mismatched selectors fail closed at saved-currentness gates. There is no schema migration or automatic rewriting of historical context, observation or finding IDs; callable baseline keys and exemption matching retain their existing contracts.
 
 ## Preparation and execution boundary
 
