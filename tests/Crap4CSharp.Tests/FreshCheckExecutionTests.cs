@@ -516,13 +516,20 @@ public sealed class FreshCheckExecutionTests
             (partialDrift ? "var p = System.IO.Path.GetFullPath(\"../../../../Library/Code.cs\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); " : "") +
             (priorBuild || measure || thresholdViolation || completedReuse || savedResults || savedCoverage || contextOnly || bundleEvidence || warmSavedEligibility ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
             "Assert.Equal(" + (failing ? "99" : "42") + ", " + (emptyEligible ? "42" : hasGenerated ? "Extra.Value" : "Library.Value") + "); } }");
+        var allowedOverrides = new Dictionary<string, bool>();
+        if (includeGenerated) allowedOverrides.Add("includeGenerated", true);
+        if (includeTests) allowedOverrides.Add("includeTests", true);
         fixture.Write("policy.json", """
             {"schemaVersion":"repository-policy-v1","mode":"strict","productionProjects":["Library/Library.csproj"],
             "testProjects":["Tests/Tests.csproj"],"configuration":"Debug","targetFrameworks":["net10.0"],"scope":"base",
             "threshold":8,"missingCoverage":"fail","requiredChecks":["tests","coverage","crap"],"exclusions":[],"ruleset":"callables-v1"}
-            """.Replace("\"ruleset\":\"callables-v1\"", includeGenerated ?
-                "\"ruleset\":\"callables-v1\",\"allowedOverrides\":{\"includeGenerated\":true}" : "\"ruleset\":\"callables-v1\"", StringComparison.Ordinal)
+            """.Replace("\"ruleset\":\"callables-v1\"", allowedOverrides.Count > 0 ?
+                "\"ruleset\":\"callables-v1\",\"allowedOverrides\":" + JsonSerializer.Serialize(allowedOverrides) : "\"ruleset\":\"callables-v1\"", StringComparison.Ordinal)
                 .Replace("\"scope\":\"base\"", "\"scope\":\"" + policyScope + "\"", StringComparison.Ordinal));
+        if (includeTests)
+            Assert.True(PolicyOverrideValidator.Validate(RepositoryPolicyParser.Parse(
+                File.ReadAllBytes(Path.Combine(fixture.Path, "policy.json")), "policy.json").Policy,
+                new PolicyOverrides(IncludeTests: true)).Allowed);
         if (thresholdViolation)
         {
             var path = Path.Combine(fixture.Path, "policy.json");
@@ -2302,6 +2309,7 @@ public sealed class FreshCheckExecutionTests
         using var terminal = JsonDocument.Parse(output.ToString());
         if (includeTests)
         {
+            Assert.True(exit == (failing ? 1 : 0), errors + Environment.NewLine + output);
             var testContext = Assert.Single(terminal.RootElement.GetProperty("evaluation").GetProperty("contexts").EnumerateArray(),
                 context => context.GetProperty("project").GetString() == "Tests/Tests.csproj");
             var testOutcome = Assert.Single(terminal.RootElement.GetProperty("run").GetProperty("testOutcomes").EnumerateArray());
