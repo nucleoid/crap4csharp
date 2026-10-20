@@ -35,6 +35,7 @@ internal static class FreshCheckCommand
         }
         catch (Exception error) when (retainedEvidence is not null && App.IsHandled(error))
         {
+            FreshPrivateFailureEvidence.TryRetain(retainedEvidence.PrivateDirectory, error, deadline.Token);
             return FreshCheckPreparation.Immediate(RetainArtifactOutput(FreshFailureResult.Refuse(retainedEvidence, error, started, elapsed.Elapsed,
                 deadlineExpired: !cancellation.IsCancellationRequested && deadline.IsCancellationRequested)));
         }
@@ -67,6 +68,7 @@ internal static class FreshCheckCommand
         retainEvidence(evidence);
         if (evidence.Tests.Failure is not null || evidence.Tests.Count != evidence.Plan.Tests.Count || evidence.Tests.Any(t => t.Process.ExitCode != 0))
         {
+            FreshPrivateFailureEvidence.TryRetain(evidence.PrivateDirectory, evidence.Tests.Failure, token);
             var failure = FreshFailureResult.Create(evidence, started, elapsed.Elapsed,
                 deadlineExpired: !cancellation.IsCancellationRequested && deadline.IsCancellationRequested);
             // Interrupted proof cannot support partial analysis. Keep the actual

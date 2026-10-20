@@ -6,13 +6,15 @@ namespace Crap4CSharp.Tests;
 
 public sealed class FreshCheckExecutionTests
 {
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public Task IncludedTestOutcomesJoinPublicScoredContextsAfterSuccessOrFailure(bool failing)
+    [Fact]
+    public Task IncludedCompletedTestOutcomeJoinsPublicScoredContext()
         // Exercise the real managed SDK/build/test/coverage route; native SDK
         // identity certification remains the separate existing native controls.
-        => RunCase(failing, false, policyScope: "all", local: true, partial: failing, includeTests: true, nativeSdkIdentity: false);
+        => RunCase(false, false, policyScope: "all", local: true, includeTests: true, nativeSdkIdentity: false);
+
+    [Fact]
+    public Task IncludedFailedTestOutcomeJoinsPublicScoredContext()
+        => RunCase(true, false, policyScope: "all", local: true, partial: true, includeTests: true, nativeSdkIdentity: false);
 
     [Theory]
     [InlineData(false)]

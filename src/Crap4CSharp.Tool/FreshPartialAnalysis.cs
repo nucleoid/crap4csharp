@@ -127,6 +127,7 @@ internal static class FreshPartialAnalysis
         catch (Exception error) when (error is ProjectContextException or PolicyException or IOException or UnauthorizedAccessException or
             ArgumentException or InvalidOperationException or OperationCanceledException or ProcessTimeoutException)
         {
+            FreshPrivateFailureEvidence.TryRetain(evidence.PrivateDirectory, error, token);
             // Preserve the original raw outcomes and fail closed without stale metrics.
             var reason = error is OperationCanceledException ? "coverage.partialAnalysisCancelled" :
                 error is ProcessTimeoutException ? "coverage.partialAnalysisTimedOut" :
