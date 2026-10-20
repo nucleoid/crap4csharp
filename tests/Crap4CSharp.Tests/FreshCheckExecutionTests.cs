@@ -505,14 +505,16 @@ public sealed class FreshCheckExecutionTests
         if (hasGenerated) fixture.Write("Library/obj/Extra.cs", "public static class Extra { public static int Value => 42; }");
         if (coordinatorOnly) fixture.Write("Library/NoRuntime.cs", "#if NOT_DEFINED\npublic class Inactive {}\n#endif\n");
         fixture.Write("Tests/Tests.csproj", """
-            <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><IsPackable>false</IsPackable></PropertyGroup>
+            <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><IsPackable>false</IsPackable>INCLUDE_TESTS_OPTIONS</PropertyGroup>
             <ItemGroup><PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" PrivateAssets="all" />
             <PackageReference Include="xunit.v3" Version="3.2.2" PrivateAssets="all" />
             <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" PrivateAssets="all" />
             <PackageReference Include="coverlet.collector" Version="6.0.4" PrivateAssets="all" />
             <ProjectReference Include="../Library/Library.csproj" /></ItemGroup>
             COUNTER</Project>
-            """.Replace("COUNTER", counter, StringComparison.Ordinal));
+            """.Replace("COUNTER", counter, StringComparison.Ordinal)
+                .Replace("INCLUDE_TESTS_OPTIONS", includeTests
+                    ? "<XunitRegisterBuiltInRunnerReporters>false</XunitRegisterBuiltInRunnerReporters>" : "", StringComparison.Ordinal));
         fixture.Write("Tests/Tests.cs", "using Xunit; public class Once { [Fact] public void Test() { " +
             (outputMutation is null ? "" : "var p = System.IO.Path.GetFullPath(\"../../../../Library/compiler-cache/" +
                 (outputMutation == "source" ? "Authored.cs" : "Rules.json") +
