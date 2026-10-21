@@ -87,6 +87,8 @@ internal static class CompilerRecipePayload
         var projection = Classify(observation, workspaceRoot, token);
         if (!projection.IsSupported) throw Refuse();
         var observed = observation.InvocationRecipe!;
+        var assembly = observation.Assembly ?? throw Refuse();
+        var pdb = observation.Pdb ?? throw Refuse();
         var sourceParameter = observation.Parameters.Single(input => input.Name == "Sources");
         var actualReferences = CompilerReferenceSnapshot.ResolveSemanticReferences(observation, token);
         if (sourceParameter.Items.Count != sources.Count || references.Count != actualReferences.Count) throw Refuse();
@@ -134,7 +136,7 @@ internal static class CompilerRecipePayload
             scalarArguments = projection.ScalarArguments, sources = sourceRows, references = referenceRows,
             embeddedSourcePaths = projection.EmbeddedSourcePaths,
             compilerCommon = FileRow(common), compilerCSharp = FileRow(csharp),
-            assembly = Output(observation.Assembly, buildId + "-pe"), pdb = Output(observation.Pdb, buildId + "-pdb"),
+            assembly = Output(assembly, buildId + "-pe"), pdb = Output(pdb, buildId + "-pdb"),
             referenceAssembly = observation.ReferenceAssembly is { } referenceOutput ? new
                 { compilerPath = referenceOutput.Path, referenceOutput.Length, sha256 = "sha256:" + referenceOutput.Sha256 } : null,
             observedClosureArtifacts = files.Where(file => file.Role is not ("compiler-common" or "compiler-csharp")).Select(FileRow).ToArray(),
