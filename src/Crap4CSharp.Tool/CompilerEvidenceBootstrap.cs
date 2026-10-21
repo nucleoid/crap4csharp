@@ -14,7 +14,8 @@ internal static class CompilerEvidenceBootstrap
             var request = JsonSerializer.Deserialize<CompilerReadRequest>(await File.ReadAllTextAsync(requestPath, token), ProjectContextLoader.JsonOptions)
                 ?? throw new InvalidDataException();
             MSBuildLocator.RegisterMSBuildPath(request.SdkPath);
-            response = new(CompilerBinlogReader.Read(request, token), null);
+            var observed = CompilerBinlogReader.Read(request, token);
+            response = new(observed, null) { CommandLineArguments = observed.CommandLineArguments, EmitParameters = observed.EmitParameters };
         }
         catch (OperationCanceledException) { response = new(null, "compiler.cancelled"); }
         catch (ProjectContextException exception) { response = new(null, exception.Reason); }

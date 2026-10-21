@@ -25,7 +25,11 @@ internal static class FreshPriorBuild
     internal sealed record SavedOutput(SavedPath Path, string Sha256, long Length);
     internal sealed record SavedCopy(SavedPath Source, SavedPath Destination);
     internal sealed record SavedNode(string Id, SavedParameter[] Parameters, SavedOutput Assembly,
-        SavedOutput Pdb, SavedOutput? ReferenceAssembly, SavedCopy[] Copies);
+        SavedOutput Pdb, SavedOutput? ReferenceAssembly, SavedCopy[] Copies)
+    {
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public CompilerRetainedRecipe? CompilerRecipe { get; init; }
+    }
     internal sealed record Recipe(string Provider, string Workspace, string PhaseHash, SavedNode[] Nodes);
 
     internal static ImmutableArray<byte> Capture(FreshExecutionEvidence execution, CancellationToken token)
@@ -41,6 +45,8 @@ internal static class FreshPriorBuild
         {
             token.ThrowIfCancellationRequested();
             var observed = observations[node.Id];
+            var binding = graph.GraphContexts.Single(item => item.GraphId == node.Id);
+            var recipeEligible = !binding.IsTestProject || binding.Context.ExclusionPolicy.IncludeTests;
             var directory = Path.GetDirectoryName(node.ProjectPath)!;
             return new SavedNode(node.Id, observed.Parameters.Select(p => new SavedParameter(p.Name,
                     p.Items.Select(i => SavePath(root, Path.GetFullPath(i, directory))).ToArray())
@@ -50,7 +56,8 @@ internal static class FreshPriorBuild
                 Output(observed.Assembly ?? throw Refuse()), Output(observed.Pdb ?? throw Refuse()),
                 observed.ReferenceAssembly is null ? null : Output(observed.ReferenceAssembly),
                 observed.RuntimeCopies.Where(c => targets.Contains(c.Source))
-                    .Select(c => new SavedCopy(SavePath(root, c.Source), SavePath(root, c.Destination))).ToArray());
+                    .Select(c => new SavedCopy(SavePath(root, c.Source), SavePath(root, c.Destination))).ToArray())
+                { CompilerRecipe = !recipeEligible || observed.InvocationRecipe is null ? null : CompilerRecipePayload.Retain(observed, root, token) };
         }).ToArray();
         var data = JsonSerializer.SerializeToUtf8Bytes(new Recipe(Provider, PathKey(root), Fingerprint(graph, token), nodes), Json);
         if (data.Length > MaximumBytes) throw Refuse();
@@ -136,6 +143,19 @@ internal static class FreshPriorBuild
                 ReferenceAssembly = saved.ReferenceAssembly is null ? null : Output(saved.ReferenceAssembly),
                 RuntimeCopies = saved.Copies.Select(c => c is null ? throw Refuse() : new CompilerCopy(Resolve(c.Source), Resolve(c.Destination))).ToArray()
             };
+            if (saved.CompilerRecipe is { } retained)
+            {
+                var supported = bundle.Manifest.Artifacts.Where(artifact => artifact.BuildId == "build-" + saved.Id && artifact.Kind == CompilerRecipePayload.Kind).ToArray();
+                var unsupported = bundle.Manifest.Artifacts.Where(artifact => artifact.BuildId == "build-" + saved.Id && artifact.Kind == CompilerRecipePayload.UnsupportedKind).ToArray();
+                var expectedKind = retained.UnsupportedReasons?.Count == 0 ? CompilerRecipePayload.Kind : CompilerRecipePayload.UnsupportedKind;
+                var selected = supported.Concat(unsupported).ToArray();
+                if (selected.Length != 1 || selected[0].Kind != expectedKind || selected[0].ContextId != LogicalContextIdentity.Create(root, node) ||
+                    selected[0].ExecutionId is not null || selected[0].Format != "json" || selected[0].CoordinateKind is not null) throw Refuse();
+                observation = CompilerRecipePayload.Restore(retained, observation, root, graph.SelectedSdk ?? throw Refuse(), token);
+            }
+            else if (bundle.Manifest.Artifacts.Any(artifact => artifact.BuildId == "build-" + saved.Id &&
+                artifact.Kind is CompilerRecipePayload.Kind or CompilerRecipePayload.UnsupportedKind or CompilerRecipePayload.ImageKind or CompilerRecipePayload.ClosureKind))
+                throw Refuse(); // A required recipe cannot disappear on prior-graph import.
             if (!accepted.TryAdd(saved.Id, observation)) throw Refuse();
         }
         return accepted;

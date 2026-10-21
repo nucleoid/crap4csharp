@@ -43,6 +43,46 @@ public sealed class CompilerEvidenceTests
             Assert.Single(observed.Parameters, p => p.Name == "References");
             Assert.NotNull(observed.Assembly);
             Assert.NotNull(observed.Pdb);
+            var recipe = Assert.IsType<CompilerInvocationObservation>(observed.InvocationRecipe);
+            Assert.NotEmpty(recipe.Arguments);
+            Assert.Equal("selected-sdk-core-target", recipe.TaskBinding);
+            Assert.Contains(recipe.CommandBinding, new[] { "selected-host-exec-csc-arguments-match", "selected-sdk-csc-exe-arguments-match" });
+            var imageRoles = new[] { "dotnet-host", "csc", "compiler-common", "compiler-csharp", "compiler-deps", "compiler-runtimeconfig", "sdk-csc-target", "sdk-csc-task" };
+            Assert.Equal(OperatingSystem.IsWindows() ? imageRoles.Append("csc-launcher") : imageRoles,
+                recipe.Images.Select(image => image.Role));
+            Assert.All(recipe.Images, image => { Assert.True(image.Length > 0); Assert.Equal(64, image.Sha256.Length); });
+            Assert.Equal(new[] { "recipe.loadedCompilerAndTaskImageNotAttested", "recipe.runtimeLoadedImageNotAttested" }, recipe.UnsupportedReasons);
+            var projected = CompilerRecipePayload.ProjectArguments(observed, fixture.Path, TestContext.Current.CancellationToken);
+            Assert.Equal(sources.Items.Count, projected.ArgumentRoles.Count(role => role.Role == "source"));
+            Assert.Equal(observed.CommandLineArguments.Count, projected.ArgumentRoles.Count);
+            Assert.Equal(CompilerRecipeObservation.Identities(observed.CommandLineArguments, TestContext.Current.CancellationToken), recipe.Arguments);
+            var captured = CompilerRecipePayload.CaptureFiles(observed, graph.GraphContexts.Single(binding => binding.GraphId == node.Id).Context,
+                "actual-build", path => System.Collections.Immutable.ImmutableArray.Create(File.ReadAllBytes(path)), TestContext.Current.CancellationToken);
+            Assert.Equal(CompilerRecipePayload.ExpectedFiles(observed, "actual-build").Select(file => file.Id), captured.Select(file => file.Id));
+            Assert.All(captured.Where(file => file.Role is "compiler-common" or "compiler-csharp"), file =>
+                Assert.Equal(observed.CompilerImages.Single(image => image.Role == file.Role).Sha256, file.Sha256));
+            ManifestInput CapturedInput(string role, string logical, string path)
+            {
+                var content = File.ReadAllBytes(path); var sha = ProjectAnalysisContext.ContentHash(content);
+                return new(role, logical, "inputs/" + sha + ".bin", content.Length, sha, role == "compiler-source" ? "utf-8" : null, false);
+            }
+            var sourceMap = sources.Items.Select((path, index) => (Path: Path.GetFullPath(path, Path.GetDirectoryName(node.ProjectPath)!), Index: index))
+                .ToDictionary(item => item.Path, item => CapturedInput("compiler-source", "captured/" + item.Index + ".cs", item.Path), PathIdentityPolicy.Current.Comparer);
+            var recipeReferences = CompilerReferenceSnapshot.ResolveSemanticReferences(observed, TestContext.Current.CancellationToken).Select(reference =>
+            {
+                var row = CapturedInput("reference", "pending", reference.Path);
+                return row with { LogicalPath = CompilerReferenceSnapshot.LogicalReference(row.Sha256, reference.Aliases, reference.EmbedInteropTypes),
+                    ReferenceAliases = reference.Aliases, EmbedInteropTypes = reference.EmbedInteropTypes ? true : null };
+            }).ToArray();
+            var recipeBytes = CompilerRecipePayload.Create(observed, "actual-context", "actual-build", fixture.Path,
+                sourceMap, recipeReferences, captured, TestContext.Current.CancellationToken);
+            var roundTrip = CompilerRecipePayload.Create(observed, "actual-context", "actual-build", fixture.Path,
+                sourceMap, recipeReferences, captured, TestContext.Current.CancellationToken);
+            Assert.Equal(recipeBytes, roundTrip);
+            using var document = System.Text.Json.JsonDocument.Parse(recipeBytes.ToArray());
+            Assert.Equal(sources.Items.Count, document.RootElement.GetProperty("sources").GetArrayLength());
+            Assert.Equal(recipeReferences.Length, document.RootElement.GetProperty("references").GetArrayLength());
+            Assert.Equal(observed.Assembly.Sha256, document.RootElement.GetProperty("assembly").GetProperty("sha256").GetString()![7..]);
             Assert.Equal(ProjectAnalysisContext.ContentHash(File.ReadAllBytes(observed.Assembly.Path)), observed.Assembly.Sha256);
             Assert.Equal(ProjectAnalysisContext.ContentHash(File.ReadAllBytes(observed.Pdb.Path)), observed.Pdb.Sha256);
             Assert.Contains(node.ProjectPath == dep ? "Debug" : "Release", observed.Assembly.Path, StringComparison.Ordinal);

@@ -9,7 +9,8 @@ internal sealed record FreshCapturedBundle(RunManifest Manifest, IReadOnlyDictio
 }
 
 // Capture from already accepted private execution. No raw command properties/binlogs,
-// inferred warm builds, runtime-load attestation or reusable membership recipe.
+// inferred warm builds or runtime-load attestation. The typed recipe is input DATA,
+// not a membership/coverage capability or authorization to load captured code.
 internal static class FreshManifestCapture
 {
     internal static Task<FreshCapturedBundle> CaptureAsync(FreshExecutionEvidence execution, CancellationToken cancellation,
@@ -139,6 +140,8 @@ internal static class FreshManifestCapture
             var pdbPaths = inspected.Documents.Keys.Select(p => Path.GetFullPath(p, Path.GetDirectoryName(binding.ProjectPath)!))
                 .ToHashSet(PathIdentityPolicy.Current.Comparer);
             var inputs = new List<ManifestInput>();
+            var recipeSources = new Dictionary<string, ManifestInput>(PathIdentityPolicy.Current.Comparer);
+            var recipeReferences = new List<ManifestInput>();
             foreach (var source in context.CompilerDocuments)
             {
                 var content = ReadCaptured(source.ResolvedPath!, ref readTotal, cancellation);
@@ -146,15 +149,17 @@ internal static class FreshManifestCapture
                 _ = CapturedSource.Create(source.LogicalPath, content.AsSpan());
                 // A valid Csc source need not have a PDB document. Preserve it in the
                 // closure without inventing a document or asking replay to bind it.
-                inputs.Add(Input(pdbPaths.Contains(source.ResolvedPath!) ? "source" : "compiler-source",
-                    source.LogicalPath, content, source.IsGenerated, RepositoryPath(source.ResolvedPath!)));
+                var input = Input(pdbPaths.Contains(source.ResolvedPath!) ? "source" : "compiler-source",
+                    source.LogicalPath, content, source.IsGenerated, RepositoryPath(source.ResolvedPath!));
+                inputs.Add(input); recipeSources.Add(Path.GetFullPath(source.ResolvedPath!), input);
             }
             foreach (var reference in CompilerReferenceSnapshot.ResolveSemanticReferences(observation, cancellation))
             {
                 var content = ReadCaptured(reference.Path, ref readTotal, cancellation);
-                inputs.Add(Input("reference", CompilerReferenceSnapshot.LogicalReference(CanonicalIdentity.Sha256(content.AsSpan()),
+                var input = Input("reference", CompilerReferenceSnapshot.LogicalReference(CanonicalIdentity.Sha256(content.AsSpan()),
                     reference.Aliases, reference.EmbedInteropTypes), content) with
-                    { ReferenceAliases = reference.Aliases, EmbedInteropTypes = reference.EmbedInteropTypes ? true : null });
+                    { ReferenceAliases = reference.Aliases, EmbedInteropTypes = reference.EmbedInteropTypes ? true : null };
+                inputs.Add(input); recipeReferences.Add(input);
             }
             var phaseIdentities = new List<object>();
             foreach (var phase in context.PhaseInputs.Where(i => i.Role != "source"))
@@ -213,6 +218,22 @@ internal static class FreshManifestCapture
             };
             contexts.Add(captured);
             var buildId = "build-" + binding.GraphId;
+            if (observation.InvocationRecipe is not null)
+            {
+                var profile = CompilerRecipePayload.Classify(observation, preflight.Root, cancellation);
+                if (!profile.IsSupported)
+                    Artifact(buildId + "-recipe-unsupported", CompilerRecipePayload.UnsupportedKind,
+                        CompilerRecipePayload.Unsupported(observation, contextId, buildId, profile, cancellation), contextId, buildId, format: "json");
+                else
+                {
+                    var recipeFiles = CompilerRecipePayload.CaptureFiles(observation, context, buildId,
+                        path => ReadCaptured(path, ref readTotal, cancellation), cancellation);
+                    foreach (var file in recipeFiles)
+                        Artifact(file.Id, CompilerRecipePayload.FileKind(file), file.Bytes, contextId, buildId);
+                    Artifact(buildId + "-recipe", CompilerRecipePayload.Kind, CompilerRecipePayload.Create(observation,
+                        contextId, buildId, preflight.Root, recipeSources, recipeReferences, recipeFiles, cancellation), contextId, buildId, format: "json");
+                }
+            }
             Artifact(buildId + "-closure", "compiler-input-closure", ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(new
                 { provider = "validated-csc-inputs-v1", metadata = phaseIdentities, reusableRecipe = false })), contextId, buildId, format: "json");
             builds.Add(new(buildId, contextId, inspected.ModuleIdentity, CanonicalIdentity.Sha256(assembly.AsSpan()),

@@ -2727,6 +2727,18 @@ public sealed class FreshCheckExecutionTests
                 Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "build-count.txt")));
                 var secondBundle = ArtifactBundle.Load(Path.Combine(fixture.Path, "bundle-next", "manifest.json"), fixture.Path);
                 Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(secondBundle.Manifest, secondBundle.Bytes).Status);
+                var inputRecipe = Assert.Single(bundle.Manifest.Artifacts, artifact => artifact.Kind == CompilerRecipePayload.Kind);
+                var importedRecipe = Assert.Single(secondBundle.Manifest.Artifacts, artifact => artifact.Kind == CompilerRecipePayload.Kind);
+                Assert.Equal(inputRecipe.ContextId, importedRecipe.ContextId); Assert.Equal(inputRecipe.BuildId, importedRecipe.BuildId);
+                Assert.Equal(bundle.Bytes[inputRecipe.Locator], secondBundle.Bytes[importedRecipe.Locator]);
+                var recipeFiles = bundle.Manifest.Artifacts.Where(artifact => artifact.Kind is CompilerRecipePayload.ImageKind or CompilerRecipePayload.ClosureKind).ToArray();
+                Assert.Equal(2, recipeFiles.Count(artifact => artifact.Kind == CompilerRecipePayload.ImageKind));
+                Assert.All(recipeFiles, artifact =>
+                {
+                    var restored = Assert.Single(secondBundle.Manifest.Artifacts, item => item.Id == artifact.Id);
+                    Assert.Equal(artifact.Sha256, restored.Sha256);
+                    Assert.Equal(bundle.Bytes[artifact.Locator], secondBundle.Bytes[restored.Locator]);
+                });
                 using var secondTerminal = JsonDocument.Parse(secondOutput.ToString());
                 Assert.Contains(secondTerminal.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
                     c => c.GetProperty("name").GetString() == "testExecution" && c.GetProperty("status").GetString() == "pass");
@@ -2773,6 +2785,7 @@ public sealed class FreshCheckExecutionTests
                 var copiedLibrary = Assert.Single(Directory.GetFiles(Path.Combine(fixture.Path, "Tests", "bin"), "Library.dll", SearchOption.AllDirectories));
                 await RejectMutation("runtime-copy", copiedLibrary);
                 await RejectMutation("recipe", Path.GetFullPath(recipeArtifact.Locator, Path.Combine(fixture.Path, "bundle")));
+                await RejectMutation("compiler-input-recipe", Path.GetFullPath(inputRecipe.Locator, Path.Combine(fixture.Path, "bundle")));
             }
             if (hasGenerated)
             {

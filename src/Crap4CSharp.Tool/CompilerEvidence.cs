@@ -1,8 +1,9 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Crap4CSharp.Core;
 
-// Physical paths and raw property values are private execution transport, not exported evidence.
+// Private execution transport. Only explicitly typed, bound compiler-path DATA is exported by the recipe.
 internal sealed record CompilerParameter(string Name, IReadOnlyList<string> Items)
 {
     public IReadOnlyList<CompilerReferenceProperties> ReferenceProperties { get; init; } = [];
@@ -19,9 +20,30 @@ internal sealed record CompilerObservation(string ProjectPath, IReadOnlyList<Com
     internal CompilerOutput? Assembly { get; init; }
     internal CompilerOutput? Pdb { get; init; }
     internal CompilerOutput? ReferenceAssembly { get; init; }
+    public CompilerInvocationObservation? InvocationRecipe { get; init; }
+    // Raw argv stays in private worker transport. The exporter admits each known
+    // scalar/role before serialization; unknown option values are never exported.
+    [JsonIgnore]
+    public IReadOnlyList<string> CommandLineArguments { get; init; } = [];
+    [JsonIgnore]
+    public IReadOnlyList<CompilerParameter> EmitParameters { get; init; } = [];
+    [JsonIgnore]
+    public IReadOnlyList<CompilerImageFile> CompilerImages { get; init; } = [];
+    // Set only by the existing prior-graph loader after its complete current
+    // workspace/parameter/output gates. This is retained DATA, never a fresh Csc.
+    [JsonIgnore]
+    internal IReadOnlyList<string>? RetainedUnsupportedRecipe { get; init; }
 }
-internal sealed record CompilerReadRequest(string SdkPath, string Binlog, string ProjectPath);
-internal sealed record CompilerReadResponse(CompilerObservation? Observation, string? FailureReason);
+internal sealed record CompilerReadRequest(string SdkPath, string Binlog, string ProjectPath)
+{
+    public string? HostPath { get; init; }
+}
+// Only this private worker envelope may serialize raw task argv/emit inputs.
+internal sealed record CompilerReadResponse(CompilerObservation? Observation, string? FailureReason)
+{
+    public IReadOnlyList<string> CommandLineArguments { get; init; } = [];
+    public IReadOnlyList<CompilerParameter> EmitParameters { get; init; } = [];
+}
 internal static class CompilerEvidence
 {
     internal const string Command = "__crap4csharp-compiler-evidence-v1";
@@ -53,7 +75,9 @@ internal static class CompilerEvidence
         arguments.AddRange(MappedGlobalArguments.Create(node.GlobalProperties));
         arguments.Add("-p:BuildProjectReferences=false");
         arguments.Add("-p:UseSharedCompilation=false");
+        arguments.Add("-p:ProvideCommandLineArgs=true");
         arguments.Add("-bl:" + log + ";ProjectImports=None");
+        var compilerImages = await CaptureCompilerImages(sdk, token);
         LoggedProcessResult process;
         using (timing?.Start("execution.build.process"))
             process = await ProcessRunner.RunLoggedAsync(sdk.HostPath, arguments, Path.GetDirectoryName(node.ProjectPath)!,
@@ -63,6 +87,13 @@ internal static class CompilerEvidence
         CompilerObservation observation;
         using (timing?.Start("execution.build.evidence"))
             observation = await ReadAsync(log, node.ProjectPath, timeout, token, nativeProbe, sdk);
+        var closingImages = await CaptureCompilerImages(sdk, token);
+        if (!compilerImages.SequenceEqual(closingImages))
+            throw new ProjectContextException("compiler.recipeImagesChanged", "Selected compiler inputs changed across the actual build.");
+        if (observation.InvocationRecipe is { } recipe)
+            observation = observation with { InvocationRecipe = recipe with
+                { Images = compilerImages.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() },
+                CompilerImages = compilerImages };
         using var outputTiming = timing?.Start("execution.build.outputs");
         var output = observation.Parameters.Single(p => p.Name == "OutputAssembly").Items.Single();
         var assembly = Path.GetFullPath(output, Path.GetDirectoryName(node.ProjectPath)!);
@@ -96,7 +127,7 @@ internal static class CompilerEvidence
             var request = Path.Combine(scratch, "request.json");
             var response = Path.Combine(scratch, "response.json");
             await File.WriteAllTextAsync(request, JsonSerializer.Serialize(new CompilerReadRequest(sdk.Path,
-                Path.GetFullPath(binlog), Path.GetFullPath(project)), ProjectContextLoader.JsonOptions), token);
+                Path.GetFullPath(binlog), Path.GetFullPath(project)) { HostPath = sdk.HostPath }, ProjectContextLoader.JsonOptions), token);
             var process = await ProcessRunner.RunProtocolAsync(sdk.HostPath,
                 [typeof(CompilerEvidence).Assembly.Location, Command, request, response], Path.GetDirectoryName(project)!, timeout,
                 token, maximumBytesPerStream: 4096);
@@ -106,9 +137,37 @@ internal static class CompilerEvidence
             if (result?.FailureReason is { } reason) throw new ProjectContextException(reason, "Actual compiler evidence was refused.");
             if (process.ExitCode != 0 || result?.Observation is null)
                 throw new ProjectContextException("compiler.protocolInvalid", "Compiler worker failed.");
-            return result.Observation;
+            return result.Observation with { CommandLineArguments = result.CommandLineArguments, EmitParameters = result.EmitParameters };
         }
         finally { Directory.Delete(scratch, true); }
+    }
+
+    private static async Task<IReadOnlyList<CompilerImageFile>> CaptureCompilerImages(ProjectContextSdkResolution sdk, CancellationToken token)
+    {
+        var result = new List<CompilerImageFile>();
+        foreach (var (role, path) in CompilerImagePaths(sdk))
+        {
+            token.ThrowIfCancellationRequested();
+            var file = await HashOutput(path, token);
+            result.Add(new(role, file.Path, file.Length, file.Sha256));
+        }
+        return result.AsReadOnly();
+    }
+
+    // Exactly the current SDK-selected pool, not paths supplied by a saved recipe.
+    internal static IReadOnlyList<(string Role, string Path)> CompilerImagePaths(ProjectContextSdkResolution sdk)
+    {
+        List<(string, string)> paths = [
+            ("dotnet-host", sdk.HostPath),
+            ("csc", Path.Combine(sdk.Path, "Roslyn", "bincore", "csc.dll")),
+            ("compiler-common", Path.Combine(sdk.Path, "Roslyn", "bincore", "Microsoft.CodeAnalysis.dll")),
+            ("compiler-csharp", Path.Combine(sdk.Path, "Roslyn", "bincore", "Microsoft.CodeAnalysis.CSharp.dll")),
+            ("compiler-deps", Path.Combine(sdk.Path, "Roslyn", "bincore", "csc.deps.json")),
+            ("compiler-runtimeconfig", Path.Combine(sdk.Path, "Roslyn", "bincore", "csc.runtimeconfig.json")),
+            ("sdk-csc-target", Path.Combine(sdk.Path, "Roslyn", "Microsoft.CSharp.Core.targets")),
+            ("sdk-csc-task", Path.Combine(sdk.Path, "Roslyn", "Microsoft.Build.Tasks.CodeAnalysis.dll"))];
+        if (OperatingSystem.IsWindows()) paths.Add(("csc-launcher", Path.Combine(sdk.Path, "Roslyn", "bincore", "csc.exe")));
+        return paths;
     }
 
     private static async Task<CompilerOutput> HashOutput(string path, CancellationToken token)

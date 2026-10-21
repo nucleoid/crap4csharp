@@ -79,6 +79,18 @@ internal static class SavedProductionExecutions
                 Match(buildId + "-pdb", "pdb", pdb, null, null, null);
                 // Closure metadata is not executable XML and is not a reusable input recipe.
                 Read(buildId + "-closure", "compiler-input-closure", null, "json", null);
+                if (observation.InvocationRecipe is not null)
+                {
+                    var profile = CompilerRecipePayload.Classify(observation, root, token);
+                    if (!profile.IsSupported)
+                        Read(buildId + "-recipe-unsupported", CompilerRecipePayload.UnsupportedKind, null, "json", null);
+                    else
+                    {
+                        Read(buildId + "-recipe", CompilerRecipePayload.Kind, null, "json", null);
+                        foreach (var file in CompilerRecipePayload.ExpectedFiles(observation, buildId))
+                            Read(file.Id, file.Kind, null, null, null);
+                    }
+                }
                 foreach (var saved in required.Where(t => Reaches(t.GraphId, binding.GraphId, new(StringComparer.Ordinal))))
                 {
                     var id = "test-" + binding.GraphId + "-" + saved.GraphId;
