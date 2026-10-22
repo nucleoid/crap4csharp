@@ -30,6 +30,9 @@ internal sealed record CompilerObservation(string ProjectPath, IReadOnlyList<Com
     public IReadOnlyList<CompilerParameter> EmitParameters { get; init; } = [];
     [JsonIgnore]
     public IReadOnlyList<CompilerImageFile> CompilerImages { get; init; } = [];
+    // Private same-task diagnostic only; never public observation/recipe/prior DATA.
+    [JsonIgnore]
+    public string? CommandRouteDiagnostic { get; init; }
     // Set only by the existing prior-graph loader after its complete current
     // workspace/parameter/output gates. This is retained DATA, never a fresh Csc.
     [JsonIgnore]
@@ -42,6 +45,8 @@ internal sealed record CompilerReadRequest(string SdkPath, string Binlog, string
 // Only this private worker envelope may serialize raw task argv/emit inputs.
 internal sealed record CompilerReadResponse(CompilerObservation? Observation, string? FailureReason)
 {
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CommandRouteDiagnostic { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? CommandLineArguments { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -142,7 +147,8 @@ internal static class CompilerEvidence
             if (result?.FailureReason is { } reason) throw new ProjectContextException(reason, "Actual compiler evidence was refused.");
             if (process.ExitCode != 0 || result?.Observation is null)
                 throw new ProjectContextException("compiler.protocolInvalid", "Compiler worker failed.");
-            return result.Observation with { CommandLineArguments = result.CommandLineArguments ?? [], EmitParameters = result.EmitParameters ?? [] };
+            return result.Observation with { CommandLineArguments = result.CommandLineArguments ?? [], EmitParameters = result.EmitParameters ?? [],
+                CommandRouteDiagnostic = CompilerRecipeObservation.NormalizeCommandRouteDiagnostic(result.CommandRouteDiagnostic) };
         }
         finally { Directory.Delete(scratch, true); }
     }

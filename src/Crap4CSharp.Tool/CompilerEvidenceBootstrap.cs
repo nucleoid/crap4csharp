@@ -15,7 +15,8 @@ internal static class CompilerEvidenceBootstrap
                 ?? throw new InvalidDataException();
             MSBuildLocator.RegisterMSBuildPath(request.SdkPath);
             var observed = CompilerBinlogReader.Read(request, token);
-            response = new(observed, null) { CommandLineArguments = observed.CommandLineArguments, EmitParameters = observed.EmitParameters };
+            response = new(observed, null) { CommandLineArguments = observed.CommandLineArguments, EmitParameters = observed.EmitParameters,
+                CommandRouteDiagnostic = observed.CommandRouteDiagnostic };
         }
         catch (OperationCanceledException) { response = new(null, "compiler.cancelled"); }
         catch (ProjectContextException exception) { response = new(null, exception.Reason); }
@@ -32,7 +33,14 @@ internal static class CompilerEvidenceBootstrap
         if (response.Observation is { } original) CompilerRecipeObservation.RequireKnownIntegrity(original, token);
         // First preserve the complete mandatory observation under its existing
         // transport bound. Optional argv must not consume that capacity.
-        if (!CompilerRecipeBudget.TrySerialize(response, ProjectContextLoader.JsonOptions, maximumBytes, out var bytes))
+        var fits = CompilerRecipeBudget.TrySerialize(response, ProjectContextLoader.JsonOptions, maximumBytes, out var bytes);
+        if (!fits && response.CommandRouteDiagnostic is not null)
+        {
+            // Diagnostics must not consume existing mandatory/optional transport capacity.
+            response = response with { CommandRouteDiagnostic = null };
+            fits = CompilerRecipeBudget.TrySerialize(response, ProjectContextLoader.JsonOptions, maximumBytes, out bytes);
+        }
+        if (!fits)
         {
             if (response.Observation is { } actual)
                 response = new(CompilerRecipeObservation.OmitForSize(actual), null);

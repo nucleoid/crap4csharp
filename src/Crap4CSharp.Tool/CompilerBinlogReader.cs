@@ -158,7 +158,8 @@ internal static class CompilerBinlogReader
                     Path.GetFullPath(destination[i], Path.GetDirectoryName(request.ProjectPath)!)));
         }
         var result = new CompilerObservation(request.ProjectPath, task.Parameters) { RuntimeCopies = runtime, InvocationRecipe = task.Recipe?.Finish(),
-            CommandLineArguments = task.Recipe?.RawArguments ?? [], EmitParameters = task.Recipe?.SizeDeclined == true ? [] : task.EmitParameters.ToArray() };
+            CommandLineArguments = task.Recipe?.RawArguments ?? [], EmitParameters = task.Recipe?.SizeDeclined == true ? [] : task.EmitParameters.ToArray(),
+            CommandRouteDiagnostic = task.Recipe?.CommandRouteDiagnostic };
         CompilerRecipeObservation.RequireKnownIntegrity(result, token);
         return result;
     }

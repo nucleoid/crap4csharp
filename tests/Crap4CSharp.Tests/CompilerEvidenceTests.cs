@@ -47,7 +47,7 @@ public sealed class CompilerEvidenceTests
             Assert.NotEmpty(recipe.Arguments);
             Assert.Equal("selected-sdk-core-target", recipe.TaskBinding);
             var commandSupported = new[] { "selected-host-exec-csc-arguments-match", "selected-sdk-csc-exe-arguments-match" }.Contains(recipe.CommandBinding, StringComparer.Ordinal);
-            Assert.True(commandSupported, commandSupported ? null : BindingDiagnostic(observed, TestContext.Current.CancellationToken, Path.Combine(directory, "compiler.binlog")));
+            Assert.True(commandSupported, commandSupported ? null : BindingDiagnostic(observed, TestContext.Current.CancellationToken));
             var imageRoles = new[] { "dotnet-host", "csc", "compiler-common", "compiler-csharp", "compiler-deps", "compiler-runtimeconfig", "sdk-csc-target", "sdk-csc-task" };
             Assert.Equal(OperatingSystem.IsWindows() ? imageRoles.Append("csc-launcher") : imageRoles,
                 recipe.Images.Select(image => image.Role));
@@ -110,7 +110,6 @@ public sealed class CompilerEvidenceTests
         var graph = await ProjectContextLoader.DiscoverGraphAsync(request, TestContext.Current.CancellationToken);
         Assert.True(graph.Success, string.Join(" | ", graph.Diagnostics));
         CompilerObservation? rootObservation = null;
-        string? rootCompilerLog = null;
         foreach (var node in graph.BuildGraph)
         {
             var directory = Path.Combine(fixture.Path, "private", node.Id); Directory.CreateDirectory(directory);
@@ -120,12 +119,12 @@ public sealed class CompilerEvidenceTests
             Assert.Equal(ProjectAnalysisContext.ContentHash(File.ReadAllBytes(observed.Pdb.Path)), observed.Pdb.Sha256);
             Assert.Single(observed.Parameters, input => input.Name == "Sources");
             Assert.Single(observed.Parameters, input => input.Name == "References");
-            if (node.ProjectPath == project) { rootObservation = observed; rootCompilerLog = Path.Combine(directory, "compiler.binlog"); }
+            if (node.ProjectPath == project) rootObservation = observed;
         }
         var actual = Assert.IsType<CompilerObservation>(rootObservation);
         Assert.Equal("selected-sdk-core-target", actual.InvocationRecipe!.TaskBinding);
         var commandSupported = new[] { "selected-host-exec-csc-arguments-match", "selected-sdk-csc-exe-arguments-match" }.Contains(actual.InvocationRecipe.CommandBinding, StringComparer.Ordinal);
-        Assert.True(commandSupported, commandSupported ? null : BindingDiagnostic(actual, TestContext.Current.CancellationToken, rootCompilerLog));
+        Assert.True(commandSupported, commandSupported ? null : BindingDiagnostic(actual, TestContext.Current.CancellationToken));
         Assert.Equal(CompilerRecipeObservation.Identities(actual.CommandLineArguments, TestContext.Current.CancellationToken), actual.InvocationRecipe.Arguments);
         if (profile == "multiple-aliases")
         {
@@ -219,10 +218,10 @@ public sealed class CompilerEvidenceTests
             TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
         Assert.Equal("compiler.binlogInvalid", error.Reason);
     }
-    // Failure diagnostics only: fixed tokens from the same actual observation and,
-    // when available, its existing owned binlog. Nothing below admits a recipe.
+    // Fixed same-task DATA from the existing compiler worker only; no replay,
+    // raw path/argv export, supported binding or recipe authority is added.
     internal static string BindingDiagnostic(CompilerObservation observed, CancellationToken token,
-        string? compilerLog = null, IReadOnlyList<string>? projectedReasons = null)
+        IReadOnlyList<string>? projectedReasons = null)
     {
         token.ThrowIfCancellationRequested();
         string[] allowed = ["recipe.bindingUnsupported", "recipe.compilerCommandPrefixUnproven",
@@ -233,50 +232,9 @@ public sealed class CompilerEvidenceTests
             .Where(reason => allowed.Contains(reason, StringComparer.Ordinal)).Distinct(StringComparer.Ordinal).ToList();
         reasons.Add(observed.InvocationRecipe?.CommandBinding == "unproven"
             ? "diagnostic.compilerBinding.unproven" : "diagnostic.compilerBinding.selected");
-        if (compilerLog is null) return string.Join(" ", reasons);
-        try
-        {
-            token.ThrowIfCancellationRequested();
-            using var stream = File.OpenRead(compilerLog);
-            var length = stream.Length;
-            if (length > CompilerEvidence.MaximumBinlogBytes) throw new InvalidDataException();
-            var host = observed.CompilerImages.Single(image => image.Role == "dotnet-host").Path;
-            var csc = observed.CompilerImages.Single(image => image.Role == "csc").Path;
-            var association = observed.InvocationRecipe!.TaskAssociationSha256;
-            var routes = new List<string>(); var count = 0;
-            var events = new Microsoft.Build.Logging.BinaryLogReplayEventSource();
-            events.AnyEventRaised += (_, value) =>
-            {
-                token.ThrowIfCancellationRequested();
-                if (++count > 200000) throw new InvalidDataException();
-                if (value is not Microsoft.Build.Framework.TaskCommandLineEventArgs command || command.TaskName != "Csc") return;
-                var context = command.BuildEventContext;
-                var key = context is null ? "null" : $"{context.SubmissionId}:{context.NodeId}:{context.ProjectContextId}:{context.TargetId}:{context.TaskId}";
-                if (Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(key))) != association) return;
-                if (command.CommandLine.Length > CompilerRecipeBudget.MaximumCharacters) throw new InvalidDataException();
-                var items = Microsoft.CodeAnalysis.CommandLineParser.SplitCommandLineIntoArguments(command.CommandLine, false).Take(32769).ToArray();
-                if (items.Length > 32768) throw new InvalidDataException();
-                routes.Add(items.Length >= 3 && Same(items[0], host) && items[1] == "exec" && Same(items[2], csc)
-                    ? "diagnostic.compilerRoute.selectedHostExec"
-                    : items.Length >= 1 && Same(items[0], Path.Combine(Path.GetDirectoryName(csc)!, "csc.exe"))
-                        ? "diagnostic.compilerRoute.selectedSdkWindowsApphost"
-                        : items.Length >= 1 && Same(items[0], Path.Combine(Path.GetDirectoryName(csc)!, "csc"))
-                            ? "diagnostic.compilerRoute.selectedSdkUnixApphost" : "diagnostic.compilerRoute.other");
-            };
-            events.Replay(stream, token);
-            token.ThrowIfCancellationRequested();
-            if (stream.Length != length) throw new InvalidDataException();
-            reasons.Add(routes.Count == 0 ? "diagnostic.compilerRoute.noEvent"
-                : routes.Count == 1 ? routes[0] : "diagnostic.compilerRoute.multipleEvents");
-        }
-        catch (Exception error) when (error is not OperationCanceledException)
-        {
-            // The original failed binding assertion remains primary.
-            reasons.Add("diagnostic.compilerRoute.unavailable");
-        }
+        reasons.Add(CompilerRecipeObservation.NormalizeCommandRouteDiagnostic(observed.CommandRouteDiagnostic)
+            ?? "diagnostic.compilerRoute.unavailable");
         return string.Join(" ", reasons);
-        static bool Same(string actual, string expected) => Path.IsPathFullyQualified(actual) &&
-            PathIdentityPolicy.Current.Comparer.Equals(Path.GetFullPath(actual), Path.GetFullPath(expected));
     }
 
 }

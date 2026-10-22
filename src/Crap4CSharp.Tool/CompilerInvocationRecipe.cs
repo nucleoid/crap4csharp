@@ -30,6 +30,12 @@ internal sealed class CompilerRecipeObservation(string sdkPath, string? hostPath
     private int argumentEvents, commandEvents;
     private bool commandPrefix;
     private bool executableRoute;
+    internal string CommandRouteDiagnostic { get; private set; } = "diagnostic.compilerRoute.noEvent";
+    internal static string? NormalizeCommandRouteDiagnostic(string? value) => value is
+        "diagnostic.compilerRoute.selectedHostExec" or "diagnostic.compilerRoute.selectedSdkWindowsApphost" or
+        "diagnostic.compilerRoute.selectedSdkUnixApphost" or "diagnostic.compilerRoute.other" or
+        "diagnostic.compilerRoute.noEvent" or "diagnostic.compilerRoute.multipleEvents" or
+        "diagnostic.compilerRoute.unavailable" ? value : null;
     internal IReadOnlyList<string> RawArguments { get; private set; } = [];
     private bool closed, late;
     private readonly HashSet<string> emitNames = new(StringComparer.Ordinal);
@@ -136,16 +142,22 @@ internal sealed class CompilerRecipeObservation(string sdkPath, string? hostPath
     {
         token.ThrowIfCancellationRequested();
         if (!MayObserve()) return;
-        if (++commandEvents != 1) { Unsupported("recipe.duplicateCommandEvent"); return; }
-        if (SizeDeclined || text.Length > CompilerRecipeBudget.MaximumCharacters) { DeclineSize(); return; }
+        if (++commandEvents != 1) { CommandRouteDiagnostic = "diagnostic.compilerRoute.multipleEvents"; Unsupported("recipe.duplicateCommandEvent"); return; }
+        if (SizeDeclined || text.Length > CompilerRecipeBudget.MaximumCharacters) { CommandRouteDiagnostic = "diagnostic.compilerRoute.unavailable"; DeclineSize(); return; }
         // Lexing only. Unlike CSharpCommandLineParser.Parse, this never reads a
         // response/ruleset file or resolves a source/reference from the command.
         var items = CommandLineParser.SplitCommandLineIntoArguments(text, removeHashComments: false).Take(32769).ToArray();
-        if (items.Length > 32768) { DeclineSize(); return; }
+        if (items.Length > 32768) { CommandRouteDiagnostic = "diagnostic.compilerRoute.unavailable"; DeclineSize(); return; }
         commandPrefix = items.Length >= 3 && hostPath is not null && EqualPath(items[0], hostPath) &&
             items[1] == "exec" && EqualPath(items[2], Path.Combine(sdkPath, "Roslyn", "bincore", "csc.dll"));
         executableRoute = items.Length >= 1 && OperatingSystem.IsWindows() &&
             EqualPath(items[0], Path.Combine(sdkPath, "Roslyn", "bincore", "csc.exe"));
+        // Fixed diagnostic DATA only. This does not extend supported command binding.
+        CommandRouteDiagnostic = commandPrefix ? "diagnostic.compilerRoute.selectedHostExec"
+            : items.Length >= 1 && EqualPath(items[0], Path.Combine(sdkPath, "Roslyn", "bincore", "csc.exe"))
+                ? "diagnostic.compilerRoute.selectedSdkWindowsApphost"
+                : items.Length >= 1 && EqualPath(items[0], Path.Combine(sdkPath, "Roslyn", "bincore", "csc"))
+                    ? "diagnostic.compilerRoute.selectedSdkUnixApphost" : "diagnostic.compilerRoute.other";
         if (commandPrefix || executableRoute)
         {
             if (!TryIdentities(items.Skip(executableRoute ? 1 : 3).ToArray(), token, out commandArguments))

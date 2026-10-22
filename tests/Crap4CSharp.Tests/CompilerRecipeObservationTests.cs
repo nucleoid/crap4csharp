@@ -215,6 +215,51 @@ public sealed class CompilerRecipeObservationTests
             CompilerRecipePayload.Classify(observed, fixture.Path, TestContext.Current.CancellationToken)).Reason);
     }
 
+
+    [Fact]
+    public void Route_diagnostic_uses_private_envelope_only_and_rejects_unknown_tokens()
+    {
+        using var fixture = TestDirectory.Create("crap-recipe-private-route-data");
+        var ordinary = SupportedObservation(fixture.Path);
+        const string route = "diagnostic.compilerRoute.selectedSdkUnixApphost";
+        var observed = ordinary with { CommandRouteDiagnostic = route };
+        Assert.Equal(JsonSerializer.Serialize(ordinary, ProjectContextLoader.JsonOptions),
+            JsonSerializer.Serialize(observed, ProjectContextLoader.JsonOptions));
+        Assert.Equal(JsonSerializer.Serialize(CompilerRecipePayload.Retain(ordinary, fixture.Path, TestContext.Current.CancellationToken), ProjectContextLoader.JsonOptions),
+            JsonSerializer.Serialize(CompilerRecipePayload.Retain(observed, fixture.Path, TestContext.Current.CancellationToken), ProjectContextLoader.JsonOptions));
+        var envelope = new CompilerReadResponse(observed, null) { CommandRouteDiagnostic = route };
+        var wire = JsonSerializer.Serialize(envelope, ProjectContextLoader.JsonOptions);
+        Assert.Contains(route, wire, StringComparison.Ordinal);
+        var restored = JsonSerializer.Deserialize<CompilerReadResponse>(wire, ProjectContextLoader.JsonOptions)!;
+        Assert.Null(restored.Observation!.CommandRouteDiagnostic);
+        Assert.Equal(route, CompilerRecipeObservation.NormalizeCommandRouteDiagnostic(restored.CommandRouteDiagnostic));
+        Assert.Contains(route, CompilerEvidenceTests.BindingDiagnostic(observed, TestContext.Current.CancellationToken), StringComparison.Ordinal);
+        const string privateValue = "PRIVATE_UNKNOWN_ROUTE /private/consumer.cs --secret-argument";
+        Assert.Null(CompilerRecipeObservation.NormalizeCommandRouteDiagnostic(privateValue));
+        var safe = CompilerEvidenceTests.BindingDiagnostic(observed with { CommandRouteDiagnostic = privateValue }, TestContext.Current.CancellationToken);
+        Assert.Contains("diagnostic.compilerRoute.unavailable", safe, StringComparison.Ordinal);
+        Assert.DoesNotContain("PRIVATE", safe, StringComparison.Ordinal);
+        Assert.DoesNotContain("/private", safe, StringComparison.Ordinal);
+        Assert.DoesNotContain("--secret", safe, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Optional_route_diagnostic_does_not_consume_existing_worker_capacity()
+    {
+        using var fixture = TestDirectory.Create("crap-recipe-private-route-capacity-data");
+        var ordinary = SupportedObservation(fixture.Path);
+        var original = new CompilerReadResponse(ordinary, null)
+        { CommandLineArguments = ordinary.CommandLineArguments, EmitParameters = ordinary.EmitParameters };
+        var expected = JsonSerializer.SerializeToUtf8Bytes(original, ProjectContextLoader.JsonOptions);
+        var response = original with { CommandRouteDiagnostic = "diagnostic.compilerRoute.selectedHostExec" };
+        var actual = CompilerEvidenceBootstrap.SerializeResponse(ref response, TestContext.Current.CancellationToken, expected.Length);
+        Assert.Equal(expected, actual);
+        Assert.Null(response.CommandRouteDiagnostic);
+        Assert.Same(ordinary, response.Observation);
+        Assert.Equal(ordinary.CommandLineArguments, response.CommandLineArguments);
+        Assert.Equal(ordinary.InvocationRecipe, response.Observation!.InvocationRecipe);
+    }
+
     private static CompilerObservation SupportedObservation(string root)
     {
         var source = Path.Combine(root, "A.cs"); var reference = Path.Combine(root, "Ref.dll"); var output = Path.Combine(root, "out.dll");
