@@ -203,6 +203,7 @@ try{
     foreach($skipCount in @(11,12)){
         $coverage=[ordered]@{schemaVersion='suite-partition-coverage-v1';outcome='passed';identity=$identity;shardCount=2;
             caseCount=60;passed=60-$skipCount;skipped=$skipCount;processControlsRequired=$true;caseSetSha256=('a'*64);receiptSetSha256=('b'*64)}
+        $coverage=$coverage | ConvertTo-Json -Depth 8 | ConvertFrom-Json
         $accepted=$true;try{Assert-SuitePartitionCoverage $coverage}catch{$accepted=$false}
         if($accepted -ne ($skipCount -eq 11)){throw 'Exact Windows declared skip ceiling differs.'}
     }
