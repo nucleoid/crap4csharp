@@ -34,22 +34,28 @@ internal static class CompilerRecipePayload
 
     // This narrow reader never follows a path discovered by lexing argv. Each
     // phase path has already passed CompilerInputBinding and phase reconciliation.
+    internal sealed record FreshFileCapture(IReadOnlyList<File> Files, bool CompilerImagesChanged);
+
+    // Saved verification keeps exact byte equality. Only the fresh optional
+    // caller may replace a current SDK-image drift with unsupported DATA.
     internal static IReadOnlyList<File> CaptureFiles(CompilerObservation observation, ProjectAnalysisContext context,
+        string buildId, Func<string, ImmutableArray<byte>> read, CancellationToken token)
+    {
+        var captured = CaptureFreshFiles(observation, context, buildId, read, token);
+        if (captured.CompilerImagesChanged) throw Refuse();
+        return captured.Files;
+    }
+
+    internal static FreshFileCapture CaptureFreshFiles(CompilerObservation observation, ProjectAnalysisContext context,
         string buildId, Func<string, ImmutableArray<byte>> read, CancellationToken token)
     {
         ValidateObservation(observation, token);
         var images = observation.CompilerImages;
         var count = observation.Parameters.Where(input => input.Name is "Analyzers" or "AnalyzerConfigFiles" or "AdditionalFiles").Sum(input => (long)input.Items.Count);
         if (count + 2 > CompilerPhaseSnapshot.MaximumInputs) throw Refuse();
-        var result = new List<File>();
-        foreach (var role in new[] { "compiler-common", "compiler-csharp" })
-        {
-            token.ThrowIfCancellationRequested();
-            var image = images.Single(item => item.Role == role);
-            var bytes = read(image.Path);
-            if (bytes.Length != image.Length || CanonicalIdentity.Sha256(bytes.AsSpan()) != image.Sha256) throw Refuse();
-            result.Add(new(role, image.Path, buildId + "-recipe-" + role, bytes));
-        }
+        var phaseFiles = new List<File>();
+        // Validate/read every phase input before SDK drift can select absence.
+        // No I/O, cancellation, role mismatch or phase failure is downgraded.
         foreach (var (parameter, role) in new[] { ("Analyzers", "analyzer"), ("AnalyzerConfigFiles", "analyzerConfig"), ("AdditionalFiles", "additionalFile") })
         {
             var actual = observation.Parameters.SingleOrDefault(input => input.Name == parameter)?.Items ?? [];
@@ -59,10 +65,32 @@ internal static class CompilerRecipePayload
             for (var index = 0; index < paths.Length; index++)
             {
                 token.ThrowIfCancellationRequested();
-                result.Add(new(role, paths[index], buildId + "-recipe-" + role + "-" + index.ToString("D4", CultureInfo.InvariantCulture), read(paths[index])));
+                phaseFiles.Add(new(role, paths[index], buildId + "-recipe-" + role + "-" + index.ToString("D4", CultureInfo.InvariantCulture), read(paths[index])));
             }
         }
-        return result.ToArray();
+        var result = new List<File>();
+        var changed = false;
+        foreach (var role in new[] { "compiler-common", "compiler-csharp" })
+        {
+            token.ThrowIfCancellationRequested();
+            var image = images.Single(item => item.Role == role);
+            var bytes = read(image.Path);
+            changed |= bytes.Length != image.Length || CanonicalIdentity.Sha256(bytes.AsSpan()) != image.Sha256;
+            result.Add(new(role, image.Path, buildId + "-recipe-" + role, bytes));
+        }
+        if (changed) return new([], true);
+        result.AddRange(phaseFiles); // Preserve the existing public file order.
+        return new(result.ToArray(), false);
+    }
+
+    internal static CompilerObservation ImagesChangedUnsupported(CompilerObservation observation, CancellationToken token)
+    {
+        CompilerRecipeObservation.RequireKnownIntegrity(observation, token);
+        return observation with { CompilerImages = [], InvocationRecipe = observation.InvocationRecipe! with
+        {
+            Images = [], UnsupportedReasons = observation.InvocationRecipe.UnsupportedReasons.Append("recipe.compilerImagesChanged")
+                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray()
+        } };
     }
 
     internal static IEnumerable<(string Id, string Kind)> ExpectedFiles(CompilerObservation observation, string buildId)
@@ -281,6 +309,7 @@ internal static class CompilerRecipePayload
         token.ThrowIfCancellationRequested();
         _ = CompilerRecipeObservation.Identities(observation.CommandLineArguments, token);
         var root = CanonicalDirectory(workspaceRoot);
+        var unsupported = new HashSet<string>(StringComparer.Ordinal);
         var sourcePaths = observation.Parameters.Single(input => input.Name == "Sources").Items.Select(path => Resolve(path, observation.ProjectPath)).ToArray();
         var references = CompilerReferenceSnapshot.ResolveSemanticReferences(observation, token);
         var embedded = observation.EmitParameters.SingleOrDefault(input => input.Name == "EmbeddedFiles")?.Items.Select(path => Resolve(path, observation.ProjectPath)).ToArray() ?? [];
@@ -297,14 +326,15 @@ internal static class CompilerRecipePayload
             foreach (var item in input.Items)
             {
                 var path = Resolve(item, observation.ProjectPath);
-                if (input.Name == "PdbFile" && !Same(path, observation.Pdb?.Path ?? throw Refuse()) ||
-                    input.Name == "GeneratedFilesOutputPath" && !Inside(path, Path.GetDirectoryName(observation.Assembly?.Path ?? throw Refuse())!)) throw Refuse();
+                if (input.Name == "PdbFile" && !Same(path, observation.Pdb?.Path ?? throw Refuse())) throw Refuse();
+                if (input.Name == "GeneratedFilesOutputPath" && !Inside(path, Path.GetDirectoryName(observation.Assembly?.Path ?? throw Refuse())!))
+                    unsupported.Add("recipe.emitProfileUnsupported");
             }
         }
         var indices = optional.Keys.ToDictionary(key => key, _ => 0, StringComparer.Ordinal);
         var sourceIndex = 0; var referenceIndex = 0; var embeddedIndex = 0; var generated = 0;
         var scalar = new List<string>(); var roles = new List<ArgumentRole>();
-        var unsupported = new HashSet<string>(StringComparer.Ordinal);
+        HashSet<string>? remainingReferenceAliases = null;
         if (sourcePaths.Distinct(PathIdentityPolicy.Current.Comparer).Count() != sourcePaths.Length ||
             embedded.Distinct(PathIdentityPolicy.Current.Comparer).Count() != embedded.Length) throw Refuse();
         if (embedded.Any(path => !sourcePaths.Contains(path, PathIdentityPolicy.Current.Comparer))) unsupported.Add("recipe.emitProfileUnsupported");
@@ -325,8 +355,16 @@ internal static class CompilerRecipePayload
                 var actual = references[referenceIndex]; var equals = value.IndexOf('=');
                 var aliases = equals < 0 ? null : CompilerReferenceSnapshot.NormalizeAliases(value[..equals]);
                 var path = Unquote(equals < 0 ? value : value[(equals + 1)..]);
-                if (!Same(Resolve(path, observation.ProjectPath), actual.Path) || aliases != actual.Aliases || (name == "link") != actual.EmbedInteropTypes) throw Refuse();
-                roles.Add(new(ordinal, "reference", referenceIndex++, name)); continue;
+                if (!Same(Resolve(path, observation.ProjectPath), actual.Path) || (name == "link") != actual.EmbedInteropTypes) throw Refuse();
+                remainingReferenceAliases ??= new(actual.Aliases?.Split(',') ?? ["global"], StringComparer.Ordinal);
+                if (actual.Aliases?.Contains(',') == true) unsupported.Add("recipe.emitProfileUnsupported");
+                // The actual SDK Csc emits one switch per alias; global has
+                // no alias prefix. Require the exact set once before advancing.
+                foreach (var alias in aliases?.Split(',') ?? ["global"])
+                    if (!remainingReferenceAliases.Remove(alias)) throw Refuse();
+                roles.Add(new(ordinal, "reference", referenceIndex, name));
+                if (remainingReferenceAliases.Count == 0) { referenceIndex++; remainingReferenceAliases = null; }
+                continue;
             }
             if (optional.TryGetValue(name, out var inputs))
             {
@@ -342,8 +380,9 @@ internal static class CompilerRecipePayload
             if (name == "generatedfilesout")
             {
                 var declared = observation.EmitParameters.SingleOrDefault(input => input.Name == "GeneratedFilesOutputPath")?.Items;
-                if (++generated != 1 || declared?.Count != 1 || !Same(Resolve(value, observation.ProjectPath), Resolve(declared[0], observation.ProjectPath)) ||
-                    !Inside(Resolve(value, observation.ProjectPath), Path.GetDirectoryName(observation.Assembly?.Path ?? throw Refuse())!)) throw Refuse();
+                if (++generated != 1 || declared?.Count != 1 || !Same(Resolve(value, observation.ProjectPath), Resolve(declared[0], observation.ProjectPath))) throw Refuse();
+                if (!Inside(Resolve(value, observation.ProjectPath), Path.GetDirectoryName(observation.Assembly?.Path ?? throw Refuse())!))
+                    unsupported.Add("recipe.emitProfileUnsupported");
                 roles.Add(new(ordinal, "generated-output", null, name)); continue;
             }
             // A full Unix source starts with '/', so source membership is checked
@@ -364,6 +403,7 @@ internal static class CompilerRecipePayload
             roles.Add(new(ordinal, "scalar", scalar.Count, name)); scalar.Add(argument);
         }
         if (sourceIndex != sourcePaths.Length || referenceIndex != references.Count || !embedAll && embeddedIndex != embedded.Length ||
+            generated != (observation.EmitParameters.SingleOrDefault(input => input.Name == "GeneratedFilesOutputPath")?.Items.Count ?? 0) ||
             optional.Any(pair => indices[pair.Key] != pair.Value.Length) ||
             scalar.Count(argument => argument.StartsWith("/out:", StringComparison.Ordinal)) != 1 ||
             scalar.Count(argument => argument.StartsWith("/refout:", StringComparison.Ordinal)) != (observation.ReferenceAssembly is null ? 0 : 1)) throw Refuse();

@@ -81,6 +81,82 @@ public sealed class CompilerEvidenceTests
     }
 
     [Theory]
+    [InlineData("multiple-aliases")]
+    [InlineData("custom-generated-output")]
+    public async Task Actual_SDK_optional_reference_or_emit_profile_preserves_compiler_capture_as_fixed_unsupported_DATA(string profile)
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-compiler-optional-real");
+        var dependency = fixture.Write("Dependency/Dependency.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>
+            """);
+        var dependencyCode = fixture.Write("Dependency/Code.cs", "public class Dependency {}");
+        var aliases = profile == "multiple-aliases" ? " Aliases=\"Foo,global\"" : "";
+        var generated = profile == "custom-generated-output" ? """
+            <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
+            <CompilerGeneratedFilesOutputPath>$(MSBuildProjectDirectory)/../Generated</CompilerGeneratedFilesOutputPath>
+            """ : "";
+        var project = fixture.Write("Root/Root.csproj", $"""
+            <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework>{generated}</PropertyGroup>
+            <ItemGroup><ProjectReference Include="../Dependency/Dependency.csproj"{aliases} /></ItemGroup></Project>
+            """);
+        var code = fixture.Write("Root/Code.cs", profile == "multiple-aliases"
+            ? "extern alias Foo; public class Root { public Foo::Dependency ViaAlias() => new(); public Dependency ViaGlobal() => new(); }"
+            : "public class Root { public Dependency Value() => new(); }");
+        var original = new[] { dependency, dependencyCode, project, code }.ToDictionary(path => path,
+            path => (Bytes: File.ReadAllBytes(path), Stamp: File.GetLastWriteTimeUtc(path)));
+        var request = new ProjectContextLoadRequest(project, "Release", "AnyCPU", [], false, false, TimeSpan.FromMinutes(2));
+        Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken)).ExitCode);
+        var graph = await ProjectContextLoader.DiscoverGraphAsync(request, TestContext.Current.CancellationToken);
+        Assert.True(graph.Success, string.Join(" | ", graph.Diagnostics));
+        CompilerObservation? rootObservation = null;
+        foreach (var node in graph.BuildGraph)
+        {
+            var directory = Path.Combine(fixture.Path, "private", node.Id); Directory.CreateDirectory(directory);
+            var observed = await CompilerEvidence.BuildAsync(node, directory, TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+            Assert.NotNull(observed.Assembly); Assert.NotNull(observed.Pdb);
+            Assert.Equal(ProjectAnalysisContext.ContentHash(File.ReadAllBytes(observed.Assembly.Path)), observed.Assembly.Sha256);
+            Assert.Equal(ProjectAnalysisContext.ContentHash(File.ReadAllBytes(observed.Pdb.Path)), observed.Pdb.Sha256);
+            Assert.Single(observed.Parameters, input => input.Name == "Sources");
+            Assert.Single(observed.Parameters, input => input.Name == "References");
+            if (node.ProjectPath == project) rootObservation = observed;
+        }
+        var actual = Assert.IsType<CompilerObservation>(rootObservation);
+        Assert.Equal("selected-sdk-core-target", actual.InvocationRecipe!.TaskBinding);
+        Assert.Contains(actual.InvocationRecipe.CommandBinding, new[] { "selected-host-exec-csc-arguments-match", "selected-sdk-csc-exe-arguments-match" });
+        Assert.Equal(CompilerRecipeObservation.Identities(actual.CommandLineArguments, TestContext.Current.CancellationToken), actual.InvocationRecipe.Arguments);
+        if (profile == "multiple-aliases")
+        {
+            var reference = Assert.Single(CompilerReferenceSnapshot.ResolveSemanticReferences(actual, TestContext.Current.CancellationToken), input => input.Aliases == "Foo,global");
+            Assert.Contains(actual.CommandLineArguments, argument => argument.StartsWith("/reference:Foo=", StringComparison.Ordinal));
+            Assert.Contains(actual.CommandLineArguments, argument => argument.StartsWith("/reference:", StringComparison.Ordinal) &&
+                !argument.Contains('=') && Path.GetFullPath(argument["/reference:".Length..].Trim('"'), Path.GetDirectoryName(project)!) == reference.Path);
+        }
+        else
+        {
+            var declared = Assert.Single(Assert.Single(actual.EmitParameters, input => input.Name == "GeneratedFilesOutputPath").Items);
+            var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(declared, Path.GetDirectoryName(project)!));
+            Assert.Equal(Path.GetFullPath(Path.Combine(fixture.Path, "Generated")), full);
+            var relative = Path.GetRelativePath(Path.GetDirectoryName(actual.Assembly!.Path)!, full);
+            Assert.True(relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) || Path.IsPathRooted(relative));
+            Assert.Contains(actual.CommandLineArguments, argument => argument.StartsWith("/generatedfilesout:", StringComparison.Ordinal));
+        }
+        var projection = CompilerRecipePayload.Classify(actual, fixture.Path, TestContext.Current.CancellationToken);
+        Assert.False(projection.IsSupported);
+        Assert.Equal(new[] { "recipe.emitProfileUnsupported" }, projection.UnsupportedReasons);
+        var unsupported = CompilerRecipePayload.Unsupported(actual, "actual-context-DATA", "actual-build-DATA", projection, TestContext.Current.CancellationToken);
+        using var parsed = System.Text.Json.JsonDocument.Parse(unsupported.AsMemory());
+        Assert.Equal("unsupported-input-profile", parsed.RootElement.GetProperty("disposition").GetString());
+        foreach (var absent in new[] { "arguments", "images", "compilerCommon", "compilerCSharp", "scalarArguments", "observedClosureArtifacts" })
+            Assert.False(parsed.RootElement.TryGetProperty(absent, out _));
+        foreach (var (path, saved) in original)
+        {
+            Assert.Equal(saved.Bytes, File.ReadAllBytes(path)); Assert.Equal(saved.Stamp, File.GetLastWriteTimeUtc(path));
+        }
+        // Genuine compiler-task capture plus fixed optional DATA only. This is
+        // not a public quality, baseline, freshness, native-owner or recipe certificate.
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task ActualReferenceOutputParameterAndParentHashAreCaptured(bool captureHash)

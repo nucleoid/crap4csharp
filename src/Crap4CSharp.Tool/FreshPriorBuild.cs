@@ -231,9 +231,7 @@ internal static class FreshPriorBuild
                 if (selected.Length != 1 || selected[0].Kind != expectedKind || selected[0].ContextId != LogicalContextIdentity.Create(root, node) ||
                     selected[0].ExecutionId is not null || selected[0].Format != "json" || selected[0].CoordinateKind is not null) throw Refuse();
                 var sdk = graph.SelectedSdk ?? throw Refuse();
-                var images = retained.Observation?.Images ?? throw Refuse();
-                if (images.Count != 0) RequireCurrentRecipeImages(images, sdk, token);
-                observation = CompilerRecipePayload.Restore(retained, observation, root, sdk, token);
+                observation = RestoreCurrentRecipe(retained, observation, root, sdk, token);
             }
             else if (bundle.Manifest.Artifacts.Any(artifact => artifact.BuildId == "build-" + saved.Id &&
                 artifact.Kind is CompilerRecipePayload.Kind or CompilerRecipePayload.UnsupportedKind or CompilerRecipePayload.ImageKind or CompilerRecipePayload.ClosureKind))
@@ -241,6 +239,17 @@ internal static class FreshPriorBuild
             if (!accepted.TryAdd(saved.Id, observation)) throw Refuse();
         }
         return accepted;
+    }
+
+    internal static CompilerObservation RestoreCurrentRecipe(CompilerRetainedRecipe retained, CompilerObservation prior,
+        string root, ProjectContextSdkResolution sdk, CancellationToken token)
+    {
+        // Validate even unsupported retained data before deciding whether any
+        // current-image claim exists. Unsupported public DATA has no image files.
+        var restored = CompilerRecipePayload.Restore(retained, prior, root, sdk, token);
+        if (retained.UnsupportedReasons.Count == 0 && retained.Observation.Images.Count != 0)
+            RequireCurrentRecipeImages(retained.Observation.Images, sdk, token);
+        return restored;
     }
 
     private static string Fingerprint(ProjectContextLoadResult graph, CancellationToken token)

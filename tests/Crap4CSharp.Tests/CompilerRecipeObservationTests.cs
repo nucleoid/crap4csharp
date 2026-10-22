@@ -563,6 +563,135 @@ public sealed class CompilerRecipeObservationTests
 
     private static string QuoteArgument(string value) => "\"" + value + "\"";
     private static ManifestInput Input(string role, string logical) => new(role, logical, "inputs/" + Hash(logical) + ".bin", 1, Hash(logical), "utf-8", false);
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SDK_per_alias_switches_join_exact_reference_and_remain_unsupported_DATA(bool reverse)
+    {
+        using var fixture = TestDirectory.Create("crap-recipe-multi-alias-data");
+        var observed = SupportedObservation(fixture.Path);
+        var reference = observed.Parameters.Single(input => input.Name == "References").Items.Single();
+        var parameters = observed.Parameters.Select(input => input.Name == "References" ? input with
+            { ReferenceProperties = [new(reference, "Foo,global", false)] } : input).ToArray();
+        string[] aliases = reverse ? ["/reference:" + reference, "/reference:Foo=" + reference] : ["/reference:Foo=" + reference, "/reference:" + reference];
+        observed = RebindArguments(observed with { Parameters = parameters }, observed.CommandLineArguments.Take(6).Concat(aliases).Concat(observed.CommandLineArguments.Skip(7)).ToArray());
+        Assert.Equal(new[] { "recipe.emitProfileUnsupported" }, CompilerRecipePayload.Classify(observed, fixture.Path, TestContext.Current.CancellationToken).UnsupportedReasons);
+        var retained = CompilerRecipePayload.Retain(observed, fixture.Path, TestContext.Current.CancellationToken);
+        Assert.Empty(retained.KnownArguments);
+        Assert.DoesNotContain(reference, Encoding.UTF8.GetString(CompilerRecipePayload.Unsupported(observed, "context", "build",
+            CompilerRecipePayload.Classify(observed, fixture.Path, TestContext.Current.CancellationToken), TestContext.Current.CancellationToken).AsSpan()), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("duplicate")]
+    [InlineData("foreign-alias")]
+    [InlineData("foreign-path")]
+    [InlineData("embed-flag")]
+    public void Unsupported_multi_alias_profile_still_refuses_reference_tamper(string change)
+    {
+        using var fixture = TestDirectory.Create("crap-recipe-multi-alias-integrity-data");
+        var observed = SupportedObservation(fixture.Path);
+        var reference = observed.Parameters.Single(input => input.Name == "References").Items.Single();
+        var parameters = observed.Parameters.Select(input => input.Name == "References" ? input with
+            { ReferenceProperties = [new(reference, "Foo,global", false)] } : input).ToArray();
+        var aliases = new List<string> { "/reference:Foo=" + reference, "/reference:" + reference };
+        if (change == "missing") aliases.RemoveAt(1);
+        if (change == "duplicate") aliases.Insert(1, aliases[0]);
+        if (change == "foreign-alias") aliases[0] = "/reference:Bar=" + reference;
+        if (change == "foreign-path") aliases[1] = "/reference:" + Path.Combine(fixture.Path, "foreign.dll");
+        if (change == "embed-flag") aliases[1] = "/link:" + reference;
+        observed = RebindArguments(observed with { Parameters = parameters }, observed.CommandLineArguments.Take(6).Concat(aliases).Concat(observed.CommandLineArguments.Skip(7)).ToArray());
+        Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() =>
+            CompilerRecipePayload.Classify(observed, fixture.Path, TestContext.Current.CancellationToken)).Reason);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Exact_custom_generated_output_is_unsupported_but_foreign_argument_is_refused(bool foreign)
+    {
+        using var fixture = TestDirectory.Create("crap-recipe-generated-output-data");
+        var observed = SupportedObservation(fixture.Path);
+        var output = Path.Combine(fixture.Path, "obj", "out.dll"); var generated = Path.Combine(fixture.Path, "Generated");
+        observed = observed with { Assembly = observed.Assembly! with { Path = output }, Pdb = observed.Pdb! with { Path = Path.ChangeExtension(output, ".pdb") },
+            EmitParameters = [new("GeneratedFilesOutputPath", [generated])] };
+        var arguments = observed.CommandLineArguments.ToArray(); arguments[5] = "/out:" + output;
+        observed = RebindArguments(observed, arguments.Append("/generatedfilesout:" + (foreign ? generated + "-foreign" : generated)).ToArray());
+        if (foreign) Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() =>
+            CompilerRecipePayload.Classify(observed, fixture.Path, TestContext.Current.CancellationToken)).Reason);
+        else Assert.Equal(new[] { "recipe.emitProfileUnsupported" }, CompilerRecipePayload.Classify(observed, fixture.Path, TestContext.Current.CancellationToken).UnsupportedReasons);
+    }
+
+    [Fact]
+    public void Missing_generated_output_argument_cannot_be_hidden_by_the_unsupported_directory_profile()
+    {
+        using var fixture = TestDirectory.Create("crap-recipe-generated-missing-data");
+        var observed = SupportedObservation(fixture.Path);
+        var generated = Path.GetFullPath(Path.Combine(fixture.Path, "..", "unsupported-generated"));
+        observed = observed with { EmitParameters = [new("GeneratedFilesOutputPath", [generated])] };
+        Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() =>
+            CompilerRecipePayload.Classify(observed, fixture.Path, TestContext.Current.CancellationToken)).Reason);
+    }
+
+    [Fact]
+    public void Unsupported_prior_keeps_public_bytes_after_SDK_drift_but_supported_or_malformed_prior_is_refused()
+    {
+        using var fixture = TestDirectory.Create("crap-recipe-unsupported-prior-drift-data");
+        var observed = SupportedObservation(fixture.Path); var sdk = SelectedSdk(fixture.Path);
+        var images = CompilerEvidence.CompilerImagePaths(sdk).Select(image =>
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(image.Path)!);
+            var content = Encoding.UTF8.GetBytes("actual role bytes " + image.Role); File.WriteAllBytes(image.Path, content);
+            return new CompilerImageFile(image.Role, image.Path, content.Length, Convert.ToHexStringLower(SHA256.HashData(content)));
+        }).ToArray();
+        observed = observed with { CompilerImages = images, InvocationRecipe = observed.InvocationRecipe! with
+            { Images = images.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() } };
+        var supported = CompilerRecipePayload.Retain(observed, fixture.Path, TestContext.Current.CancellationToken);
+        var arguments = observed.CommandLineArguments.ToArray(); arguments[2] = "/target:exe";
+        var unsupported = RebindArguments(observed, arguments);
+        var retained = CompilerRecipePayload.Retain(unsupported, fixture.Path, TestContext.Current.CancellationToken);
+        var prior = observed with { InvocationRecipe = null, CompilerImages = [], CommandLineArguments = [], EmitParameters = [] };
+        var path = images.Single(image => image.Role == "compiler-deps").Path;
+        var stamp = File.GetLastWriteTimeUtc(path); var before = File.ReadAllBytes(path);
+        File.WriteAllBytes(path, before.Select(value => (byte)(value ^ 1)).ToArray()); File.SetLastWriteTimeUtc(path, stamp);
+        Assert.Equal(before.Length, new FileInfo(path).Length); Assert.Equal(stamp, File.GetLastWriteTimeUtc(path));
+        var restored = FreshPriorBuild.RestoreCurrentRecipe(retained, prior, fixture.Path, sdk, TestContext.Current.CancellationToken);
+        Assert.Equal(CompilerRecipePayload.Unsupported(unsupported, "context", "build", CompilerRecipePayload.Classify(unsupported, fixture.Path, TestContext.Current.CancellationToken), TestContext.Current.CancellationToken),
+            CompilerRecipePayload.Unsupported(restored, "context", "build", CompilerRecipePayload.Classify(restored, fixture.Path, TestContext.Current.CancellationToken), TestContext.Current.CancellationToken));
+        Assert.Equal("check.priorBuildInvalid", Assert.Throws<PolicyException>(() => FreshPriorBuild.RestoreCurrentRecipe(supported, prior, fixture.Path, sdk, TestContext.Current.CancellationToken)).Code);
+        var malformed = retained with { Observation = retained.Observation with { Images = retained.Observation.Images.Select((image, index) => index == 0 ? image with { Role = "foreign" } : image).ToArray() } };
+        Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() => FreshPriorBuild.RestoreCurrentRecipe(malformed, prior, fixture.Path, sdk, TestContext.Current.CancellationToken)).Reason);
+        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+        Assert.ThrowsAny<OperationCanceledException>(() => FreshPriorBuild.RestoreCurrentRecipe(retained, prior, fixture.Path, sdk, cancelled.Token));
+    }
+
+    [Fact]
+    public void Fresh_SDK_image_drift_is_DATA_but_saved_image_verification_and_phase_failures_stay_strict()
+    {
+        using var fixture = TestDirectory.Create("crap-recipe-fresh-image-drift-data");
+        var observed = SupportedObservation(fixture.Path);
+        var context = ProjectAnalysisContext.Create(observed.ProjectPath, "app", "net10.0", "Release", "AnyCPU",
+            Microsoft.CodeAnalysis.CSharp.LanguageVersion.Latest, [], Microsoft.CodeAnalysis.SourceCodeKind.Regular, [], [], new(false, false), new("sdk", "msbuild", "roslyn"));
+        ImmutableArray<byte> ChangedImage(string path) => ImmutableArray.Create((byte)42);
+        var captured = CompilerRecipePayload.CaptureFreshFiles(observed, context, "build", ChangedImage, TestContext.Current.CancellationToken);
+        Assert.True(captured.CompilerImagesChanged); Assert.Empty(captured.Files);
+        var changed = CompilerRecipePayload.ImagesChangedUnsupported(observed, TestContext.Current.CancellationToken);
+        Assert.Equal(new[] { "recipe.compilerImagesChanged" }, CompilerRecipePayload.Classify(changed, fixture.Path, TestContext.Current.CancellationToken).UnsupportedReasons);
+        Assert.Empty(changed.CompilerImages);
+        Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() => CompilerRecipePayload.CaptureFiles(observed, context, "build", ChangedImage, TestContext.Current.CancellationToken)).Reason);
+        var phase = Path.Combine(fixture.Path, "phase.txt");
+        var withPhase = observed with { Parameters = observed.Parameters.Append(new CompilerParameter("AdditionalFiles", [phase])).ToArray() };
+        var readCount = 0;
+        ImmutableArray<byte> NoRead(string path) { readCount++; return ChangedImage(path); }
+        Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() => CompilerRecipePayload.CaptureFreshFiles(withPhase, context, "build", NoRead, TestContext.Current.CancellationToken)).Reason);
+        Assert.Equal(0, readCount);
+        var withContextPhase = context with { PhaseInputs = [new(phase, "additionalFile", false)] };
+        Assert.Throws<IOException>(() => CompilerRecipePayload.CaptureFreshFiles(withPhase, withContextPhase, "build", path => throw new IOException("actual DATA phase read failure"), TestContext.Current.CancellationToken));
+        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+        Assert.ThrowsAny<OperationCanceledException>(() => CompilerRecipePayload.CaptureFreshFiles(observed, context, "build", ChangedImage, cancelled.Token));
+    }
+
     private static (CompilerRecipeObservation Capture, string Prefix) Capture(string root, string key = "1:2:3:4:5")
     {
         var sdk = Path.Combine(root, "sdk"); var host = Path.Combine(root, "dotnet");

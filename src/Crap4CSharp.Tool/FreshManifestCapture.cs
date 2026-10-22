@@ -244,10 +244,14 @@ internal static class FreshManifestCapture
                     if (profile.IsSupported && !optionalReadsExhausted)
                     {
                         IReadOnlyList<CompilerRecipePayload.File>? recipeFiles = null;
+                        var imagesChanged = false;
                         try
                         {
-                            recipeFiles = CompilerRecipePayload.CaptureFiles(candidate, context, buildId,
+                            var capturedFiles = CompilerRecipePayload.CaptureFreshFiles(candidate, context, buildId,
                                 path => ReadCaptured(path, ref readTotal, cancellation), cancellation);
+                            imagesChanged = capturedFiles.CompilerImagesChanged;
+                            if (imagesChanged) candidate = CompilerRecipePayload.ImagesChangedUnsupported(candidate, cancellation);
+                            else recipeFiles = capturedFiles.Files;
                         }
                         catch (ProjectContextException failure) when (failure.Reason == "compiler.outputLimit")
                         {
@@ -261,7 +265,7 @@ internal static class FreshManifestCapture
                             staged.AddRange(recipeFiles.Select(file => (file.Id, CompilerRecipePayload.FileKind(file), file.Bytes)));
                             staged.Add((buildId + "-recipe", CompilerRecipePayload.Kind, recipeBytes));
                         }
-                        else candidate = CompilerRecipePayload.SizeUnsupported(candidate);
+                        else if (!imagesChanged) candidate = CompilerRecipePayload.SizeUnsupported(candidate);
                     }
                     else if (profile.IsSupported) candidate = CompilerRecipePayload.SizeUnsupported(candidate);
                     if (staged.Count == 0)
