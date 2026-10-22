@@ -18,7 +18,7 @@ internal static class FreshCompletedCapture
         ArtifactBundle bundle;
         using (timing?.Start("promotion.physicalLoad"))
             bundle = ArtifactBundle.Load(path, execution.PrivateDirectory);
-        await ValidateAsync(execution, bundle, token, timing: timing);
+        await ValidateAsync(execution, bundle, token, timing: timing, optionalRecipes: captured.OptionalRecipes);
         return prospective;
     }
 
@@ -68,7 +68,8 @@ internal static class FreshCompletedCapture
     internal static async Task<ProvenanceResult> ValidateAsync(FreshExecutionEvidence execution,
         ArtifactBundle bundle, CancellationToken token,
         Func<CancellationToken, Task>? beforeFinalValidation = null, CompletedProofTiming? timing = null,
-        Action<CurrentEvidence, ProvenanceResult>? beforePublication = null)
+        Action<CurrentEvidence, ProvenanceResult>? beforePublication = null,
+        FreshCompilerRecipeSelection? optionalRecipes = null)
     {
         token.ThrowIfCancellationRequested();
         var original = execution.Preflight;
@@ -87,7 +88,7 @@ internal static class FreshCompletedCapture
         // Only this live invocation may reuse its original retained compiler proof.
         // Saved-only public consumers continue through the full generic validator.
         var current = await FreshRetainedCompletedProof.ValidateAsync(execution, bundle, preflight, token,
-            beforeFinalValidation, timing);
+            beforeFinalValidation, timing, optionalRecipes);
         var proof = ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, current, true,
             original.Policy.Ruleset);
         if (proof.Status != ProvenanceStatus.Verified || !proof.Reusable) throw Refuse();

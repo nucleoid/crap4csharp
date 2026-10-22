@@ -63,11 +63,18 @@ internal sealed class CompilerReferenceSnapshot
         return result.AsReadOnly();
     }
 
-    internal static string? NormalizeAliases(string? aliases)
+    internal static string? NormalizeAliases(string? aliases) => NormalizeAliases(aliases, taskMetadata: true);
+
+    // The selected SDK Csc treats its metadata keyword case-insensitively and
+    // emits an unprefixed reference. Raw explicit argv aliases stay case-sensitive.
+    internal static string? NormalizeCommandAliases(string? aliases) => NormalizeAliases(aliases, taskMetadata: false);
+
+    private static string? NormalizeAliases(string? aliases, bool taskMetadata)
     {
         if (string.IsNullOrEmpty(aliases)) return null;
         if (aliases.Length > 32768) throw Limit();
-        var names = aliases.Split(',').Select(value => value.Trim()).ToArray();
+        var names = aliases.Split(',').Select(value => value.Trim()).Select(value =>
+            taskMetadata && string.Equals(value, "global", StringComparison.OrdinalIgnoreCase) ? "global" : value).ToArray();
         if (names.Any(name => name != "global" && !Microsoft.CodeAnalysis.CSharp.SyntaxFacts.IsValidIdentifier(name)) ||
             names.Any(string.IsNullOrEmpty) || names.Distinct(StringComparer.Ordinal).Count() != names.Length) throw Refuse();
         Array.Sort(names, StringComparer.Ordinal);

@@ -6,6 +6,7 @@ using Crap4CSharp.Core;
 internal sealed record FreshCapturedBundle(RunManifest Manifest, IReadOnlyDictionary<string, ImmutableArray<byte>> Bytes)
 {
     internal bool RequiresCompletedProof { get; init; }
+    internal FreshCompilerRecipeSelection? OptionalRecipes { get; init; }
 }
 
 // Capture from already accepted private execution. No raw command properties/binlogs,
@@ -411,7 +412,8 @@ internal static class FreshManifestCapture
             var valid = ProvenanceVerifier.VerifyCaptureCancellable(manifest, bytes, preflight.Policy.Ruleset, cancellation);
             if (valid.Status != ProvenanceStatus.Captured) throw new PolicyException("check.captureUnproven", string.Join(", ", valid.Reasons));
         }
-        return new(manifest, bytes) { RequiresCompletedProof = provisional };
+        return new(manifest, bytes) { RequiresCompletedProof = provisional,
+            OptionalRecipes = FreshCompilerRecipeSelection.Create(execution.Compiler, observations, preflight.Root, cancellation) };
     }
 
     internal static async Task<string> PublishAsync(FreshExecutionEvidence execution, FreshCapturedBundle captured,

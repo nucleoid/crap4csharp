@@ -13,7 +13,7 @@ internal static class SavedCompilerContexts
         => ValidateObserved(bundle, compiler, root, token, null, "saved");
 
     internal static void ValidateObserved(ArtifactBundle bundle, CompilerGraphPhaseResult compiler, string root, CancellationToken token,
-        global::CompletedProofTiming? timing, string prefix)
+        global::CompletedProofTiming? timing, string prefix, FreshCompilerRecipeSelection? optionalRecipes = null)
     {
         token.ThrowIfCancellationRequested();
         try
@@ -30,6 +30,7 @@ internal static class SavedCompilerContexts
             long total = 0;
             var reads = new CompilerByteReadScope(token);
             var testArtifacts = new HashSet<string>(StringComparer.Ordinal);
+            var recipeArtifacts = new HashSet<string>(StringComparer.Ordinal);
             foreach (var binding in bindings)
             {
                 token.ThrowIfCancellationRequested();
@@ -157,37 +158,46 @@ internal static class SavedCompilerContexts
                 if (closure.Kind != "compiler-input-closure" || closure.ContextId != contextId || closure.BuildId != "build-" + binding.GraphId ||
                     closure.ExecutionId is not null || closure.Format != "json" || closure.CoordinateKind is not null) throw Refuse();
                 Match(closure, Json(new { provider = "validated-csc-inputs-v1", metadata = phaseIdentities, reusableRecipe = false }));
-                if (observation.InvocationRecipe is not null)
+                // Mandatory compiler/physical gates above always use originals.
+                // Only this optional branch may consume invocation-private loss.
+                var recipeObservation = optionalRecipes?.OptionalView(compiler, observation, root, token) ?? observation;
+                if (recipeObservation.InvocationRecipe is not null)
                 {
                     var buildId = "build-" + binding.GraphId;
-                    var profile = CompilerRecipePayload.Classify(observation, root, token);
+                    var profile = CompilerRecipePayload.Classify(recipeObservation, root, token);
                     if (!profile.IsSupported)
                     {
                         var unsupported = bundle.Manifest.Artifacts.Single(artifact => artifact.Id == buildId + "-recipe-unsupported");
                         if (unsupported.Kind != CompilerRecipePayload.UnsupportedKind || unsupported.ContextId != contextId || unsupported.BuildId != buildId ||
                             unsupported.ExecutionId is not null || unsupported.Format != "json" || unsupported.CoordinateKind is not null) throw Refuse();
-                        Match(unsupported, CompilerRecipePayload.Unsupported(observation, contextId, buildId, profile, token));
+                        if (!recipeArtifacts.Add(unsupported.Id)) throw Refuse();
+                        Match(unsupported, CompilerRecipePayload.Unsupported(recipeObservation, contextId, buildId, profile, token));
                         continue;
                     }
                     var recipe = bundle.Manifest.Artifacts.Single(a => a.Id == buildId + "-recipe");
                     if (recipe.Kind != CompilerRecipePayload.Kind || recipe.ContextId != contextId || recipe.BuildId != buildId ||
                         recipe.ExecutionId is not null || recipe.Format != "json" || recipe.CoordinateKind is not null) throw Refuse();
+                    if (!recipeArtifacts.Add(recipe.Id)) throw Refuse();
                     var sourceMap = current.CompilerDocuments.ToDictionary(source => Path.GetFullPath(source.ResolvedPath!),
                         source => expected.Single(input => (input.Role is "source" or "compiler-source") && input.LogicalPath == source.LogicalPath), PathIdentityPolicy.Current.Comparer);
-                    var recipeFiles = CompilerRecipePayload.CaptureFiles(observation, current, buildId, Read, token);
+                    var recipeFiles = CompilerRecipePayload.CaptureFiles(recipeObservation, current, buildId, Read, token);
                     foreach (var file in recipeFiles)
                     {
                         var artifact = bundle.Manifest.Artifacts.Single(item => item.Id == file.Id);
                         if (artifact.Kind != CompilerRecipePayload.FileKind(file) || artifact.ContextId != contextId || artifact.BuildId != buildId ||
                             artifact.ExecutionId is not null || artifact.Format is not null || artifact.CoordinateKind is not null) throw Refuse();
+                        if (!recipeArtifacts.Add(artifact.Id)) throw Refuse();
                         Match(artifact, file.Bytes);
                     }
-                    Match(recipe, CompilerRecipePayload.Create(observation, contextId, buildId, root, sourceMap,
+                    Match(recipe, CompilerRecipePayload.Create(recipeObservation, contextId, buildId, root, sourceMap,
                         references.Select(reference => reference.Input).ToArray(), recipeFiles, token));
                 }
             }
             var excluded = bundle.Manifest.Artifacts.Where(a => a.Kind is "test-compiler-source" or "test-compiler-reference" or "test-compiler-input-closure").ToArray();
             if (excluded.Length != testArtifacts.Count || !testArtifacts.SetEquals(excluded.Select(a => a.Id))) throw Refuse();
+            var optionalArtifacts = bundle.Manifest.Artifacts.Where(artifact => artifact.Kind is
+                CompilerRecipePayload.Kind or CompilerRecipePayload.UnsupportedKind or CompilerRecipePayload.ImageKind or CompilerRecipePayload.ClosureKind).ToArray();
+            if (optionalArtifacts.Length != recipeArtifacts.Count || !recipeArtifacts.SetEquals(optionalArtifacts.Select(artifact => artifact.Id))) throw Refuse();
             reads.Complete();
             using (timing?.StartSynchronous(prefix + ".compiler.retainedClosing"))
                 compiler.RetainedProof.ValidateCurrent(token);

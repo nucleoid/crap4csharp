@@ -49,13 +49,6 @@ internal static class FreshCheckCommand
         DateTimeOffset started, Stopwatch elapsed, CancellationToken cancellation, CancellationTokenSource deadline, Action<FreshFailureOutputProof>? retainFailureOutputProof, Action<string>? retainPrivateDirectory, Action<Func<Task>>? retainTerminalProof, Action<FreshExecutionEvidence> retainEvidence, Action<string> retainArtifactDirectory, CompletedProofTiming? timing,
         Action<string>? onStagingCreated)
     {
-        void RetainCreatedStaging(string path)
-        {
-            retainArtifactDirectory(path);
-            // This observer belongs only to initial staging, before writer proof.
-            // CommitExport updates its retained locator without invoking it again.
-            onStagingCreated?.Invoke(path);
-        }
         var token = deadline.Token;
         FreshCheckPreflight preflight;
         using (timing?.Start("public.preflight"))
@@ -88,6 +81,29 @@ internal static class FreshCheckCommand
             captured = promote
                 ? await FreshManifestCapture.PrepareCompletedAsync(evidence, token, timing)
                 : await FreshManifestCapture.CaptureAsync(evidence, token, timing);
+        return await PrepareCapturedForWriterAsync(request, evidence, captured, started, elapsed, cancellation, token,
+            retainTerminalProof, retainArtifactDirectory, timing, onStagingCreated);
+    }
+
+    // Existing post-capture composition. Pending is never proof: the same actual
+    // terminal validator, remaining original clock and guarded writer still run.
+    internal static async Task<FreshCheckPreparation> PrepareCapturedForWriterAsync(FreshCheckRequest request,
+        FreshExecutionEvidence evidence, FreshCapturedBundle captured, DateTimeOffset started, Stopwatch elapsed,
+        CancellationToken cancellation, CancellationToken token, Action<Func<Task>>? retainTerminalProof,
+        Action<string> retainArtifactDirectory, CompletedProofTiming? timing = null, Action<string>? onStagingCreated = null)
+    {
+        var preflight = evidence.Preflight;
+        var promote = preflight.GitSnapshot is not null ||
+            preflight.Policy.Mode == RepositoryPolicyMode.Strict && preflight.Policy.Scope == "all";
+        if (promote && retainTerminalProof is null)
+            throw new InvalidOperationException("Fresh completed results require the terminal publication boundary.");
+        void RetainCreatedStaging(string path)
+        {
+            retainArtifactDirectory(path);
+            // This observer belongs only to initial staging, before writer proof.
+            // CommitExport updates its retained locator without invoking it again.
+            onStagingCreated?.Invoke(path);
+        }
         if (promote)
             using (timing?.Start("public.promotion"))
                 captured = FreshCompletedCapture.PrepareForValidation(evidence, captured, token);
@@ -164,7 +180,7 @@ internal static class FreshCheckCommand
                 // Operationally incomplete scoring keeps its established failure
                 // materialization/output path; it never advertises reusable success.
                 using (timing?.Start("public.finalProof"))
-                    completedProof = await FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token, timing: timing);
+                    completedProof = await FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token, timing: timing, optionalRecipes: captured.OptionalRecipes);
                 retainTerminalProof?.Invoke(() => ValidateAtWriterAsync((current, proof, writerToken) =>
                     CommitExport(current.ProtectedPaths, writerToken, finalBundle, proof)));
             }
@@ -182,7 +198,8 @@ internal static class FreshCheckCommand
                 {
                     using (timing?.Start("public.outerProof"))
                         await FreshCompletedCapture.ValidateAsync(evidence, finalBundle, finalDeadline.Token, timing: timing,
-                            beforePublication: (current, proof) => publish(current, proof, finalDeadline.Token));
+                            beforePublication: (current, proof) => publish(current, proof, finalDeadline.Token),
+                            optionalRecipes: captured.OptionalRecipes);
                 }
                 catch (OperationCanceledException) when (!cancellation.IsCancellationRequested && finalDeadline.IsCancellationRequested)
                 { throw new ProcessTimeoutException("Fresh check", request.Timeout); }

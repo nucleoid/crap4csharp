@@ -564,15 +564,19 @@ public sealed class CompilerRecipeObservationTests
     private static string QuoteArgument(string value) => "\"" + value + "\"";
     private static ManifestInput Input(string role, string logical) => new(role, logical, "inputs/" + Hash(logical) + ".bin", 1, Hash(logical), "utf-8", false);
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void SDK_per_alias_switches_join_exact_reference_and_remain_unsupported_DATA(bool reverse)
+    [InlineData(false, "global")]
+    [InlineData(true, "global")]
+    [InlineData(false, "GLOBAL")]
+    [InlineData(true, "GLOBAL")]
+    [InlineData(false, "GlObAl")]
+    [InlineData(true, "GlObAl")]
+    public void SDK_per_alias_switches_join_exact_reference_and_remain_unsupported_DATA(bool reverse, string globalKeyword)
     {
         using var fixture = TestDirectory.Create("crap-recipe-multi-alias-data");
         var observed = SupportedObservation(fixture.Path);
         var reference = observed.Parameters.Single(input => input.Name == "References").Items.Single();
         var parameters = observed.Parameters.Select(input => input.Name == "References" ? input with
-            { ReferenceProperties = [new(reference, "Foo,global", false)] } : input).ToArray();
+            { ReferenceProperties = [new(reference, "Foo," + globalKeyword, false)] } : input).ToArray();
         string[] aliases = reverse ? ["/reference:" + reference, "/reference:Foo=" + reference] : ["/reference:Foo=" + reference, "/reference:" + reference];
         observed = RebindArguments(observed with { Parameters = parameters }, observed.CommandLineArguments.Take(6).Concat(aliases).Concat(observed.CommandLineArguments.Skip(7)).ToArray());
         Assert.Equal(new[] { "recipe.emitProfileUnsupported" }, CompilerRecipePayload.Classify(observed, fixture.Path, TestContext.Current.CancellationToken).UnsupportedReasons);
@@ -580,6 +584,29 @@ public sealed class CompilerRecipeObservationTests
         Assert.Empty(retained.KnownArguments);
         Assert.DoesNotContain(reference, Encoding.UTF8.GetString(CompilerRecipePayload.Unsupported(observed, "context", "build",
             CompilerRecipePayload.Classify(observed, fixture.Path, TestContext.Current.CancellationToken), TestContext.Current.CancellationToken).AsSpan()), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("GLOBAL")]
+    [InlineData("GlObAl")]
+    public void Task_global_keyword_joins_only_the_actual_unprefixed_command(string globalKeyword)
+    {
+        using var fixture = TestDirectory.Create("crap-recipe-global-keyword-data");
+        var observed = SupportedObservation(fixture.Path);
+        var reference = observed.Parameters.Single(input => input.Name == "References").Items.Single();
+        var parameters = observed.Parameters.Select(input => input.Name == "References" ? input with
+            { ReferenceProperties = [new(reference, globalKeyword, false)] } : input).ToArray();
+        observed = observed with { Parameters = parameters };
+        Assert.True(CompilerRecipePayload.Classify(observed, fixture.Path, TestContext.Current.CancellationToken).IsSupported);
+        Assert.Null(Assert.Single(CompilerReferenceSnapshot.ResolveSemanticReferences(observed, TestContext.Current.CancellationToken)).Aliases);
+        // The primary task emits no alias prefix for this metadata. Do not
+        // reinterpret a foreign explicit argv alias by folding its spelling.
+        var arguments = observed.CommandLineArguments.ToArray();
+        Assert.Equal("/reference:" + reference, arguments[6]);
+        arguments[6] = "/reference:" + globalKeyword + "=" + reference;
+        var foreign = RebindArguments(observed, arguments);
+        Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() =>
+            CompilerRecipePayload.Classify(foreign, fixture.Path, TestContext.Current.CancellationToken)).Reason);
     }
 
     [Theory]

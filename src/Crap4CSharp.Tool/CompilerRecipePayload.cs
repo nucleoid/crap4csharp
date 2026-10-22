@@ -353,7 +353,7 @@ internal static class CompilerRecipePayload
             {
                 if (referenceIndex >= references.Count) throw Refuse();
                 var actual = references[referenceIndex]; var equals = value.IndexOf('=');
-                var aliases = equals < 0 ? null : CompilerReferenceSnapshot.NormalizeAliases(value[..equals]);
+                var aliases = equals < 0 ? null : CompilerReferenceSnapshot.NormalizeCommandAliases(value[..equals]);
                 var path = Unquote(equals < 0 ? value : value[(equals + 1)..]);
                 if (!Same(Resolve(path, observation.ProjectPath), actual.Path) || (name == "link") != actual.EmbedInteropTypes) throw Refuse();
                 remainingReferenceAliases ??= new(actual.Aliases?.Split(',') ?? ["global"], StringComparer.Ordinal);

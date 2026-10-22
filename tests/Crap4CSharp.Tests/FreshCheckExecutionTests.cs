@@ -6,6 +6,13 @@ namespace Crap4CSharp.Tests;
 
 public sealed class FreshCheckExecutionTests
 {
+    [Theory]
+    [InlineData("size")]
+    [InlineData("images")]
+    [InlineData("absence")]
+    public Task Actual_promoted_writer_preserves_mandatory_proof_under_fixture_optional_DATA_loss(string loss)
+        => RunCase(false, true, policyScope: "all", local: true, optionalRecipeLoss: loss);
+
     [Fact]
     public Task IncludedCompletedTestOutcomeJoinsPublicScoredContext()
         // Exercise the real managed SDK/build/test/coverage route; native SDK
@@ -455,8 +462,92 @@ public sealed class FreshCheckExecutionTests
     public Task PendingFreshStagingCanBeRestoredBeforeTheSingleWriterProof()
         => RunCase(false, false, policyScope: "all", publicTiming: true, writerOrdering: true);
 
+    private static async Task ExerciseOptionalPromotedWriterAsync(FreshExecutionEvidence evidence, FreshCheckRequest request,
+        string root, string loss, DateTimeOffset started, System.Diagnostics.Stopwatch originalClock,
+        CancellationToken outerToken, CancellationToken token)
+    {
+        Assert.Null(evidence.Tests.Failure); Assert.NotNull(evidence.Coverage);
+        var captured = await FreshManifestCapture.PrepareCompletedAsync(evidence, token);
+        var originals = evidence.Compiler.ByGraphId();
+        var selected = originals.ToDictionary(pair => pair.Key,
+            pair => captured.OptionalRecipes!.OptionalView(evidence.Compiler, pair.Value, root, token), StringComparer.Ordinal);
+        var binding = Assert.Single(evidence.Compiler.FinalGraph.GraphContexts, item => !item.IsTestProject);
+        var original = originals[binding.GraphId];
+        Assert.True(CompilerRecipePayload.Classify(original, root, token).IsSupported);
+        selected[binding.GraphId] = loss == "size" ? CompilerRecipePayload.SizeUnsupported(original) : loss == "images"
+            ? CompilerRecipePayload.ImagesChangedUnsupported(original, token) : CompilerRecipeObservation.WithoutOptionalRecipe(original, token);
+        var selection = FreshCompilerRecipeSelection.Create(evidence.Compiler, selected, root, token);
+        var buildId = "build-" + binding.GraphId;
+        var recipe = Assert.Single(captured.Manifest.Artifacts, artifact => artifact.BuildId == buildId && artifact.Kind == CompilerRecipePayload.Kind);
+        var artifacts = captured.Manifest.Artifacts.Where(artifact => artifact.BuildId != buildId || artifact.Kind is not
+            (CompilerRecipePayload.Kind or CompilerRecipePayload.UnsupportedKind or CompilerRecipePayload.ImageKind or CompilerRecipePayload.ClosureKind)).ToList();
+        var bytes = captured.Bytes.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        if (loss != "absence")
+        {
+            var data = CompilerRecipePayload.Unsupported(selected[binding.GraphId], recipe.ContextId!, buildId,
+                CompilerRecipePayload.Classify(selected[binding.GraphId], root, token), token);
+            var sha = CanonicalIdentity.Sha256(data.AsSpan()); var locator = "inputs/" + sha + ".bin";
+            bytes[locator] = data;
+            artifacts.Add(recipe with { Id = buildId + "-recipe-unsupported", Kind = CompilerRecipePayload.UnsupportedKind,
+                Locator = locator, Length = data.Length, Sha256 = sha });
+        }
+        var prior = Assert.Single(artifacts, artifact => artifact.Kind == FreshPriorBuild.Kind);
+        var priorBytes = FreshPriorBuild.Capture(FreshPriorBuild.Prepare(evidence, token), selected, root, token);
+        var priorSha = CanonicalIdentity.Sha256(priorBytes.AsSpan()); var priorLocator = "inputs/" + priorSha + ".bin";
+        bytes[priorLocator] = priorBytes;
+        artifacts[artifacts.IndexOf(prior)] = prior with { Locator = priorLocator, Length = priorBytes.Length, Sha256 = priorSha };
+        var manifest = ManifestIdentity.Seal(captured.Manifest with { Artifacts = artifacts.ToArray(), ManifestHash = null });
+        var retainedLocators = manifest.Artifacts.Select(artifact => artifact.Locator).Concat(manifest.Contexts.SelectMany(context => context.Inputs.Select(input => input.Locator))).ToHashSet(StringComparer.Ordinal);
+        var demoted = captured with { Manifest = manifest, Bytes = bytes.Where(pair => retainedLocators.Contains(pair.Key)).ToDictionary(pair => pair.Key, pair => pair.Value), OptionalRecipes = selection };
+        Assert.Equal(captured.Manifest.Contexts, demoted.Manifest.Contexts); Assert.Same(captured.Manifest.Builds, demoted.Manifest.Builds);
+        Assert.Same(captured.Manifest.Executions, demoted.Manifest.Executions);
+        foreach (var input in captured.Manifest.Contexts.SelectMany(context => context.Inputs))
+            Assert.Equal(captured.Bytes[input.Locator], demoted.Bytes[input.Locator]);
+        foreach (var artifact in captured.Manifest.Artifacts.Where(artifact => artifact.Kind is not
+            (FreshPriorBuild.Kind or CompilerRecipePayload.Kind or CompilerRecipePayload.UnsupportedKind or CompilerRecipePayload.ImageKind or CompilerRecipePayload.ClosureKind)))
+            Assert.Equal(captured.Bytes[artifact.Locator], demoted.Bytes[artifact.Locator]);
+        var memory = new ArtifactBundle(manifest, demoted.Bytes, Path.Combine(root, "unused-fixture-manifest.json"), root, []);
+        // Actual mandatory validator positive first; known optional loss alone
+        // is not permission for a foreign frame, stray artifacts or saved reuse.
+        SavedCompilerContexts.ValidateObserved(memory, evidence.Compiler, root, token, null, "fixture", selection);
+        Assert.Equal("provenance.savedCompilerContextsUnproven", Assert.Throws<PolicyException>(() =>
+            SavedCompilerContexts.ValidateObserved(memory, evidence.Compiler, root, token, null, "saved-strict")).Code);
+        var foreign = evidence.Compiler with { Observations = evidence.Compiler.Observations.ToArray() };
+        Assert.Equal("compiler.captureSelectionUnproven", Assert.Throws<ProjectContextException>(() => selection.OptionalView(foreign, original, root, token)).Reason);
+        var corrupted = original with { InvocationRecipe = original.InvocationRecipe! with
+            { Arguments = original.InvocationRecipe.Arguments.Select((argument, index) => index == 0 ? argument with { Sha256 = new string('0', 64) } : argument).ToArray() } };
+        var corruptOwner = evidence.Compiler with { Observations = evidence.Compiler.Observations.Select(item => item.GraphId == binding.GraphId ? corrupted : item).ToArray() };
+        var corruptSelected = selected.ToDictionary(pair => pair.Key, pair => pair.Value); corruptSelected[binding.GraphId] = CompilerRecipeObservation.WithoutOptionalRecipe(original, token);
+        Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() => FreshCompilerRecipeSelection.Create(corruptOwner, corruptSelected, root, token)).Reason);
+        var stray = recipe with { Id = buildId + "-stray-image", Kind = CompilerRecipePayload.ImageKind };
+        var strayBytes = demoted.Bytes.ToDictionary(pair => pair.Key, pair => pair.Value); strayBytes[recipe.Locator] = captured.Bytes[recipe.Locator];
+        var strayBundle = memory with { Manifest = ManifestIdentity.Seal(manifest with { Artifacts = [.. manifest.Artifacts, stray], ManifestHash = null }), Bytes = strayBytes };
+        Assert.Equal("provenance.savedCompilerContextsUnproven", Assert.Throws<PolicyException>(() =>
+            SavedCompilerContexts.ValidateObserved(strayBundle, evidence.Compiler, root, token, null, "fixture-stray", selection)).Code);
+        using (var cancelled = new CancellationTokenSource())
+        {
+            cancelled.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => FreshCompletedCapture.ValidateAsync(evidence, memory, cancelled.Token, optionalRecipes: selection));
+        }
+        var prepared = await global::FreshCheckCommand.PrepareCapturedForWriterAsync(request, evidence, demoted, started,
+            originalClock, outerToken, token, _ => Assert.Fail("Pending owns the actual writer proof."), _ => { });
+        Assert.True(prepared.RequiresWriterProof); Assert.Null(prepared.ImmediateResult);
+        var calls = 0;
+        var terminal = await prepared.CompleteAtWriterAsync(result =>
+        {
+            calls++;
+            Assert.True(result.Evaluation.Provenance!.Reusable);
+            return new global::SerializedFreshTerminal(result, ResultWriter.Serialize(result));
+        });
+        Assert.Equal(1, calls); Assert.Equal(0, terminal.Result.Run.ExitCode);
+        Assert.True(File.Exists(Path.Combine(root, "bundle", "manifest.json")));
+        Assert.Throws<InvalidOperationException>(() => { _ = prepared.CompleteAtWriterAsync(_ => throw new InvalidOperationException("Never retry writer.")); });
+        // Canonical optional DATA fault only: the real SDK, raw original Csc/task
+        // argv, mandatory sources/outputs/tests/proof were never changed or rerun.
+    }
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false, bool warmPostBuild = false, bool warmSaved = false, bool warmSavedEligibility = false, bool nativeSdkIdentity = global::App.DefaultNativeSdkIdentity, bool privateArtifactOnly = false, bool aliasedReference = false, bool localIncremental = false, bool lateLocalJson = false, string? writerProbe = null, bool writerOrdering = false, bool includeTests = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false, bool warmPostBuild = false, bool warmSaved = false, bool warmSavedEligibility = false, bool nativeSdkIdentity = global::App.DefaultNativeSdkIdentity, bool privateArtifactOnly = false, bool aliasedReference = false, bool localIncremental = false, bool lateLocalJson = false, string? writerProbe = null, bool writerOrdering = false, bool includeTests = false, string? optionalRecipeLoss = null)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -610,6 +701,11 @@ public sealed class FreshCheckExecutionTests
                 timings.Add(name, clock.Elapsed.TotalMilliseconds);
                 return value;
             }
+            var originalCoordinatorClock = System.Diagnostics.Stopwatch.StartNew();
+            var originalCoordinatorStarted = DateTimeOffset.UtcNow;
+            var outerCoordinatorToken = token;
+            using var optionalDeadline = optionalRecipeLoss is null ? null : CancellationTokenSource.CreateLinkedTokenSource(token);
+            if (optionalDeadline is not null) { optionalDeadline.CancelAfter(TimeSpan.FromMinutes(3)); token = optionalDeadline.Token; }
             var request = new FreshCheckRequest(standaloneTest ? "Root.slnx" : "Tests/Tests.csproj", "policy.json", local ? null : "HEAD", local || newPreflight ? "all" : null, null, "worktree", granularity,
                 null, "bundle", false, false, null, new PolicyOverrides(IncludeTests: includeTests ? true : null, IncludeGenerated: includeGenerated ? true : null), TimeSpan.FromMinutes(3))
                 { WarmPostBuildProbe = warmPostBuild || nativeSdkIdentity, NativeSdkIdentityProbe = nativeSdkIdentity };
@@ -617,6 +713,13 @@ public sealed class FreshCheckExecutionTests
             var evidence = await MeasureAsync("executionComposite", () => FreshCheckExecution.RunAsync(preflight, token));
             if (nativeSdkIdentity && evidence.Tests.Failure is not null)
                 Console.WriteLine("PRIVATE_NATIVE_AGGREGATE_FAILURE " + evidence.Tests.Failure);
+            if (optionalRecipeLoss is not null)
+            {
+                await ExerciseOptionalPromotedWriterAsync(evidence, request, fixture.Path, optionalRecipeLoss,
+                    originalCoordinatorStarted, originalCoordinatorClock, outerCoordinatorToken, token);
+                foreach (var (path, bytes) in original) Assert.Equal(bytes, File.ReadAllBytes(path));
+                return;
+            }
             Assert.Equal(standaloneTest ? 3 : 2, evidence.Compiler.Observations.Count);
             Assert.Equal(standaloneTest ? 2 : 1, evidence.Tests.Count);
             Assert.Equal(standaloneTest ? 2 : 1, evidence.Tests.Outcomes.Count);

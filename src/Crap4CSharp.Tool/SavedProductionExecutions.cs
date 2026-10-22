@@ -28,17 +28,17 @@ internal static class SavedProductionExecutions
     // production refusal ordering; the generic saved-only entry point is unchanged.
     internal static void ValidateFreshBoundary(ArtifactBundle bundle, CheckExecutionPlan current,
         CompilerGraphPhaseResult compiler, string root, CancellationToken token,
-        CompletedProofTiming? timing = null, string boundary = "fresh")
+        CompletedProofTiming? timing = null, string boundary = "fresh", FreshCompilerRecipeSelection? optionalRecipes = null)
     {
         var proof = CoverageGraphBinding.ValidateFreshRequiredAndNormalized(
             bundle, current, compiler, root, token, timing, boundary);
         using (timing?.Start(boundary + ".saved.production"))
-            ValidateCore(bundle, current, compiler, root, token, proof.Required, proof.Coverage);
+            ValidateCore(bundle, current, compiler, root, token, proof.Required, proof.Coverage, optionalRecipes);
     }
 
     private static void ValidateCore(ArtifactBundle bundle, CheckExecutionPlan current,
         CompilerGraphPhaseResult compiler, string root, CancellationToken token,
-        IReadOnlyList<SavedRequiredTest> required, BoundSavedGraphCoverage coverage)
+        IReadOnlyList<SavedRequiredTest> required, BoundSavedGraphCoverage coverage, FreshCompilerRecipeSelection? optionalRecipes = null)
     {
         token.ThrowIfCancellationRequested();
         try
@@ -79,15 +79,19 @@ internal static class SavedProductionExecutions
                 Match(buildId + "-pdb", "pdb", pdb, null, null, null);
                 // Closure metadata is not executable XML and is not a reusable input recipe.
                 Read(buildId + "-closure", "compiler-input-closure", null, "json", null);
-                if (observation.InvocationRecipe is not null)
+                // Membership for optional recipe artifacts follows only the
+                // same invocation-private loss selection. Mandatory output,
+                // execution, coverage and physical gates retain originals.
+                var recipeObservation = optionalRecipes?.OptionalView(compiler, observation, root, token) ?? observation;
+                if (recipeObservation.InvocationRecipe is not null)
                 {
-                    var profile = CompilerRecipePayload.Classify(observation, root, token);
+                    var profile = CompilerRecipePayload.Classify(recipeObservation, root, token);
                     if (!profile.IsSupported)
                         Read(buildId + "-recipe-unsupported", CompilerRecipePayload.UnsupportedKind, null, "json", null);
                     else
                     {
                         Read(buildId + "-recipe", CompilerRecipePayload.Kind, null, "json", null);
-                        foreach (var file in CompilerRecipePayload.ExpectedFiles(observation, buildId))
+                        foreach (var file in CompilerRecipePayload.ExpectedFiles(recipeObservation, buildId))
                             Read(file.Id, file.Kind, null, null, null);
                     }
                 }
