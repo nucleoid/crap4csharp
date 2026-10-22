@@ -14,7 +14,8 @@ internal static class FreshPrivateFailureEvidence
         {
             token.ThrowIfCancellationRequested();
             for (var parent = Path.GetFullPath(ownedDirectory); parent is not null; parent = Path.GetDirectoryName(parent))
-                if ((File.GetAttributes(parent) & FileAttributes.ReparsePoint) != 0) return;
+                if ((File.GetAttributes(parent) & FileAttributes.ReparsePoint) != 0)
+                    throw new IOException("Private failure diagnostic reparse ancestor is unsupported.");
             var text = "diagnosticStatus=complete\n" + error;
             var length = Encoding.UTF8.GetByteCount(text);
             if (length > MaximumBytes)

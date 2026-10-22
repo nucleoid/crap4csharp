@@ -9,7 +9,9 @@ internal static class FreshPriorBuild
 {
     internal const string Kind = "prior-compiler-graph";
     private const string Provider = "finite-sdk-prior-compiler-v1";
-    private const int MaximumBytes = 4 * 1024 * 1024;
+    internal const int MaximumBytes = 4 * 1024 * 1024;
+    internal const int MaximumOptionalBytes = 4 * 1024 * 1024;
+    internal const int MaximumEnvelopeBytes = MaximumBytes + MaximumOptionalBytes;
     private static readonly JsonSerializerOptions Json = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -32,7 +34,9 @@ internal static class FreshPriorBuild
     }
     internal sealed record Recipe(string Provider, string Workspace, string PhaseHash, SavedNode[] Nodes);
 
-    internal static ImmutableArray<byte> Capture(FreshExecutionEvidence execution, CancellationToken token)
+    internal sealed record CapturePlan(Recipe Ordinary, IReadOnlyDictionary<string, CompilerObservation> Observations);
+
+    internal static CapturePlan Prepare(FreshExecutionEvidence execution, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         var graph = execution.Compiler.FinalGraph;
@@ -45,8 +49,6 @@ internal static class FreshPriorBuild
         {
             token.ThrowIfCancellationRequested();
             var observed = observations[node.Id];
-            var binding = graph.GraphContexts.Single(item => item.GraphId == node.Id);
-            var recipeEligible = !binding.IsTestProject || binding.Context.ExclusionPolicy.IncludeTests;
             var directory = Path.GetDirectoryName(node.ProjectPath)!;
             return new SavedNode(node.Id, observed.Parameters.Select(p => new SavedParameter(p.Name,
                     p.Items.Select(i => SavePath(root, Path.GetFullPath(i, directory))).ToArray())
@@ -56,12 +58,88 @@ internal static class FreshPriorBuild
                 Output(observed.Assembly ?? throw Refuse()), Output(observed.Pdb ?? throw Refuse()),
                 observed.ReferenceAssembly is null ? null : Output(observed.ReferenceAssembly),
                 observed.RuntimeCopies.Where(c => targets.Contains(c.Source))
-                    .Select(c => new SavedCopy(SavePath(root, c.Source), SavePath(root, c.Destination))).ToArray())
-                { CompilerRecipe = !recipeEligible || observed.InvocationRecipe is null ? null : CompilerRecipePayload.Retain(observed, root, token) };
+                    .Select(c => new SavedCopy(SavePath(root, c.Source), SavePath(root, c.Destination))).ToArray());
         }).ToArray();
-        var data = JsonSerializer.SerializeToUtf8Bytes(new Recipe(Provider, PathKey(root), Fingerprint(graph, token), nodes), Json);
-        if (data.Length > MaximumBytes) throw Refuse();
+        var ordinary = new Recipe(Provider, PathKey(root), Fingerprint(graph, token), nodes);
+        if (!CompilerRecipeBudget.TrySerialize(ordinary, Json, MaximumBytes, out _)) throw Refuse();
+        var selected = observations.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        var eligible = graph.GraphContexts.Where(binding => !binding.IsTestProject || binding.Context.ExclusionPolicy.IncludeTests)
+            .Select(binding => binding.GraphId).ToHashSet(StringComparer.Ordinal);
+        var optionalUsed = 0;
+        foreach (var node in nodes)
+        {
+            token.ThrowIfCancellationRequested();
+            var observed = selected[node.Id];
+            if (!eligible.Contains(node.Id) || observed.InvocationRecipe is null)
+            { selected[node.Id] = observed with { InvocationRecipe = null }; continue; }
+            // Classify/Retain validates recognized integrity before any drop.
+            if (!TryOptionalContribution(observed, root, token, out var contribution) || contribution > MaximumOptionalBytes - optionalUsed)
+            {
+                observed = CompilerRecipePayload.SizeUnsupported(observed);
+                if (!TryOptionalContribution(observed, root, token, out contribution) || contribution > MaximumOptionalBytes - optionalUsed)
+                { selected[node.Id] = CompilerRecipeObservation.WithoutOptionalRecipe(observed, token); continue; }
+            }
+            selected[node.Id] = observed; optionalUsed += contribution;
+        }
+        return new(ordinary, selected);
+    }
+
+    // Exact delta of the nonnull compilerRecipe property on a SavedNode.
+    // The wrapper adds two braces; the real node instead adds one comma.
+    internal static bool TryOptionalContribution(CompilerObservation observation, string root, CancellationToken token, out int contribution)
+    {
+        contribution = 0;
+        if (observation.InvocationRecipe is null) return true;
+        var retained = CompilerRecipePayload.Retain(observation, root, token);
+        if (!CompilerRecipeBudget.TrySerialize(new { compilerRecipe = retained }, Json, MaximumEnvelopeBytes, out var data)) return false;
+        contribution = data.Length - 1;
+        return contribution <= MaximumOptionalBytes;
+    }
+
+    // Explicit --no-build and saved verification never compile on SDK drift.
+    // Only paths selected by the current trusted SDK are read; saved paths never
+    // select a compiler image. The original command binding remains historical.
+    internal static void RequireCurrentRecipeImages(IReadOnlyList<CompilerImageIdentity> expected,
+        ProjectContextSdkResolution sdk, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var paths = CompilerEvidence.CompilerImagePaths(sdk);
+        if (expected is null || expected.Count != paths.Count ||
+            expected.Where((image, index) => image is null || image.Role != paths[index].Role || image.Length <= 0 ||
+                image.Length > CompilerPhaseSnapshot.MaximumFileBytes || image.Sha256 is not { Length: 64 } ||
+                !image.Sha256.All(char.IsAsciiHexDigitLower)).Any()) throw Refuse();
+        long total = 0;
+        foreach (var (image, index) in expected.Select((image, index) => (image, index)))
+        {
+            token.ThrowIfCancellationRequested();
+            ImmutableArray<byte> bytes;
+            try { bytes = CompilerOutputBinding.Read(paths[index].Path, ref total, token); }
+            catch (Exception failure) when (failure is ProjectContextException or IOException or UnauthorizedAccessException)
+            { throw Refuse(); }
+            if (bytes.Length != image.Length || CanonicalIdentity.Sha256(bytes.AsSpan()) != image.Sha256) throw Refuse();
+        }
+        token.ThrowIfCancellationRequested();
+    }
+
+    internal static ImmutableArray<byte> Capture(CapturePlan plan, IReadOnlyDictionary<string, CompilerObservation> selected, string root, CancellationToken token)
+    {
+        var nodes = plan.Ordinary.Nodes.Select(node =>
+        {
+            token.ThrowIfCancellationRequested();
+            var observed = selected[node.Id];
+            return node with { CompilerRecipe = observed.InvocationRecipe is null ? null : CompilerRecipePayload.Retain(observed, root, token) };
+        }).ToArray();
+        var value = plan.Ordinary with { Nodes = nodes };
+        if (!CompilerRecipeBudget.TrySerialize(value, Json, MaximumEnvelopeBytes, out var data)) throw Refuse();
+        ValidateSlices(value, data.Length);
         return ImmutableArray.Create(data);
+    }
+
+    internal static void ValidateSlices(Recipe value, int envelopeLength)
+    {
+        if (value.Nodes is null || value.Nodes.Any(node => node is null)) throw Refuse();
+        var ordinary = value with { Nodes = value.Nodes.Select(node => node with { CompilerRecipe = null }).ToArray() };
+        if (!CompilerRecipeBudget.TrySerialize(ordinary, Json, MaximumBytes, out var mandatory) || envelopeLength - mandatory.Length > MaximumOptionalBytes) throw Refuse();
     }
 
     internal static IReadOnlyDictionary<string, CompilerObservation> Load(ArtifactBundle bundle,
@@ -72,7 +150,7 @@ internal static class FreshPriorBuild
             throw Refuse();
         var artifacts = bundle.Manifest.Artifacts.Where(a => a.Kind == Kind).ToArray();
         if (artifacts.Length != 1 || !bundle.Bytes.TryGetValue(artifacts[0].Locator, out var data) ||
-            data.Length > MaximumBytes) throw Refuse();
+            data.Length > MaximumEnvelopeBytes) throw Refuse();
         Recipe recipe;
         try
         {
@@ -86,6 +164,7 @@ internal static class FreshPriorBuild
             recipe.PhaseHash != Fingerprint(graph, token) || recipe.Nodes is null ||
             recipe.Nodes.Length != graph.BuildGraph.Count || recipe.Nodes.Length > CompilerPhaseSnapshot.MaximumInputs)
             throw Refuse();
+        ValidateSlices(recipe, data.Length);
         var pool = graph.GraphContexts.SelectMany(b => b.Context.ReferencePaths
                 .Concat(b.Context.PhaseInputs.Select(i => i.Path))
                 .Concat(b.Context.CompilerDocuments.Select(d => d.ResolvedPath!))
@@ -151,7 +230,10 @@ internal static class FreshPriorBuild
                 var selected = supported.Concat(unsupported).ToArray();
                 if (selected.Length != 1 || selected[0].Kind != expectedKind || selected[0].ContextId != LogicalContextIdentity.Create(root, node) ||
                     selected[0].ExecutionId is not null || selected[0].Format != "json" || selected[0].CoordinateKind is not null) throw Refuse();
-                observation = CompilerRecipePayload.Restore(retained, observation, root, graph.SelectedSdk ?? throw Refuse(), token);
+                var sdk = graph.SelectedSdk ?? throw Refuse();
+                var images = retained.Observation?.Images ?? throw Refuse();
+                if (images.Count != 0) RequireCurrentRecipeImages(images, sdk, token);
+                observation = CompilerRecipePayload.Restore(retained, observation, root, sdk, token);
             }
             else if (bundle.Manifest.Artifacts.Any(artifact => artifact.BuildId == "build-" + saved.Id &&
                 artifact.Kind is CompilerRecipePayload.Kind or CompilerRecipePayload.UnsupportedKind or CompilerRecipePayload.ImageKind or CompilerRecipePayload.ClosureKind))

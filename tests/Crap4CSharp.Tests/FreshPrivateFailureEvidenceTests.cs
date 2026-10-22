@@ -32,6 +32,35 @@ public sealed class FreshPrivateFailureEvidenceTests
     }
 
     [Fact]
+    public void ReparseAncestorRefusalIsRecordedOnPrimaryWithoutFollowingIt()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Skip("Directory symbolic-link creation is not a required Windows test privilege.");
+            return;
+        }
+        using var root = TestDirectory.Create("crap-private-failure-link");
+        var physical = Path.Combine(root.Path, "physical");
+        var owned = Path.Combine(physical, "owned");
+        Directory.CreateDirectory(owned);
+        var alias = Path.Combine(root.Path, "alias");
+        Directory.CreateSymbolicLink(alias, physical);
+        try
+        {
+            var inner = new IOException("original inner");
+            var failure = new InvalidDataException("original failure", inner);
+            FreshPrivateFailureEvidence.TryRetain(Path.Combine(alias, "owned"), failure,
+                TestContext.Current.CancellationToken);
+            var diagnostic = Assert.IsAssignableFrom<IOException>(failure.Data["PrivateFailureDiagnosticFailure"]);
+            Assert.Equal("Private failure diagnostic reparse ancestor is unsupported.", diagnostic.Message);
+            Assert.Equal("original failure", failure.Message);
+            Assert.Same(inner, failure.InnerException);
+            Assert.Empty(Directory.GetFileSystemEntries(owned));
+        }
+        finally { Directory.Delete(alias); }
+    }
+
+    [Fact]
     public void ClosedOriginalCancellationCannotCreateDiagnosticFile()
     {
         using var owned = TestDirectory.Create("crap-private-failure");

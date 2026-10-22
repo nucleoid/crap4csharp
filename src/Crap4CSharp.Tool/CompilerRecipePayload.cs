@@ -82,6 +82,11 @@ internal static class CompilerRecipePayload
     internal static ImmutableArray<byte> Create(CompilerObservation observation, string contextId, string buildId,
         string workspaceRoot, IReadOnlyDictionary<string, ManifestInput> sources, IReadOnlyList<ManifestInput> references,
         IReadOnlyList<File> files, CancellationToken token)
+        => TryCreate(observation, contextId, buildId, workspaceRoot, sources, references, files, token, out var bytes) ? bytes : throw Refuse();
+
+    internal static bool TryCreate(CompilerObservation observation, string contextId, string buildId,
+        string workspaceRoot, IReadOnlyDictionary<string, ManifestInput> sources, IReadOnlyList<ManifestInput> references,
+        IReadOnlyList<File> files, CancellationToken token, out ImmutableArray<byte> result)
     {
         token.ThrowIfCancellationRequested();
         var projection = Classify(observation, workspaceRoot, token);
@@ -92,14 +97,8 @@ internal static class CompilerRecipePayload
         var sourceParameter = observation.Parameters.Single(input => input.Name == "Sources");
         var actualReferences = CompilerReferenceSnapshot.ResolveSemanticReferences(observation, token);
         if (sourceParameter.Items.Count != sources.Count || references.Count != actualReferences.Count) throw Refuse();
-        // Admit a conservative escaped-JSON envelope before constructing the
-        // output arrays. Relative argv can otherwise expand by the project prefix
-        // once per source/reference. No transport or closure bound is enlarged.
-        var characters = observation.CommandLineArguments.Sum(argument => (long)argument.Length) +
-            sources.Keys.Sum(path => (long)path.Length) + actualReferences.Sum(reference => (long)reference.Path.Length + (reference.Aliases?.Length ?? 0)) +
-            files.Sum(file => (long)file.Path.Length + file.Id.Length) + contextId.Length + buildId.Length + observation.ProjectPath.Length;
-        var rows = sourceParameter.Items.Count + (long)references.Count + files.Count + observed.Arguments.Count + observed.Options.Count + observed.Images.Count;
-        if (checked(8 * characters + 2048 * rows) > CompilerEvidence.MaximumTransportBytes) throw Refuse();
+        if (sources.Count > CompilerPhaseSnapshot.MaximumInputs || references.Count > CompilerPhaseSnapshot.MaximumInputs ||
+            files.Count > CompilerPhaseSnapshot.MaximumInputs) throw Refuse();
         var sourceRows = sourceParameter.Items.Select((path, index) =>
         {
             token.ThrowIfCancellationRequested();
@@ -129,7 +128,7 @@ internal static class CompilerRecipePayload
         var csharp = files.Single(file => file.Role == "compiler-csharp");
         object Output(CompilerOutput output, string id) => new { locator = "inputs/" + output.Sha256 + ".bin",
             output.Length, sha256 = "sha256:" + output.Sha256, artifactId = id, compilerPath = output.Path };
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(new
+        var supported = CompilerRecipeBudget.TrySerialize(new
         {
             provider = Provider, disposition = "typed-input-data-only", contextId, buildId,
             baseDirectory = Canonical(Path.GetDirectoryName(observation.ProjectPath)!),
@@ -145,30 +144,42 @@ internal static class CompilerRecipePayload
             // These limits remain explicit: no loaded/prebirth image attestation,
             // body-origin proof or manifest/coverage capability is issued here.
             unsupportedAttestations = observed.UnsupportedReasons
-        }, ProjectContextLoader.JsonOptions);
-        if (bytes.Length > CompilerEvidence.MaximumTransportBytes) throw Refuse();
-        return ImmutableArray.Create(bytes);
+        }, ProjectContextLoader.JsonOptions, CompilerEvidence.MaximumTransportBytes, out var bytes);
+        result = supported ? ImmutableArray.Create(bytes) : [];
+        return supported;
     }
 
     internal static Projection Classify(CompilerObservation observation, string workspaceRoot, CancellationToken token)
     {
-        // Integrity is established before optional profile classification. No
-        // cancellation, I/O, image drift or context failure is caught as support DATA.
         ValidateObservation(observation, token);
-        if (observation.RetainedUnsupportedRecipe is { } reasons)
-            return new([], [], [], reasons);
+        if (observation.RetainedUnsupportedRecipe is { } retained) return new([], [], [], retained);
+        var recipe = observation.InvocationRecipe!;
+        var reasons = new HashSet<string>(StringComparer.Ordinal);
+        if (recipe.UnsupportedReasons.Contains("recipe.sizeUnsupported", StringComparer.Ordinal)) reasons.Add("recipe.sizeUnsupported");
+        if (recipe.UnsupportedReasons.Contains("recipe.compilerImageUnavailable", StringComparer.Ordinal)) reasons.Add("recipe.compilerImageUnavailable");
+        if (recipe.UnsupportedReasons.Contains("recipe.compilerImagesChanged", StringComparer.Ordinal)) reasons.Add("recipe.compilerImagesChanged");
+        if (recipe.TaskBinding == "unproven" || recipe.CommandBinding == "unproven")
+        {
+            if (!reasons.Contains("recipe.sizeUnsupported")) reasons.Add("recipe.bindingUnsupported");
+            return new([], [], [], reasons.Order(StringComparer.Ordinal).ToArray());
+        }
+        // A proven same-task command still validates every recognized source,
+        // reference and output role even if another optional feature is unsupported.
         var profile = ProjectArguments(observation, workspaceRoot, token);
-        return observation.InvocationRecipe!.UnsupportedReasons.Contains("recipe.languageVersionUnsupported", StringComparer.Ordinal)
-            ? profile with { UnsupportedReasons = profile.UnsupportedReasons.Append("recipe.scalarProfileUnsupported").Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray() }
-            : profile;
+        reasons.UnionWith(profile.UnsupportedReasons);
+        if (recipe.UnsupportedReasons.Any(reason => reason is "recipe.languageVersionUnsupported" or "recipe.scalarOptionUnsupported" or "recipe.scalarOptionAmbiguous"))
+            reasons.Add("recipe.scalarProfileUnsupported");
+        return profile with { UnsupportedReasons = reasons.Order(StringComparer.Ordinal).ToArray() };
     }
+
+    internal static CompilerObservation SizeUnsupported(CompilerObservation observation) =>
+        CompilerRecipeObservation.OmitForSize(observation) with { RetainedUnsupportedRecipe = ["recipe.sizeUnsupported"] };
 
     internal static ImmutableArray<byte> Unsupported(CompilerObservation observation, string contextId, string buildId,
         Projection projection, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        if (projection.IsSupported || projection.UnsupportedReasons.Any(reason => reason is not
-            ("recipe.scalarProfileUnsupported" or "recipe.emitProfileUnsupported"))) throw Refuse();
+        if (projection.IsSupported || !SafeReasons(projection.UnsupportedReasons)) throw Refuse();
         // Fixed codes only: no raw command, option name/value, image/phase byte
         // artifact or falsely consumable recipe is published for this profile.
         return ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(new
@@ -192,16 +203,17 @@ internal static class CompilerRecipePayload
     {
         token.ThrowIfCancellationRequested();
         if (retained.Observation is null || retained.KnownArguments is null || retained.EmitParameters is null || retained.UnsupportedReasons is null ||
-            retained.KnownArguments.Count > 32768 || retained.EmitParameters.Count > 3 || retained.UnsupportedReasons.Count > 2 ||
+            retained.KnownArguments.Count > 32768 || retained.EmitParameters.Count > 3 || retained.UnsupportedReasons.Count > 6 ||
             retained.UnsupportedReasons.Count != 0 && (!SafeReasons(retained.UnsupportedReasons) || retained.KnownArguments.Count != 0 || retained.EmitParameters.Count != 0)) throw Refuse();
         var pool = CompilerEvidence.CompilerImagePaths(selectedSdk);
         var identities = retained.Observation.Images;
-        if (identities is null || identities.Count != pool.Count || !identities.Select(image => image.Role).SequenceEqual(pool.Select(image => image.Role))) throw Refuse();
+        var noImages = retained.UnsupportedReasons.Any(reason => reason is "recipe.sizeUnsupported" or "recipe.compilerImageUnavailable" or "recipe.compilerImagesChanged") && identities?.Count == 0;
+        if (identities is null || !noImages && (identities.Count != pool.Count || !identities.Select(image => image.Role).SequenceEqual(pool.Select(image => image.Role)))) throw Refuse();
         var restored = prior with
         {
             InvocationRecipe = retained.Observation,
             CommandLineArguments = retained.KnownArguments.ToArray(), EmitParameters = retained.EmitParameters.ToArray(),
-            CompilerImages = pool.Select((image, index) => new CompilerImageFile(image.Role, image.Path, identities[index].Length, identities[index].Sha256)).ToArray(),
+            CompilerImages = noImages ? [] : pool.Select((image, index) => new CompilerImageFile(image.Role, image.Path, identities[index].Length, identities[index].Sha256)).ToArray(),
             RetainedUnsupportedRecipe = retained.UnsupportedReasons.Count == 0 ? null : retained.UnsupportedReasons.ToArray()
         };
         var profile = Classify(restored, root, token);
@@ -209,38 +221,56 @@ internal static class CompilerRecipePayload
         return restored;
     }
 
-    private static bool SafeReasons(IReadOnlyList<string> reasons) => reasons.Count is > 0 and <= 2 &&
+    private static bool SafeReasons(IReadOnlyList<string> reasons) => reasons.Count is > 0 and <= 6 &&
         reasons.SequenceEqual(reasons.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)) &&
-        reasons.All(reason => reason is "recipe.scalarProfileUnsupported" or "recipe.emitProfileUnsupported");
+        reasons.All(reason => reason is "recipe.scalarProfileUnsupported" or "recipe.emitProfileUnsupported" or "recipe.bindingUnsupported" or
+            "recipe.sizeUnsupported" or "recipe.compilerImageUnavailable" or "recipe.compilerImagesChanged");
 
     private static void ValidateObservation(CompilerObservation observation, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         var recipe = observation.InvocationRecipe ?? throw Refuse();
-        if (recipe.Arguments is null || recipe.Options is null || recipe.Images is null || recipe.UnsupportedReasons is null || recipe.TaskBinding != "selected-sdk-core-target" || recipe.CommandBinding is not
-            ("selected-host-exec-csc-arguments-match" or "selected-sdk-csc-exe-arguments-match") ||
-            recipe.UnsupportedReasons.Count is < 2 or > 3 ||
+        if (recipe.Arguments is null || recipe.Options is null || recipe.Images is null || recipe.UnsupportedReasons is null ||
+            recipe.Arguments.Any(argument => argument is null) || recipe.Images.Any(image => image is null) ||
+            observation.CommandLineArguments is null || observation.EmitParameters is null || observation.CompilerImages is null ||
+            recipe.TaskBinding is not ("selected-sdk-core-target" or "unproven") || recipe.CommandBinding is not
+                ("selected-host-exec-csc-arguments-match" or "selected-sdk-csc-exe-arguments-match" or "unproven") ||
+            recipe.UnsupportedReasons.Count is < 2 or > 16 ||
             !recipe.UnsupportedReasons.Contains("recipe.loadedCompilerAndTaskImageNotAttested", StringComparer.Ordinal) ||
             !recipe.UnsupportedReasons.Contains("recipe.runtimeLoadedImageNotAttested", StringComparer.Ordinal) ||
             recipe.UnsupportedReasons.Distinct(StringComparer.Ordinal).Count() != recipe.UnsupportedReasons.Count ||
-            recipe.UnsupportedReasons.Any(reason => reason is not ("recipe.loadedCompilerAndTaskImageNotAttested" or "recipe.runtimeLoadedImageNotAttested" or "recipe.languageVersionUnsupported")) ||
-            !CompilerRecipeObservation.SafeOptions(recipe.Options, token) ||
-            !Digest(recipe.TaskAssociationSha256) || observation.Assembly is null || observation.Pdb is null) throw Refuse();
+            recipe.UnsupportedReasons.Any(reason => reason is not ("recipe.loadedCompilerAndTaskImageNotAttested" or "recipe.runtimeLoadedImageNotAttested" or
+                "recipe.languageVersionUnsupported" or "recipe.scalarOptionUnsupported" or "recipe.scalarOptionAmbiguous" or
+                "recipe.selectedSdkTaskFileUnproven" or "recipe.compilerCommandPrefixUnproven" or "recipe.argumentOutputMissing" or
+                "recipe.commandEventMissing" or "recipe.commandArgumentsUnproven" or "recipe.sizeUnsupported" or
+                "recipe.compilerImageUnavailable" or "recipe.compilerImagesChanged")) ||
+            !CompilerRecipeObservation.SafeOptions(recipe.Options, token) || !Digest(recipe.TaskAssociationSha256) ||
+            observation.Assembly is null || observation.Pdb is null) throw Refuse();
+        // Missing/foreign optional task/prefix is not a recipe. Contradictory
+        // binding assertions, late/duplicate terminals, and a PROVEN same-task
+        // argv mismatch remain integrity errors; no broad exception downgrade.
+        var bindingUnavailable = recipe.UnsupportedReasons.Any(reason => reason is "recipe.selectedSdkTaskFileUnproven" or
+            "recipe.compilerCommandPrefixUnproven" or "recipe.argumentOutputMissing" or "recipe.commandEventMissing" or "recipe.sizeUnsupported");
+        if ((recipe.TaskBinding == "unproven") != recipe.UnsupportedReasons.Contains("recipe.selectedSdkTaskFileUnproven", StringComparer.Ordinal) ||
+            recipe.CommandBinding != "unproven" && recipe.Arguments.Count == 0 ||
+            recipe.CommandBinding == "unproven" && !bindingUnavailable ||
+            recipe.CommandBinding != "unproven" && (recipe.TaskBinding == "unproven" || bindingUnavailable ||
+                recipe.UnsupportedReasons.Contains("recipe.commandArgumentsUnproven", StringComparer.Ordinal))) throw Refuse();
         if (observation.RetainedUnsupportedRecipe is { } retainedReasons)
         {
             if (observation.CommandLineArguments.Count != 0 || observation.EmitParameters.Count != 0 || !SafeReasons(retainedReasons) ||
-                recipe.Arguments.Count is 0 or > 32768 || recipe.Arguments.Sum(argument => (long)argument.Utf8Length) > 2 * 1024 * 1024 ||
+                recipe.Arguments.Count > 32768 || recipe.Arguments.Sum(argument => (long)argument.Utf8Length) > 2 * 1024 * 1024 ||
                 recipe.Arguments.Where((argument, index) => argument.Ordinal != index || argument.Utf8Length <= 0 || !Digest(argument.Sha256)).Any()) throw Refuse();
         }
         else if (!CompilerRecipeObservation.Identities(observation.CommandLineArguments, token).SequenceEqual(recipe.Arguments)) throw Refuse();
         foreach (var output in new[] { observation.Assembly, observation.Pdb, observation.ReferenceAssembly }.OfType<CompilerOutput>())
             if (output.Length <= 0 || output.Length > CompilerPhaseSnapshot.MaximumFileBytes || !Digest(output.Sha256) || Canonical(output.Path) != output.Path) throw Refuse();
-        string[] roles = ["dotnet-host", "csc", "compiler-common", "compiler-csharp", "compiler-deps",
-            "compiler-runtimeconfig", "sdk-csc-target", "sdk-csc-task"];
+        string[] roles = ["dotnet-host", "csc", "compiler-common", "compiler-csharp", "compiler-deps", "compiler-runtimeconfig", "sdk-csc-target", "sdk-csc-task"];
         var expected = OperatingSystem.IsWindows() ? roles.Append("csc-launcher").ToArray() : roles;
         var images = observation.CompilerImages;
-        if (!images.Select(image => image.Role).SequenceEqual(expected) ||
-            !images.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).SequenceEqual(recipe.Images)) throw Refuse();
+        var unavailableImages = recipe.UnsupportedReasons.Any(reason => reason is "recipe.sizeUnsupported" or "recipe.compilerImageUnavailable" or "recipe.compilerImagesChanged") && images.Count == 0 && recipe.Images.Count == 0;
+        if (!unavailableImages && (!images.Select(image => image.Role).SequenceEqual(expected) ||
+            !images.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).SequenceEqual(recipe.Images))) throw Refuse();
         foreach (var image in images)
             if (image.Length <= 0 || image.Length > CompilerPhaseSnapshot.MaximumFileBytes || !Digest(image.Sha256) || Canonical(image.Path) != image.Path) throw Refuse();
     }
@@ -276,8 +306,9 @@ internal static class CompilerRecipePayload
         var scalar = new List<string>(); var roles = new List<ArgumentRole>();
         var unsupported = new HashSet<string>(StringComparer.Ordinal);
         if (sourcePaths.Distinct(PathIdentityPolicy.Current.Comparer).Count() != sourcePaths.Length ||
-            embedded.Distinct(PathIdentityPolicy.Current.Comparer).Count() != embedded.Length ||
-            embedded.Any(path => !sourcePaths.Contains(path, PathIdentityPolicy.Current.Comparer))) throw Refuse();
+            embedded.Distinct(PathIdentityPolicy.Current.Comparer).Count() != embedded.Length) throw Refuse();
+        if (embedded.Any(path => !sourcePaths.Contains(path, PathIdentityPolicy.Current.Comparer))) unsupported.Add("recipe.emitProfileUnsupported");
+        var embedAll = false;
         for (var ordinal = 0; ordinal < observation.CommandLineArguments.Count; ordinal++)
         {
             token.ThrowIfCancellationRequested();
@@ -285,6 +316,8 @@ internal static class CompilerRecipePayload
             if (argument.Length is 0 or > 65536 || argument.Any(char.IsControl) || argument[0] == '@') throw Refuse();
             var colon = argument.IndexOf(':');
             var name = argument[0] == '/' ? argument[1..(colon < 0 ? argument.Length : colon)] : "";
+            if (name == "embed" && colon < 0)
+            { embedAll = true; unsupported.Add("recipe.emitProfileUnsupported"); roles.Add(new(ordinal, "unsupported-embedded-all", null, null)); continue; }
             var value = colon < 0 ? "" : name is "reference" or "link" ? argument[(colon + 1)..] : Unquote(argument[(colon + 1)..]);
             if (name is "reference" or "link")
             {
@@ -330,7 +363,7 @@ internal static class CompilerRecipePayload
             }
             roles.Add(new(ordinal, "scalar", scalar.Count, name)); scalar.Add(argument);
         }
-        if (sourceIndex != sourcePaths.Length || referenceIndex != references.Count || embeddedIndex != embedded.Length ||
+        if (sourceIndex != sourcePaths.Length || referenceIndex != references.Count || !embedAll && embeddedIndex != embedded.Length ||
             optional.Any(pair => indices[pair.Key] != pair.Value.Length) ||
             scalar.Count(argument => argument.StartsWith("/out:", StringComparison.Ordinal)) != 1 ||
             scalar.Count(argument => argument.StartsWith("/refout:", StringComparison.Ordinal)) != (observation.ReferenceAssembly is null ? 0 : 1)) throw Refuse();

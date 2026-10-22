@@ -42,13 +42,17 @@ internal static class FreshManifestCapture
         var graph = execution.Compiler.FinalGraph;
         var bindings = graph.GraphContexts.ToDictionary(b => b.GraphId, StringComparer.Ordinal);
         var logicalIds = graph.BuildGraph.ToDictionary(n => n.Id, n => LogicalContextIdentity.Create(preflight.Root, n), StringComparer.Ordinal);
-        var observations = execution.Compiler.ByGraphId();
+        var prior = FreshPriorBuild.Prepare(execution, cancellation);
+        var observations = prior.Observations.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
         var referenceEdges = CompilerReferenceGraph.Observe(graph, cancellation);
         var bytes = new Dictionary<string, ImmutableArray<byte>>(StringComparer.Ordinal);
         var artifacts = new List<ManifestArtifact>();
         var contexts = new List<ManifestContext>(); var builds = new List<ManifestBuild>();
         var executions = new List<ManifestExecution>();
         long readTotal = 0;
+        var optional = new List<Action>();
+        var mandatoryPriorLength = 0; var optionalPriorBytes = 0;
+        var optionalReadsExhausted = false;
         // This synchronous construction still rereads every file. Check shared
         // ancestors once on entry and again before the independent closing proof.
         var readPaths = new CompilerPathBatch(cancellation, RefuseReadPath);
@@ -72,6 +76,15 @@ internal static class FreshManifestCapture
             string? invocation = null, string? format = null, string? coordinates = null)
             => artifacts.Add(new(id, kind, Store(content), content.Length, CanonicalIdentity.Sha256(content.AsSpan()),
                 context, build, invocation, format, coordinates));
+        bool AdmitOptional(CompilerObservation candidate, IReadOnlyList<(string Id, string Kind, ImmutableArray<byte> Bytes)> staged,
+            out int priorBytes)
+        {
+            if (!FreshPriorBuild.TryOptionalContribution(candidate, preflight.Root, cancellation, out priorBytes) ||
+                priorBytes > FreshPriorBuild.MaximumOptionalBytes - optionalPriorBytes) return false;
+            var extra = staged.Select(item => item.Bytes).GroupBy(content => CanonicalIdentity.Sha256(content.AsSpan()), StringComparer.Ordinal)
+                .Where(group => !bytes.ContainsKey("inputs/" + group.Key + ".bin")).Sum(group => (long)group.First().Length);
+            return bytes.Values.Sum(content => (long)content.Length) + extra + mandatoryPriorLength + optionalPriorBytes + priorBytes <= 192L * 1024 * 1024;
+        }
         string RepositoryPath(string physical)
         {
             var relative = Path.GetRelativePath(preflight.Root, physical).Replace('\\', '/');
@@ -80,7 +93,6 @@ internal static class FreshManifestCapture
         if (preflight.GitSnapshot is null)
             Artifact(SavedLocalMembership.Kind, SavedLocalMembership.Kind, ImmutableArray.Create(
                 SavedLocalMembership.Capture(preflight.LocalSnapshot ?? throw Refuse(), cancellation)), format: "json");
-        Artifact("prior-compiler-graph", FreshPriorBuild.Kind, FreshPriorBuild.Capture(execution, cancellation));
         Artifact("completed-test-plan", CompletedTestPlanRecipe.Kind, ImmutableArray.Create(
             CompletedTestPlanRecipe.Capture(execution.Plan, preflight.Root,
                 ProjectTargetSelector.Select(preflight.Root, preflight.Request.Project), cancellation)), format: "json");
@@ -220,19 +232,54 @@ internal static class FreshManifestCapture
             var buildId = "build-" + binding.GraphId;
             if (observation.InvocationRecipe is not null)
             {
+                // Validate known task/argv/role errors before capacity can omit
+                // optional DATA. Emission is deferred until mandatory capture ends.
                 var profile = CompilerRecipePayload.Classify(observation, preflight.Root, cancellation);
-                if (!profile.IsSupported)
-                    Artifact(buildId + "-recipe-unsupported", CompilerRecipePayload.UnsupportedKind,
-                        CompilerRecipePayload.Unsupported(observation, contextId, buildId, profile, cancellation), contextId, buildId, format: "json");
-                else
+                optional.Add(() =>
                 {
-                    var recipeFiles = CompilerRecipePayload.CaptureFiles(observation, context, buildId,
-                        path => ReadCaptured(path, ref readTotal, cancellation), cancellation);
-                    foreach (var file in recipeFiles)
-                        Artifact(file.Id, CompilerRecipePayload.FileKind(file), file.Bytes, contextId, buildId);
-                    Artifact(buildId + "-recipe", CompilerRecipePayload.Kind, CompilerRecipePayload.Create(observation,
-                        contextId, buildId, preflight.Root, recipeSources, recipeReferences, recipeFiles, cancellation), contextId, buildId, format: "json");
-                }
+                    if (bytes.Values.Sum(content => (long)content.Length) + mandatoryPriorLength + optionalPriorBytes >= 192L * 1024 * 1024)
+                        return; // Even a new status byte cannot fit; do not read optional files.
+                    var candidate = observation;
+                    var staged = new List<(string Id, string Kind, ImmutableArray<byte> Bytes)>();
+                    if (profile.IsSupported && !optionalReadsExhausted)
+                    {
+                        IReadOnlyList<CompilerRecipePayload.File>? recipeFiles = null;
+                        try
+                        {
+                            recipeFiles = CompilerRecipePayload.CaptureFiles(candidate, context, buildId,
+                                path => ReadCaptured(path, ref readTotal, cancellation), cancellation);
+                        }
+                        catch (ProjectContextException failure) when (failure.Reason == "compiler.outputLimit")
+                        {
+                            // The same read ledger is never reset. All mandatory
+                            // reads have completed; optional quota failure is DATA.
+                            optionalReadsExhausted = true;
+                        }
+                        if (recipeFiles is not null && CompilerRecipePayload.TryCreate(candidate, contextId, buildId, preflight.Root,
+                            recipeSources, recipeReferences, recipeFiles, cancellation, out var recipeBytes))
+                        {
+                            staged.AddRange(recipeFiles.Select(file => (file.Id, CompilerRecipePayload.FileKind(file), file.Bytes)));
+                            staged.Add((buildId + "-recipe", CompilerRecipePayload.Kind, recipeBytes));
+                        }
+                        else candidate = CompilerRecipePayload.SizeUnsupported(candidate);
+                    }
+                    else if (profile.IsSupported) candidate = CompilerRecipePayload.SizeUnsupported(candidate);
+                    if (staged.Count == 0)
+                        staged.Add((buildId + "-recipe-unsupported", CompilerRecipePayload.UnsupportedKind,
+                            CompilerRecipePayload.Unsupported(candidate, contextId, buildId,
+                                CompilerRecipePayload.Classify(candidate, preflight.Root, cancellation), cancellation)));
+                    if (!AdmitOptional(candidate, staged, out var contribution))
+                    {
+                        candidate = CompilerRecipePayload.SizeUnsupported(candidate);
+                        staged.Clear(); staged.Add((buildId + "-recipe-unsupported", CompilerRecipePayload.UnsupportedKind,
+                            CompilerRecipePayload.Unsupported(candidate, contextId, buildId,
+                                CompilerRecipePayload.Classify(candidate, preflight.Root, cancellation), cancellation)));
+                        if (!AdmitOptional(candidate, staged, out contribution)) return;
+                    }
+                    observations[binding.GraphId] = candidate; optionalPriorBytes += contribution;
+                    foreach (var item in staged) Artifact(item.Id, item.Kind, item.Bytes, contextId, buildId,
+                        format: item.Kind == CompilerRecipePayload.Kind || item.Kind == CompilerRecipePayload.UnsupportedKind ? "json" : null);
+                });
             }
             Artifact(buildId + "-closure", "compiler-input-closure", ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(new
                 { provider = "validated-csc-inputs-v1", metadata = phaseIdentities, reusableRecipe = false })), contextId, buildId, format: "json");
@@ -324,6 +371,18 @@ internal static class FreshManifestCapture
             Artifact("exemption-" + CanonicalIdentity.Tuple("exemption", exemption.Key), "trusted-exemption", ImmutableArray.Create(exemption.Value), format: "json");
         if (preflight.Trusted.Baseline is { } baseline)
             Artifact("trusted-baseline", "trusted-baseline", ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(baseline)), format: "json");
+        // Mandatory graph bytes are reserved before optional artifacts. Absence
+        // is the existing legacy-compatible shape when even status DATA cannot fit.
+        foreach (var id in observations.Keys.ToArray())
+            observations[id] = CompilerRecipeObservation.WithoutOptionalRecipe(observations[id], cancellation);
+        var mandatoryPrior = FreshPriorBuild.Capture(prior, observations, preflight.Root, cancellation);
+        mandatoryPriorLength = mandatoryPrior.Length;
+        if (bytes.Values.Sum(content => (long)content.Length) + mandatoryPriorLength > 192L * 1024 * 1024) throw Refuse();
+        optionalReadsExhausted = readTotal >= CompilerPhaseSnapshot.MaximumClosureBytes;
+        foreach (var emit in optional) { cancellation.ThrowIfCancellationRequested(); emit(); }
+        var selectedPrior = FreshPriorBuild.Capture(prior, observations, preflight.Root, cancellation);
+        if (selectedPrior.Length != mandatoryPriorLength + optionalPriorBytes) throw Refuse();
+        Artifact("prior-compiler-graph", FreshPriorBuild.Kind, selectedPrior);
         var revision = preflight.GitSnapshot?.Revision;
         var stateHash = preflight.GitSnapshot is { } git ? FreshGitProof.Identity(git) :
             FreshLocalProof.Identity(preflight.LocalSnapshot ?? throw new InvalidDataException("Local workspace fingerprint is missing."));

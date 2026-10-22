@@ -20,6 +20,7 @@ internal sealed record CompilerObservation(string ProjectPath, IReadOnlyList<Com
     internal CompilerOutput? Assembly { get; init; }
     internal CompilerOutput? Pdb { get; init; }
     internal CompilerOutput? ReferenceAssembly { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public CompilerInvocationObservation? InvocationRecipe { get; init; }
     // Raw argv stays in private worker transport. The exporter admits each known
     // scalar/role before serialization; unknown option values are never exported.
@@ -41,8 +42,10 @@ internal sealed record CompilerReadRequest(string SdkPath, string Binlog, string
 // Only this private worker envelope may serialize raw task argv/emit inputs.
 internal sealed record CompilerReadResponse(CompilerObservation? Observation, string? FailureReason)
 {
-    public IReadOnlyList<string> CommandLineArguments { get; init; } = [];
-    public IReadOnlyList<CompilerParameter> EmitParameters { get; init; } = [];
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? CommandLineArguments { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<CompilerParameter>? EmitParameters { get; init; }
 }
 internal static class CompilerEvidence
 {
@@ -88,12 +91,14 @@ internal static class CompilerEvidence
         using (timing?.Start("execution.build.evidence"))
             observation = await ReadAsync(log, node.ProjectPath, timeout, token, nativeProbe, sdk);
         var closingImages = await CaptureCompilerImages(sdk, token);
-        if (!compilerImages.SequenceEqual(closingImages))
-            throw new ProjectContextException("compiler.recipeImagesChanged", "Selected compiler inputs changed across the actual build.");
+        var imageUnsupported = compilerImages.UnsupportedReason ?? closingImages.UnsupportedReason ??
+            (!compilerImages.Files.SequenceEqual(closingImages.Files) ? "recipe.compilerImagesChanged" : null);
         if (observation.InvocationRecipe is { } recipe)
             observation = observation with { InvocationRecipe = recipe with
-                { Images = compilerImages.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() },
-                CompilerImages = compilerImages };
+                { Images = imageUnsupported is null ? compilerImages.Files.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() : [],
+                    UnsupportedReasons = imageUnsupported is null ? recipe.UnsupportedReasons :
+                        recipe.UnsupportedReasons.Append(imageUnsupported).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray() },
+                CompilerImages = imageUnsupported is null ? compilerImages.Files : [] };
         using var outputTiming = timing?.Start("execution.build.outputs");
         var output = observation.Parameters.Single(p => p.Name == "OutputAssembly").Items.Single();
         var assembly = Path.GetFullPath(output, Path.GetDirectoryName(node.ProjectPath)!);
@@ -137,21 +142,25 @@ internal static class CompilerEvidence
             if (result?.FailureReason is { } reason) throw new ProjectContextException(reason, "Actual compiler evidence was refused.");
             if (process.ExitCode != 0 || result?.Observation is null)
                 throw new ProjectContextException("compiler.protocolInvalid", "Compiler worker failed.");
-            return result.Observation with { CommandLineArguments = result.CommandLineArguments, EmitParameters = result.EmitParameters };
+            return result.Observation with { CommandLineArguments = result.CommandLineArguments ?? [], EmitParameters = result.EmitParameters ?? [] };
         }
         finally { Directory.Delete(scratch, true); }
     }
 
-    private static async Task<IReadOnlyList<CompilerImageFile>> CaptureCompilerImages(ProjectContextSdkResolution sdk, CancellationToken token)
+    internal sealed record CompilerImageCapture(IReadOnlyList<CompilerImageFile> Files, string? UnsupportedReason);
+    internal static async Task<CompilerImageCapture> CaptureCompilerImages(ProjectContextSdkResolution sdk, CancellationToken token)
     {
         var result = new List<CompilerImageFile>();
         foreach (var (role, path) in CompilerImagePaths(sdk))
         {
             token.ThrowIfCancellationRequested();
-            var file = await HashOutput(path, token);
+            CompilerOutput file;
+            try { file = await HashOutput(path, token); }
+            catch (ProjectContextException failure) when (failure.Reason is "compiler.outputMissing" or "compiler.outputUnproven" or "compiler.outputLimit" or "compiler.outputMutated")
+            { return new([], "recipe.compilerImageUnavailable"); }
             result.Add(new(role, file.Path, file.Length, file.Sha256));
         }
-        return result.AsReadOnly();
+        return new(result.AsReadOnly(), null);
     }
 
     // Exactly the current SDK-selected pool, not paths supplied by a saved recipe.

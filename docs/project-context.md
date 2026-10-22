@@ -74,3 +74,7 @@ consumer's approved private credential mechanism. The guard refuses conventional
 credential names, including mapped password, token and connection-key variants.
 It cannot determine whether an arbitrary property value is secret. Deterministic
 identity hashes are not encryption, and private diagnostics must remain private.
+
+Optional compiler recipe capture has finite independent observation/prior limits. Mandatory capture retains its existing read and stored-byte ceilings. Optional artifacts are admitted only after mandatory data and the mandatory prior graph are accounted for. A compact unsupported artifact is used when it fits; otherwise the optional recipe and its associated artifacts are absent, as with older bundles. Absence supplies no compiler, coverage, freshness or reusable-execution authority. Known malformed task/argument evidence remains an error before any capacity omission. These bounds do not guarantee availability for every workload or extend the invocation deadline.
+
+Explicit `--no-build` and saved verification recheck every retained compiler-image identity against the current trusted SDK role pool. Drift refuses that prior evidence; it never launches a replacement compiler or restamps the retained original command binding. Use an ordinary fresh check when a cold build is wanted. Unchanged supported warm recipes retain their original binding and bytes.

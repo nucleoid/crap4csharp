@@ -32,6 +32,23 @@ internal sealed class CompilerRecipeObservation(string sdkPath, string? hostPath
     private bool executableRoute;
     internal IReadOnlyList<string> RawArguments { get; private set; } = [];
     private bool closed, late;
+    private readonly HashSet<string> emitNames = new(StringComparer.Ordinal);
+    internal bool SizeDeclined { get; private set; }
+    internal void DeclineSize()
+    {
+        if (ProvenArgumentMismatch()) Unsupported("recipe.provenCommandArgumentsMismatch");
+        SizeDeclined = true; arguments = null; commandArguments = null;
+        RawArguments = []; options.Clear(); optionNames.Clear();
+        Unsupported("recipe.sizeUnsupported");
+    }
+    internal static CompilerObservation OmitForSize(CompilerObservation observation)
+    {
+        var recipe = observation.InvocationRecipe;
+        if (recipe is null) return observation;
+        return observation with { CommandLineArguments = [], EmitParameters = [], CompilerImages = [],
+            InvocationRecipe = recipe with { CommandBinding = "unproven", Arguments = [], Options = [], Images = [],
+                UnsupportedReasons = recipe.UnsupportedReasons.Append("recipe.sizeUnsupported").Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray() } };
+    }
 
     internal void Close()
     {
@@ -45,12 +62,73 @@ internal sealed class CompilerRecipeObservation(string sdkPath, string? hostPath
         late = true; Unsupported("recipe.eventAfterTaskTerminal"); return false;
     }
 
+    internal bool BeginEmitParameter(string name)
+    {
+        if (!MayObserve()) return false;
+        if (name is not ("EmbeddedFiles" or "GeneratedFilesOutputPath" or "PdbFile") || !emitNames.Add(name))
+        { Unsupported("recipe.duplicateEmitParameter"); return false; }
+        return true;
+    }
+
+    // Required before optional absence: known malformed task/argv evidence must
+    // not disappear merely because optional JSON or artifact capacity is full.
+    internal static void RequireKnownIntegrity(CompilerObservation observation, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        if (observation.InvocationRecipe is not { } recipe) return;
+        static bool Digest(string? value) => value is { Length: 64 } && value.All(char.IsAsciiHexDigitLower);
+        if (!Digest(recipe.TaskAssociationSha256) || recipe.Arguments is null || recipe.Options is null ||
+            recipe.Images is null || recipe.UnsupportedReasons is null || recipe.UnsupportedReasons.Count is < 2 or > 16 ||
+            !recipe.UnsupportedReasons.Contains("recipe.loadedCompilerAndTaskImageNotAttested", StringComparer.Ordinal) ||
+            !recipe.UnsupportedReasons.Contains("recipe.runtimeLoadedImageNotAttested", StringComparer.Ordinal) ||
+            recipe.UnsupportedReasons.Count != recipe.UnsupportedReasons.Distinct(StringComparer.Ordinal).Count() ||
+            recipe.TaskBinding is not ("selected-sdk-core-target" or "unproven") ||
+            recipe.CommandBinding is not ("selected-host-exec-csc-arguments-match" or "selected-sdk-csc-exe-arguments-match" or "unproven") ||
+            recipe.UnsupportedReasons.Any(reason => reason is not ("recipe.loadedCompilerAndTaskImageNotAttested" or
+                "recipe.runtimeLoadedImageNotAttested" or "recipe.languageVersionUnsupported" or "recipe.scalarOptionUnsupported" or
+                "recipe.scalarOptionAmbiguous" or "recipe.selectedSdkTaskFileUnproven" or "recipe.compilerCommandPrefixUnproven" or
+                "recipe.argumentOutputMissing" or "recipe.commandEventMissing" or "recipe.commandArgumentsUnproven" or
+                "recipe.sizeUnsupported" or "recipe.compilerImageUnavailable" or "recipe.compilerImagesChanged")) ||
+            !SafeOptions(recipe.Options, token) || recipe.Arguments.Count > CompilerRecipeBudget.MaximumItems ||
+            recipe.Arguments.Sum(argument => (long)(argument?.Utf8Length ?? 0)) > CompilerRecipeBudget.MaximumCharacters ||
+            recipe.Arguments.Where((argument, index) => argument is null || argument.Ordinal != index || argument.Utf8Length <= 0 || !Digest(argument.Sha256)).Any() ||
+            (observation.RetainedUnsupportedRecipe is null
+                ? !Identities(observation.CommandLineArguments, token).SequenceEqual(recipe.Arguments)
+                : observation.CommandLineArguments.Count != 0 || observation.EmitParameters.Count != 0) ||
+            recipe.Images.Any(image => image is null || image.Length <= 0 || image.Length > CompilerPhaseSnapshot.MaximumFileBytes || !Digest(image.Sha256)))
+            throw new ProjectContextException("compiler.recipeBindingUnproven", "Malformed compiler observation cannot be hidden by optional absence.");
+        var bindingUnavailable = recipe.UnsupportedReasons.Any(reason => reason is "recipe.selectedSdkTaskFileUnproven" or
+            "recipe.compilerCommandPrefixUnproven" or "recipe.argumentOutputMissing" or "recipe.commandEventMissing" or "recipe.sizeUnsupported");
+        if ((recipe.TaskBinding == "unproven") != recipe.UnsupportedReasons.Contains("recipe.selectedSdkTaskFileUnproven", StringComparer.Ordinal) ||
+            recipe.CommandBinding != "unproven" && recipe.Arguments.Count == 0 ||
+            recipe.CommandBinding == "unproven" && !bindingUnavailable ||
+            recipe.CommandBinding != "unproven" && (recipe.TaskBinding == "unproven" || bindingUnavailable ||
+                recipe.UnsupportedReasons.Contains("recipe.commandArgumentsUnproven", StringComparer.Ordinal)))
+            throw new ProjectContextException("compiler.recipeBindingUnproven", "Contradictory compiler binding cannot be hidden by optional absence.");
+        if (recipe.Images.Count != 0)
+        {
+            string[] roles = ["dotnet-host", "csc", "compiler-common", "compiler-csharp", "compiler-deps",
+                "compiler-runtimeconfig", "sdk-csc-target", "sdk-csc-task"];
+            var expectedRoles = OperatingSystem.IsWindows() ? roles.Append("csc-launcher") : roles;
+            if (!recipe.Images.Select(image => image.Role).SequenceEqual(expectedRoles) ||
+                !observation.CompilerImages.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).SequenceEqual(recipe.Images))
+                throw new ProjectContextException("compiler.recipeBindingUnproven", "Malformed compiler image roles cannot be hidden by optional absence.");
+        }
+    }
+
+    internal static CompilerObservation WithoutOptionalRecipe(CompilerObservation observation, CancellationToken token)
+    {
+        RequireKnownIntegrity(observation, token);
+        return observation with { InvocationRecipe = null, CommandLineArguments = [], EmitParameters = [],
+            CompilerImages = [], RetainedUnsupportedRecipe = null };
+    }
+
     internal void Arguments(IReadOnlyList<string> items, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         if (!MayObserve()) return;
         if (++argumentEvents != 1) { Unsupported("recipe.duplicateArgumentOutput"); return; }
-        arguments = Identities(items, token);
+        if (SizeDeclined || !TryIdentities(items, token, out arguments)) { DeclineSize(); return; }
         RawArguments = items.ToArray();
     }
 
@@ -59,18 +137,19 @@ internal sealed class CompilerRecipeObservation(string sdkPath, string? hostPath
         token.ThrowIfCancellationRequested();
         if (!MayObserve()) return;
         if (++commandEvents != 1) { Unsupported("recipe.duplicateCommandEvent"); return; }
-        if (text.Length > 2 * 1024 * 1024) throw Limit();
+        if (SizeDeclined || text.Length > CompilerRecipeBudget.MaximumCharacters) { DeclineSize(); return; }
         // Lexing only. Unlike CSharpCommandLineParser.Parse, this never reads a
         // response/ruleset file or resolves a source/reference from the command.
-        var items = CommandLineParser.SplitCommandLineIntoArguments(text, removeHashComments: false).ToArray();
-        if (items.Length > 32768) throw Limit();
+        var items = CommandLineParser.SplitCommandLineIntoArguments(text, removeHashComments: false).Take(32769).ToArray();
+        if (items.Length > 32768) { DeclineSize(); return; }
         commandPrefix = items.Length >= 3 && hostPath is not null && EqualPath(items[0], hostPath) &&
             items[1] == "exec" && EqualPath(items[2], Path.Combine(sdkPath, "Roslyn", "bincore", "csc.dll"));
         executableRoute = items.Length >= 1 && OperatingSystem.IsWindows() &&
             EqualPath(items[0], Path.Combine(sdkPath, "Roslyn", "bincore", "csc.exe"));
         if (commandPrefix || executableRoute)
         {
-            commandArguments = Identities(items.Skip(executableRoute ? 1 : 3).ToArray(), token);
+            if (!TryIdentities(items.Skip(executableRoute ? 1 : 3).ToArray(), token, out commandArguments))
+            { DeclineSize(); return; }
             commandPrefix = true;
         }
         else Unsupported("recipe.compilerCommandPrefixUnproven");
@@ -80,7 +159,7 @@ internal sealed class CompilerRecipeObservation(string sdkPath, string? hostPath
     {
         token.ThrowIfCancellationRequested();
         if (!MayObserve()) return;
-        if (!ProjectsOption(name)) return;
+        if (SizeDeclined || !ProjectsOption(name)) return;
         if (!optionNames.Add(name) || values.Count != 1) { Unsupported("recipe.scalarOptionAmbiguous"); return; }
         var value = values[0];
         if (BoolOptions.Contains(name) && bool.TryParse(value, out var boolean))
@@ -128,6 +207,7 @@ internal sealed class CompilerRecipeObservation(string sdkPath, string? hostPath
     internal CompilerInvocationObservation Finish()
     {
         var taskBound = taskKey != "null" && taskFile is not null && EqualPath(taskFile, Path.Combine(sdkPath, "Roslyn", "Microsoft.CSharp.Core.targets"));
+        if (ProvenArgumentMismatch()) Unsupported("recipe.provenCommandArgumentsMismatch");
         if (!taskBound) Unsupported("recipe.selectedSdkTaskFileUnproven");
         if (argumentEvents != 1 || arguments is null) Unsupported("recipe.argumentOutputMissing");
         if (commandEvents != 1 || commandArguments is null) Unsupported("recipe.commandEventMissing");
@@ -142,6 +222,19 @@ internal sealed class CompilerRecipeObservation(string sdkPath, string? hostPath
             matched ? executableRoute ? "selected-sdk-csc-exe-arguments-match" : "selected-host-exec-csc-arguments-match" : "unproven",
             Array.AsReadOnly(arguments ?? []), Array.AsReadOnly(options.ToArray()),
             Array.AsReadOnly(unsupported.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray()));
+    }
+
+    private static bool TryIdentities(IReadOnlyList<string> values, CancellationToken token, out CompilerArgumentIdentity[]? result)
+    {
+        result = null;
+        if (values.Count > CompilerRecipeBudget.MaximumItems) return false;
+        long length = 0;
+        foreach (var value in values)
+        {
+            token.ThrowIfCancellationRequested();
+            if (value is null || (length += Encoding.UTF8.GetByteCount(value)) > CompilerRecipeBudget.MaximumCharacters) return false;
+        }
+        result = Identities(values, token); return true;
     }
 
     internal static CompilerArgumentIdentity[] Identities(IReadOnlyList<string> values, CancellationToken token)
@@ -159,6 +252,10 @@ internal sealed class CompilerRecipeObservation(string sdkPath, string? hostPath
     }
 
     private void Unsupported(string reason) => unsupported.Add(reason);
+    private bool ProvenArgumentMismatch() => taskKey != "null" && taskFile is not null &&
+        EqualPath(taskFile, Path.Combine(sdkPath, "Roslyn", "Microsoft.CSharp.Core.targets")) &&
+        !late && argumentEvents == 1 && commandEvents == 1 && commandPrefix && arguments is not null && commandArguments is not null &&
+        !arguments.SequenceEqual(commandArguments);
     private static string Hash(string value) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
     private static bool EqualPath(string value, string expected)
     {

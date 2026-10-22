@@ -20,6 +20,7 @@ internal static class CompilerBinlogReader
         events.TargetFinished += (_, value) => targets.Remove(TargetKey(value.BuildEventContext));
         int eventCount = 0, itemCount = 0;
         long characters = 0;
+        var optionalBudget = new CompilerRecipeBudget();
         bool buildCompleted = false;
         static string Key(BuildEventContext? context) => context is null ? "null" :
             $"{context.SubmissionId}:{context.NodeId}:{context.ProjectContextId}:{context.TargetId}:{context.TaskId}";
@@ -54,9 +55,9 @@ internal static class CompilerBinlogReader
             if (value is TaskCommandLineEventArgs command && command.TaskName == "Csc" &&
                 tasks.TryGetValue(Key(command.BuildEventContext), out var commanded))
             {
-                if ((characters += command.CommandLine.Length) > 2 * 1024 * 1024)
-                    throw new ProjectContextException("compiler.evidenceLimit", "Compiler input limit exceeded.");
-                commanded.Recipe?.Command(command.CommandLine, token);
+                if (!optionalBudget.TryCharge(command.CommandLine.Length))
+                { commanded.Recipe?.DeclineSize(); commanded.Recipe?.Command("", token); }
+                else commanded.Recipe?.Command(command.CommandLine, token);
                 return;
             }
             if (value is not TaskParameterEventArgs parameter) return;
@@ -69,8 +70,8 @@ internal static class CompilerBinlogReader
                 {
                     token.ThrowIfCancellationRequested();
                     var text = item is IItemData itemData ? itemData.EvaluatedInclude : item is ITaskItem taskItem ? taskItem.ItemSpec : item?.ToString() ?? "";
-                    if (++itemCount > 32768 || (characters += text.Length) > 2 * 1024 * 1024)
-                        throw new ProjectContextException("compiler.evidenceLimit", "Compiler input limit exceeded.");
+                    if (!optionalBudget.TryCharge(text.Length))
+                    { recipeTask.Recipe?.DeclineSize(); values.Clear(); break; }
                     values.Add(text);
                 }
                 if (parameter.Kind == TaskParameterMessageKind.TaskOutput) recipeTask.Recipe?.Arguments(values, token);
@@ -81,18 +82,19 @@ internal static class CompilerBinlogReader
             if (tasks.TryGetValue(Key(parameter.BuildEventContext), out var emitTask) &&
                 parameter.ParameterName is "EmbeddedFiles" or "GeneratedFilesOutputPath" or "PdbFile")
             {
-                if (emitTask.EmitParameters.Any(input => input.Name == parameter.ParameterName))
-                    throw new ProjectContextException("compiler.associationInvalid", "Duplicate compiler emit parameter.");
+                if (emitTask.Recipe?.BeginEmitParameter(parameter.ParameterName) != true ||
+                    emitTask.EmitParameters.Any(input => input.Name == parameter.ParameterName))
+                    throw new ProjectContextException("compiler.associationInvalid", "Late or duplicate compiler emit parameter.");
                 var values = new List<string>();
                 foreach (var item in parameter.Items)
                 {
                     token.ThrowIfCancellationRequested();
                     var text = item is IItemData data ? data.EvaluatedInclude : item is ITaskItem taskItem ? taskItem.ItemSpec : item?.ToString() ?? "";
-                    if (++itemCount > 32768 || (characters += text.Length) > 2 * 1024 * 1024)
-                        throw new ProjectContextException("compiler.evidenceLimit", "Compiler input limit exceeded.");
+                    if (!optionalBudget.TryCharge(text.Length))
+                    { emitTask.Recipe?.DeclineSize(); values.Clear(); break; }
                     values.Add(text);
                 }
-                emitTask.EmitParameters.Add(new(parameter.ParameterName, values));
+                if (!optionalBudget.Exceeded) emitTask.EmitParameters.Add(new(parameter.ParameterName, values));
                 return;
             }
             Observation? observed;
@@ -155,8 +157,10 @@ internal static class CompilerBinlogReader
                 runtime.Add(new(Path.GetFullPath(source[i], Path.GetDirectoryName(request.ProjectPath)!),
                     Path.GetFullPath(destination[i], Path.GetDirectoryName(request.ProjectPath)!)));
         }
-        return new(request.ProjectPath, task.Parameters) { RuntimeCopies = runtime, InvocationRecipe = task.Recipe?.Finish(),
-            CommandLineArguments = task.Recipe?.RawArguments ?? [], EmitParameters = task.EmitParameters.ToArray() };
+        var result = new CompilerObservation(request.ProjectPath, task.Parameters) { RuntimeCopies = runtime, InvocationRecipe = task.Recipe?.Finish(),
+            CommandLineArguments = task.Recipe?.RawArguments ?? [], EmitParameters = task.Recipe?.SizeDeclined == true ? [] : task.EmitParameters.ToArray() };
+        CompilerRecipeObservation.RequireKnownIntegrity(result, token);
+        return result;
     }
 
     private sealed class Observation(string? project)
