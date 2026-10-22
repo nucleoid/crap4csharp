@@ -126,6 +126,7 @@ public sealed class CompilerRecipeObservationTests
     [InlineData("foreign-output")]
     [InlineData("foreign-map")]
     [InlineData("source-order")]
+    [InlineData("relative-source-repeat")]
     [InlineData("reference-alias")]
     [InlineData("embedded-source")]
     public void Unknown_or_foreign_role_DATA_refuses_before_export(string change)
@@ -139,6 +140,7 @@ public sealed class CompilerRecipeObservationTests
         if (change == "foreign-output") arguments[5] = "/out:" + Path.Combine(fixture.Path, "foreign.dll");
         if (change == "foreign-map") arguments.Insert(2, "/pathmap:" + Path.GetPathRoot(fixture.Path) + "=/_/");
         if (change == "source-order") arguments.Add(source);
+        if (change == "relative-source-repeat") arguments.Add(Path.GetRelativePath(fixture.Path, source));
         if (change == "reference-alias") arguments[6] = "/reference:Foreign=" + reference;
         if (change == "embedded-source") arguments.Insert(2, "/embed:" + Path.Combine(fixture.Path, "missing.cs"));
         var observation = new CompilerObservation(Path.Combine(fixture.Path, "App.csproj"), [new("Sources", [source]), new("References", [reference])])
@@ -277,6 +279,8 @@ public sealed class CompilerRecipeObservationTests
     [InlineData("late", "diagnostic.compilerRoute.lateEvent")]
     public void Actual_command_classifier_reports_only_closed_route_DATA_without_extending_binding(string scenario, string expected)
     {
+        // Duplicate/late tokens are in-process DATA only: real worker integrity refusal
+        // precedes transport for these malformed event streams.
         using var fixture = TestDirectory.Create("crap-recipe-route-classifier-data");
         var (capture, prefix) = Capture(fixture.Path);
         var compiler = Path.Combine(fixture.Path, "sdk", "Roslyn", "bincore");

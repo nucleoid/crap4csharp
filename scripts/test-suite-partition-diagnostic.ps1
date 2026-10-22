@@ -63,6 +63,14 @@ for($routeIndex=0;$routeIndex -lt $routeTokens.Count;$routeIndex++){
     $observedTokens=@($routeValue.failures[0].observedDiagnosticTokens)
     if($observedTokens.Count -ne 1 -or $observedTokens[0] -cne $routeTokens[$routeIndex]){throw 'Closed route distinction missing or ambiguous.'}
 }
+# Bundle diagnostics transport only independent fixed cardinalities/reasons, never payload text.
+$bundleTokens=@('diagnostic.recipeArtifact.none','diagnostic.recipeArtifact.one','diagnostic.recipeArtifact.multiple','diagnostic.recipeUnsupported.none','diagnostic.recipeUnsupported.one','diagnostic.recipeUnsupported.multiple','diagnostic.recipeInspection.unavailable','compiler.recipeBindingUnproven')
+for($bundleIndex=0;$bundleIndex -lt $bundleTokens.Count;$bundleIndex++){
+    $message.InnerText='PRIVATE_MESSAGE recipe.PRIVATE_UNKNOWN_OPTION '+$bundleTokens[$bundleIndex]
+    $doc.Save($trx);$bundleValue=Observe ('closed-bundle-'+$bundleIndex)
+    $observedTokens=@($bundleValue.failures[0].observedDiagnosticTokens)
+    if($observedTokens.Count -ne 1 -or $observedTokens[0] -cne $bundleTokens[$bundleIndex]){throw 'Closed bundle distinction missing or ambiguous.'}
+}
 $message.InnerText=$originalMessage
 $originalStack=$stack.InnerText
 $stack.InnerText=(1..12 | ForEach-Object {' at test in /owned/tests/Crap4CSharp.Tests/OwnedFixture.cs:line 2'}) -join "`n"

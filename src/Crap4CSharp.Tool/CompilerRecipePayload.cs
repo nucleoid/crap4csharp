@@ -451,6 +451,10 @@ internal static class CompilerRecipePayload
             else if (!SafeScalar(argument, name, value, observation, root))
             {
                 if (argument[0] != '/' || name.Length == 0) throw Refuse();
+                // A repeated known Unix source is an integrity mismatch, not
+                // an unfamiliar slash-option unsupported profile. Supported
+                // scalar flags never enter this diagnostic-free branch.
+                if (colon < 0 && sourcePaths.Contains(Resolve(argument, observation.ProjectPath), PathIdentityPolicy.Current.Comparer)) throw Refuse();
                 unsupported.Add("recipe.scalarProfileUnsupported");
                 roles.Add(new(ordinal, "unsupported-scalar", null, null));
                 continue; // Do not retain an unknown value in a projected object.

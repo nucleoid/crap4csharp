@@ -2934,7 +2934,13 @@ public sealed class FreshCheckExecutionTests
                 Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "build-count.txt")));
                 var secondBundle = ArtifactBundle.Load(Path.Combine(fixture.Path, "bundle-next", "manifest.json"), fixture.Path);
                 Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(secondBundle.Manifest, secondBundle.Bytes).Status);
+                // Public App.RunAsync does not expose the first compiler observation here.
+                // Inspect only existing, bounded bundle DATA; this cannot establish a command route.
+                var inputRecipePresent = bundle.Manifest.Artifacts.Count(artifact => artifact.Kind == CompilerRecipePayload.Kind) == 1;
+                Assert.True(inputRecipePresent, inputRecipePresent ? null : BundleRecipeDiagnostic(bundle));
                 var inputRecipe = Assert.Single(bundle.Manifest.Artifacts, artifact => artifact.Kind == CompilerRecipePayload.Kind);
+                var importedRecipePresent = secondBundle.Manifest.Artifacts.Count(artifact => artifact.Kind == CompilerRecipePayload.Kind) == 1;
+                Assert.True(importedRecipePresent, importedRecipePresent ? null : BundleRecipeDiagnostic(secondBundle));
                 var importedRecipe = Assert.Single(secondBundle.Manifest.Artifacts, artifact => artifact.Kind == CompilerRecipePayload.Kind);
                 Assert.Equal(inputRecipe.ContextId, importedRecipe.ContextId); Assert.Equal(inputRecipe.BuildId, importedRecipe.BuildId);
                 Assert.Equal(bundle.Bytes[inputRecipe.Locator], secondBundle.Bytes[importedRecipe.Locator]);
@@ -3053,6 +3059,43 @@ public sealed class FreshCheckExecutionTests
             File.WriteAllBytes(path, original[path]);
         }
         foreach (var (path, bytes) in original) Assert.Equal(bytes, File.ReadAllBytes(path));
+    }
+
+    private static string BundleRecipeDiagnostic(ArtifactBundle bundle)
+    {
+        static string Cardinality(int count) => count == 0 ? "none" : count == 1 ? "one" : "multiple";
+        var tokens = new SortedSet<string>(StringComparer.Ordinal)
+        {
+            "diagnostic.recipeArtifact." + Cardinality(bundle.Manifest.Artifacts.Count(a => a.Kind == CompilerRecipePayload.Kind)),
+            "diagnostic.recipeUnsupported." + Cardinality(bundle.Manifest.Artifacts.Count(a => a.Kind == CompilerRecipePayload.UnsupportedKind))
+        };
+        // No new I/O: at most eight already-loaded payloads and 64 KiB total.
+        var remaining = 64 * 1024;
+        var unsupported = bundle.Manifest.Artifacts.Where(a => a.Kind == CompilerRecipePayload.UnsupportedKind).Take(9).ToArray();
+        if (unsupported.Length > 8) tokens.Add("diagnostic.recipeInspection.unavailable");
+        foreach (var artifact in unsupported.Take(8))
+        {
+            if (!bundle.Bytes.TryGetValue(artifact.Locator, out var bytes) || bytes.IsDefault || bytes.Length > remaining)
+            { tokens.Add("diagnostic.recipeInspection.unavailable"); break; }
+            remaining -= bytes.Length;
+            try
+            {
+                using var payload = JsonDocument.Parse(bytes.ToArray(), new JsonDocumentOptions { MaxDepth = 8 });
+                if (payload.RootElement.ValueKind != JsonValueKind.Object ||
+                    !payload.RootElement.TryGetProperty("reasons", out var reasons) || reasons.ValueKind != JsonValueKind.Array ||
+                    reasons.GetArrayLength() > 6)
+                { tokens.Add("diagnostic.recipeInspection.unavailable"); continue; }
+                foreach (var reason in reasons.EnumerateArray())
+                {
+                    if (reason.ValueKind != JsonValueKind.String) continue;
+                    var value = reason.GetString();
+                    if (value is "recipe.scalarProfileUnsupported" or "recipe.emitProfileUnsupported" or "recipe.bindingUnsupported" or
+                        "recipe.sizeUnsupported" or "recipe.compilerImageUnavailable" or "recipe.compilerImagesChanged") tokens.Add(value);
+                }
+            }
+            catch (JsonException) { tokens.Add("diagnostic.recipeInspection.unavailable"); }
+        }
+        return string.Join(" ", tokens);
     }
 
     private static void AssertRetainedPrivateDiagnostics(JsonElement terminal, bool requireBuildLog)
