@@ -454,7 +454,10 @@ internal static class CompilerRecipePayload
                 // A repeated known Unix source is an integrity mismatch, not
                 // an unfamiliar slash-option unsupported profile. Supported
                 // scalar flags never enter this diagnostic-free branch.
-                if (colon < 0 && sourcePaths.Contains(Resolve(argument, observation.ProjectPath), PathIdentityPolicy.Current.Comparer)) throw Refuse();
+                // Longer unknown switches keep their unsupported profile without
+                // entering Resolve's stricter path extent. Absolute Unix source
+                // tokens containing ':' retain the existing syntax limitation.
+                if (argument.Length <= 16384 && colon < 0 && sourcePaths.Contains(Resolve(argument, observation.ProjectPath), PathIdentityPolicy.Current.Comparer)) throw Refuse();
                 unsupported.Add("recipe.scalarProfileUnsupported");
                 roles.Add(new(ordinal, "unsupported-scalar", null, null));
                 continue; // Do not retain an unknown value in a projected object.

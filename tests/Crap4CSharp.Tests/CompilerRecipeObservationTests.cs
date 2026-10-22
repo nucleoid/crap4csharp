@@ -127,6 +127,9 @@ public sealed class CompilerRecipeObservationTests
     [InlineData("foreign-map")]
     [InlineData("source-order")]
     [InlineData("relative-source-repeat")]
+    [InlineData("slash-rooted-source-repeat")]
+    [InlineData("unknown-slash-option")]
+    [InlineData("long-unknown-slash-option")]
     [InlineData("reference-alias")]
     [InlineData("embedded-source")]
     public void Unknown_or_foreign_role_DATA_refuses_before_export(string change)
@@ -141,6 +144,18 @@ public sealed class CompilerRecipeObservationTests
         if (change == "foreign-map") arguments.Insert(2, "/pathmap:" + Path.GetPathRoot(fixture.Path) + "=/_/");
         if (change == "source-order") arguments.Add(source);
         if (change == "relative-source-repeat") arguments.Add(Path.GetRelativePath(fixture.Path, source));
+        if (change == "slash-rooted-source-repeat")
+        {
+            // This reaches the slash-token branch on Windows too, while proving
+            // the alternate spelling binds the same captured path before refusal.
+            var repeated = "/" + Path.GetRelativePath(Path.GetPathRoot(source)!, source).Replace('\\', '/');
+            Assert.StartsWith("/", repeated, StringComparison.Ordinal);
+            Assert.DoesNotContain(":", repeated, StringComparison.Ordinal);
+            Assert.Equal(Path.GetFullPath(source), Path.GetFullPath(repeated, fixture.Path));
+            arguments.Add(repeated);
+        }
+        if (change == "unknown-slash-option") arguments.Add("/PRIVATE_UNKNOWN_SLASH_OPTION");
+        if (change == "long-unknown-slash-option") arguments.Add("/" + new string('x', 16384));
         if (change == "reference-alias") arguments[6] = "/reference:Foreign=" + reference;
         if (change == "embedded-source") arguments.Insert(2, "/embed:" + Path.Combine(fixture.Path, "missing.cs"));
         var observation = new CompilerObservation(Path.Combine(fixture.Path, "App.csproj"), [new("Sources", [source]), new("References", [reference])])
@@ -149,11 +164,16 @@ public sealed class CompilerRecipeObservationTests
         // before the single adversarial role/option mutation above.
         Assert.Equal(originalArguments.Length, CompilerRecipePayload.ProjectArguments(observation with { CommandLineArguments = originalArguments },
             fixture.Path, TestContext.Current.CancellationToken).ArgumentRoles.Count);
-        if (change is "unknown-option" or "foreign-map")
+        if (change is "unknown-option" or "foreign-map" or "unknown-slash-option" or "long-unknown-slash-option")
         {
             var profile = CompilerRecipePayload.ProjectArguments(observation, fixture.Path, TestContext.Current.CancellationToken);
             Assert.False(profile.IsSupported);
             Assert.DoesNotContain("PRIVATE_KEY", JsonSerializer.Serialize(profile), StringComparison.Ordinal);
+            if (change is "unknown-slash-option" or "long-unknown-slash-option")
+            {
+                Assert.Contains("recipe.scalarProfileUnsupported", profile.UnsupportedReasons);
+                Assert.DoesNotContain(arguments[^1], JsonSerializer.Serialize(profile), StringComparison.Ordinal);
+            }
         }
         else
             Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() =>
