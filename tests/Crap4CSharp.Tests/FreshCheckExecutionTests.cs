@@ -475,7 +475,9 @@ public sealed class FreshCheckExecutionTests
             pair => captured.OptionalRecipes!.OptionalView(evidence.Compiler, pair.Value, root, token), StringComparer.Ordinal);
         var binding = Assert.Single(evidence.Compiler.FinalGraph.GraphContexts, item => !item.IsTestProject);
         var original = originals[binding.GraphId];
-        Assert.True(CompilerRecipePayload.Classify(original, root, token).IsSupported);
+        var initialProjection = CompilerRecipePayload.Classify(original, root, token);
+        Assert.True(initialProjection.IsSupported, initialProjection.IsSupported ? null
+            : CompilerEvidenceTests.BindingDiagnostic(original, token, projectedReasons: initialProjection.UnsupportedReasons));
         selected[binding.GraphId] = loss == "size" ? CompilerRecipePayload.SizeUnsupported(original) : loss == "images"
             ? CompilerRecipePayload.ImagesChangedUnsupported(original, token) : CompilerRecipeObservation.WithoutOptionalRecipe(original, token);
         var selection = FreshCompilerRecipeSelection.Create(evidence.Compiler, selected, root, token);

@@ -44,7 +44,7 @@ try {
         $method=$case.Class+'.'+$case.Method
         $messageNode=$row.SelectSingleNode('*[local-name()="Output"]/*[local-name()="ErrorInfo"]/*[local-name()="Message"]')
         $message=if($null -eq $messageNode){''}else{[string]$messageNode.InnerText}
-        $tokens=@(foreach($token in @('run.timedOut','run.cancelled','context.projectLoadFailed','context.assetsUnavailable','context.inputsMutated','compiler.inputsMutated','compiler.referencesUnproven','coverage.unavailable','test.runnerUnsupported')){
+        $tokens=@(foreach($token in @('run.timedOut','run.cancelled','context.projectLoadFailed','context.assetsUnavailable','context.inputsMutated','compiler.inputsMutated','compiler.referencesUnproven','coverage.unavailable','test.runnerUnsupported','recipe.bindingUnsupported','recipe.compilerCommandPrefixUnproven','recipe.argumentOutputMissing','recipe.commandEventMissing','recipe.commandArgumentsUnproven','recipe.sizeUnsupported','recipe.compilerImageUnavailable','recipe.compilerImagesChanged','recipe.scalarProfileUnsupported','recipe.emitProfileUnsupported','recipe.selectedSdkTaskFileUnproven','diagnostic.compilerBinding.unproven','diagnostic.compilerBinding.selected','diagnostic.compilerRoute.selectedHostExec','diagnostic.compilerRoute.selectedSdkWindowsApphost','diagnostic.compilerRoute.selectedSdkUnixApphost','diagnostic.compilerRoute.other','diagnostic.compilerRoute.noEvent','diagnostic.compilerRoute.multipleEvents','diagnostic.compilerRoute.unavailable')){
             if($message.Contains($token,[StringComparison]::Ordinal)){$token}
         })
         $stackNode=$row.SelectSingleNode('*[local-name()="Output"]/*[local-name()="ErrorInfo"]/*[local-name()="StackTrace"]')

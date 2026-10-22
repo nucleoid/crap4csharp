@@ -37,7 +37,7 @@ function Observe([string]$Label) {
     $path=Join-Path $ResultsDirectory "$Label.json"
     & "$PSScriptRoot/write-suite-partition-diagnostic.ps1" -DiscoveryPath $discovery -ShardCount 1 -ShardIndex 0 -TrxPath $trx -ExitCode 1 -OutputPath $path -RepositoryRoot (Join-Path $ResultsDirectory 'repo')
     $raw=Get-Content -LiteralPath $path -Raw
-    foreach ($secret in @('PRIVATE_MESSAGE','PRIVATE_STACK','Consumer.cs','C:\private','SECRET_ARGUMENT','OwnedFixture.cs','Owned.Private','999999')) {
+    foreach ($secret in @('PRIVATE_MESSAGE','PRIVATE_STACK','Consumer.cs','C:\private','SECRET_ARGUMENT','OwnedFixture.cs','Owned.Private','999999','recipe.PRIVATE_UNKNOWN_OPTION')) {
         if ($raw.Contains($secret)) { throw 'Private diagnostic details leaked.' }
     }
     return ($raw | ConvertFrom-Json)
@@ -49,6 +49,11 @@ if (@($failure.observedDiagnosticTokens).Count -ne 1 -or $failure.observedDiagno
 if (@(Compare-Object @(2,3) @($failure.observedRepositoryTestSites.line)).Count) { throw 'Source line bounds or separator handling failed.' }
 $expectedDigest=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes('tests/Crap4CSharp.Tests/OwnedFixture.cs'))).ToLowerInvariant()
 foreach ($site in $failure.observedRepositoryTestSites) { if ($site.sourceDigest -cne $expectedDigest) { throw 'Source digest mismatch.' } }
+# Fixed optional-recipe tokens survive; unknown/private values still cannot leave diagnostics.
+$message.InnerText+=' recipe.bindingUnsupported recipe.compilerCommandPrefixUnproven diagnostic.compilerBinding.unproven diagnostic.compilerRoute.selectedSdkUnixApphost recipe.PRIVATE_UNKNOWN_OPTION'
+$doc.Save($trx); $recipeValue=Observe 'recipe-binding-fixed-tokens'
+$expectedTokens=@('run.timedOut','recipe.bindingUnsupported','recipe.compilerCommandPrefixUnproven','diagnostic.compilerBinding.unproven','diagnostic.compilerRoute.selectedSdkUnixApphost')
+if (@(Compare-Object $expectedTokens @($recipeValue.failures[0].observedDiagnosticTokens)).Count) { throw 'Closed recipe route observations missing.' }
 $originalStack=$stack.InnerText
 $stack.InnerText=(1..12 | ForEach-Object {' at test in /owned/tests/Crap4CSharp.Tests/OwnedFixture.cs:line 2'}) -join "`n"
 $doc.Save($trx)
