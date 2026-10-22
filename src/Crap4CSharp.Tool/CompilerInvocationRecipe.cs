@@ -35,7 +35,9 @@ internal sealed class CompilerRecipeObservation(string sdkPath, string? hostPath
         "diagnostic.compilerRoute.selectedHostExec" or "diagnostic.compilerRoute.selectedSdkWindowsApphost" or
         "diagnostic.compilerRoute.selectedSdkUnixApphost" or "diagnostic.compilerRoute.other" or
         "diagnostic.compilerRoute.noEvent" or "diagnostic.compilerRoute.multipleEvents" or
-        "diagnostic.compilerRoute.unavailable" ? value : null;
+        "diagnostic.compilerRoute.unavailable" or "diagnostic.compilerRoute.hostExecSelectedCscOtherHost" or
+        "diagnostic.compilerRoute.hostExecOtherCsc" or "diagnostic.compilerRoute.notSelectedCscLauncher" or
+        "diagnostic.compilerRoute.lateEvent" ? value : null;
     internal IReadOnlyList<string> RawArguments { get; private set; } = [];
     private bool closed, late;
     private readonly HashSet<string> emitNames = new(StringComparer.Ordinal);
@@ -141,7 +143,7 @@ internal sealed class CompilerRecipeObservation(string sdkPath, string? hostPath
     internal void Command(string text, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        if (!MayObserve()) return;
+        if (!MayObserve()) { CommandRouteDiagnostic = "diagnostic.compilerRoute.lateEvent"; return; }
         if (++commandEvents != 1) { CommandRouteDiagnostic = "diagnostic.compilerRoute.multipleEvents"; Unsupported("recipe.duplicateCommandEvent"); return; }
         if (SizeDeclined || text.Length > CompilerRecipeBudget.MaximumCharacters) { CommandRouteDiagnostic = "diagnostic.compilerRoute.unavailable"; DeclineSize(); return; }
         // Lexing only. Unlike CSharpCommandLineParser.Parse, this never reads a
@@ -157,7 +159,14 @@ internal sealed class CompilerRecipeObservation(string sdkPath, string? hostPath
             : items.Length >= 1 && EqualPath(items[0], Path.Combine(sdkPath, "Roslyn", "bincore", "csc.exe"))
                 ? "diagnostic.compilerRoute.selectedSdkWindowsApphost"
                 : items.Length >= 1 && EqualPath(items[0], Path.Combine(sdkPath, "Roslyn", "bincore", "csc"))
-                    ? "diagnostic.compilerRoute.selectedSdkUnixApphost" : "diagnostic.compilerRoute.other";
+                    ? "diagnostic.compilerRoute.selectedSdkUnixApphost"
+                    : items.Length >= 3 && items[1] == "exec" && (ToolLeaf(items[0], "dotnet") || ToolLeaf(items[0], "dotnet.exe")) &&
+                        EqualPath(items[2], Path.Combine(sdkPath, "Roslyn", "bincore", "csc.dll"))
+                        ? "diagnostic.compilerRoute.hostExecSelectedCscOtherHost"
+                        : items.Length >= 3 && items[1] == "exec" && (ToolLeaf(items[0], "dotnet") || ToolLeaf(items[0], "dotnet.exe")) && ToolLeaf(items[2], "csc.dll")
+                            ? "diagnostic.compilerRoute.hostExecOtherCsc"
+                            : items.Length >= 1 && (ToolLeaf(items[0], "csc") || ToolLeaf(items[0], "csc.exe") || ToolLeaf(items[0], "csc.dll"))
+                                ? "diagnostic.compilerRoute.notSelectedCscLauncher" : "diagnostic.compilerRoute.other";
         if (commandPrefix || executableRoute)
         {
             if (!TryIdentities(items.Skip(executableRoute ? 1 : 3).ToArray(), token, out commandArguments))
@@ -269,6 +278,11 @@ internal sealed class CompilerRecipeObservation(string sdkPath, string? hostPath
         !late && argumentEvents == 1 && commandEvents == 1 && commandPrefix && arguments is not null && commandArguments is not null &&
         !arguments.SequenceEqual(commandArguments);
     private static string Hash(string value) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+    private static bool ToolLeaf(string value, string expected)
+    {
+        try { return PathIdentityPolicy.Current.Comparer.Equals(Path.GetFileName(value), expected); }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or PathTooLongException) { return false; }
+    }
     private static bool EqualPath(string value, string expected)
     {
         try { return Path.IsPathFullyQualified(value) && PathIdentityPolicy.Current.Comparer.Equals(Path.GetFullPath(value), Path.GetFullPath(expected)); }

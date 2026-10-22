@@ -54,6 +54,16 @@ $message.InnerText+=' recipe.bindingUnsupported recipe.compilerCommandPrefixUnpr
 $doc.Save($trx); $recipeValue=Observe 'recipe-binding-fixed-tokens'
 $expectedTokens=@('run.timedOut','recipe.bindingUnsupported','recipe.compilerCommandPrefixUnproven','diagnostic.compilerBinding.unproven','diagnostic.compilerRoute.selectedSdkUnixApphost')
 if (@(Compare-Object $expectedTokens @($recipeValue.failures[0].observedDiagnosticTokens)).Count) { throw 'Closed recipe route observations missing.' }
+# Each new closed route token is independent; unknown/private values remain excluded.
+$originalMessage=$message.InnerText
+$routeTokens=@('diagnostic.compilerRoute.hostExecSelectedCscOtherHost','diagnostic.compilerRoute.hostExecOtherCsc','diagnostic.compilerRoute.notSelectedCscLauncher','diagnostic.compilerRoute.lateEvent','diagnostic.compilerRoute.notTransported')
+for($routeIndex=0;$routeIndex -lt $routeTokens.Count;$routeIndex++){
+    $message.InnerText='PRIVATE_MESSAGE recipe.PRIVATE_UNKNOWN_OPTION '+$routeTokens[$routeIndex]
+    $doc.Save($trx);$routeValue=Observe ('closed-route-'+$routeIndex)
+    $observedTokens=@($routeValue.failures[0].observedDiagnosticTokens)
+    if($observedTokens.Count -ne 1 -or $observedTokens[0] -cne $routeTokens[$routeIndex]){throw 'Closed route distinction missing or ambiguous.'}
+}
+$message.InnerText=$originalMessage
 $originalStack=$stack.InnerText
 $stack.InnerText=(1..12 | ForEach-Object {' at test in /owned/tests/Crap4CSharp.Tests/OwnedFixture.cs:line 2'}) -join "`n"
 $doc.Save($trx)

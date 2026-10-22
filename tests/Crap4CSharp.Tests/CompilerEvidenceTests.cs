@@ -48,6 +48,9 @@ public sealed class CompilerEvidenceTests
             Assert.Equal("selected-sdk-core-target", recipe.TaskBinding);
             var commandSupported = new[] { "selected-host-exec-csc-arguments-match", "selected-sdk-csc-exe-arguments-match" }.Contains(recipe.CommandBinding, StringComparer.Ordinal);
             Assert.True(commandSupported, commandSupported ? null : BindingDiagnostic(observed, TestContext.Current.CancellationToken));
+            var routeDelivered = CompilerRecipeObservation.NormalizeCommandRouteDiagnostic(observed.CommandRouteDiagnostic) is
+                "diagnostic.compilerRoute.selectedHostExec" or "diagnostic.compilerRoute.selectedSdkWindowsApphost";
+            Assert.True(routeDelivered, routeDelivered ? null : BindingDiagnostic(observed, TestContext.Current.CancellationToken));
             var imageRoles = new[] { "dotnet-host", "csc", "compiler-common", "compiler-csharp", "compiler-deps", "compiler-runtimeconfig", "sdk-csc-target", "sdk-csc-task" };
             Assert.Equal(OperatingSystem.IsWindows() ? imageRoles.Append("csc-launcher") : imageRoles,
                 recipe.Images.Select(image => image.Role));
@@ -125,6 +128,9 @@ public sealed class CompilerEvidenceTests
         Assert.Equal("selected-sdk-core-target", actual.InvocationRecipe!.TaskBinding);
         var commandSupported = new[] { "selected-host-exec-csc-arguments-match", "selected-sdk-csc-exe-arguments-match" }.Contains(actual.InvocationRecipe.CommandBinding, StringComparer.Ordinal);
         Assert.True(commandSupported, commandSupported ? null : BindingDiagnostic(actual, TestContext.Current.CancellationToken));
+        var routeDelivered = CompilerRecipeObservation.NormalizeCommandRouteDiagnostic(actual.CommandRouteDiagnostic) is
+            "diagnostic.compilerRoute.selectedHostExec" or "diagnostic.compilerRoute.selectedSdkWindowsApphost";
+        Assert.True(routeDelivered, routeDelivered ? null : BindingDiagnostic(actual, TestContext.Current.CancellationToken));
         Assert.Equal(CompilerRecipeObservation.Identities(actual.CommandLineArguments, TestContext.Current.CancellationToken), actual.InvocationRecipe.Arguments);
         if (profile == "multiple-aliases")
         {
@@ -233,7 +239,7 @@ public sealed class CompilerEvidenceTests
         reasons.Add(observed.InvocationRecipe?.CommandBinding == "unproven"
             ? "diagnostic.compilerBinding.unproven" : "diagnostic.compilerBinding.selected");
         reasons.Add(CompilerRecipeObservation.NormalizeCommandRouteDiagnostic(observed.CommandRouteDiagnostic)
-            ?? "diagnostic.compilerRoute.unavailable");
+            ?? "diagnostic.compilerRoute.notTransported");
         return string.Join(" ", reasons);
     }
 

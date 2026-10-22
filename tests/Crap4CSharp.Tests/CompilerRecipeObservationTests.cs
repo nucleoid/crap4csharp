@@ -237,7 +237,8 @@ public sealed class CompilerRecipeObservationTests
         const string privateValue = "PRIVATE_UNKNOWN_ROUTE /private/consumer.cs --secret-argument";
         Assert.Null(CompilerRecipeObservation.NormalizeCommandRouteDiagnostic(privateValue));
         var safe = CompilerEvidenceTests.BindingDiagnostic(observed with { CommandRouteDiagnostic = privateValue }, TestContext.Current.CancellationToken);
-        Assert.Contains("diagnostic.compilerRoute.unavailable", safe, StringComparison.Ordinal);
+        Assert.Contains("diagnostic.compilerRoute.notTransported", safe, StringComparison.Ordinal);
+        Assert.Contains("diagnostic.compilerRoute.notTransported", CompilerEvidenceTests.BindingDiagnostic(ordinary, TestContext.Current.CancellationToken), StringComparison.Ordinal);
         Assert.DoesNotContain("PRIVATE", safe, StringComparison.Ordinal);
         Assert.DoesNotContain("/private", safe, StringComparison.Ordinal);
         Assert.DoesNotContain("--secret", safe, StringComparison.Ordinal);
@@ -258,6 +259,50 @@ public sealed class CompilerRecipeObservationTests
         Assert.Same(ordinary, response.Observation);
         Assert.Equal(ordinary.CommandLineArguments, response.CommandLineArguments);
         Assert.Equal(ordinary.InvocationRecipe, response.Observation!.InvocationRecipe);
+    }
+
+
+    [Theory]
+    [InlineData("host-exec", "diagnostic.compilerRoute.selectedHostExec")]
+    [InlineData("windows-apphost", "diagnostic.compilerRoute.selectedSdkWindowsApphost")]
+    [InlineData("unix-apphost", "diagnostic.compilerRoute.selectedSdkUnixApphost")]
+    [InlineData("other", "diagnostic.compilerRoute.other")]
+    [InlineData("duplicate", "diagnostic.compilerRoute.multipleEvents")]
+    [InlineData("oversize", "diagnostic.compilerRoute.unavailable")]
+    [InlineData("missing", "diagnostic.compilerRoute.noEvent")]
+    [InlineData("other-host", "diagnostic.compilerRoute.hostExecSelectedCscOtherHost")]
+    [InlineData("relative-host", "diagnostic.compilerRoute.hostExecSelectedCscOtherHost")]
+    [InlineData("other-csc", "diagnostic.compilerRoute.hostExecOtherCsc")]
+    [InlineData("foreign-csc", "diagnostic.compilerRoute.notSelectedCscLauncher")]
+    [InlineData("late", "diagnostic.compilerRoute.lateEvent")]
+    public void Actual_command_classifier_reports_only_closed_route_DATA_without_extending_binding(string scenario, string expected)
+    {
+        using var fixture = TestDirectory.Create("crap-recipe-route-classifier-data");
+        var (capture, prefix) = Capture(fixture.Path);
+        var compiler = Path.Combine(fixture.Path, "sdk", "Roslyn", "bincore");
+        var host = Path.Combine(fixture.Path, "dotnet");
+        var command = scenario switch
+        {
+            "windows-apphost" => QuoteArgument(Path.Combine(compiler, "csc.exe")) + " A.cs",
+            "unix-apphost" => QuoteArgument(Path.Combine(compiler, "csc")) + " A.cs",
+            "other-host" => QuoteArgument(Path.Combine(fixture.Path, "other", "dotnet")) + " exec " + QuoteArgument(Path.Combine(compiler, "csc.dll")) + " A.cs",
+            "relative-host" => "dotnet exec " + QuoteArgument(Path.Combine(compiler, "csc.dll")) + " A.cs",
+            "other-csc" => QuoteArgument(host) + " exec " + QuoteArgument(Path.Combine(fixture.Path, "other-sdk", "csc.dll")) + " A.cs",
+            "foreign-csc" => QuoteArgument(Path.Combine(fixture.Path, "other-sdk", "csc")) + " A.cs",
+            "other" => QuoteArgument(Path.Combine(fixture.Path, "driver")) + " A.cs",
+            "oversize" => new string('x', CompilerRecipeBudget.MaximumCharacters + 1),
+            _ => prefix + " A.cs"
+        };
+        capture.Arguments(["A.cs"], TestContext.Current.CancellationToken);
+        if (scenario == "late") capture.Close();
+        if (scenario != "missing") capture.Command(command, TestContext.Current.CancellationToken);
+        if (scenario == "duplicate") capture.Command(command, TestContext.Current.CancellationToken);
+        if (scenario != "late") capture.Close();
+        Assert.Equal(expected, capture.CommandRouteDiagnostic);
+        Assert.Equal(expected, CompilerRecipeObservation.NormalizeCommandRouteDiagnostic(capture.CommandRouteDiagnostic));
+        if (scenario != "host-exec" && !(scenario == "windows-apphost" && OperatingSystem.IsWindows()))
+            Assert.Equal("unproven", capture.Finish().CommandBinding);
+        Assert.DoesNotContain(fixture.Path, capture.CommandRouteDiagnostic, StringComparison.Ordinal);
     }
 
     private static CompilerObservation SupportedObservation(string root)
