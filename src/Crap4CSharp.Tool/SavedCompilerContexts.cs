@@ -42,45 +42,65 @@ internal static class SavedCompilerContexts
                 var documents = new List<(ManifestInput Input, ImmutableArray<byte> Bytes)>();
                 var references = new List<(ManifestInput Input, ImmutableArray<byte> Bytes)>();
                 using (timing?.StartSynchronous(prefix + ".compiler.documents"))
-                foreach (var source in current.CompilerDocuments)
-                {
-                    var content = Read(source.ResolvedPath!);
-                    if (CanonicalIdentity.Sha256(content.AsSpan()) != source.ContentIdentity) throw Refuse();
-                    _ = CapturedSource.Create(source.LogicalPath, content.AsSpan());
-                    documents.Add((Input("compiler-source", source.LogicalPath, content, source.IsGenerated,
-                        excludedTest ? null : Logical(source.ResolvedPath!), "utf-8"), content));
-                }
+                    foreach (var source in current.CompilerDocuments)
+                    {
+                        var content = Read(source.ResolvedPath!);
+                        if (CanonicalIdentity.Sha256(content.AsSpan()) != source.ContentIdentity) throw Refuse();
+                        _ = CapturedSource.Create(source.LogicalPath, content.AsSpan());
+                        documents.Add((Input("compiler-source", source.LogicalPath, content, source.IsGenerated,
+                            excludedTest ? null : Logical(source.ResolvedPath!), "utf-8"), content));
+                    }
                 using (timing?.StartSynchronous(prefix + ".compiler.references"))
-                foreach (var reference in CompilerReferenceSnapshot.ResolveSemanticReferences(observation, token))
-                {
-                    var content = Read(reference.Path);
-                    references.Add((Input("reference", CompilerReferenceSnapshot.LogicalReference(CanonicalIdentity.Sha256(content.AsSpan()),
-                        reference.Aliases, reference.EmbedInteropTypes), content) with
+                    foreach (var reference in CompilerReferenceSnapshot.ResolveSemanticReferences(observation, token))
+                    {
+                        var content = Read(reference.Path);
+                        references.Add((Input("reference", CompilerReferenceSnapshot.LogicalReference(CanonicalIdentity.Sha256(content.AsSpan()),
+                            reference.Aliases, reference.EmbedInteropTypes), content) with
                         { ReferenceAliases = reference.Aliases, EmbedInteropTypes = reference.EmbedInteropTypes ? true : null }, content));
-                }
+                    }
                 if (excludedTest)
                 {
                     var identities = new List<object>(); var index = 0;
                     foreach (var (input, content) in documents)
                     {
                         Artifact("test-source-" + binding.GraphId + "-" + index++, "test-compiler-source", content);
-                        identities.Add(new { role = "compiler-source", logicalPath = input.LogicalPath, locator = input.Locator,
-                            sha256 = input.Sha256, length = input.Length, generated = input.Generated });
+                        identities.Add(new
+                        {
+                            role = "compiler-source",
+                            logicalPath = input.LogicalPath,
+                            locator = input.Locator,
+                            sha256 = input.Sha256,
+                            length = input.Length,
+                            generated = input.Generated
+                        });
                     }
                     foreach (var (input, content) in references)
                     {
                         Artifact("test-reference-" + binding.GraphId + "-" + index++, "test-compiler-reference", content);
-                        identities.Add(new { role = "reference", logicalPath = input.LogicalPath, locator = input.Locator,
-                            sha256 = input.Sha256, length = input.Length, referenceAliases = input.ReferenceAliases, embedInteropTypes = input.EmbedInteropTypes });
+                        identities.Add(new
+                        {
+                            role = "reference",
+                            logicalPath = input.LogicalPath,
+                            locator = input.Locator,
+                            sha256 = input.Sha256,
+                            length = input.Length,
+                            referenceAliases = input.ReferenceAliases,
+                            embedInteropTypes = input.EmbedInteropTypes
+                        });
                     }
                     foreach (var phase in current.PhaseInputs.Where(p => p.Role != "source" && File.Exists(p.Path)))
                     {
                         var content = Read(phase.Path);
-                        identities.Add(new { role = phase.Role, logicalPath = "metadata/" + CanonicalIdentity.Tuple("phase-path", phase.Role, phase.Path),
-                            sha256 = CanonicalIdentity.Sha256(content.AsSpan()), length = content.Length });
+                        identities.Add(new
+                        {
+                            role = phase.Role,
+                            logicalPath = "metadata/" + CanonicalIdentity.Tuple("phase-path", phase.Role, phase.Path),
+                            sha256 = CanonicalIdentity.Sha256(content.AsSpan()),
+                            length = content.Length
+                        });
                     }
                     Artifact("test-closure-" + binding.GraphId, "test-compiler-input-closure", Json(new
-                        { provider = "validated-csc-inputs-v1", project = Logical(binding.ProjectPath), inputs = identities, reusableRecipe = false }), "json");
+                    { provider = "validated-csc-inputs-v1", project = Logical(binding.ProjectPath), inputs = identities, reusableRecipe = false }), "json");
                     continue;
                 }
                 var contextId = logicalIds[binding.GraphId];
@@ -93,8 +113,11 @@ internal static class SavedCompilerContexts
                 var inspected = ArtifactEvidenceInspector.InspectBuild(pe, pdb);
                 var paths = inspected.Documents.Keys.Select(p => Path.GetFullPath(p, Path.GetDirectoryName(binding.ProjectPath)!))
                     .ToHashSet(PathIdentityPolicy.Current.Comparer);
-                var expected = documents.Select(d => d.Input with { Role = paths.Contains(current.CompilerDocuments.Single(s => s.LogicalPath == d.Input.LogicalPath).ResolvedPath!)
-                    ? "source" : "compiler-source" }).Concat(references.Select(r => r.Input))
+                var expected = documents.Select(d => d.Input with
+                {
+                    Role = paths.Contains(current.CompilerDocuments.Single(s => s.LogicalPath == d.Input.LogicalPath).ResolvedPath!)
+                    ? "source" : "compiler-source"
+                }).Concat(references.Select(r => r.Input))
                     .GroupBy(i => (i.Role, i.LogicalPath)).Select(g =>
                     { if (g.Select(i => i.Sha256).Distinct(StringComparer.Ordinal).Count() != 1) throw Refuse(); return g.First(); }).ToArray();
                 if (saved.Project != Logical(binding.ProjectPath) || saved.Configuration != current.Configuration ||
@@ -145,13 +168,19 @@ internal static class SavedCompilerContexts
                         .Callables.Any(c => c.Applicability == CallableApplicability.Applicable)) throw Refuse();
                 var phaseIdentities = new List<object>();
                 using (timing?.StartSynchronous(prefix + ".compiler.phaseInputs"))
-                foreach (var phase in current.PhaseInputs.Where(i => i.Role != "source" && File.Exists(i.Path)))
-                {
-                    var content = Read(phase.Path); var relative = Path.GetRelativePath(root, phase.Path).Replace('\\', '/');
-                    var inside = relative != ".." && !relative.StartsWith("../", StringComparison.Ordinal) && !Path.IsPathRooted(relative);
-                    phaseIdentities.Add(new { role = phase.Role, logicalPath = inside ? relative : "external/" + CanonicalIdentity.Tuple("phase-path", phase.Role, phase.Path),
-                        length = content.Length, sha256 = CanonicalIdentity.Sha256(content.AsSpan()), generated = phase.ExpectedGenerated });
-                }
+                    foreach (var phase in current.PhaseInputs.Where(i => i.Role != "source" && File.Exists(i.Path)))
+                    {
+                        var content = Read(phase.Path); var relative = Path.GetRelativePath(root, phase.Path).Replace('\\', '/');
+                        var inside = relative != ".." && !relative.StartsWith("../", StringComparison.Ordinal) && !Path.IsPathRooted(relative);
+                        phaseIdentities.Add(new
+                        {
+                            role = phase.Role,
+                            logicalPath = inside ? relative : "external/" + CanonicalIdentity.Tuple("phase-path", phase.Role, phase.Path),
+                            length = content.Length,
+                            sha256 = CanonicalIdentity.Sha256(content.AsSpan()),
+                            generated = phase.ExpectedGenerated
+                        });
+                    }
                 // Security boundary: these physical graph IDs bind this saved
                 // closure to the current workspace, independently of public IDs.
                 var closure = bundle.Manifest.Artifacts.Single(a => a.Id == "build-" + binding.GraphId + "-closure");

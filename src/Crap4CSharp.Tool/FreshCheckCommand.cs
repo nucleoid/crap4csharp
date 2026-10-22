@@ -18,12 +18,15 @@ internal static class FreshCheckCommand
         ResultDocument RetainArtifactOutput(ResultDocument refusal)
         {
             if (retainedArtifactDirectory is null) return refusal;
-            return refusal with { Run = refusal.Run with
+            return refusal with
             {
-                Artifacts = refusal.Run.Artifacts.Concat(new[] { new RunArtifact("retained-artifact-output",
+                Run = refusal.Run with
+                {
+                    Artifacts = refusal.Run.Artifacts.Concat(new[] { new RunArtifact("retained-artifact-output",
                     retainedArtifactDirectory, "retained", false, false) }).ToArray(),
-                DiagnosticLocations = refusal.Run.DiagnosticLocations.Concat(new[] { retainedArtifactDirectory }).ToArray()
-            } };
+                    DiagnosticLocations = refusal.Run.DiagnosticLocations.Concat(new[] { retainedArtifactDirectory }).ToArray()
+                }
+            };
         }
         try
         {
@@ -148,7 +151,7 @@ internal static class FreshCheckCommand
         // requires the complete independently current writer proof of the
         // actual bytes. The export remains absent until that outer proof succeeds.
         FreshCheckExecution.ProtectPreparedDestinations(preflight with
-            { Request = request with { ArtifactOutput = null } }, evidence.Compiler.FinalGraph);
+        { Request = request with { ArtifactOutput = null } }, evidence.Compiler.FinalGraph);
         var complete = policy.Evaluation.ExitCode != 1;
         ProvenanceResult? completedProof = null;
         Func<ProvenanceResult?, ResultDocument>? createResult = null;
@@ -269,22 +272,28 @@ internal static class FreshCheckCommand
                 preflight.Policy.RequiredChecks.Contains("crap"))
         };
         var differences = TrustedPolicyLoader.CompareProposed(preflight.Root, preflight.Trusted)
-            .Select(d => new PolicyDifferenceResult(d.Path,d.Status,d.TrustedHash,d.ProposedHash)).ToArray();
+            .Select(d => new PolicyDifferenceResult(d.Path, d.Status, d.TrustedHash, d.ProposedHash)).ToArray();
         createResult = proof => replay with
         {
             Evaluation = replay.Evaluation with
             {
-                InvocationMode = "check", Policy = new(preflight.Policy.Threshold, false), Checks = checks, Findings = policy.Findings,
+                InvocationMode = "check",
+                Policy = new(preflight.Policy.Threshold, false),
+                Checks = checks,
+                Findings = policy.Findings,
                 Decision = new(complete, policy.Evaluation.Decision, policy.Evaluation.OperationalReasons.FirstOrDefault() ??
                     (policy.Evaluation.ExitCode == 2 ? "crap.thresholdExceeded" : "crap.withinThreshold")),
                 Provenance = new("verified", "currentWorkspaceMatch", true, complete && (proof?.Reusable ?? false), proof?.Reasons ?? [ProvenanceReasonCodes.ReuseRecipeIncomplete]),
                 PolicyTrust = new(preflight.Trusted.Trust, preflight.Trusted.Revision, preflight.Trusted.Policy.PolicyPath,
-                    preflight.Trusted.Policy.Hash, policy.CompatibilityHash), PolicyDifferences = differences,
-                CallableExemptions = policy.Exemptions.Matches, ExemptionErrors = []
+                    preflight.Trusted.Policy.Hash, policy.CompatibilityHash),
+                PolicyDifferences = differences,
+                CallableExemptions = policy.Exemptions.Matches,
+                ExemptionErrors = []
             },
             Run = replay.Run with
             {
-                Status = complete ? "completed" : "operationalError", ExitCode = policy.Evaluation.ExitCode,
+                Status = complete ? "completed" : "operationalError",
+                ExitCode = policy.Evaluation.ExitCode,
                 Artifacts = [new("manifest", manifest, "retained", complete, complete && (proof?.Reusable ?? false))],
                 TestOutcomes = FreshTestOutcomeProjection.Create(evidence)
             }

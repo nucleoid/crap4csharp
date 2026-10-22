@@ -53,7 +53,8 @@ public sealed class CompilerReferenceSnapshotTests
         var reference = Assert.Single(CompilerReferenceSnapshot.ResolveSemanticReferences(observation, token));
         var hash = CanonicalIdentity.Sha256(bytes.AsSpan());
         var input = new ManifestInput("reference", CompilerReferenceSnapshot.LogicalReference(hash, reference.Aliases, false),
-            "reference.dll", bytes.Length, hash, null, false) { ReferenceAliases = reference.Aliases };
+            "reference.dll", bytes.Length, hash, null, false)
+        { ReferenceAliases = reference.Aliases };
         var captured = CompilerReferenceSnapshot.CapturedReference(input, bytes);
         Assert.Equal(["ProbeLibrary"], captured.Properties.Aliases);
         var consumer = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create("Consumer",
@@ -66,8 +67,12 @@ public sealed class CompilerReferenceSnapshotTests
         var stripped = input with { ReferenceAliases = null };
         Assert.Throws<ProjectContextException>(() => CompilerReferenceSnapshot.CapturedReference(stripped, bytes));
         Assert.Throws<InvalidDataException>(() => SemanticEligibility.CapturedReference(stripped, bytes));
-        var embedded = input with { ReferenceAliases = null, EmbedInteropTypes = true,
-            LogicalPath = CompilerReferenceSnapshot.LogicalReference(hash, null, true) };
+        var embedded = input with
+        {
+            ReferenceAliases = null,
+            EmbedInteropTypes = true,
+            LogicalPath = CompilerReferenceSnapshot.LogicalReference(hash, null, true)
+        };
         Assert.True(SemanticEligibility.CapturedReference(embedded, bytes).Properties.EmbedInteropTypes);
         Assert.Throws<InvalidDataException>(() => SemanticEligibility.CapturedReference(embedded with { EmbedInteropTypes = null }, bytes));
         Assert.Empty(SemanticEligibility.CapturedReference(stripped with { LogicalPath = "refs/app.dll" }, bytes).Properties.Aliases);

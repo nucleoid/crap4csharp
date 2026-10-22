@@ -59,7 +59,8 @@ internal static class FreshCompletedCapture
                 CompletedRevalidationDeclaration.Validate(proposed, Relative(binding.ProjectPath),
                     Relative(assembly), Relative(Path.ChangeExtension(assembly, ".pdb")));
                 return proposed;
-            }).ToArray(), ManifestHash = null
+            }).ToArray(),
+            ManifestHash = null
         });
         token.ThrowIfCancellationRequested();
         return captured with { Manifest = manifest };
@@ -81,9 +82,14 @@ internal static class FreshCompletedCapture
                 local, null, original.Request.Timeout, token);
         // The current preflight still independently reloads all trust/scope bytes;
         // retain only this invocation's acquisition choice, never its old graph.
-        preflight = preflight with { Request = preflight.Request with
-            { NativeSdkIdentityProbe = original.Request.NativeSdkIdentityProbe,
-                WarmPostBuildProbe = original.Request.WarmPostBuildProbe } };
+        preflight = preflight with
+        {
+            Request = preflight.Request with
+            {
+                NativeSdkIdentityProbe = original.Request.NativeSdkIdentityProbe,
+                WarmPostBuildProbe = original.Request.WarmPostBuildProbe
+            }
+        };
         CompletedReusePreflight.ValidateScope(bundle, preflight);
         // Only this live invocation may reuse its original retained compiler proof.
         // Saved-only public consumers continue through the full generic validator.

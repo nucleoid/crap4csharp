@@ -82,20 +82,27 @@ public sealed class CompilerRecipeObservationTests
         var observation = new CompilerObservation(project, [new("Sources", [b, a]), new("References", [reference])
             { ReferenceProperties = [new(reference, "Alias", true)] }])
         {
-            CommandLineArguments = arguments, EmitParameters = [new("EmbeddedFiles", [b])], InvocationRecipe = capture.Finish(),
-            Assembly = new(assembly, Hash("assembly-DATA"), 1), Pdb = new(pdb, Hash("pdb-DATA"), 1)
+            CommandLineArguments = arguments,
+            EmitParameters = [new("EmbeddedFiles", [b])],
+            InvocationRecipe = capture.Finish(),
+            Assembly = new(assembly, Hash("assembly-DATA"), 1),
+            Pdb = new(pdb, Hash("pdb-DATA"), 1)
         };
         var sources = new Dictionary<string, ManifestInput>(PathIdentityPolicy.Current.Comparer)
-            { [a] = Input("source", "A.cs"), [b] = Input("compiler-source", "B.cs") };
+        { [a] = Input("source", "A.cs"), [b] = Input("compiler-source", "B.cs") };
         var referenceInput = Input("reference", CompilerReferenceSnapshot.LogicalReference(Hash("Ref-DATA"), "Alias", true)) with
-            { Sha256 = Hash("Ref-DATA"), Locator = "inputs/" + Hash("Ref-DATA") + ".bin", ReferenceAliases = "Alias", EmbedInteropTypes = true };
+        { Sha256 = Hash("Ref-DATA"), Locator = "inputs/" + Hash("Ref-DATA") + ".bin", ReferenceAliases = "Alias", EmbedInteropTypes = true };
         CompilerRecipePayload.File[] files = [new("compiler-common", Path.Combine(fixture.Path, "sdk", "Roslyn", "bincore", "Microsoft.CodeAnalysis.dll"), "build-recipe-compiler-common", ImmutableArray.Create((byte)1)),
             new("compiler-csharp", Path.Combine(fixture.Path, "sdk", "Roslyn", "bincore", "Microsoft.CodeAnalysis.CSharp.dll"), "build-recipe-compiler-csharp", ImmutableArray.Create((byte)2))];
         observation = WithImageIdentities(observation, fixture.Path);
         var images = observation.CompilerImages.Select(image => files.SingleOrDefault(file => file.Role == image.Role) is { } file
             ? image with { Sha256 = file.Sha256, Length = file.Bytes.Length } : image).ToArray();
-        observation = observation with { CompilerImages = images, InvocationRecipe = observation.InvocationRecipe! with
-            { Images = images.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() } };
+        observation = observation with
+        {
+            CompilerImages = images,
+            InvocationRecipe = observation.InvocationRecipe! with
+            { Images = images.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() }
+        };
         var first = CompilerRecipePayload.Create(observation, "context", "build", fixture.Path, sources, [referenceInput], files, TestContext.Current.CancellationToken);
         var second = CompilerRecipePayload.Create(observation, "context", "build", fixture.Path, sources, [referenceInput], files, TestContext.Current.CancellationToken);
         Assert.Equal(first, second);
@@ -135,7 +142,7 @@ public sealed class CompilerRecipeObservationTests
         if (change == "reference-alias") arguments[6] = "/reference:Foreign=" + reference;
         if (change == "embedded-source") arguments.Insert(2, "/embed:" + Path.Combine(fixture.Path, "missing.cs"));
         var observation = new CompilerObservation(Path.Combine(fixture.Path, "App.csproj"), [new("Sources", [source]), new("References", [reference])])
-            { CommandLineArguments = arguments, Assembly = new(output, Hash("output"), 1) };
+        { CommandLineArguments = arguments, Assembly = new(output, Hash("output"), 1) };
         // Hold all unrelated requirements valid: the same DATA observation passes
         // before the single adversarial role/option mutation above.
         Assert.Equal(originalArguments.Length, CompilerRecipePayload.ProjectArguments(observation with { CommandLineArguments = originalArguments },
@@ -216,8 +223,12 @@ public sealed class CompilerRecipeObservationTests
         capture.Arguments(arguments, TestContext.Current.CancellationToken);
         capture.Command(prefix + " " + string.Join(" ", arguments.Select(QuoteArgument)), TestContext.Current.CancellationToken); capture.Close();
         return WithImageIdentities(new(Path.Combine(root, "App.csproj"), [new("Sources", [source]), new("References", [reference])])
-            { InvocationRecipe = capture.Finish(), CommandLineArguments = arguments, Assembly = new(output, Hash("assembly"), 1),
-                Pdb = new(Path.ChangeExtension(output, ".pdb"), Hash("pdb"), 1) }, root);
+        {
+            InvocationRecipe = capture.Finish(),
+            CommandLineArguments = arguments,
+            Assembly = new(output, Hash("assembly"), 1),
+            Pdb = new(Path.ChangeExtension(output, ".pdb"), Hash("pdb"), 1)
+        }, root);
     }
     private static CompilerObservation RebindArguments(CompilerObservation observation, IReadOnlyList<string> arguments) => observation with
     {
@@ -228,8 +239,12 @@ public sealed class CompilerRecipeObservationTests
     {
         var images = CompilerEvidence.CompilerImagePaths(SelectedSdk(root))
             .Select(image => new CompilerImageFile(image.Role, image.Path, 1, Hash(image.Role))).ToArray();
-        return observation with { CompilerImages = images, InvocationRecipe = observation.InvocationRecipe! with
-            { Images = images.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() } };
+        return observation with
+        {
+            CompilerImages = images,
+            InvocationRecipe = observation.InvocationRecipe! with
+            { Images = images.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() }
+        };
     }
 
     [Theory]
@@ -335,12 +350,16 @@ public sealed class CompilerRecipeObservationTests
         using var fixture = TestDirectory.Create("crap-optional-recipe-integrity-data");
         var observed = SupportedObservation(fixture.Path);
         var reason = change == "task-file" ? "recipe.selectedSdkTaskFileUnproven" : "recipe.compilerCommandPrefixUnproven";
-        observed = observed with { InvocationRecipe = observed.InvocationRecipe! with
+        observed = observed with
         {
-            TaskBinding = change == "task-file" ? "unproven" : "selected-sdk-core-target", CommandBinding = "unproven",
-            UnsupportedReasons = observed.InvocationRecipe.UnsupportedReasons.Append(reason).Append("recipe.commandArgumentsUnproven").ToArray(),
-            Arguments = observed.InvocationRecipe.Arguments.Select((argument, index) => index == 0 ? argument with { Sha256 = new string('0', 64) } : argument).ToArray()
-        } };
+            InvocationRecipe = observed.InvocationRecipe! with
+            {
+                TaskBinding = change == "task-file" ? "unproven" : "selected-sdk-core-target",
+                CommandBinding = "unproven",
+                UnsupportedReasons = observed.InvocationRecipe.UnsupportedReasons.Append(reason).Append("recipe.commandArgumentsUnproven").ToArray(),
+                Arguments = observed.InvocationRecipe.Arguments.Select((argument, index) => index == 0 ? argument with { Sha256 = new string('0', 64) } : argument).ToArray()
+            }
+        };
         Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() =>
             CompilerRecipePayload.Classify(observed, fixture.Path, TestContext.Current.CancellationToken)).Reason);
     }
@@ -364,8 +383,12 @@ public sealed class CompilerRecipeObservationTests
         var files = observed.CompilerImages.Where(image => image.Role is "compiler-common" or "compiler-csharp").Select((image, index) =>
             new CompilerRecipePayload.File(image.Role, image.Path, "build-recipe-" + image.Role, ImmutableArray.Create((byte)(index + 1)))).ToArray();
         var imageFiles = observed.CompilerImages.Select(image => files.SingleOrDefault(file => file.Role == image.Role) is { } file ? image with { Length = file.Bytes.Length, Sha256 = file.Sha256 } : image).ToArray();
-        observed = observed with { CompilerImages = imageFiles, InvocationRecipe = observed.InvocationRecipe! with
-            { Images = imageFiles.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() } };
+        observed = observed with
+        {
+            CompilerImages = imageFiles,
+            InvocationRecipe = observed.InvocationRecipe! with
+            { Images = imageFiles.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() }
+        };
         Assert.True(CompilerRecipePayload.TryCreate(observed, "context", "build", fixture.Path, sources, references, files,
             TestContext.Current.CancellationToken, out var data));
         using var parsed = JsonDocument.Parse(data.AsMemory());
@@ -402,8 +425,12 @@ public sealed class CompilerRecipeObservationTests
         var missing = await CompilerEvidence.CaptureCompilerImages(SelectedSdk(fixture.Path), TestContext.Current.CancellationToken);
         Assert.Empty(missing.Files); Assert.Equal("recipe.compilerImageUnavailable", missing.UnsupportedReason);
         var observation = SupportedObservation(fixture.Path);
-        observation = observation with { CompilerImages = [], InvocationRecipe = observation.InvocationRecipe! with
-            { Images = [], UnsupportedReasons = observation.InvocationRecipe.UnsupportedReasons.Append(missing.UnsupportedReason!).ToArray() } };
+        observation = observation with
+        {
+            CompilerImages = [],
+            InvocationRecipe = observation.InvocationRecipe! with
+            { Images = [], UnsupportedReasons = observation.InvocationRecipe.UnsupportedReasons.Append(missing.UnsupportedReason!).ToArray() }
+        };
         Assert.Equal(new[] { "recipe.compilerImageUnavailable" }, CompilerRecipePayload.Classify(observation, fixture.Path, TestContext.Current.CancellationToken).UnsupportedReasons);
         using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
         var error = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => CompilerEvidence.CaptureCompilerImages(SelectedSdk(fixture.Path), cancelled.Token));
@@ -510,8 +537,11 @@ public sealed class CompilerRecipeObservationTests
         Assert.False(parsed.RootElement.GetProperty("observation").TryGetProperty("invocationRecipe", out _));
         Assert.False(parsed.RootElement.TryGetProperty("commandLineArguments", out _));
         Assert.False(parsed.RootElement.TryGetProperty("emitParameters", out _));
-        var corrupt = original with { InvocationRecipe = original.InvocationRecipe! with
-            { Arguments = original.InvocationRecipe.Arguments.Select((value, index) => index == 0 ? value with { Sha256 = new string('0', 64) } : value).ToArray() } };
+        var corrupt = original with
+        {
+            InvocationRecipe = original.InvocationRecipe! with
+            { Arguments = original.InvocationRecipe.Arguments.Select((value, index) => index == 0 ? value with { Sha256 = new string('0', 64) } : value).ToArray() }
+        };
         Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() =>
             CompilerRecipeObservation.WithoutOptionalRecipe(corrupt, TestContext.Current.CancellationToken)).Reason);
     }
@@ -525,14 +555,17 @@ public sealed class CompilerRecipeObservationTests
         var mandatory = new CompilerReadResponse(absent, null);
         var limit = JsonSerializer.SerializeToUtf8Bytes(mandatory, ProjectContextLoader.JsonOptions).Length;
         var response = new CompilerReadResponse(original, null)
-            { CommandLineArguments = original.CommandLineArguments, EmitParameters = original.EmitParameters };
+        { CommandLineArguments = original.CommandLineArguments, EmitParameters = original.EmitParameters };
         var bytes = CompilerEvidenceBootstrap.SerializeResponse(ref response, TestContext.Current.CancellationToken, limit);
         var actual = Assert.IsType<CompilerObservation>(response.Observation); Assert.Null(actual.InvocationRecipe);
         Assert.Equal(JsonSerializer.SerializeToUtf8Bytes(mandatory, ProjectContextLoader.JsonOptions), bytes);
-        var corrupt = original with { InvocationRecipe = original.InvocationRecipe! with
-            { Arguments = original.InvocationRecipe.Arguments.Select((value, index) => index == 0 ? value with { Sha256 = new string('0', 64) } : value).ToArray() } };
+        var corrupt = original with
+        {
+            InvocationRecipe = original.InvocationRecipe! with
+            { Arguments = original.InvocationRecipe.Arguments.Select((value, index) => index == 0 ? value with { Sha256 = new string('0', 64) } : value).ToArray() }
+        };
         response = new CompilerReadResponse(corrupt, null)
-            { CommandLineArguments = corrupt.CommandLineArguments, EmitParameters = corrupt.EmitParameters };
+        { CommandLineArguments = corrupt.CommandLineArguments, EmitParameters = corrupt.EmitParameters };
         Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() =>
             CompilerEvidenceBootstrap.SerializeResponse(ref response, TestContext.Current.CancellationToken, limit)).Reason);
     }
@@ -576,7 +609,7 @@ public sealed class CompilerRecipeObservationTests
         var observed = SupportedObservation(fixture.Path);
         var reference = observed.Parameters.Single(input => input.Name == "References").Items.Single();
         var parameters = observed.Parameters.Select(input => input.Name == "References" ? input with
-            { ReferenceProperties = [new(reference, "Foo," + globalKeyword, false)] } : input).ToArray();
+        { ReferenceProperties = [new(reference, "Foo," + globalKeyword, false)] } : input).ToArray();
         string[] aliases = reverse ? ["/reference:" + reference, "/reference:Foo=" + reference] : ["/reference:Foo=" + reference, "/reference:" + reference];
         observed = RebindArguments(observed with { Parameters = parameters }, observed.CommandLineArguments.Take(6).Concat(aliases).Concat(observed.CommandLineArguments.Skip(7)).ToArray());
         Assert.Equal(new[] { "recipe.emitProfileUnsupported" }, CompilerRecipePayload.Classify(observed, fixture.Path, TestContext.Current.CancellationToken).UnsupportedReasons);
@@ -595,7 +628,7 @@ public sealed class CompilerRecipeObservationTests
         var observed = SupportedObservation(fixture.Path);
         var reference = observed.Parameters.Single(input => input.Name == "References").Items.Single();
         var parameters = observed.Parameters.Select(input => input.Name == "References" ? input with
-            { ReferenceProperties = [new(reference, globalKeyword, false)] } : input).ToArray();
+        { ReferenceProperties = [new(reference, globalKeyword, false)] } : input).ToArray();
         observed = observed with { Parameters = parameters };
         Assert.True(CompilerRecipePayload.Classify(observed, fixture.Path, TestContext.Current.CancellationToken).IsSupported);
         Assert.Null(Assert.Single(CompilerReferenceSnapshot.ResolveSemanticReferences(observed, TestContext.Current.CancellationToken)).Aliases);
@@ -621,7 +654,7 @@ public sealed class CompilerRecipeObservationTests
         var observed = SupportedObservation(fixture.Path);
         var reference = observed.Parameters.Single(input => input.Name == "References").Items.Single();
         var parameters = observed.Parameters.Select(input => input.Name == "References" ? input with
-            { ReferenceProperties = [new(reference, "Foo,global", false)] } : input).ToArray();
+        { ReferenceProperties = [new(reference, "Foo,global", false)] } : input).ToArray();
         var aliases = new List<string> { "/reference:Foo=" + reference, "/reference:" + reference };
         if (change == "missing") aliases.RemoveAt(1);
         if (change == "duplicate") aliases.Insert(1, aliases[0]);
@@ -641,8 +674,12 @@ public sealed class CompilerRecipeObservationTests
         using var fixture = TestDirectory.Create("crap-recipe-generated-output-data");
         var observed = SupportedObservation(fixture.Path);
         var output = Path.Combine(fixture.Path, "obj", "out.dll"); var generated = Path.Combine(fixture.Path, "Generated");
-        observed = observed with { Assembly = observed.Assembly! with { Path = output }, Pdb = observed.Pdb! with { Path = Path.ChangeExtension(output, ".pdb") },
-            EmitParameters = [new("GeneratedFilesOutputPath", [generated])] };
+        observed = observed with
+        {
+            Assembly = observed.Assembly! with { Path = output },
+            Pdb = observed.Pdb! with { Path = Path.ChangeExtension(output, ".pdb") },
+            EmitParameters = [new("GeneratedFilesOutputPath", [generated])]
+        };
         var arguments = observed.CommandLineArguments.ToArray(); arguments[5] = "/out:" + output;
         observed = RebindArguments(observed, arguments.Append("/generatedfilesout:" + (foreign ? generated + "-foreign" : generated)).ToArray());
         if (foreign) Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() =>
@@ -672,8 +709,12 @@ public sealed class CompilerRecipeObservationTests
             var content = Encoding.UTF8.GetBytes("actual role bytes " + image.Role); File.WriteAllBytes(image.Path, content);
             return new CompilerImageFile(image.Role, image.Path, content.Length, Convert.ToHexStringLower(SHA256.HashData(content)));
         }).ToArray();
-        observed = observed with { CompilerImages = images, InvocationRecipe = observed.InvocationRecipe! with
-            { Images = images.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() } };
+        observed = observed with
+        {
+            CompilerImages = images,
+            InvocationRecipe = observed.InvocationRecipe! with
+            { Images = images.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() }
+        };
         var supported = CompilerRecipePayload.Retain(observed, fixture.Path, TestContext.Current.CancellationToken);
         var arguments = observed.CommandLineArguments.ToArray(); arguments[2] = "/target:exe";
         var unsupported = RebindArguments(observed, arguments);

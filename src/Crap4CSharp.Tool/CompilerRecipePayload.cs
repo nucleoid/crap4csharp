@@ -86,11 +86,16 @@ internal static class CompilerRecipePayload
     internal static CompilerObservation ImagesChangedUnsupported(CompilerObservation observation, CancellationToken token)
     {
         CompilerRecipeObservation.RequireKnownIntegrity(observation, token);
-        return observation with { CompilerImages = [], InvocationRecipe = observation.InvocationRecipe! with
+        return observation with
         {
-            Images = [], UnsupportedReasons = observation.InvocationRecipe.UnsupportedReasons.Append("recipe.compilerImagesChanged")
+            CompilerImages = [],
+            InvocationRecipe = observation.InvocationRecipe! with
+            {
+                Images = [],
+                UnsupportedReasons = observation.InvocationRecipe.UnsupportedReasons.Append("recipe.compilerImagesChanged")
                 .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray()
-        } };
+            }
+        };
     }
 
     internal static IEnumerable<(string Id, string Kind)> ExpectedFiles(CompilerObservation observation, string buildId)
@@ -132,8 +137,18 @@ internal static class CompilerRecipePayload
             token.ThrowIfCancellationRequested();
             var full = Resolve(path, observation.ProjectPath);
             if (!sources.TryGetValue(full, out var input) || input.Role is not ("source" or "compiler-source") || input.Encoding != "utf-8") throw Refuse();
-            return new { path = full, input.Locator, input.Length, sha256 = "sha256:" + input.Sha256,
-                ordinal = index, input.Role, input.LogicalPath, input.Encoding, input.Generated };
+            return new
+            {
+                path = full,
+                input.Locator,
+                input.Length,
+                sha256 = "sha256:" + input.Sha256,
+                ordinal = index,
+                input.Role,
+                input.LogicalPath,
+                input.Encoding,
+                input.Generated
+            };
         }).ToArray();
         var referenceRows = references.Select((input, index) =>
         {
@@ -141,11 +156,27 @@ internal static class CompilerRecipePayload
             var actual = actualReferences[index];
             if (input.Role != "reference" || input.ReferenceAliases != actual.Aliases || (input.EmbedInteropTypes ?? false) != actual.EmbedInteropTypes ||
                 input.LogicalPath != CompilerReferenceSnapshot.LogicalReference(input.Sha256, actual.Aliases, actual.EmbedInteropTypes)) throw Refuse();
-            return new { path = actual.Path, input.Locator, input.Length, sha256 = "sha256:" + input.Sha256,
-                aliases = actual.Aliases?.Split(',') ?? [], embedInteropTypes = actual.EmbedInteropTypes, ordinal = index, input.LogicalPath };
+            return new
+            {
+                path = actual.Path,
+                input.Locator,
+                input.Length,
+                sha256 = "sha256:" + input.Sha256,
+                aliases = actual.Aliases?.Split(',') ?? [],
+                embedInteropTypes = actual.EmbedInteropTypes,
+                ordinal = index,
+                input.LogicalPath
+            };
         }).ToArray();
-        object FileRow(File file) => new { file.Locator, length = file.Bytes.Length, sha256 = "sha256:" + file.Sha256,
-            artifactId = file.Id, file.Role, compilerPath = file.Path };
+        object FileRow(File file) => new
+        {
+            file.Locator,
+            length = file.Bytes.Length,
+            sha256 = "sha256:" + file.Sha256,
+            artifactId = file.Id,
+            file.Role,
+            compilerPath = file.Path
+        };
         if (!files.Select(file => (file.Id, FileKind(file))).SequenceEqual(ExpectedFiles(observation, buildId))) throw Refuse();
         foreach (var file in files.Where(file => file.Role is "compiler-common" or "compiler-csharp"))
         {
@@ -154,21 +185,39 @@ internal static class CompilerRecipePayload
         }
         var common = files.Single(file => file.Role == "compiler-common");
         var csharp = files.Single(file => file.Role == "compiler-csharp");
-        object Output(CompilerOutput output, string id) => new { locator = "inputs/" + output.Sha256 + ".bin",
-            output.Length, sha256 = "sha256:" + output.Sha256, artifactId = id, compilerPath = output.Path };
+        object Output(CompilerOutput output, string id) => new
+        {
+            locator = "inputs/" + output.Sha256 + ".bin",
+            output.Length,
+            sha256 = "sha256:" + output.Sha256,
+            artifactId = id,
+            compilerPath = output.Path
+        };
         var supported = CompilerRecipeBudget.TrySerialize(new
         {
-            provider = Provider, disposition = "typed-input-data-only", contextId, buildId,
+            provider = Provider,
+            disposition = "typed-input-data-only",
+            contextId,
+            buildId,
             baseDirectory = Canonical(Path.GetDirectoryName(observation.ProjectPath)!),
-            scalarArguments = projection.ScalarArguments, sources = sourceRows, references = referenceRows,
+            scalarArguments = projection.ScalarArguments,
+            sources = sourceRows,
+            references = referenceRows,
             embeddedSourcePaths = projection.EmbeddedSourcePaths,
-            compilerCommon = FileRow(common), compilerCSharp = FileRow(csharp),
-            assembly = Output(assembly, buildId + "-pe"), pdb = Output(pdb, buildId + "-pdb"),
+            compilerCommon = FileRow(common),
+            compilerCSharp = FileRow(csharp),
+            assembly = Output(assembly, buildId + "-pe"),
+            pdb = Output(pdb, buildId + "-pdb"),
             referenceAssembly = observation.ReferenceAssembly is { } referenceOutput ? new
-                { compilerPath = referenceOutput.Path, referenceOutput.Length, sha256 = "sha256:" + referenceOutput.Sha256 } : null,
+            { compilerPath = referenceOutput.Path, referenceOutput.Length, sha256 = "sha256:" + referenceOutput.Sha256 } : null,
             observedClosureArtifacts = files.Where(file => file.Role is not ("compiler-common" or "compiler-csharp")).Select(FileRow).ToArray(),
-            observed.TaskAssociationSha256, observed.TaskBinding, observed.CommandBinding, images = observed.Images,
-            arguments = observed.Arguments, argumentRoles = projection.ArgumentRoles, taskOptions = observed.Options,
+            observed.TaskAssociationSha256,
+            observed.TaskBinding,
+            observed.CommandBinding,
+            images = observed.Images,
+            arguments = observed.Arguments,
+            argumentRoles = projection.ArgumentRoles,
+            taskOptions = observed.Options,
             // These limits remain explicit: no loaded/prebirth image attestation,
             // body-origin proof or manifest/coverage capability is issued here.
             unsupportedAttestations = observed.UnsupportedReasons
@@ -212,7 +261,10 @@ internal static class CompilerRecipePayload
         // artifact or falsely consumable recipe is published for this profile.
         return ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(new
         {
-            provider = Provider, disposition = "unsupported-input-profile", contextId, buildId,
+            provider = Provider,
+            disposition = "unsupported-input-profile",
+            contextId,
+            buildId,
             taskAssociationSha256 = observation.InvocationRecipe!.TaskAssociationSha256,
             reasons = projection.UnsupportedReasons
         }, ProjectContextLoader.JsonOptions));
@@ -240,7 +292,8 @@ internal static class CompilerRecipePayload
         var restored = prior with
         {
             InvocationRecipe = retained.Observation,
-            CommandLineArguments = retained.KnownArguments.ToArray(), EmitParameters = retained.EmitParameters.ToArray(),
+            CommandLineArguments = retained.KnownArguments.ToArray(),
+            EmitParameters = retained.EmitParameters.ToArray(),
             CompilerImages = noImages ? [] : pool.Select((image, index) => new CompilerImageFile(image.Role, image.Path, identities[index].Length, identities[index].Sha256)).ToArray(),
             RetainedUnsupportedRecipe = retained.UnsupportedReasons.Count == 0 ? null : retained.UnsupportedReasons.ToArray()
         };
@@ -315,7 +368,9 @@ internal static class CompilerRecipePayload
         var embedded = observation.EmitParameters.SingleOrDefault(input => input.Name == "EmbeddedFiles")?.Items.Select(path => Resolve(path, observation.ProjectPath)).ToArray() ?? [];
         var optional = new Dictionary<string, string[]>(StringComparer.Ordinal)
         {
-            ["analyzer"] = Paths("Analyzers"), ["analyzerconfig"] = Paths("AnalyzerConfigFiles"), ["additionalfile"] = Paths("AdditionalFiles")
+            ["analyzer"] = Paths("Analyzers"),
+            ["analyzerconfig"] = Paths("AnalyzerConfigFiles"),
+            ["additionalfile"] = Paths("AdditionalFiles")
         };
         if (observation.EmitParameters.Count > 3 || observation.EmitParameters.Select(input => input.Name).Distinct(StringComparer.Ordinal).Count() != observation.EmitParameters.Count ||
             observation.EmitParameters.Any(input => input.Name is not ("EmbeddedFiles" or "PdbFile" or "GeneratedFilesOutputPath") ||

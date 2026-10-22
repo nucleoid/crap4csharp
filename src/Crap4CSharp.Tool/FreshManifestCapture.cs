@@ -72,7 +72,7 @@ internal static class FreshManifestCapture
         ManifestInput Input(string role, string logical, ImmutableArray<byte> content, bool generated = false, string? repository = null)
             => new(role, CanonicalIdentity.NormalizeLogicalPath(logical), Store(content), content.Length,
                 CanonicalIdentity.Sha256(content.AsSpan()), role is "source" or "compiler-source" ? "utf-8" : null, generated)
-                { RepositoryPath = repository };
+            { RepositoryPath = repository };
         void Artifact(string id, string kind, ImmutableArray<byte> content, string? context = null, string? build = null,
             string? invocation = null, string? format = null, string? coordinates = null)
             => artifacts.Add(new(id, kind, Store(content), content.Length, CanonicalIdentity.Sha256(content.AsSpan()),
@@ -131,13 +131,24 @@ internal static class FreshManifestCapture
                 Artifact(moduleId, "required-test-module-coverage", module.LineProjection, format: "opencover", coordinates: "line");
                 return new { graphId = module.GraphId, artifact = moduleId };
             }).ToArray();
-            requiredTests.Add(new { graphId = invocation.GraphId, project = RepositoryPath(invocation.ProjectPath),
-                trx = id + "-trx", assembly = id + "-pe", pdb = id + "-pdb", child = id + "-child",
-                moduleIdentity = inspected.ModuleIdentity, mvid = inspected.Mvid, debugIdentity = inspected.DebugIdentity,
-                passed = boundResult.Passed, rawExitCode = invocation.Process.ExitCode, modules });
+            requiredTests.Add(new
+            {
+                graphId = invocation.GraphId,
+                project = RepositoryPath(invocation.ProjectPath),
+                trx = id + "-trx",
+                assembly = id + "-pe",
+                pdb = id + "-pdb",
+                child = id + "-child",
+                moduleIdentity = inspected.ModuleIdentity,
+                mvid = inspected.Mvid,
+                debugIdentity = inspected.DebugIdentity,
+                passed = boundResult.Passed,
+                rawExitCode = invocation.Process.ExitCode,
+                modules
+            });
         }
         var inventoryBytes = JsonSerializer.SerializeToUtf8Bytes(new
-            { provider = "finite-sdk-required-test-inventory-v1", tests = requiredTests, reusableRecipe = false });
+        { provider = "finite-sdk-required-test-inventory-v1", tests = requiredTests, reusableRecipe = false });
         _ = SavedRequiredTestInventory.Parse(inventoryBytes, requiredIds, cancellation);
         Artifact("required-test-inventory", "required-test-inventory", ImmutableArray.Create(inventoryBytes), format: "json");
         foreach (var binding in graph.GraphContexts.Where(b => !b.IsTestProject || b.Context.ExclusionPolicy.IncludeTests))
@@ -171,7 +182,7 @@ internal static class FreshManifestCapture
                 var content = ReadCaptured(reference.Path, ref readTotal, cancellation);
                 var input = Input("reference", CompilerReferenceSnapshot.LogicalReference(CanonicalIdentity.Sha256(content.AsSpan()),
                     reference.Aliases, reference.EmbedInteropTypes), content) with
-                    { ReferenceAliases = reference.Aliases, EmbedInteropTypes = reference.EmbedInteropTypes ? true : null };
+                { ReferenceAliases = reference.Aliases, EmbedInteropTypes = reference.EmbedInteropTypes ? true : null };
                 inputs.Add(input); recipeReferences.Add(input);
             }
             var phaseIdentities = new List<object>();
@@ -184,8 +195,14 @@ internal static class FreshManifestCapture
                 var logical = inside ? relative : "external/" + CanonicalIdentity.Tuple("phase-path", phase.Role, phase.Path);
                 // Project/import/restore/config properties can contain secrets. Retain
                 // independently observed byte identities, never raw metadata XML/properties.
-                phaseIdentities.Add(new { role = phase.Role, logicalPath = logical, length = content.Length,
-                    sha256 = CanonicalIdentity.Sha256(content.AsSpan()), generated = phase.ExpectedGenerated });
+                phaseIdentities.Add(new
+                {
+                    role = phase.Role,
+                    logicalPath = logical,
+                    length = content.Length,
+                    sha256 = CanonicalIdentity.Sha256(content.AsSpan()),
+                    generated = phase.ExpectedGenerated
+                });
             }
             inputs = inputs.GroupBy(i => (i.Role, i.LogicalPath)).Select(g =>
             {
@@ -287,7 +304,7 @@ internal static class FreshManifestCapture
                 });
             }
             Artifact(buildId + "-closure", "compiler-input-closure", ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(new
-                { provider = "validated-csc-inputs-v1", metadata = phaseIdentities, reusableRecipe = false })), contextId, buildId, format: "json");
+            { provider = "validated-csc-inputs-v1", metadata = phaseIdentities, reusableRecipe = false })), contextId, buildId, format: "json");
             builds.Add(new(buildId, contextId, inspected.ModuleIdentity, CanonicalIdentity.Sha256(assembly.AsSpan()),
                 inspected.Mvid, CanonicalIdentity.Sha256(pdb.AsSpan()), inspected.DebugIdentity));
             Artifact(buildId + "-pe", "assembly", assembly, contextId, buildId);
@@ -312,9 +329,12 @@ internal static class FreshManifestCapture
                 executions.Add(new(id, contextId, buildId, true, invocation.Process.ExitCode,
                     counters.Total, counters.Passed, counters.Failed, counters.Skipped)
                 {
-                    TestProject = RepositoryPath(invocation.ProjectPath), TestModuleIdentity = tested.ModuleIdentity,
-                    TestAssemblySha256 = CanonicalIdentity.Sha256(testPe.AsSpan()), TestMvid = tested.Mvid,
-                    TestPdbSha256 = CanonicalIdentity.Sha256(testPdb.AsSpan()), TestDebugIdentity = tested.DebugIdentity
+                    TestProject = RepositoryPath(invocation.ProjectPath),
+                    TestModuleIdentity = tested.ModuleIdentity,
+                    TestAssemblySha256 = CanonicalIdentity.Sha256(testPe.AsSpan()),
+                    TestMvid = tested.Mvid,
+                    TestPdbSha256 = CanonicalIdentity.Sha256(testPdb.AsSpan()),
+                    TestDebugIdentity = tested.DebugIdentity
                 });
                 Artifact(id + "-trx", "test-result", trx, contextId, buildId, id, "trx");
                 Artifact(id + "-pe", "test-assembly", testPe, contextId, buildId, id);
@@ -338,38 +358,68 @@ internal static class FreshManifestCapture
                 _ = CapturedSource.Create(source.LogicalPath, content.AsSpan());
                 var locator = Store(content);
                 Artifact("test-source-" + test.GraphId + "-" + index++, "test-compiler-source", content);
-                identities.Add(new { role = "compiler-source", logicalPath = source.LogicalPath, locator,
-                    sha256 = source.ContentIdentity, length = content.Length, generated = source.IsGenerated });
+                identities.Add(new
+                {
+                    role = "compiler-source",
+                    logicalPath = source.LogicalPath,
+                    locator,
+                    sha256 = source.ContentIdentity,
+                    length = content.Length,
+                    generated = source.IsGenerated
+                });
             }
             foreach (var reference in CompilerReferenceSnapshot.ResolveSemanticReferences(observations[test.GraphId], cancellation))
             {
                 var content = ReadCaptured(reference.Path, ref readTotal, cancellation);
                 var hash = CanonicalIdentity.Sha256(content.AsSpan()); var locator = Store(content);
                 Artifact("test-reference-" + test.GraphId + "-" + index++, "test-compiler-reference", content);
-                identities.Add(new { role = "reference", logicalPath = CompilerReferenceSnapshot.LogicalReference(hash, reference.Aliases, reference.EmbedInteropTypes), locator,
-                    sha256 = hash, length = content.Length, referenceAliases = reference.Aliases, embedInteropTypes = reference.EmbedInteropTypes ? (bool?)true : null });
+                identities.Add(new
+                {
+                    role = "reference",
+                    logicalPath = CompilerReferenceSnapshot.LogicalReference(hash, reference.Aliases, reference.EmbedInteropTypes),
+                    locator,
+                    sha256 = hash,
+                    length = content.Length,
+                    referenceAliases = reference.Aliases,
+                    embedInteropTypes = reference.EmbedInteropTypes ? (bool?)true : null
+                });
             }
             foreach (var phase in test.Context.PhaseInputs.Where(p => p.Role != "source" && File.Exists(p.Path)))
             {
                 var content = ReadCaptured(phase.Path, ref readTotal, cancellation);
-                identities.Add(new { role = phase.Role, logicalPath = "metadata/" + CanonicalIdentity.Tuple("phase-path", phase.Role, phase.Path),
-                    sha256 = CanonicalIdentity.Sha256(content.AsSpan()), length = content.Length });
+                identities.Add(new
+                {
+                    role = phase.Role,
+                    logicalPath = "metadata/" + CanonicalIdentity.Tuple("phase-path", phase.Role, phase.Path),
+                    sha256 = CanonicalIdentity.Sha256(content.AsSpan()),
+                    length = content.Length
+                });
             }
             Artifact("test-closure-" + test.GraphId, "test-compiler-input-closure", ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(new
-                { provider = "validated-csc-inputs-v1", project = RepositoryPath(test.ProjectPath), inputs = identities, reusableRecipe = false })), format: "json");
+            { provider = "validated-csc-inputs-v1", project = RepositoryPath(test.ProjectPath), inputs = identities, reusableRecipe = false })), format: "json");
         }
         var available = contexts.SelectMany(c => c.Inputs.Where(i => i.Role == "source" && (!i.Generated || c.IncludeGenerated))
             .Select(i => i.RepositoryPath!)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         var selected = preflight.Scope is null || preflight.Scope.Completeness == ScopeCompleteness.ContextIncomplete ? available :
             preflight.Scope.Files.Select(f => f.NewPath).Where(p => p is not null && available.Contains(p, StringComparer.Ordinal))
                 .Select(p => p!).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
-        var scopeBytes = ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(new { version = 1, sources = selected,
-            sourceState = "worktree", granularity = preflight.Request.Granularity, requestedScope = preflight.Policy.Scope,
-            revision = preflight.GitSnapshot?.Revision }));
+        var scopeBytes = ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            version = 1,
+            sources = selected,
+            sourceState = "worktree",
+            granularity = preflight.Request.Granularity,
+            requestedScope = preflight.Policy.Scope,
+            revision = preflight.GitSnapshot?.Revision
+        }));
         // Tiny replay policy is effective threshold only; base policy/overlays are independently
         // retained and the caller must run the pure trusted policy gate, not trust replay's verdict.
-        var policyBytes = ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(new { version = 1,
-            threshold = preflight.Policy.Threshold, allowMissingCoverage = false }));
+        var policyBytes = ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            version = 1,
+            threshold = preflight.Policy.Threshold,
+            allowMissingCoverage = false
+        }));
         Artifact("scope", "scope", scopeBytes, format: "json"); Artifact("policy", "policy", policyBytes, format: "json");
         Artifact("trusted-policy", "trusted-policy", ImmutableArray.Create(preflight.Trusted.Policy.CanonicalBytes), format: "json");
         foreach (var exemption in preflight.Trusted.ExemptionBytes)
@@ -397,7 +447,7 @@ internal static class FreshManifestCapture
             new("completed", true, true, []), new(revision is null ? "none" : "git", CanonicalIdentity.Tuple("fresh-repository", preflight.Root),
                 CanonicalIdentity.Tuple("fresh-workspace", preflight.Root), revision?.CurrentHead,
                 revision is null ? null : preflight.Trusted.Revision, revision?.ResolvedHead)
-                { StateHash = stateHash },
+            { StateHash = stateHash },
             [new("workspace", "workspace", OperatingSystem.IsWindows() ? "insensitive" : "sensitive")], contexts, builds, executions, artifacts,
             new(CanonicalIdentity.Sha256(scopeBytes.AsSpan()), CanonicalIdentity.Sha256(policyBytes.AsSpan()), null, null), null));
         readPaths.Complete();
@@ -412,8 +462,11 @@ internal static class FreshManifestCapture
             var valid = ProvenanceVerifier.VerifyCaptureCancellable(manifest, bytes, preflight.Policy.Ruleset, cancellation);
             if (valid.Status != ProvenanceStatus.Captured) throw new PolicyException("check.captureUnproven", string.Join(", ", valid.Reasons));
         }
-        return new(manifest, bytes) { RequiresCompletedProof = provisional,
-            OptionalRecipes = FreshCompilerRecipeSelection.Create(execution.Compiler, observations, preflight.Root, cancellation) };
+        return new(manifest, bytes)
+        {
+            RequiresCompletedProof = provisional,
+            OptionalRecipes = FreshCompilerRecipeSelection.Create(execution.Compiler, observations, preflight.Root, cancellation)
+        };
     }
 
     internal static async Task<string> PublishAsync(FreshExecutionEvidence execution, FreshCapturedBundle captured,

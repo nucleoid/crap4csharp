@@ -68,8 +68,9 @@ internal sealed class FreshCompilerRecipeSelection
     {
         CommandLineArguments = value.CommandLineArguments.ToArray(),
         EmitParameters = value.EmitParameters.Select(parameter => parameter with
-            { Items = parameter.Items.ToArray(), ReferenceProperties = parameter.ReferenceProperties.ToArray() }).ToArray(),
-        CompilerImages = value.CompilerImages.ToArray(), RetainedUnsupportedRecipe = value.RetainedUnsupportedRecipe?.ToArray(),
+        { Items = parameter.Items.ToArray(), ReferenceProperties = parameter.ReferenceProperties.ToArray() }).ToArray(),
+        CompilerImages = value.CompilerImages.ToArray(),
+        RetainedUnsupportedRecipe = value.RetainedUnsupportedRecipe?.ToArray(),
         InvocationRecipe = value.InvocationRecipe is not { } recipe ? null : recipe with
         { Arguments = recipe.Arguments.ToArray(), Options = recipe.Options.ToArray(), Images = recipe.Images.ToArray(), UnsupportedReasons = recipe.UnsupportedReasons.ToArray() }
     };
