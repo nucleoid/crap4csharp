@@ -427,8 +427,10 @@ public sealed class CompilerRecipeObservationTests
         Assert.Equal(FreshPriorBuild.MaximumBytes, fullBytes.Length);
         FreshPriorBuild.ValidateSlices(full, fullBytes.Length);
         FreshPriorBuild.ValidateSlices(full, fullBytes.Length + FreshPriorBuild.MaximumOptionalBytes);
-        Assert.Throws<ProjectContextException>(() => FreshPriorBuild.ValidateSlices(full, fullBytes.Length + FreshPriorBuild.MaximumOptionalBytes + 1));
-        Assert.Throws<ProjectContextException>(() => FreshPriorBuild.ValidateSlices(full with { Workspace = full.Workspace + "x" }, fullBytes.Length + 1));
+        Assert.Equal("check.priorBuildInvalid", Assert.Throws<PolicyException>(() =>
+            FreshPriorBuild.ValidateSlices(full, fullBytes.Length + FreshPriorBuild.MaximumOptionalBytes + 1)).Code);
+        Assert.Equal("check.priorBuildInvalid", Assert.Throws<PolicyException>(() =>
+            FreshPriorBuild.ValidateSlices(full with { Workspace = full.Workspace + "x" }, fullBytes.Length + 1)).Code);
     }
 
     [Theory]
