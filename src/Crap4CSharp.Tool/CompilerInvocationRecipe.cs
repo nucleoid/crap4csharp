@@ -91,7 +91,7 @@ internal sealed class CompilerRecipeObservation(string sdkPath, string? hostPath
             !recipe.UnsupportedReasons.Contains("recipe.runtimeLoadedImageNotAttested", StringComparer.Ordinal) ||
             recipe.UnsupportedReasons.Count != recipe.UnsupportedReasons.Distinct(StringComparer.Ordinal).Count() ||
             recipe.TaskBinding is not ("selected-sdk-core-target" or "unproven") ||
-            recipe.CommandBinding is not ("selected-host-exec-csc-arguments-match" or "selected-sdk-csc-exe-arguments-match" or "unproven") ||
+            recipe.CommandBinding is not ("selected-host-exec-csc-arguments-match" or "selected-sdk-csc-exe-arguments-match" or "selected-sdk-csc-unix-apphost-arguments-match" or "unproven") ||
             recipe.UnsupportedReasons.Any(reason => reason is not ("recipe.loadedCompilerAndTaskImageNotAttested" or
                 "recipe.runtimeLoadedImageNotAttested" or "recipe.languageVersionUnsupported" or "recipe.scalarOptionUnsupported" or
                 "recipe.scalarOptionAmbiguous" or "recipe.selectedSdkTaskFileUnproven" or "recipe.compilerCommandPrefixUnproven" or
@@ -115,13 +115,20 @@ internal sealed class CompilerRecipeObservation(string sdkPath, string? hostPath
             throw new ProjectContextException("compiler.recipeBindingUnproven", "Contradictory compiler binding cannot be hidden by optional absence.");
         if (recipe.Images.Count != 0)
         {
-            string[] roles = ["dotnet-host", "csc", "compiler-common", "compiler-csharp", "compiler-deps",
-                "compiler-runtimeconfig", "sdk-csc-target", "sdk-csc-task"];
-            var expectedRoles = OperatingSystem.IsWindows() ? roles.Append("csc-launcher") : roles;
-            if (!recipe.Images.Select(image => image.Role).SequenceEqual(expectedRoles) ||
+            if (!HasExpectedImageRoles(recipe) ||
                 !observation.CompilerImages.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).SequenceEqual(recipe.Images))
                 throw new ProjectContextException("compiler.recipeBindingUnproven", "Malformed compiler image roles cannot be hidden by optional absence.");
         }
+    }
+
+    internal static bool HasExpectedImageRoles(CompilerInvocationObservation recipe)
+    {
+        string[] roles = ["dotnet-host", "csc", "compiler-common", "compiler-csharp", "compiler-deps",
+            "compiler-runtimeconfig", "sdk-csc-target", "sdk-csc-task"];
+        var withLauncher = recipe.Images.Select(image => image.Role).SequenceEqual(roles.Append("csc-launcher"));
+        var ordinary = recipe.Images.Select(image => image.Role).SequenceEqual(roles);
+        return (OperatingSystem.IsWindows() ? withLauncher : OperatingSystem.IsLinux() ? ordinary || withLauncher : ordinary) &&
+            (recipe.CommandBinding != "selected-sdk-csc-unix-apphost-arguments-match" || OperatingSystem.IsLinux() && withLauncher);
     }
 
     internal static CompilerObservation WithoutOptionalRecipe(CompilerObservation observation, CancellationToken token)
@@ -152,9 +159,11 @@ internal sealed class CompilerRecipeObservation(string sdkPath, string? hostPath
         if (items.Length > 32768) { CommandRouteDiagnostic = "diagnostic.compilerRoute.unavailable"; DeclineSize(); return; }
         commandPrefix = items.Length >= 3 && hostPath is not null && EqualPath(items[0], hostPath) &&
             items[1] == "exec" && EqualPath(items[2], Path.Combine(sdkPath, "Roslyn", "bincore", "csc.dll"));
-        executableRoute = items.Length >= 1 && OperatingSystem.IsWindows() &&
-            EqualPath(items[0], Path.Combine(sdkPath, "Roslyn", "bincore", "csc.exe"));
-        // Fixed diagnostic DATA only. This does not extend supported command binding.
+        executableRoute = items.Length >= 1 && (OperatingSystem.IsWindows() &&
+            EqualPath(items[0], Path.Combine(sdkPath, "Roslyn", "bincore", "csc.exe")) ||
+            OperatingSystem.IsLinux() && EqualPath(items[0], Path.Combine(sdkPath, "Roslyn", "bincore", "csc")));
+        // Closed route diagnostics remain DATA; only the exact platform-selected
+        // apphost above participates in same-task argument matching.
         CommandRouteDiagnostic = commandPrefix ? "diagnostic.compilerRoute.selectedHostExec"
             : items.Length >= 1 && EqualPath(items[0], Path.Combine(sdkPath, "Roslyn", "bincore", "csc.exe"))
                 ? "diagnostic.compilerRoute.selectedSdkWindowsApphost"
@@ -240,7 +249,8 @@ internal sealed class CompilerRecipeObservation(string sdkPath, string? hostPath
         Unsupported("recipe.loadedCompilerAndTaskImageNotAttested");
         Unsupported("recipe.runtimeLoadedImageNotAttested");
         return new(Hash(taskKey), taskBound ? "selected-sdk-core-target" : "unproven",
-            matched ? executableRoute ? "selected-sdk-csc-exe-arguments-match" : "selected-host-exec-csc-arguments-match" : "unproven",
+            matched ? executableRoute ? OperatingSystem.IsLinux() ? "selected-sdk-csc-unix-apphost-arguments-match" :
+                "selected-sdk-csc-exe-arguments-match" : "selected-host-exec-csc-arguments-match" : "unproven",
             Array.AsReadOnly(arguments ?? []), Array.AsReadOnly(options.ToArray()),
             Array.AsReadOnly(unsupported.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray()));
     }

@@ -315,7 +315,7 @@ internal static class CompilerRecipePayload
             recipe.Arguments.Any(argument => argument is null) || recipe.Images.Any(image => image is null) ||
             observation.CommandLineArguments is null || observation.EmitParameters is null || observation.CompilerImages is null ||
             recipe.TaskBinding is not ("selected-sdk-core-target" or "unproven") || recipe.CommandBinding is not
-                ("selected-host-exec-csc-arguments-match" or "selected-sdk-csc-exe-arguments-match" or "unproven") ||
+                ("selected-host-exec-csc-arguments-match" or "selected-sdk-csc-exe-arguments-match" or "selected-sdk-csc-unix-apphost-arguments-match" or "unproven") ||
             recipe.UnsupportedReasons.Count is < 2 or > 16 ||
             !recipe.UnsupportedReasons.Contains("recipe.loadedCompilerAndTaskImageNotAttested", StringComparer.Ordinal) ||
             !recipe.UnsupportedReasons.Contains("recipe.runtimeLoadedImageNotAttested", StringComparer.Ordinal) ||
@@ -346,11 +346,9 @@ internal static class CompilerRecipePayload
         else if (!CompilerRecipeObservation.Identities(observation.CommandLineArguments, token).SequenceEqual(recipe.Arguments)) throw Refuse();
         foreach (var output in new[] { observation.Assembly, observation.Pdb, observation.ReferenceAssembly }.OfType<CompilerOutput>())
             if (output.Length <= 0 || output.Length > CompilerPhaseSnapshot.MaximumFileBytes || !Digest(output.Sha256) || Canonical(output.Path) != output.Path) throw Refuse();
-        string[] roles = ["dotnet-host", "csc", "compiler-common", "compiler-csharp", "compiler-deps", "compiler-runtimeconfig", "sdk-csc-target", "sdk-csc-task"];
-        var expected = OperatingSystem.IsWindows() ? roles.Append("csc-launcher").ToArray() : roles;
         var images = observation.CompilerImages;
         var unavailableImages = recipe.UnsupportedReasons.Any(reason => reason is "recipe.sizeUnsupported" or "recipe.compilerImageUnavailable" or "recipe.compilerImagesChanged") && images.Count == 0 && recipe.Images.Count == 0;
-        if (!unavailableImages && (!images.Select(image => image.Role).SequenceEqual(expected) ||
+        if (!unavailableImages && (!CompilerRecipeObservation.HasExpectedImageRoles(recipe) ||
             !images.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).SequenceEqual(recipe.Images))) throw Refuse();
         foreach (var image in images)
             if (image.Length <= 0 || image.Length > CompilerPhaseSnapshot.MaximumFileBytes || !Digest(image.Sha256) || Canonical(image.Path) != image.Path) throw Refuse();

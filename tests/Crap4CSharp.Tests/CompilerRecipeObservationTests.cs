@@ -297,7 +297,7 @@ public sealed class CompilerRecipeObservationTests
     [InlineData("other-csc", "diagnostic.compilerRoute.hostExecOtherCsc")]
     [InlineData("foreign-csc", "diagnostic.compilerRoute.notSelectedCscLauncher")]
     [InlineData("late", "diagnostic.compilerRoute.lateEvent")]
-    public void Actual_command_classifier_reports_only_closed_route_DATA_without_extending_binding(string scenario, string expected)
+    public void Actual_command_classifier_reports_closed_route_DATA_and_only_exact_platform_binding(string scenario, string expected)
     {
         // Duplicate/late tokens are in-process DATA only: real worker integrity refusal
         // precedes transport for these malformed event streams.
@@ -324,9 +324,79 @@ public sealed class CompilerRecipeObservationTests
         if (scenario != "late") capture.Close();
         Assert.Equal(expected, capture.CommandRouteDiagnostic);
         Assert.Equal(expected, CompilerRecipeObservation.NormalizeCommandRouteDiagnostic(capture.CommandRouteDiagnostic));
-        if (scenario != "host-exec" && !(scenario == "windows-apphost" && OperatingSystem.IsWindows()))
+        if (scenario != "host-exec" && !(scenario == "windows-apphost" && OperatingSystem.IsWindows()) &&
+            !(scenario == "unix-apphost" && OperatingSystem.IsLinux()))
             Assert.Equal("unproven", capture.Finish().CommandBinding);
         Assert.DoesNotContain(fixture.Path, capture.CommandRouteDiagnostic, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("selected")]
+    [InlineData("relative")]
+    [InlineData("foreign")]
+    [InlineData("mismatch")]
+    public void Unix_apphost_binding_keeps_exact_path_task_and_argument_order(string scenario)
+    {
+        using var fixture = TestDirectory.Create("crap-unix-apphost-binding-data");
+        var (capture, _) = Capture(fixture.Path);
+        var path = scenario == "relative" ? "csc" : scenario == "foreign"
+            ? Path.Combine(fixture.Path, "foreign", "csc") : Path.Combine(fixture.Path, "sdk", "Roslyn", "bincore", "csc");
+        capture.Arguments(["A.cs", "B.cs"], TestContext.Current.CancellationToken);
+        capture.Command(QuoteArgument(path) + (scenario == "mismatch" ? " B.cs A.cs" : " A.cs B.cs"), TestContext.Current.CancellationToken);
+        capture.Close(); var result = capture.Finish();
+        Assert.Equal(OperatingSystem.IsLinux() && scenario == "selected"
+            ? "selected-sdk-csc-unix-apphost-arguments-match" : "unproven", result.CommandBinding);
+        if (OperatingSystem.IsLinux() && scenario == "mismatch")
+            Assert.Contains("recipe.provenCommandArgumentsMismatch", result.UnsupportedReasons);
+        Assert.DoesNotContain(fixture.Path, JsonSerializer.Serialize(result), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Selected_launcher_membership_and_bytes_are_required_before_fresh_or_saved_recipe_support()
+    {
+        // Real BCL files, synthetic SDK DATA only. No compiler or launcher runs.
+        using var fixture = TestDirectory.Create("crap-launcher-membership-data");
+        var sdk = SelectedSdk(fixture.Path); var original = SupportedObservation(fixture.Path);
+        foreach (var image in CompilerEvidence.CompilerImagePaths(sdk))
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(image.Path)!);
+            File.WriteAllText(image.Path, "fixed image DATA " + image.Role);
+        }
+        var opening = await CompilerEvidence.CaptureCompilerImages(sdk, TestContext.Current.CancellationToken);
+        var launcher = Path.Combine(sdk.Path, "Roslyn", "bincore", OperatingSystem.IsWindows() ? "csc.exe" : "csc");
+        if (OperatingSystem.IsLinux())
+        {
+            Assert.DoesNotContain(opening.Files, image => image.Role == "csc-launcher");
+            Assert.True(CompilerRecipePayload.Classify(original, fixture.Path, TestContext.Current.CancellationToken).IsSupported);
+            File.WriteAllText(launcher, "fixed Unix launcher DATA");
+        }
+        var closing = await CompilerEvidence.CaptureCompilerImages(sdk, TestContext.Current.CancellationToken);
+        var binding = OperatingSystem.IsLinux() ? "selected-sdk-csc-unix-apphost-arguments-match" : "selected-sdk-csc-exe-arguments-match";
+        var observation = original with
+        {
+            CompilerImages = closing.Files,
+            InvocationRecipe = original.InvocationRecipe! with { CommandBinding = binding,
+                Images = closing.Files.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() }
+        };
+        Assert.True(CompilerRecipePayload.Classify(observation, fixture.Path, TestContext.Current.CancellationToken).IsSupported);
+        Assert.Null(CompilerEvidence.CompilerImageDisposition(closing, closing, observation.InvocationRecipe));
+        if (OperatingSystem.IsLinux())
+        {
+            Assert.Equal("recipe.compilerImagesChanged", CompilerEvidence.CompilerImageDisposition(opening, closing, observation.InvocationRecipe));
+            Assert.Equal("recipe.compilerImageUnavailable", CompilerEvidence.CompilerImageDisposition(opening, opening, observation.InvocationRecipe));
+            var missing = observation with { CompilerImages = opening.Files,
+                InvocationRecipe = observation.InvocationRecipe with { Images = opening.Files.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() } };
+            Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() =>
+                CompilerRecipePayload.Classify(missing, fixture.Path, TestContext.Current.CancellationToken)).Reason);
+        }
+        var retained = CompilerRecipePayload.Retain(observation, fixture.Path, TestContext.Current.CancellationToken);
+        var prior = observation with { InvocationRecipe = null, CompilerImages = [], CommandLineArguments = [], EmitParameters = [] };
+        _ = FreshPriorBuild.RestoreCurrentRecipe(retained, prior, fixture.Path, sdk, TestContext.Current.CancellationToken);
+        File.Delete(launcher);
+        var removed = await CompilerEvidence.CaptureCompilerImages(sdk, TestContext.Current.CancellationToken);
+        Assert.NotNull(CompilerEvidence.CompilerImageDisposition(closing, removed, observation.InvocationRecipe));
+        Assert.Equal("check.priorBuildInvalid", Assert.Throws<PolicyException>(() =>
+            FreshPriorBuild.RestoreCurrentRecipe(retained, prior, fixture.Path, sdk, TestContext.Current.CancellationToken)).Code);
     }
 
     private static CompilerObservation SupportedObservation(string root)
@@ -617,10 +687,13 @@ public sealed class CompilerRecipeObservationTests
     [InlineData("compiler-runtimeconfig")]
     [InlineData("sdk-csc-target")]
     [InlineData("sdk-csc-task")]
+    [InlineData("csc-launcher")]
     public void Explicit_prior_rejects_drift_in_every_other_selected_SDK_image_without_rebuilding(string role)
     {
         using var fixture = TestDirectory.Create("crap-prior-sdk-pool-data");
         var sdk = SelectedSdk(fixture.Path);
+        if (role == "csc-launcher" && OperatingSystem.IsLinux())
+            fixture.Write("sdk/Roslyn/bincore/csc", "small SDK launcher DATA");
         var pool = CompilerEvidence.CompilerImagePaths(sdk);
         var identities = pool.Select(image =>
         {

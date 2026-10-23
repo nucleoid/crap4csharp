@@ -96,8 +96,7 @@ internal static class CompilerEvidence
         using (timing?.Start("execution.build.evidence"))
             observation = await ReadAsync(log, node.ProjectPath, timeout, token, nativeProbe, sdk);
         var closingImages = await CaptureCompilerImages(sdk, token);
-        var imageUnsupported = compilerImages.UnsupportedReason ?? closingImages.UnsupportedReason ??
-            (!compilerImages.Files.SequenceEqual(closingImages.Files) ? "recipe.compilerImagesChanged" : null);
+        var imageUnsupported = CompilerImageDisposition(compilerImages, closingImages, observation.InvocationRecipe);
         if (observation.InvocationRecipe is { } recipe)
             observation = observation with { InvocationRecipe = recipe with
                 { Images = imageUnsupported is null ? compilerImages.Files.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() : [],
@@ -154,6 +153,17 @@ internal static class CompilerEvidence
     }
 
     internal sealed record CompilerImageCapture(IReadOnlyList<CompilerImageFile> Files, string? UnsupportedReason);
+    internal static string? CompilerImageDisposition(CompilerImageCapture opening, CompilerImageCapture closing,
+        CompilerInvocationObservation? recipe)
+    {
+        var reason = opening.UnsupportedReason ?? closing.UnsupportedReason ??
+            (!opening.Files.SequenceEqual(closing.Files) ? "recipe.compilerImagesChanged" : null);
+        // A transient launcher used between two absent snapshots cannot acquire
+        // a supported recipe with only the ordinary eight-image pool.
+        return reason ?? (recipe?.CommandBinding == "selected-sdk-csc-unix-apphost-arguments-match" &&
+            !opening.Files.Any(image => image.Role == "csc-launcher") ? "recipe.compilerImageUnavailable" : null);
+    }
+
     internal static async Task<CompilerImageCapture> CaptureCompilerImages(ProjectContextSdkResolution sdk, CancellationToken token)
     {
         var result = new List<CompilerImageFile>();
@@ -182,6 +192,8 @@ internal static class CompilerEvidence
             ("sdk-csc-target", Path.Combine(sdk.Path, "Roslyn", "Microsoft.CSharp.Core.targets")),
             ("sdk-csc-task", Path.Combine(sdk.Path, "Roslyn", "Microsoft.Build.Tasks.CodeAnalysis.dll"))];
         if (OperatingSystem.IsWindows()) paths.Add(("csc-launcher", Path.Combine(sdk.Path, "Roslyn", "bincore", "csc.exe")));
+        else if (OperatingSystem.IsLinux() && File.Exists(Path.Combine(sdk.Path, "Roslyn", "bincore", "csc")))
+            paths.Add(("csc-launcher", Path.Combine(sdk.Path, "Roslyn", "bincore", "csc")));
         return paths;
     }
 
