@@ -18,7 +18,7 @@ internal static class FreshCompletedCapture
         ArtifactBundle bundle;
         using (timing?.Start("promotion.physicalLoad"))
             bundle = ArtifactBundle.Load(path, execution.PrivateDirectory);
-        await ValidateAsync(execution, bundle, token, timing: timing);
+        await ValidateAsync(execution, bundle, token, timing: timing, optionalRecipes: captured.OptionalRecipes);
         return prospective;
     }
 
@@ -41,13 +41,15 @@ internal static class FreshCompletedCapture
                 CanonicalIdentity.NormalizeLogicalPath(path) != path) throw Refuse();
             return path;
         }
+        var logicalIds = execution.Compiler.FinalGraph.BuildGraph.ToDictionary(n => n.Id,
+            n => LogicalContextIdentity.Create(root, n), StringComparer.Ordinal);
         var manifest = ManifestIdentity.Seal(captured.Manifest with
         {
             Contexts = captured.Manifest.Contexts.Select(context =>
             {
                 token.ThrowIfCancellationRequested();
                 var matches = execution.Compiler.FinalGraph.GraphContexts.Where(binding =>
-                    binding.GraphId == context.Id).ToArray();
+                    logicalIds[binding.GraphId] == context.Id).ToArray();
                 if (matches.Length != 1) throw Refuse();
                 var binding = matches[0];
                 var assembly = binding.Context.EvaluatedTargetPath ?? throw Refuse();
@@ -57,7 +59,8 @@ internal static class FreshCompletedCapture
                 CompletedRevalidationDeclaration.Validate(proposed, Relative(binding.ProjectPath),
                     Relative(assembly), Relative(Path.ChangeExtension(assembly, ".pdb")));
                 return proposed;
-            }).ToArray(), ManifestHash = null
+            }).ToArray(),
+            ManifestHash = null
         });
         token.ThrowIfCancellationRequested();
         return captured with { Manifest = manifest };
@@ -66,7 +69,8 @@ internal static class FreshCompletedCapture
     internal static async Task<ProvenanceResult> ValidateAsync(FreshExecutionEvidence execution,
         ArtifactBundle bundle, CancellationToken token,
         Func<CancellationToken, Task>? beforeFinalValidation = null, CompletedProofTiming? timing = null,
-        Action<CurrentEvidence, ProvenanceResult>? beforePublication = null)
+        Action<CurrentEvidence, ProvenanceResult>? beforePublication = null,
+        FreshCompilerRecipeSelection? optionalRecipes = null)
     {
         token.ThrowIfCancellationRequested();
         var original = execution.Preflight;
@@ -78,14 +82,19 @@ internal static class FreshCompletedCapture
                 local, null, original.Request.Timeout, token);
         // The current preflight still independently reloads all trust/scope bytes;
         // retain only this invocation's acquisition choice, never its old graph.
-        preflight = preflight with { Request = preflight.Request with
-            { NativeSdkIdentityProbe = original.Request.NativeSdkIdentityProbe,
-                WarmPostBuildProbe = original.Request.WarmPostBuildProbe } };
+        preflight = preflight with
+        {
+            Request = preflight.Request with
+            {
+                NativeSdkIdentityProbe = original.Request.NativeSdkIdentityProbe,
+                WarmPostBuildProbe = original.Request.WarmPostBuildProbe
+            }
+        };
         CompletedReusePreflight.ValidateScope(bundle, preflight);
         // Only this live invocation may reuse its original retained compiler proof.
         // Saved-only public consumers continue through the full generic validator.
         var current = await FreshRetainedCompletedProof.ValidateAsync(execution, bundle, preflight, token,
-            beforeFinalValidation, timing);
+            beforeFinalValidation, timing, optionalRecipes);
         var proof = ProvenanceVerifier.VerifyCurrent(bundle.Manifest, bundle.Bytes, current, true,
             original.Policy.Ruleset);
         if (proof.Status != ProvenanceStatus.Verified || !proof.Reusable) throw Refuse();

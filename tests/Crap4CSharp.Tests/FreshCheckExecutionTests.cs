@@ -7,6 +7,23 @@ namespace Crap4CSharp.Tests;
 public sealed class FreshCheckExecutionTests
 {
     [Theory]
+    [InlineData("size")]
+    [InlineData("images")]
+    [InlineData("absence")]
+    public Task Actual_promoted_writer_preserves_mandatory_proof_under_fixture_optional_DATA_loss(string loss)
+        => RunCase(false, true, policyScope: "all", local: true, optionalRecipeLoss: loss);
+
+    [Fact]
+    public Task IncludedCompletedTestOutcomeJoinsPublicScoredContext()
+        // Exercise the real managed SDK/build/test/coverage route; native SDK
+        // identity certification remains the separate existing native controls.
+        => RunCase(false, false, policyScope: "all", local: true, includeTests: true, nativeSdkIdentity: false);
+
+    [Fact]
+    public Task IncludedFailedTestOutcomeJoinsPublicScoredContext()
+        => RunCase(true, false, policyScope: "all", local: true, partial: true, includeTests: true, nativeSdkIdentity: false);
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public Task ColdPublicFreshCheckRestoresBuildsAndTestsOnceAndRetainsBoundArtifacts(bool failing)
@@ -393,7 +410,8 @@ public sealed class FreshCheckExecutionTests
         Reject(context with { CurrentRevalidation = recipe with { PdbPath = recipe.Project } });
         var historical = ManifestIdentity.Seal(captured.Manifest with
         {
-            Contexts = [context with { ReuseRecipeComplete = false, CurrentRevalidation = null }], ManifestHash = null
+            Contexts = [context with { ReuseRecipeComplete = false, CurrentRevalidation = null }],
+            ManifestHash = null
         });
         var historicalResult = ProvenanceVerifier.VerifyCapture(historical, captured.Bytes);
         Assert.Equal(ProvenanceStatus.Captured, historicalResult.Status);
@@ -406,7 +424,8 @@ public sealed class FreshCheckExecutionTests
             {
                 Id = "unexpected-empty-coverage", Kind = "coverage", Format = "opencover",
                 CoordinateKind = "line", ExecutionId = captured.Manifest.Executions[0].Id
-            }], ManifestHash = null
+            }],
+            ManifestHash = null
         });
         Assert.Contains(ProvenanceReasonCodes.ActualBindingIncomplete,
             ProvenanceVerifier.VerifyCapture(unexpectedCoverage, captured.Bytes).Reasons);
@@ -445,8 +464,103 @@ public sealed class FreshCheckExecutionTests
     public Task PendingFreshStagingCanBeRestoredBeforeTheSingleWriterProof()
         => RunCase(false, false, policyScope: "all", publicTiming: true, writerOrdering: true);
 
+    private static async Task ExerciseOptionalPromotedWriterAsync(FreshExecutionEvidence evidence, FreshCheckRequest request,
+        string root, string loss, DateTimeOffset started, System.Diagnostics.Stopwatch originalClock,
+        CancellationToken outerToken, CancellationToken token)
+    {
+        Assert.Null(evidence.Tests.Failure); Assert.NotNull(evidence.Coverage);
+        var captured = await FreshManifestCapture.PrepareCompletedAsync(evidence, token);
+        var originals = evidence.Compiler.ByGraphId();
+        var selected = originals.ToDictionary(pair => pair.Key,
+            pair => captured.OptionalRecipes!.OptionalView(evidence.Compiler, pair.Value, root, token), StringComparer.Ordinal);
+        var binding = Assert.Single(evidence.Compiler.FinalGraph.GraphContexts, item => !item.IsTestProject);
+        var original = originals[binding.GraphId];
+        var initialProjection = CompilerRecipePayload.Classify(original, root, token);
+        Assert.True(initialProjection.IsSupported, initialProjection.IsSupported ? null
+            : CompilerEvidenceTests.BindingDiagnostic(original, token, projectedReasons: initialProjection.UnsupportedReasons));
+        selected[binding.GraphId] = loss == "size" ? CompilerRecipePayload.SizeUnsupported(original) : loss == "images"
+            ? CompilerRecipePayload.ImagesChangedUnsupported(original, token) : CompilerRecipeObservation.WithoutOptionalRecipe(original, token);
+        var selection = FreshCompilerRecipeSelection.Create(evidence.Compiler, selected, root, token);
+        var buildId = "build-" + binding.GraphId;
+        var recipe = Assert.Single(captured.Manifest.Artifacts, artifact => artifact.BuildId == buildId && artifact.Kind == CompilerRecipePayload.Kind);
+        var artifacts = captured.Manifest.Artifacts.Where(artifact => artifact.BuildId != buildId || artifact.Kind is not
+            (CompilerRecipePayload.Kind or CompilerRecipePayload.UnsupportedKind or CompilerRecipePayload.ImageKind or CompilerRecipePayload.ClosureKind)).ToList();
+        var bytes = captured.Bytes.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        if (loss != "absence")
+        {
+            var data = CompilerRecipePayload.Unsupported(selected[binding.GraphId], recipe.ContextId!, buildId,
+                CompilerRecipePayload.Classify(selected[binding.GraphId], root, token), token);
+            var sha = CanonicalIdentity.Sha256(data.AsSpan()); var locator = "inputs/" + sha + ".bin";
+            bytes[locator] = data;
+            artifacts.Add(recipe with
+            {
+                Id = buildId + "-recipe-unsupported",
+                Kind = CompilerRecipePayload.UnsupportedKind,
+                Locator = locator,
+                Length = data.Length,
+                Sha256 = sha
+            });
+        }
+        var prior = Assert.Single(artifacts, artifact => artifact.Kind == FreshPriorBuild.Kind);
+        var priorBytes = FreshPriorBuild.Capture(FreshPriorBuild.Prepare(evidence, token), selected, root, token);
+        var priorSha = CanonicalIdentity.Sha256(priorBytes.AsSpan()); var priorLocator = "inputs/" + priorSha + ".bin";
+        bytes[priorLocator] = priorBytes;
+        artifacts[artifacts.IndexOf(prior)] = prior with { Locator = priorLocator, Length = priorBytes.Length, Sha256 = priorSha };
+        var manifest = ManifestIdentity.Seal(captured.Manifest with { Artifacts = artifacts.ToArray(), ManifestHash = null });
+        var retainedLocators = manifest.Artifacts.Select(artifact => artifact.Locator).Concat(manifest.Contexts.SelectMany(context => context.Inputs.Select(input => input.Locator))).ToHashSet(StringComparer.Ordinal);
+        var demoted = captured with { Manifest = manifest, Bytes = bytes.Where(pair => retainedLocators.Contains(pair.Key)).ToDictionary(pair => pair.Key, pair => pair.Value), OptionalRecipes = selection };
+        Assert.Equal(captured.Manifest.Contexts, demoted.Manifest.Contexts); Assert.Same(captured.Manifest.Builds, demoted.Manifest.Builds);
+        Assert.Same(captured.Manifest.Executions, demoted.Manifest.Executions);
+        foreach (var input in captured.Manifest.Contexts.SelectMany(context => context.Inputs))
+            Assert.Equal(captured.Bytes[input.Locator], demoted.Bytes[input.Locator]);
+        foreach (var artifact in captured.Manifest.Artifacts.Where(artifact => artifact.Kind is not
+            (FreshPriorBuild.Kind or CompilerRecipePayload.Kind or CompilerRecipePayload.UnsupportedKind or CompilerRecipePayload.ImageKind or CompilerRecipePayload.ClosureKind)))
+            Assert.Equal(captured.Bytes[artifact.Locator], demoted.Bytes[artifact.Locator]);
+        var memory = new ArtifactBundle(manifest, demoted.Bytes, Path.Combine(root, "unused-fixture-manifest.json"), root, []);
+        // Actual mandatory validator positive first; known optional loss alone
+        // is not permission for a foreign frame, stray artifacts or saved reuse.
+        SavedCompilerContexts.ValidateObserved(memory, evidence.Compiler, root, token, null, "fixture", selection);
+        Assert.Equal("provenance.savedCompilerContextsUnproven", Assert.Throws<PolicyException>(() =>
+            SavedCompilerContexts.ValidateObserved(memory, evidence.Compiler, root, token, null, "saved-strict")).Code);
+        var foreign = evidence.Compiler with { Observations = evidence.Compiler.Observations.ToArray() };
+        Assert.Equal("compiler.captureSelectionUnproven", Assert.Throws<ProjectContextException>(() => selection.OptionalView(foreign, original, root, token)).Reason);
+        var corrupted = original with
+        {
+            InvocationRecipe = original.InvocationRecipe! with
+            { Arguments = original.InvocationRecipe.Arguments.Select((argument, index) => index == 0 ? argument with { Sha256 = new string('0', 64) } : argument).ToArray() }
+        };
+        var corruptOwner = evidence.Compiler with { Observations = evidence.Compiler.Observations.Select(item => item.GraphId == binding.GraphId ? corrupted : item).ToArray() };
+        var corruptSelected = selected.ToDictionary(pair => pair.Key, pair => pair.Value); corruptSelected[binding.GraphId] = CompilerRecipeObservation.WithoutOptionalRecipe(original, token);
+        Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() => FreshCompilerRecipeSelection.Create(corruptOwner, corruptSelected, root, token)).Reason);
+        var stray = recipe with { Id = buildId + "-stray-image", Kind = CompilerRecipePayload.ImageKind };
+        var strayBytes = demoted.Bytes.ToDictionary(pair => pair.Key, pair => pair.Value); strayBytes[recipe.Locator] = captured.Bytes[recipe.Locator];
+        var strayBundle = memory with { Manifest = ManifestIdentity.Seal(manifest with { Artifacts = [.. manifest.Artifacts, stray], ManifestHash = null }), Bytes = strayBytes };
+        Assert.Equal("provenance.savedCompilerContextsUnproven", Assert.Throws<PolicyException>(() =>
+            SavedCompilerContexts.ValidateObserved(strayBundle, evidence.Compiler, root, token, null, "fixture-stray", selection)).Code);
+        using (var cancelled = new CancellationTokenSource())
+        {
+            cancelled.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => FreshCompletedCapture.ValidateAsync(evidence, memory, cancelled.Token, optionalRecipes: selection));
+        }
+        var prepared = await global::FreshCheckCommand.PrepareCapturedForWriterAsync(request, evidence, demoted, started,
+            originalClock, outerToken, token, _ => Assert.Fail("Pending owns the actual writer proof."), _ => { });
+        Assert.True(prepared.RequiresWriterProof); Assert.Null(prepared.ImmediateResult);
+        var calls = 0;
+        var terminal = await prepared.CompleteAtWriterAsync(result =>
+        {
+            calls++;
+            Assert.True(result.Evaluation.Provenance!.Reusable);
+            return new global::SerializedFreshTerminal(result, ResultWriter.Serialize(result));
+        });
+        Assert.Equal(1, calls); Assert.Equal(0, terminal.Result.Run.ExitCode);
+        Assert.True(File.Exists(Path.Combine(root, "bundle", "manifest.json")));
+        Assert.Throws<InvalidOperationException>(() => { _ = prepared.CompleteAtWriterAsync(_ => throw new InvalidOperationException("Never retry writer.")); });
+        // Canonical optional DATA fault only: the real SDK, raw original Csc/task
+        // argv, mandatory sources/outputs/tests/proof were never changed or rerun.
+    }
+
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false, bool warmPostBuild = false, bool warmSaved = false, bool warmSavedEligibility = false, bool nativeSdkIdentity = global::App.DefaultNativeSdkIdentity, bool privateArtifactOnly = false, bool aliasedReference = false, bool localIncremental = false, bool lateLocalJson = false, string? writerProbe = null, bool writerOrdering = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false, bool warmPostBuild = false, bool warmSaved = false, bool warmSavedEligibility = false, bool nativeSdkIdentity = global::App.DefaultNativeSdkIdentity, bool privateArtifactOnly = false, bool aliasedReference = false, bool localIncremental = false, bool lateLocalJson = false, string? writerProbe = null, bool writerOrdering = false, bool includeTests = false, string? optionalRecipeLoss = null)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -495,14 +609,16 @@ public sealed class FreshCheckExecutionTests
         if (hasGenerated) fixture.Write("Library/obj/Extra.cs", "public static class Extra { public static int Value => 42; }");
         if (coordinatorOnly) fixture.Write("Library/NoRuntime.cs", "#if NOT_DEFINED\npublic class Inactive {}\n#endif\n");
         fixture.Write("Tests/Tests.csproj", """
-            <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><IsPackable>false</IsPackable></PropertyGroup>
+            <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><IsPackable>false</IsPackable>INCLUDE_TESTS_OPTIONS</PropertyGroup>
             <ItemGroup><PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" PrivateAssets="all" />
             <PackageReference Include="xunit.v3" Version="3.2.2" PrivateAssets="all" />
             <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" PrivateAssets="all" />
             <PackageReference Include="coverlet.collector" Version="6.0.4" PrivateAssets="all" />
             <ProjectReference Include="../Library/Library.csproj" /></ItemGroup>
             COUNTER</Project>
-            """.Replace("COUNTER", counter, StringComparison.Ordinal));
+            """.Replace("COUNTER", counter, StringComparison.Ordinal)
+                .Replace("INCLUDE_TESTS_OPTIONS", includeTests
+                    ? "<XunitRegisterBuiltInRunnerReporters>false</XunitRegisterBuiltInRunnerReporters>" : "", StringComparison.Ordinal));
         fixture.Write("Tests/Tests.cs", "using Xunit; public class Once { [Fact] public void Test() { " +
             (outputMutation is null ? "" : "var p = System.IO.Path.GetFullPath(\"../../../../Library/compiler-cache/" +
                 (outputMutation == "source" ? "Authored.cs" : "Rules.json") +
@@ -510,13 +626,20 @@ public sealed class FreshCheckExecutionTests
             (partialDrift ? "var p = System.IO.Path.GetFullPath(\"../../../../Library/Code.cs\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); " : "") +
             (priorBuild || measure || thresholdViolation || completedReuse || savedResults || savedCoverage || contextOnly || bundleEvidence || warmSavedEligibility ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
             "Assert.Equal(" + (failing ? "99" : "42") + ", " + (emptyEligible ? "42" : hasGenerated ? "Extra.Value" : "Library.Value") + "); } }");
+        var allowedOverrides = new Dictionary<string, bool>();
+        if (includeGenerated) allowedOverrides.Add("includeGenerated", true);
+        if (includeTests) allowedOverrides.Add("includeTests", true);
         fixture.Write("policy.json", """
             {"schemaVersion":"repository-policy-v1","mode":"strict","productionProjects":["Library/Library.csproj"],
             "testProjects":["Tests/Tests.csproj"],"configuration":"Debug","targetFrameworks":["net10.0"],"scope":"base",
             "threshold":8,"missingCoverage":"fail","requiredChecks":["tests","coverage","crap"],"exclusions":[],"ruleset":"callables-v1"}
-            """.Replace("\"ruleset\":\"callables-v1\"", includeGenerated ?
-                "\"ruleset\":\"callables-v1\",\"allowedOverrides\":{\"includeGenerated\":true}" : "\"ruleset\":\"callables-v1\"", StringComparison.Ordinal)
+            """.Replace("\"ruleset\":\"callables-v1\"", allowedOverrides.Count > 0 ?
+                "\"ruleset\":\"callables-v1\",\"allowedOverrides\":" + JsonSerializer.Serialize(allowedOverrides) : "\"ruleset\":\"callables-v1\"", StringComparison.Ordinal)
                 .Replace("\"scope\":\"base\"", "\"scope\":\"" + policyScope + "\"", StringComparison.Ordinal));
+        if (includeTests)
+            Assert.True(PolicyOverrideValidator.Validate(RepositoryPolicyParser.Parse(
+                File.ReadAllBytes(Path.Combine(fixture.Path, "policy.json")), "policy.json").Policy,
+                new PolicyOverrides(IncludeTests: true)).Allowed);
         if (thresholdViolation)
         {
             var path = Path.Combine(fixture.Path, "policy.json");
@@ -591,16 +714,38 @@ public sealed class FreshCheckExecutionTests
                 timings.Add(name, clock.Elapsed.TotalMilliseconds);
                 return value;
             }
+            var originalCoordinatorClock = System.Diagnostics.Stopwatch.StartNew();
+            var originalCoordinatorStarted = DateTimeOffset.UtcNow;
+            var outerCoordinatorToken = token;
+            using var optionalDeadline = optionalRecipeLoss is null ? null : CancellationTokenSource.CreateLinkedTokenSource(token);
+            if (optionalDeadline is not null) { optionalDeadline.CancelAfter(TimeSpan.FromMinutes(3)); token = optionalDeadline.Token; }
             var request = new FreshCheckRequest(standaloneTest ? "Root.slnx" : "Tests/Tests.csproj", "policy.json", local ? null : "HEAD", local || newPreflight ? "all" : null, null, "worktree", granularity,
-                null, "bundle", false, false, null, new PolicyOverrides(IncludeGenerated: includeGenerated ? true : null), TimeSpan.FromMinutes(3))
-                { WarmPostBuildProbe = warmPostBuild || nativeSdkIdentity, NativeSdkIdentityProbe = nativeSdkIdentity };
+                null, "bundle", false, false, null, new PolicyOverrides(IncludeTests: includeTests ? true : null, IncludeGenerated: includeGenerated ? true : null), TimeSpan.FromMinutes(3))
+            { WarmPostBuildProbe = warmPostBuild || nativeSdkIdentity, NativeSdkIdentityProbe = nativeSdkIdentity };
             var preflight = await MeasureAsync("trustedPreflight", () => FreshCheckPreflightLoader.LoadAsync(request, fixture.Path, token));
             var evidence = await MeasureAsync("executionComposite", () => FreshCheckExecution.RunAsync(preflight, token));
             if (nativeSdkIdentity && evidence.Tests.Failure is not null)
                 Console.WriteLine("PRIVATE_NATIVE_AGGREGATE_FAILURE " + evidence.Tests.Failure);
+            if (optionalRecipeLoss is not null)
+            {
+                await ExerciseOptionalPromotedWriterAsync(evidence, request, fixture.Path, optionalRecipeLoss,
+                    originalCoordinatorStarted, originalCoordinatorClock, outerCoordinatorToken, token);
+                foreach (var (path, bytes) in original) Assert.Equal(bytes, File.ReadAllBytes(path));
+                return;
+            }
             Assert.Equal(standaloneTest ? 3 : 2, evidence.Compiler.Observations.Count);
             Assert.Equal(standaloneTest ? 2 : 1, evidence.Tests.Count);
             Assert.Equal(standaloneTest ? 2 : 1, evidence.Tests.Outcomes.Count);
+            var publicOutcomes = FreshTestOutcomeProjection.Create(evidence);
+            Assert.Equal(evidence.Tests.Outcomes.Count, publicOutcomes.Count);
+            foreach (var observed in evidence.Tests.Outcomes)
+            {
+                var node = evidence.Compiler.FinalGraph.BuildGraph.Single(n => n.Id == observed.GraphId);
+                var projected = publicOutcomes.Single(o => o.Project == node.ProjectPath);
+                Assert.Equal(LogicalContextIdentity.Create(fixture.Path, node), projected.ContextId);
+                Assert.NotEqual(observed.GraphId, projected.ContextId);
+                Assert.Equal(observed.State, projected.Status); Assert.Equal(observed.Process?.ExitCode, projected.ExitCode);
+            }
             FreshCapturedBundle? measuredCapture = null;
             if (failing)
             {
@@ -612,6 +757,7 @@ public sealed class FreshCheckExecutionTests
                 Assert.Equal(1, rawFailure.Run.ExitCode);
                 Assert.Contains(rawFailure.Evaluation.Checks, c => c.Name == "testExecution" && c.Status == "fail");
                 var outcome = Assert.Single(rawFailure.Run.TestOutcomes!);
+                Assert.Equal(Assert.Single(publicOutcomes).ContextId, outcome.ContextId);
                 Assert.Equal("failed", outcome.Status); Assert.Equal(evidence.Tests[0].Process.ExitCode, outcome.ExitCode);
                 Assert.All(rawFailure.Run.Artifacts, a => { Assert.False(a.Complete); Assert.False(a.Reusable); });
                 Assert.DoesNotContain(rawFailure.Run.Artifacts, a => a.Kind == "manifest");
@@ -735,8 +881,11 @@ public sealed class FreshCheckExecutionTests
                     Assert.NotNull(trustedValidator);
                     void ValidateTrusted(byte[] independentPolicy, IReadOnlyDictionary<string, byte[]> independentExemptions)
                     {
-                        try { trustedValidator.Invoke(null, [captured.Manifest.Artifacts, captured.Bytes,
-                            independentPolicy, independentExemptions, token]); }
+                        try
+                        {
+                            trustedValidator.Invoke(null, [captured.Manifest.Artifacts, captured.Bytes,
+                            independentPolicy, independentExemptions, token]);
+                        }
                         catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
                         { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); }
                     }
@@ -841,18 +990,26 @@ public sealed class FreshCheckExecutionTests
                     // This explicit adapter acceptance supplies declarations from the
                     // independently evaluated actual graph; automatic public capture
                     // promotion remains a separate, not-yet-enabled feature.
-                    captured = captured with { Manifest = ManifestIdentity.Seal(captured.Manifest with
+                    captured = captured with
                     {
-                        Contexts = captured.Manifest.Contexts.Select(context =>
+                        Manifest = ManifestIdentity.Seal(captured.Manifest with
                         {
-                            var binding = currentGraph.GraphContexts.Single(b => b.GraphId == context.Id);
-                            string Relative(string path) => Path.GetRelativePath(fixture.Path, path).Replace('\\', '/');
-                            return context with { ReuseRecipeComplete = true, CurrentRevalidation = new(
-                                "finite-sdk-completed-tests-v1", Relative(binding.ProjectPath),
-                                Relative(binding.Context.EvaluatedTargetPath!),
-                                Relative(Path.ChangeExtension(binding.Context.EvaluatedTargetPath!, ".pdb"))) };
-                        }).ToArray(), ManifestHash = null
-                    }) };
+                            Contexts = captured.Manifest.Contexts.Select(context =>
+                            {
+                                var binding = currentGraph.GraphContexts.Single(b => LogicalContextIdentity.Create(fixture.Path, currentGraph.BuildGraph.Single(n => n.Id == b.GraphId)) == context.Id);
+                                string Relative(string path) => Path.GetRelativePath(fixture.Path, path).Replace('\\', '/');
+                                return context with
+                                {
+                                    ReuseRecipeComplete = true,
+                                    CurrentRevalidation = new(
+                                    "finite-sdk-completed-tests-v1", Relative(binding.ProjectPath),
+                                    Relative(binding.Context.EvaluatedTargetPath!),
+                                    Relative(Path.ChangeExtension(binding.Context.EvaluatedTargetPath!, ".pdb")))
+                                };
+                            }).ToArray(),
+                            ManifestHash = null
+                        })
+                    };
                     await Assert.ThrowsAsync<PolicyException>(() => CurrentEvidenceAdapter.CaptureSupportedAsync(
                         captured.Manifest, fixture.Path, request.Timeout, token));
                 }
@@ -882,7 +1039,7 @@ public sealed class FreshCheckExecutionTests
                     Assert.All(warm.FinalGraph.GraphContexts, b => Assert.Equal(includeGenerated, b.Context.ExclusionPolicy.IncludeGenerated));
                     var scored = Assert.Single(bundle.Manifest.Contexts);
                     var production = Assert.Single(warm.FinalGraph.GraphContexts, b => !b.IsTestProject);
-                    Assert.Equal(production.GraphId, scored.Id);
+                    Assert.Equal(LogicalContextIdentity.Create(fixture.Path, warm.FinalGraph.BuildGraph.Single(n => n.Id == production.GraphId)), scored.Id);
                     Assert.Equal(emptyEligible ? "semantic-empty" : null, scored.CoverageApplicability);
                     Assert.Equal(includeGenerated, scored.IncludeGenerated);
                     Assert.False(scored.ReuseRecipeComplete);
@@ -906,8 +1063,11 @@ public sealed class FreshCheckExecutionTests
                         if (emptyEligible) Assert.DoesNotContain("Library.Value", text, StringComparison.Ordinal);
                         var closure = Assert.Single(bundle.Manifest.Artifacts, a => a.Id == "test-closure-" + required.GraphId);
                         Assert.Equal("test-compiler-input-closure", closure.Kind);
-                        var missingClosure = bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with
-                        { Artifacts = bundle.Manifest.Artifacts.Where(a => a.Id != closure.Id).ToArray() }) };
+                        var missingClosure = bundle with
+                        {
+                            Manifest = ManifestIdentity.Seal(bundle.Manifest with
+                            { Artifacts = bundle.Manifest.Artifacts.Where(a => a.Id != closure.Id).ToArray() })
+                        };
                         Assert.Equal("provenance.savedCompilerContextsUnproven", Assert.Throws<PolicyException>(() =>
                             SavedCompilerContexts.Validate(missingClosure, warm, fixture.Path, token)).Code);
                         var sourceBytes = File.ReadAllBytes(source.ResolvedPath!);
@@ -942,8 +1102,11 @@ public sealed class FreshCheckExecutionTests
                             System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
                         Assert.NotNull(loader);
                         FreshCheckPreflight current;
-                        try { current = await (Task<FreshCheckPreflight>)loader.Invoke(null,
-                            [bundle, fixture.Path, "policy.json", baselineLocal ? null : "HEAD", baselineLocal, null, request.Timeout, token])!; }
+                        try
+                        {
+                            current = await (Task<FreshCheckPreflight>)loader.Invoke(null,
+                            [bundle, fixture.Path, "policy.json", baselineLocal ? null : "HEAD", baselineLocal, null, request.Timeout, token])!;
+                        }
                         catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
                         { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw; }
                         Assert.Equal(fixture.Path, current.Root);
@@ -1179,7 +1342,8 @@ public sealed class FreshCheckExecutionTests
                             {
                                 Artifacts = bundle.Manifest.Artifacts.Select(a => a.Id == originalPolicy.Id
                                     ? a with { Length = changedBytes.Length, Sha256 = CanonicalIdentity.Sha256(changedBytes) }
-                                    : a).ToArray(), ManifestHash = null
+                                    : a).ToArray(),
+                                ManifestHash = null
                             }),
                             Bytes = substitutedBytes
                         };
@@ -1429,37 +1593,37 @@ public sealed class FreshCheckExecutionTests
                     }
                     else
                     {
-                    // Restore this owned fixture's Git stat cache as well as bytes/time. Read-only
-                    // diff-index otherwise retains an excluded Tests.cs M record after the mutation.
-                    // Refresh cannot change the ORIGINAL logical staged entries; prove that explicitly.
-                    Assert.Equal(0, (await ProcessRunner.RunAsync("git", ["update-index", "--refresh", "--", mutationProject + "/Tests.cs"],
-                        fixture.Path, TimeSpan.FromSeconds(30), token)).ExitCode);
-                    var restoredStage = await ProcessRunner.RunAsync("git", ["ls-files", "--stage", "-z", "--"],
-                        fixture.Path, TimeSpan.FromSeconds(30), token);
-                    Assert.Equal(0, restoredStage.ExitCode);
-                    Assert.Equal(preflight.GitSnapshot!.Revision.IndexIdentity,
-                        "sha256:" + CanonicalIdentity.Sha256(System.Text.Encoding.UTF8.GetBytes(restoredStage.StandardOutput)));
-                    // A staged mode-only change leaves physical inputs and HEAD-to-worktree changes
-                    // unchanged, but must still fail the ORIGINAL index identity comparison.
-                    var indexPath = Path.Combine(fixture.Path, ".git", "index");
-                    var originalIndex = File.ReadAllBytes(indexPath);
-                    var indexTime = File.GetLastWriteTimeUtc(indexPath);
-                    try
-                    {
-                        var refused = await Record.ExceptionAsync(() => Agree(async ct =>
+                        // Restore this owned fixture's Git stat cache as well as bytes/time. Read-only
+                        // diff-index otherwise retains an excluded Tests.cs M record after the mutation.
+                        // Refresh cannot change the ORIGINAL logical staged entries; prove that explicitly.
+                        Assert.Equal(0, (await ProcessRunner.RunAsync("git", ["update-index", "--refresh", "--", mutationProject + "/Tests.cs"],
+                            fixture.Path, TimeSpan.FromSeconds(30), token)).ExitCode);
+                        var restoredStage = await ProcessRunner.RunAsync("git", ["ls-files", "--stage", "-z", "--"],
+                            fixture.Path, TimeSpan.FromSeconds(30), token);
+                        Assert.Equal(0, restoredStage.ExitCode);
+                        Assert.Equal(preflight.GitSnapshot!.Revision.IndexIdentity,
+                            "sha256:" + CanonicalIdentity.Sha256(System.Text.Encoding.UTF8.GetBytes(restoredStage.StandardOutput)));
+                        // A staged mode-only change leaves physical inputs and HEAD-to-worktree changes
+                        // unchanged, but must still fail the ORIGINAL index identity comparison.
+                        var indexPath = Path.Combine(fixture.Path, ".git", "index");
+                        var originalIndex = File.ReadAllBytes(indexPath);
+                        var indexTime = File.GetLastWriteTimeUtc(indexPath);
+                        try
                         {
-                            callbacks++;
-                            Assert.Equal(0, (await ProcessRunner.RunAsync("git", ["update-index", "--chmod=+x", mutationProject + "/Tests.cs"],
-                                fixture.Path, TimeSpan.FromSeconds(30), ct)).ExitCode);
-                            Assert.Equal(originalBytes, File.ReadAllBytes(sourcePath));
-                        }));
-                        Assert.Equal(2, callbacks);
-                        Assert.Equal("provenance.gitStateChanged", Assert.IsType<PolicyException>(refused).Code);
-                        Assert.False(originalIndex.AsSpan().SequenceEqual(File.ReadAllBytes(indexPath)));
-                    }
-                    finally { File.WriteAllBytes(indexPath, originalIndex); File.SetLastWriteTimeUtc(indexPath, indexTime); }
-                    await Agree();
-                    Assert.Equal(originalIndex, File.ReadAllBytes(indexPath));
+                            var refused = await Record.ExceptionAsync(() => Agree(async ct =>
+                            {
+                                callbacks++;
+                                Assert.Equal(0, (await ProcessRunner.RunAsync("git", ["update-index", "--chmod=+x", mutationProject + "/Tests.cs"],
+                                    fixture.Path, TimeSpan.FromSeconds(30), ct)).ExitCode);
+                                Assert.Equal(originalBytes, File.ReadAllBytes(sourcePath));
+                            }));
+                            Assert.Equal(2, callbacks);
+                            Assert.Equal("provenance.gitStateChanged", Assert.IsType<PolicyException>(refused).Code);
+                            Assert.False(originalIndex.AsSpan().SequenceEqual(File.ReadAllBytes(indexPath)));
+                        }
+                        finally { File.WriteAllBytes(indexPath, originalIndex); File.SetLastWriteTimeUtc(indexPath, indexTime); }
+                        await Agree();
+                        Assert.Equal(originalIndex, File.ReadAllBytes(indexPath));
                     }
                     if (physicalComposite)
                     {
@@ -1533,6 +1697,19 @@ public sealed class FreshCheckExecutionTests
                 if (contextOnly)
                 {
                     var imported = FreshPriorBuild.Load(bundle, currentPlan.PreparedGraph, fixture.Path, token);
+                    // A matching public selector never authorizes prior evidence in
+                    // another physical workspace. The original import above is the
+                    // positive control, so unrelated missing inputs cannot pass this.
+                    using (var foreign = TestDirectory.Create("crap4csharp-foreign-prior-root"))
+                    {
+                        foreach (var node in currentPlan.PreparedGraph.BuildGraph)
+                        {
+                            var relocated = node with { ProjectPath = Path.GetFullPath(Path.GetRelativePath(fixture.Path, node.ProjectPath), foreign.Path) };
+                            Assert.Equal(LogicalContextIdentity.Create(fixture.Path, node), LogicalContextIdentity.Create(foreign.Path, relocated));
+                        }
+                        Assert.Equal("check.priorBuildInvalid", Assert.Throws<PolicyException>(() =>
+                            FreshPriorBuild.Load(bundle, currentPlan.PreparedGraph, foreign.Path, token)).Code);
+                    }
                     var currentCompiler = await CompilerGraphExecution.RunBoundAsync(reloadRequest, currentPlan.PreparedGraph,
                         (node, cancellation) => { cancellation.ThrowIfCancellationRequested(); return Task.FromResult(imported[node.Id]); }, token);
                     ValidateEligibilityContexts(bundle, currentCompiler, fixture.Path, emptyEligible, includeGenerated, token);
@@ -1572,12 +1749,16 @@ public sealed class FreshCheckExecutionTests
                                 Agree(bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Contexts = [changed] }) })).Code);
                         Agree(bundle);
                         var savedContext = bundle.Manifest.Contexts.Single();
-                        var scoredBinding = currentCompiler.FinalGraph.GraphContexts.Single(b => b.GraphId == savedContext.Id);
+                        var scoredBinding = currentCompiler.FinalGraph.GraphContexts.Single(b => LogicalContextIdentity.Create(fixture.Path, currentCompiler.FinalGraph.BuildGraph.Single(n => n.Id == b.GraphId)) == savedContext.Id);
                         string EvaluatedPath(string path) => Path.GetRelativePath(fixture.Path, path).Replace('\\', '/');
-                        var declared = savedContext with { ReuseRecipeComplete = true, CurrentRevalidation = new(
+                        var declared = savedContext with
+                        {
+                            ReuseRecipeComplete = true,
+                            CurrentRevalidation = new(
                             "finite-sdk-completed-tests-v1", EvaluatedPath(scoredBinding.ProjectPath),
                             EvaluatedPath(scoredBinding.Context.EvaluatedTargetPath!),
-                            EvaluatedPath(Path.ChangeExtension(scoredBinding.Context.EvaluatedTargetPath!, ".pdb"))) };
+                            EvaluatedPath(Path.ChangeExtension(scoredBinding.Context.EvaluatedTargetPath!, ".pdb")))
+                        };
                         Agree(bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Contexts = [declared] }) });
                         Reject(declared with { CurrentRevalidation = declared.CurrentRevalidation! with { Provider = "foreign" } });
                         Reject(declared with { CurrentRevalidation = declared.CurrentRevalidation! with { Project = "Other/Other.csproj" } });
@@ -1603,9 +1784,15 @@ public sealed class FreshCheckExecutionTests
                         {
                             var altered = System.Collections.Immutable.ImmutableArray.Create(System.Text.Encoding.UTF8.GetBytes("{}"));
                             var hash = CanonicalIdentity.Sha256(altered.AsSpan()); var locator = "inputs/" + hash + ".bin";
-                            var candidate = bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Artifacts = bundle.Manifest.Artifacts.Select(a =>
-                                a.Id == closure.Id ? a with { Locator = locator, Length = altered.Length, Sha256 = hash } : a).ToArray() }),
-                                Bytes = new Dictionary<string, System.Collections.Immutable.ImmutableArray<byte>>(bundle.Bytes) { [locator] = altered } };
+                            var candidate = bundle with
+                            {
+                                Manifest = ManifestIdentity.Seal(bundle.Manifest with
+                                {
+                                    Artifacts = bundle.Manifest.Artifacts.Select(a =>
+                                a.Id == closure.Id ? a with { Locator = locator, Length = altered.Length, Sha256 = hash } : a).ToArray()
+                                }),
+                                Bytes = new Dictionary<string, System.Collections.Immutable.ImmutableArray<byte>>(bundle.Bytes) { [locator] = altered }
+                            };
                             Assert.Equal("provenance.savedCompilerContextsUnproven", Assert.Throws<PolicyException>(() => Agree(candidate)).Code);
                         }
                         Agree(bundle);
@@ -1667,24 +1854,35 @@ public sealed class FreshCheckExecutionTests
                         xml.Descendants("SequencePoint").First().SetAttributeValue("vc", "999");
                         var changedBytes = System.Collections.Immutable.ImmutableArray.Create(System.Text.Encoding.UTF8.GetBytes(xml.ToString()));
                         var hash = CanonicalIdentity.Sha256(changedBytes.AsSpan()); var locator = "inputs/" + hash + ".bin";
-                        var changedBundle = bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Artifacts = bundle.Manifest.Artifacts.Select(a =>
-                            a.Id == coverage.Id ? a with { Locator = locator, Length = changedBytes.Length, Sha256 = hash } : a).ToArray() }),
-                            Bytes = new Dictionary<string, System.Collections.Immutable.ImmutableArray<byte>>(bundle.Bytes) { [locator] = changedBytes } };
+                        var changedBundle = bundle with
+                        {
+                            Manifest = ManifestIdentity.Seal(bundle.Manifest with
+                            {
+                                Artifacts = bundle.Manifest.Artifacts.Select(a =>
+                            a.Id == coverage.Id ? a with { Locator = locator, Length = changedBytes.Length, Sha256 = hash } : a).ToArray()
+                            }),
+                            Bytes = new Dictionary<string, System.Collections.Immutable.ImmutableArray<byte>>(bundle.Bytes) { [locator] = changedBytes }
+                        };
                         Assert.Equal("provenance.savedProductionExecutionsUnproven", Assert.Throws<PolicyException>(() => Agree(changedBundle)).Code);
                         Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(changedBundle.Manifest, changedBundle.Bytes).Status);
                         // Coherently renamed associations still satisfy captured schema,
                         // but are not canonical IDs derived from the current graph.
                         var renamedId = "renamed-" + originalExecution.Id;
-                        var renamed = bundle.Manifest with { Executions = bundle.Manifest.Executions.Select(e => e.Id == originalExecution.Id ? e with { Id = renamedId } : e).ToArray(),
-                            Artifacts = bundle.Manifest.Artifacts.Select(a => a.ExecutionId == originalExecution.Id ? a with { ExecutionId = renamedId } : a).ToArray() };
+                        var renamed = bundle.Manifest with
+                        {
+                            Executions = bundle.Manifest.Executions.Select(e => e.Id == originalExecution.Id ? e with { Id = renamedId } : e).ToArray(),
+                            Artifacts = bundle.Manifest.Artifacts.Select(a => a.ExecutionId == originalExecution.Id ? a with { ExecutionId = renamedId } : a).ToArray()
+                        };
                         renamed = ManifestIdentity.Seal(renamed);
                         Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(renamed, bundle.Bytes).Status);
                         Reject(renamed);
                         var renamedBuild = "renamed-" + originalExecution.BuildId;
-                        var buildRenamed = ManifestIdentity.Seal(bundle.Manifest with {
+                        var buildRenamed = ManifestIdentity.Seal(bundle.Manifest with
+                        {
                             Builds = bundle.Manifest.Builds.Select(b => b with { Id = renamedBuild }).ToArray(),
                             Executions = bundle.Manifest.Executions.Select(e => e with { BuildId = renamedBuild }).ToArray(),
-                            Artifacts = bundle.Manifest.Artifacts.Select(a => a.BuildId is null ? a : a with { BuildId = renamedBuild }).ToArray() });
+                            Artifacts = bundle.Manifest.Artifacts.Select(a => a.BuildId is null ? a : a with { BuildId = renamedBuild }).ToArray()
+                        });
                         Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(buildRenamed, bundle.Bytes).Status);
                         Reject(buildRenamed);
                         Agree(bundle);
@@ -1710,10 +1908,16 @@ public sealed class FreshCheckExecutionTests
                     {
                         var bytes = System.Collections.Immutable.ImmutableArray.Create(content);
                         var hash = CanonicalIdentity.Sha256(bytes.AsSpan()); var locator = "inputs/" + hash + ".bin";
-                        var manifestChanged = ManifestIdentity.Seal(bundle.Manifest with { Artifacts = bundle.Manifest.Artifacts.Select(a =>
-                            a.Id == id ? a with { Locator = locator, Length = bytes.Length, Sha256 = hash } : a).ToArray() });
-                        return bundle with { Manifest = manifestChanged,
-                            Bytes = new Dictionary<string, System.Collections.Immutable.ImmutableArray<byte>>(bundle.Bytes) { [locator] = bytes } };
+                        var manifestChanged = ManifestIdentity.Seal(bundle.Manifest with
+                        {
+                            Artifacts = bundle.Manifest.Artifacts.Select(a =>
+                            a.Id == id ? a with { Locator = locator, Length = bytes.Length, Sha256 = hash } : a).ToArray()
+                        });
+                        return bundle with
+                        {
+                            Manifest = manifestChanged,
+                            Bytes = new Dictionary<string, System.Collections.Immutable.ImmutableArray<byte>>(bundle.Bytes) { [locator] = bytes }
+                        };
                     }
                     void Refused(ArtifactBundle candidate)
                         => Assert.Equal("provenance.savedCoverageUnproven", Assert.Throws<PolicyException>(() => Validate(candidate)).Code);
@@ -1741,22 +1945,34 @@ public sealed class FreshCheckExecutionTests
                     var independent = sharedCoverage ? null : parsedRequired.Single(t => t.Modules.Count == 0);
                     inventory["tests"]!.AsArray().Single(t => t!["graphId"]!.GetValue<string>() == owner.GraphId)!["modules"] = new System.Text.Json.Nodes.JsonArray();
                     var missingModule = ChangeBytes(requiredInventory.Id, System.Text.Encoding.UTF8.GetBytes(inventory.ToJsonString()));
-                    missingModule = missingModule with { Manifest = ManifestIdentity.Seal(missingModule.Manifest with { Artifacts = missingModule.Manifest.Artifacts
-                        .Where(a => a.Id != module.Artifact).ToArray() }) };
+                    missingModule = missingModule with
+                    {
+                        Manifest = ManifestIdentity.Seal(missingModule.Manifest with
+                        {
+                            Artifacts = missingModule.Manifest.Artifacts
+                        .Where(a => a.Id != module.Artifact).ToArray()
+                        })
+                    };
                     // Another required invocation still has the same genuine production
                     // module. Full graph union alone must not waive this omission.
                     Refused(missingModule);
                     if (independent is not null)
                     {
-                    inventory = System.Text.Json.Nodes.JsonNode.Parse(bundle.Bytes[requiredInventory.Locator].AsSpan())!;
-                    var transferredId = "required-test-" + independent.GraphId + "-coverage-" + module.GraphId;
-                    inventory["tests"]!.AsArray().Single(t => t!["graphId"]!.GetValue<string>() == owner.GraphId)!["modules"] = new System.Text.Json.Nodes.JsonArray();
-                    inventory["tests"]!.AsArray().Single(t => t!["graphId"]!.GetValue<string>() == independent.GraphId)!["modules"] =
-                        new System.Text.Json.Nodes.JsonArray(new System.Text.Json.Nodes.JsonObject { ["graphId"] = module.GraphId, ["artifact"] = transferredId });
-                    var transferred = ChangeBytes(requiredInventory.Id, System.Text.Encoding.UTF8.GetBytes(inventory.ToJsonString()));
-                    transferred = transferred with { Manifest = ManifestIdentity.Seal(transferred.Manifest with { Artifacts = transferred.Manifest.Artifacts.Select(a =>
-                        a.Id == module.Artifact ? a with { Id = transferredId } : a).ToArray() }) };
-                    Refused(transferred);
+                        inventory = System.Text.Json.Nodes.JsonNode.Parse(bundle.Bytes[requiredInventory.Locator].AsSpan())!;
+                        var transferredId = "required-test-" + independent.GraphId + "-coverage-" + module.GraphId;
+                        inventory["tests"]!.AsArray().Single(t => t!["graphId"]!.GetValue<string>() == owner.GraphId)!["modules"] = new System.Text.Json.Nodes.JsonArray();
+                        inventory["tests"]!.AsArray().Single(t => t!["graphId"]!.GetValue<string>() == independent.GraphId)!["modules"] =
+                            new System.Text.Json.Nodes.JsonArray(new System.Text.Json.Nodes.JsonObject { ["graphId"] = module.GraphId, ["artifact"] = transferredId });
+                        var transferred = ChangeBytes(requiredInventory.Id, System.Text.Encoding.UTF8.GetBytes(inventory.ToJsonString()));
+                        transferred = transferred with
+                        {
+                            Manifest = ManifestIdentity.Seal(transferred.Manifest with
+                            {
+                                Artifacts = transferred.Manifest.Artifacts.Select(a =>
+                            a.Id == module.Artifact ? a with { Id = transferredId } : a).ToArray()
+                            })
+                        };
+                        Refused(transferred);
                     }
                     Validate(bundle);
                     foreach (var required in currentPlan.Tests)
@@ -1784,8 +2000,11 @@ public sealed class FreshCheckExecutionTests
                     Validate(bundle);
                     Assert.Equal(2, parsedRequired.Count);
                     ArtifactBundle ChangeArtifact(string id, Func<ManifestArtifact, ManifestArtifact> change)
-                        => bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with
-                            { Artifacts = bundle.Manifest.Artifacts.Select(a => a.Id == id ? change(a) : a).ToArray() }) };
+                        => bundle with
+                        {
+                            Manifest = ManifestIdentity.Seal(bundle.Manifest with
+                            { Artifacts = bundle.Manifest.Artifacts.Select(a => a.Id == id ? change(a) : a).ToArray() })
+                        };
                     ArtifactBundle ChangeBytes(string id, byte[] content)
                     {
                         var bytes = System.Collections.Immutable.ImmutableArray.Create(content);
@@ -1835,10 +2054,22 @@ public sealed class FreshCheckExecutionTests
                         Refused(ChangeBytes(savedTest.Assembly, bundle.Bytes[bundle.Manifest.Artifacts.Single(a => a.Id == other.Assembly).Locator].ToArray()));
                         Refused(ChangeBytes(savedTest.Pdb, bundle.Bytes[bundle.Manifest.Artifacts.Single(a => a.Id == other.Pdb).Locator].ToArray()));
                     }
-                    Refused(bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Artifacts = [.. bundle.Manifest.Artifacts,
-                        bundle.Manifest.Artifacts.Single(a => a.Id == parsedRequired[0].Trx) with { Id = "required-test-orphan-trx" }] }) });
-                    Refused(bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Artifacts = bundle.Manifest.Artifacts
-                        .Where(a => a.Id != parsedRequired[1].Trx).ToArray() }) });
+                    Refused(bundle with
+                    {
+                        Manifest = ManifestIdentity.Seal(bundle.Manifest with
+                        {
+                            Artifacts = [.. bundle.Manifest.Artifacts,
+                        bundle.Manifest.Artifacts.Single(a => a.Id == parsedRequired[0].Trx) with { Id = "required-test-orphan-trx" }]
+                        })
+                    });
+                    Refused(bundle with
+                    {
+                        Manifest = ManifestIdentity.Seal(bundle.Manifest with
+                        {
+                            Artifacts = bundle.Manifest.Artifacts
+                        .Where(a => a.Id != parsedRequired[1].Trx).ToArray()
+                        })
+                    });
                     var input = currentCompiler.FinalGraph.GraphContexts.Single(b => b.GraphId == parsedRequired[1].GraphId).Context.CompilerDocuments
                         .First(d => !d.IsGenerated).ResolvedPath!;
                     var originalInput = File.ReadAllBytes(input); var mtime = File.GetLastWriteTimeUtc(input);
@@ -1872,7 +2103,7 @@ public sealed class FreshCheckExecutionTests
                 var policy = Measure("purePolicy", () => FreshPolicyEvaluation.Evaluate(preflight, bundle.Manifest, replay));
                 Assert.Equal(0, policy.Evaluation.ExitCode);
                 Assert.Equal(emptyEligible ? 0 : 2, FreshPolicyEvaluation.Evaluate(preflight with
-                    { Policy = preflight.Policy with { Threshold = .5 } }, bundle.Manifest, replay).Evaluation.ExitCode);
+                { Policy = preflight.Policy with { Threshold = .5 } }, bundle.Manifest, replay).Evaluation.ExitCode);
                 Assert.Equal("captured", replay.Evaluation.Provenance.Status); // pure policy is not execution attestation
             }
             if (measure)
@@ -2110,6 +2341,7 @@ public sealed class FreshCheckExecutionTests
         string[] baseArgs = local ? [] : ["--base", "HEAD"];
         string[] publicArgs = ["check", "--project", standaloneTest ? "Root.slnx" : "Tests/Tests.csproj", "--policy", "policy.json", .. baseArgs,
             "--artifact-output", "bundle", "--format", "json", "--timeout-seconds", completedReuse || freshTerminalCancellation ? "600" : "180", "--granularity", granularity, "--scope", policyScope];
+        if (includeTests) publicArgs = [.. publicArgs, "--include-tests"];
         if (privateArtifactOnly)
         {
             var artifactOption = Array.IndexOf(publicArgs, "--artifact-output");
@@ -2223,12 +2455,14 @@ public sealed class FreshCheckExecutionTests
                 File.WriteAllBytes(stagedSource, original[stagedSource]);
                 File.SetLastWriteTimeUtc(stagedSource, stagedSourceTime);
                 return Task.CompletedTask;
-            } : lateLocalJson ? ct =>
+            }
+        : lateLocalJson ? ct =>
             {
                 ct.ThrowIfCancellationRequested();
                 fixture.Write("UnrelatedAfterCapture.json", "{}");
                 return Task.CompletedTask;
-            } : freshTerminalCancellation ? ct =>
+            }
+        : freshTerminalCancellation ? ct =>
             {
                 ct.ThrowIfCancellationRequested();
                 if (privateArtifactOnly)
@@ -2240,7 +2474,8 @@ public sealed class FreshCheckExecutionTests
                     throw new ProcessTimeoutException("Fresh check", TimeSpan.FromSeconds(600));
                 lateFreshCancellation.Cancel();
                 return Task.CompletedTask;
-            } : null, freshTiming: actualTiming, nativeSdkIdentityProbe: nativeSdkIdentity,
+            }
+        : null, freshTiming: actualTiming, nativeSdkIdentityProbe: nativeSdkIdentity,
             onFreshStagingCreated: writerOrdering ? path =>
             {
                 Assert.True(Directory.Exists(path));
@@ -2250,7 +2485,8 @@ public sealed class FreshCheckExecutionTests
                 changed[0] ^= 1;
                 File.WriteAllBytes(stagedSource, changed);
                 File.SetLastWriteTimeUtc(stagedSource, stagedSourceTime);
-            } : null);
+            }
+        : null);
         if (writerOrdering)
         {
             Assert.Equal(1, stagingMutations);
@@ -2262,13 +2498,37 @@ public sealed class FreshCheckExecutionTests
         {
             Assert.All(actualTiming.Spans, span => Assert.True(double.IsFinite(span.Milliseconds) && span.Milliseconds >= 0));
             var timingJson = JsonSerializer.Serialize(new
-                { outputLayout, policyScope, granularity, includeGenerated, generatedFixture, failing, local, scopedEmpty,
-                    exit, wallMilliseconds = actualStart.Elapsed.TotalMilliseconds, spans = actualTiming.Spans });
+            {
+                outputLayout,
+                policyScope,
+                granularity,
+                includeGenerated,
+                generatedFixture,
+                failing,
+                local,
+                scopedEmpty,
+                exit,
+                wallMilliseconds = actualStart.Elapsed.TotalMilliseconds,
+                spans = actualTiming.Spans
+            });
             Console.WriteLine("STRICT_PUBLIC_TIMING " + timingJson);
             // Synthetic fixture diagnostics must survive runners that omit Console output.
             TestValidationOutput.WriteOptionalProfile("strict-public", timingJson);
         }
         using var terminal = JsonDocument.Parse(output.ToString());
+        if (includeTests)
+        {
+            Assert.True(exit == (failing ? 1 : 0), errors + Environment.NewLine + output);
+            var testContext = Assert.Single(terminal.RootElement.GetProperty("evaluation").GetProperty("contexts").EnumerateArray(),
+                context => context.GetProperty("project").GetString() == "Tests/Tests.csproj");
+            var testOutcome = Assert.Single(terminal.RootElement.GetProperty("run").GetProperty("testOutcomes").EnumerateArray());
+            Assert.Equal(testContext.GetProperty("id").GetString(), testOutcome.GetProperty("contextId").GetString());
+            Assert.Contains(terminal.RootElement.GetProperty("evaluation").GetProperty("callables").EnumerateArray(),
+                callable => callable.GetProperty("path").GetString() == "Tests.cs" &&
+                    callable.GetProperty("kind").GetString() == "Method" &&
+                    callable.GetProperty("semanticSignature").GetString() == "System.Void Once::Test()" &&
+                    callable.GetProperty("contextId").GetString() == testOutcome.GetProperty("contextId").GetString());
+        }
         if (writerOrdering)
         {
             var evaluation = terminal.RootElement.GetProperty("evaluation");
@@ -2416,6 +2676,14 @@ public sealed class FreshCheckExecutionTests
             Assert.True(exit == (thresholdViolation ? 2 : 0), errors + Environment.NewLine + output);
             Assert.True(File.Exists(Path.Combine(fixture.Path, "bundle", "manifest.json")));
             var bundle = ArtifactBundle.Load(Path.Combine(fixture.Path, "bundle", "manifest.json"), fixture.Path);
+            var requiredInventory = bundle.Manifest.Artifacts.Single(a => a.Kind == "required-test-inventory");
+            using (var inventory = JsonDocument.Parse(bundle.Bytes[requiredInventory.Locator].AsSpan().ToArray()))
+            {
+                var physicalTestIds = inventory.RootElement.GetProperty("tests").EnumerateArray()
+                    .Select(t => t.GetProperty("graphId").GetString()).ToHashSet(StringComparer.Ordinal);
+                Assert.All(terminal.RootElement.GetProperty("run").GetProperty("testOutcomes").EnumerateArray(),
+                    outcome => Assert.DoesNotContain(outcome.GetProperty("contextId").GetString(), physicalTestIds));
+            }
             Assert.Contains(bundle.Manifest.Artifacts, a => a.Kind == "test-child-build");
             Assert.DoesNotContain(bundle.Manifest.Artifacts, a => a.Kind == "binlog");
             if (thresholdViolation)
@@ -2444,9 +2712,13 @@ public sealed class FreshCheckExecutionTests
                         "coverage", "crap", "threshold", "comparisonOperator", "decision" }
                         .Select(name => name == "path" ? JsonSerializer.Serialize(bundle.Manifest.Contexts
                             .Single(c => c.Id == f.GetProperty("contextId").GetString()).Inputs
-                            .Where(i => i.Role == "source").Select(i => new { i.LogicalPath, RepositoryPath =
+                            .Where(i => i.Role == "source").Select(i => new
+                            {
+                                i.LogicalPath,
+                                RepositoryPath =
                                 CapturedEvaluationInputs.DeclaredRepositorySourcePath(bundle.Manifest.Contexts
-                                    .Single(c => c.Id == f.GetProperty("contextId").GetString()), i) })
+                                    .Single(c => c.Id == f.GetProperty("contextId").GetString()), i)
+                            })
                             .Single(i => i.LogicalPath == f.GetProperty("path").GetString() ||
                                 i.RepositoryPath == f.GetProperty("path").GetString()).RepositoryPath)
                             : JsonSerializer.Serialize(f.GetProperty(name))))).Order(StringComparer.Ordinal).ToArray();
@@ -2662,6 +2934,24 @@ public sealed class FreshCheckExecutionTests
                 Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests", "build-count.txt")));
                 var secondBundle = ArtifactBundle.Load(Path.Combine(fixture.Path, "bundle-next", "manifest.json"), fixture.Path);
                 Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(secondBundle.Manifest, secondBundle.Bytes).Status);
+                // Public App.RunAsync does not expose the first compiler observation here.
+                // Inspect only existing, bounded bundle DATA; this cannot establish a command route.
+                var inputRecipePresent = bundle.Manifest.Artifacts.Count(artifact => artifact.Kind == CompilerRecipePayload.Kind) == 1;
+                Assert.True(inputRecipePresent, inputRecipePresent ? null : BundleRecipeDiagnostic(bundle));
+                var inputRecipe = Assert.Single(bundle.Manifest.Artifacts, artifact => artifact.Kind == CompilerRecipePayload.Kind);
+                var importedRecipePresent = secondBundle.Manifest.Artifacts.Count(artifact => artifact.Kind == CompilerRecipePayload.Kind) == 1;
+                Assert.True(importedRecipePresent, importedRecipePresent ? null : BundleRecipeDiagnostic(secondBundle));
+                var importedRecipe = Assert.Single(secondBundle.Manifest.Artifacts, artifact => artifact.Kind == CompilerRecipePayload.Kind);
+                Assert.Equal(inputRecipe.ContextId, importedRecipe.ContextId); Assert.Equal(inputRecipe.BuildId, importedRecipe.BuildId);
+                Assert.Equal(bundle.Bytes[inputRecipe.Locator], secondBundle.Bytes[importedRecipe.Locator]);
+                var recipeFiles = bundle.Manifest.Artifacts.Where(artifact => artifact.Kind is CompilerRecipePayload.ImageKind or CompilerRecipePayload.ClosureKind).ToArray();
+                Assert.Equal(2, recipeFiles.Count(artifact => artifact.Kind == CompilerRecipePayload.ImageKind));
+                Assert.All(recipeFiles, artifact =>
+                {
+                    var restored = Assert.Single(secondBundle.Manifest.Artifacts, item => item.Id == artifact.Id);
+                    Assert.Equal(artifact.Sha256, restored.Sha256);
+                    Assert.Equal(bundle.Bytes[artifact.Locator], secondBundle.Bytes[restored.Locator]);
+                });
                 using var secondTerminal = JsonDocument.Parse(secondOutput.ToString());
                 Assert.Contains(secondTerminal.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray(),
                     c => c.GetProperty("name").GetString() == "testExecution" && c.GetProperty("status").GetString() == "pass");
@@ -2669,8 +2959,10 @@ public sealed class FreshCheckExecutionTests
                     secondTerminal.RootElement.GetProperty("evaluation").GetProperty("provenance").GetProperty("basis").GetString());
                 var recipeArtifact = Assert.Single(bundle.Manifest.Artifacts, a => a.Kind == FreshPriorBuild.Kind);
                 using var recipe = JsonDocument.Parse(bundle.Bytes[recipeArtifact.Locator].ToArray());
+                var physicalBuildId = bundle.Manifest.Builds.Single(b => b.ContextId == bundle.Manifest.Contexts.Single().Id).Id;
+                Assert.StartsWith("build-", physicalBuildId);
                 var savedNode = recipe.RootElement.GetProperty("nodes").EnumerateArray().Single(n =>
-                    n.GetProperty("id").GetString() == bundle.Manifest.Contexts.Single().Id);
+                    n.GetProperty("id").GetString() == physicalBuildId["build-".Length..]);
                 string SavedOutput(string name) => Path.GetFullPath(savedNode.GetProperty(name).GetProperty("path")
                     .GetProperty("relative").GetString()!, fixture.Path);
                 async Task RejectMutation(string name, string path, bool add = false)
@@ -2706,6 +2998,7 @@ public sealed class FreshCheckExecutionTests
                 var copiedLibrary = Assert.Single(Directory.GetFiles(Path.Combine(fixture.Path, "Tests", "bin"), "Library.dll", SearchOption.AllDirectories));
                 await RejectMutation("runtime-copy", copiedLibrary);
                 await RejectMutation("recipe", Path.GetFullPath(recipeArtifact.Locator, Path.Combine(fixture.Path, "bundle")));
+                await RejectMutation("compiler-input-recipe", Path.GetFullPath(inputRecipe.Locator, Path.Combine(fixture.Path, "bundle")));
             }
             if (hasGenerated)
             {
@@ -2736,9 +3029,12 @@ public sealed class FreshCheckExecutionTests
                 var forgedBytes = bundle.Bytes.ToDictionary(p => p.Key, p => p.Value);
                 forgedBytes.Add("inputs/hidden.cs", hidden);
                 var oldContext = bundle.Manifest.Contexts.Single();
-                var forged = ManifestIdentity.Seal(bundle.Manifest with { Contexts = [oldContext with { Inputs = [.. oldContext.Inputs,
+                var forged = ManifestIdentity.Seal(bundle.Manifest with
+                {
+                    Contexts = [oldContext with { Inputs = [.. oldContext.Inputs,
                     new ManifestInput("compiler-source", "Hidden.cs", "inputs/hidden.cs", hidden.Length,
-                        CanonicalIdentity.Sha256(hidden.AsSpan()), "utf-8", false) { RepositoryPath = "Library/Hidden.cs" }] }] });
+                        CanonicalIdentity.Sha256(hidden.AsSpan()), "utf-8", false) { RepositoryPath = "Library/Hidden.cs" }] }]
+                });
                 Assert.Equal(ProvenanceStatus.Invalid, ProvenanceVerifier.VerifyCapture(forged, forgedBytes).Status);
                 var checks = terminal.RootElement.GetProperty("evaluation").GetProperty("checks").EnumerateArray().ToArray();
                 Assert.Contains(checks, c => c.GetProperty("name").GetString() == "testExecution" && c.GetProperty("status").GetString() == "pass");
@@ -2763,6 +3059,43 @@ public sealed class FreshCheckExecutionTests
             File.WriteAllBytes(path, original[path]);
         }
         foreach (var (path, bytes) in original) Assert.Equal(bytes, File.ReadAllBytes(path));
+    }
+
+    private static string BundleRecipeDiagnostic(ArtifactBundle bundle)
+    {
+        static string Cardinality(int count) => count == 0 ? "none" : count == 1 ? "one" : "multiple";
+        var tokens = new SortedSet<string>(StringComparer.Ordinal)
+        {
+            "diagnostic.recipeArtifact." + Cardinality(bundle.Manifest.Artifacts.Count(a => a.Kind == CompilerRecipePayload.Kind)),
+            "diagnostic.recipeUnsupported." + Cardinality(bundle.Manifest.Artifacts.Count(a => a.Kind == CompilerRecipePayload.UnsupportedKind))
+        };
+        // No new I/O: at most eight already-loaded payloads and 64 KiB total.
+        var remaining = 64 * 1024;
+        var unsupported = bundle.Manifest.Artifacts.Where(a => a.Kind == CompilerRecipePayload.UnsupportedKind).Take(9).ToArray();
+        if (unsupported.Length > 8) tokens.Add("diagnostic.recipeInspection.unavailable");
+        foreach (var artifact in unsupported.Take(8))
+        {
+            if (!bundle.Bytes.TryGetValue(artifact.Locator, out var bytes) || bytes.IsDefault || bytes.Length > remaining)
+            { tokens.Add("diagnostic.recipeInspection.unavailable"); break; }
+            remaining -= bytes.Length;
+            try
+            {
+                using var payload = JsonDocument.Parse(bytes.ToArray(), new JsonDocumentOptions { MaxDepth = 8 });
+                if (payload.RootElement.ValueKind != JsonValueKind.Object ||
+                    !payload.RootElement.TryGetProperty("reasons", out var reasons) || reasons.ValueKind != JsonValueKind.Array ||
+                    reasons.GetArrayLength() > 6)
+                { tokens.Add("diagnostic.recipeInspection.unavailable"); continue; }
+                foreach (var reason in reasons.EnumerateArray())
+                {
+                    if (reason.ValueKind != JsonValueKind.String) continue;
+                    var value = reason.GetString();
+                    if (value is "recipe.scalarProfileUnsupported" or "recipe.emitProfileUnsupported" or "recipe.bindingUnsupported" or
+                        "recipe.sizeUnsupported" or "recipe.compilerImageUnavailable" or "recipe.compilerImagesChanged") tokens.Add(value);
+                }
+            }
+            catch (JsonException) { tokens.Add("diagnostic.recipeInspection.unavailable"); }
+        }
+        return string.Join(" ", tokens);
     }
 
     private static void AssertRetainedPrivateDiagnostics(JsonElement terminal, bool requireBuildLog)
@@ -2802,6 +3135,18 @@ public sealed class FreshCheckExecutionTests
             => Refuse(bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Contexts = [changed] }) });
         Agree(bundle);
         var context = Assert.Single(bundle.Manifest.Contexts);
+        var physicalClosure = bundle.Manifest.Artifacts.Single(a => a.Kind == "compiler-input-closure");
+        var logicalClosureId = "build-" + context.Id + "-closure";
+        Assert.NotEqual(physicalClosure.Id, logicalClosureId);
+        // Keep the complete actual bytes and public selector. Changing only
+        // the physical closure ID must still fail this compiler boundary.
+        var renamedClosure = ManifestIdentity.Seal(bundle.Manifest with
+        {
+            Artifacts = bundle.Manifest.Artifacts
+            .Select(a => a.Id == physicalClosure.Id ? a with { Id = logicalClosureId } : a).ToArray()
+        });
+        Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(renamedClosure, bundle.Bytes).Status);
+        Refuse(bundle with { Manifest = renamedClosure });
         Assert.Equal(empty ? "semantic-empty" : null, context.CoverageApplicability);
         Assert.Equal(generated, context.IncludeGenerated);
         Assert.False(context.ReuseRecipeComplete);
@@ -2832,9 +3177,15 @@ public sealed class FreshCheckExecutionTests
             else bytes[^1] ^= 1;
             var altered = System.Collections.Immutable.ImmutableArray.Create(bytes);
             var hash = CanonicalIdentity.Sha256(altered.AsSpan()); var locator = "inputs/" + hash + ".bin";
-            Refuse(bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with { Artifacts = bundle.Manifest.Artifacts.Select(a =>
-                a.Id == artifact.Id ? a with { Locator = locator, Length = altered.Length, Sha256 = hash } : a).ToArray() }),
-                Bytes = new Dictionary<string, System.Collections.Immutable.ImmutableArray<byte>>(bundle.Bytes) { [locator] = altered } });
+            Refuse(bundle with
+            {
+                Manifest = ManifestIdentity.Seal(bundle.Manifest with
+                {
+                    Artifacts = bundle.Manifest.Artifacts.Select(a =>
+                a.Id == artifact.Id ? a with { Locator = locator, Length = altered.Length, Sha256 = hash } : a).ToArray()
+                }),
+                Bytes = new Dictionary<string, System.Collections.Immutable.ImmutableArray<byte>>(bundle.Bytes) { [locator] = altered }
+            });
         }
         var path = compiler.FinalGraph.GraphContexts.First(b => b.IsTestProject).Context.CompilerDocuments.First(d => !d.IsGenerated).ResolvedPath!;
         var original = File.ReadAllBytes(path); var timestamp = File.GetLastWriteTimeUtc(path);

@@ -26,6 +26,7 @@ internal static class FreshPartialAnalysis
             foreach (var binding in graph.GraphContexts.Where(b => !b.IsTestProject || b.Context.ExclusionPolicy.IncludeTests))
             {
                 token.ThrowIfCancellationRequested();
+                var contextId = LogicalContextIdentity.Create(evidence.Preflight.Root, graph.BuildGraph.Single(n => n.Id == binding.GraphId));
                 var context = binding.Context; var compiler = observations[binding.GraphId];
                 CompilerOutputBinding.Validate(context, compiler, token);
                 var pe = CompilerOutputBinding.Read(compiler.Assembly!.Path, ref total, token);
@@ -40,7 +41,7 @@ internal static class FreshPartialAnalysis
                     var relative = Path.GetRelativePath(evidence.Preflight.Root, d.ResolvedPath!).Replace('\\', '/');
                     if (relative == ".." || relative.StartsWith("../", StringComparison.Ordinal) || Path.IsPathRooted(relative))
                         throw new ProjectContextException("provenance.partialSourceUnsupported", "Partial source is outside the selected root.");
-                    repositoryPaths.Add((binding.GraphId, d.LogicalPath), relative);
+                    repositoryPaths.Add((contextId, d.LogicalPath), relative);
                     return CapturedSource.Create(d.LogicalPath, bytes.AsSpan());
                 }).ToArray();
                 var references = CompilerReferenceSnapshot.ResolveSemanticReferences(compiler, token)
@@ -55,7 +56,7 @@ internal static class FreshPartialAnalysis
                 var pathPolicy = new CapturedPathPolicy(!OperatingSystem.IsWindows(), context.CompilerDocuments
                     .Select(d => new ManifestReportRootMapping(d.ResolvedPath!, d.LogicalPath)).ToArray());
                 var analysis = new CallableAnalysisContext(Path.GetRelativePath(evidence.Preflight.Root, binding.ProjectPath).Replace('\\', '/'),
-                    context.TargetFramework, context.Configuration, context.Platform, binding.GraphId, context.ParseOptions);
+                    context.TargetFramework, context.Configuration, context.Platform, contextId, context.ParseOptions);
                 partitions.Add(AnalyzeCommand.EvaluateBoundCallables(analysis,
                     CanonicalIdentity.Set("partial-source-set-v1", sources.Select(s => CanonicalIdentity.Tuple(s.LogicalPath, s.ContentIdentity))),
                     build.ModuleIdentity, sources.Where(s => eligible.Contains(s.LogicalPath)).ToArray(), coverage,
@@ -126,6 +127,7 @@ internal static class FreshPartialAnalysis
         catch (Exception error) when (error is ProjectContextException or PolicyException or IOException or UnauthorizedAccessException or
             ArgumentException or InvalidOperationException or OperationCanceledException or ProcessTimeoutException)
         {
+            FreshPrivateFailureEvidence.TryRetain(evidence.PrivateDirectory, error, token);
             // Preserve the original raw outcomes and fail closed without stale metrics.
             var reason = error is OperationCanceledException ? "coverage.partialAnalysisCancelled" :
                 error is ProcessTimeoutException ? "coverage.partialAnalysisTimedOut" :
