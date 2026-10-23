@@ -417,8 +417,17 @@ public sealed class CompilerRecipeObservationTests
         File.Delete(launcher);
         var removed = await CompilerEvidence.CaptureCompilerImages(sdk, TestContext.Current.CancellationToken);
         Assert.NotNull(CompilerEvidence.CompilerImageDisposition(closing, removed, observation.InvocationRecipe));
-        Assert.Equal("check.priorBuildInvalid", Assert.Throws<PolicyException>(() =>
-            FreshPriorBuild.RestoreCurrentRecipe(retained, prior, fixture.Path, sdk, TestContext.Current.CancellationToken)).Code);
+        if (OperatingSystem.IsLinux())
+        {
+            // The absent optional launcher changes the current role pool first.
+            Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() =>
+                FreshPriorBuild.RestoreCurrentRecipe(retained, prior, fixture.Path, sdk, TestContext.Current.CancellationToken)).Reason);
+        }
+        else
+        {
+            Assert.Equal("check.priorBuildInvalid", Assert.Throws<PolicyException>(() =>
+                FreshPriorBuild.RestoreCurrentRecipe(retained, prior, fixture.Path, sdk, TestContext.Current.CancellationToken)).Code);
+        }
         if (OperatingSystem.IsLinux())
         {
             var target = fixture.Write("launcher-target-DATA", "owned symlink target DATA");
