@@ -368,7 +368,29 @@ public sealed class CompilerRecipeObservationTests
         {
             Assert.DoesNotContain(opening.Files, image => image.Role == "csc-launcher");
             Assert.True(CompilerRecipePayload.Classify(original, fixture.Path, TestContext.Current.CancellationToken).IsSupported);
+            // Emulate the historical pre-Unix-profile unsupported observation,
+            // not a current task or compiler. It restores against eight roles.
+            var legacy = original with
+            {
+                CompilerImages = opening.Files,
+                InvocationRecipe = original.InvocationRecipe! with
+                {
+                    CommandBinding = "unproven",
+                    Images = opening.Files.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray(),
+                    UnsupportedReasons = original.InvocationRecipe.UnsupportedReasons.Concat(new[]
+                    { "recipe.compilerCommandPrefixUnproven", "recipe.commandEventMissing", "recipe.commandArgumentsUnproven" })
+                        .Order(StringComparer.Ordinal).ToArray()
+                }
+            };
+            var legacyRetained = CompilerRecipePayload.Retain(legacy, fixture.Path, TestContext.Current.CancellationToken);
+            Assert.Equal(new[] { "recipe.bindingUnsupported" }, legacyRetained.UnsupportedReasons);
+            var legacyPrior = CompilerRecipeObservation.WithoutOptionalRecipe(legacy, TestContext.Current.CancellationToken);
+            _ = FreshPriorBuild.RestoreCurrentRecipe(legacyRetained, legacyPrior, fixture.Path, sdk, TestContext.Current.CancellationToken);
             File.WriteAllText(launcher, "fixed Unix launcher DATA");
+            // The historical eight-role DATA cannot match the current nine-role
+            // pool. This fixture materializes its launcher; no old SDK task ran.
+            Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() =>
+                FreshPriorBuild.RestoreCurrentRecipe(legacyRetained, legacyPrior, fixture.Path, sdk, TestContext.Current.CancellationToken)).Reason);
         }
         var closing = await CompilerEvidence.CaptureCompilerImages(sdk, TestContext.Current.CancellationToken);
         var binding = OperatingSystem.IsLinux() ? "selected-sdk-csc-unix-apphost-arguments-match" : "selected-sdk-csc-exe-arguments-match";
@@ -397,6 +419,20 @@ public sealed class CompilerRecipeObservationTests
         Assert.NotNull(CompilerEvidence.CompilerImageDisposition(closing, removed, observation.InvocationRecipe));
         Assert.Equal("check.priorBuildInvalid", Assert.Throws<PolicyException>(() =>
             FreshPriorBuild.RestoreCurrentRecipe(retained, prior, fixture.Path, sdk, TestContext.Current.CancellationToken)).Code);
+        if (OperatingSystem.IsLinux())
+        {
+            var target = fixture.Write("launcher-target-DATA", "owned symlink target DATA");
+            File.CreateSymbolicLink(launcher, target);
+            var invalidPresent = await CompilerEvidence.CaptureCompilerImages(sdk, TestContext.Current.CancellationToken);
+            Assert.Equal("recipe.compilerImageUnavailable", invalidPresent.UnsupportedReason);
+            Assert.Empty(invalidPresent.Files);
+            // Host-exec does not use this launcher, but the present selected
+            // SDK pool deliberately declines as a whole. No target is opened
+            // through the link and no process or launcher is executed here.
+            Assert.Equal("selected-host-exec-csc-arguments-match", original.InvocationRecipe!.CommandBinding);
+            Assert.Equal("recipe.compilerImageUnavailable",
+                CompilerEvidence.CompilerImageDisposition(invalidPresent, invalidPresent, original.InvocationRecipe));
+        }
     }
 
     private static CompilerObservation SupportedObservation(string root)
