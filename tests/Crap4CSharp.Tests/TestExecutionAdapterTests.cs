@@ -75,6 +75,22 @@ public sealed class TestExecutionAdapterTests
             catch (ProjectContextException failure) { throw new InvalidOperationException(failure.Message + "\n" + File.ReadAllText(System.IO.Path.Combine(owned, "stdout.log")) + "\n" + File.ReadAllText(System.IO.Path.Combine(owned, "stderr.log")), failure); }
         }, TestContext.Current.CancellationToken);
         Assert.Equal(3, bound.Observations.Count);
+        var actualProof = Assert.IsType<CompilerRetainedProof>(bound.RetainedProof);
+        const string noSourceHeuristic = "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.ExcludeAssembliesWithoutSources=None";
+        var expectedDefaultCollector = new[] { "--collect", "XPlat Code Coverage", "--",
+            "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover",
+            "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.IncludeTestAssembly=false" };
+        Assert.Equal(expectedDefaultCollector, TestExecutionAdapter.CreateCollectorArguments(null, false));
+        Assert.Equal(expectedDefaultCollector, TestExecutionAdapter.CreateCollectorArguments(actualProof, false));
+        // This is the real once-built retained proof. Replacing the public
+        // result DATA cannot manufacture a mapped collector selection.
+        var replaced = bound with
+        {
+            Observations = bound.Observations.Select(observed => observed with
+            { CommandLineArguments = observed.CommandLineArguments.Append("/pathmap:" + fixture.Path + "=/_/").ToArray() }).ToArray()
+        };
+        Assert.Same(actualProof, replaced.RetainedProof);
+        Assert.DoesNotContain(noSourceHeuristic, TestExecutionAdapter.CreateCollectorArguments(replaced.RetainedProof, false));
         Assert.Single(File.ReadAllLines(System.IO.Path.Combine(fixture.Path, "Tests/build-count.txt")));
         Assert.Single(File.ReadAllLines(System.IO.Path.Combine(fixture.Path, "Dep/build-count.txt")));
         var authored = new[] { project, dependency, root, source }.ToDictionary(p => p,
@@ -429,7 +445,7 @@ public sealed class TestExecutionAdapterTests
     [Fact]
     public void ActualTestArgumentsPreserveMappedSelectorsAndEscapeMSBuildDelimiters()
     {
-        var properties = new Dictionary<string,string> { ["Flavor"] = "left;other=value,%$@'()*?", ["Platform"] = "AnyCPU", ["vstestnobuild"] = "false" };
+        var properties = new Dictionary<string, string> { ["Flavor"] = "left;other=value,%$@'()*?", ["Platform"] = "AnyCPU", ["vstestnobuild"] = "false" };
         var node = new ProjectBuildGraphNode("test", Path.GetFullPath("Tests.csproj"), "Release", "AnyCPU", "net10.0", properties, []);
         var arguments = TestExecutionAdapter.CreateArguments(node);
         Assert.Equal(new[] { "test", node.ProjectPath, "--no-build", "--no-restore", "-m:1", "-nr:false" }, arguments.Take(6));
@@ -449,17 +465,17 @@ public sealed class TestExecutionAdapterTests
     [InlineData("bad=name")]
     public void InvalidPropertyNamesRefuseBeforeTransport(string name)
     {
-        var error = Assert.Throws<ProjectContextException>(() => MappedGlobalArguments.Create(new Dictionary<string,string> { [name] = "x" }));
+        var error = Assert.Throws<ProjectContextException>(() => MappedGlobalArguments.Create(new Dictionary<string, string> { [name] = "x" }));
         Assert.Equal("compiler.globalPropertyInvalid", error.Reason);
     }
 
     [Fact]
     public void DuplicateCaseInsensitivePropertiesAndNulRefuseBeforeTransport()
     {
-        Assert.Throws<ProjectContextException>(() => MappedGlobalArguments.Create(new Dictionary<string,string>
-            { ["Flavor"] = "left", ["flavor"] = "right" }));
-        Assert.Throws<ProjectContextException>(() => MappedGlobalArguments.Create(new Dictionary<string,string>
-            { ["Flavor"] = "left\0right" }));
+        Assert.Throws<ProjectContextException>(() => MappedGlobalArguments.Create(new Dictionary<string, string>
+        { ["Flavor"] = "left", ["flavor"] = "right" }));
+        Assert.Throws<ProjectContextException>(() => MappedGlobalArguments.Create(new Dictionary<string, string>
+        { ["Flavor"] = "left\0right" }));
     }
 
     [Theory]
@@ -514,7 +530,7 @@ public sealed class TestExecutionAdapterTests
             PhaseInputs = new[] { new ProjectPhaseInput(project, "project", false),
                 new ProjectPhaseInput(defect == "input" ? Path.Combine(directory, "immutable.cs") : Path.Combine(fixture.Path, "Code.cs"), "source", false) }
         };
-        var node = new ProjectBuildGraphNode("test", project, "Release", "AnyCPU", "net10.0", new Dictionary<string,string>(), []);
+        var node = new ProjectBuildGraphNode("test", project, "Release", "AnyCPU", "net10.0", new Dictionary<string, string>(), []);
         var runner = new ProjectTestRunnerMetadata("test", project, "Release", "AnyCPU", "net10.0", "VSTest", "18.0.1", "6.0.4");
         var graph = new ProjectContextLoadResult(true, new[] { context }, [])
         { BuildGraph = new[] { node }, GraphContexts = new[] { new ProjectGraphContextBinding("test", project, context, true) }, TestRunners = new[] { runner } };

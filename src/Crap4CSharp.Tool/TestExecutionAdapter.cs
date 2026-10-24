@@ -111,10 +111,8 @@ internal static class TestExecutionAdapter
                 var sdk = frozenSdk is null ? currentSdk : SdkExecutionIdentity.Validate(frozenSdk, currentSdk);
                 var childLog = Path.Combine(logs, "test-child.binlog");
                 if (childLog.IndexOfAny([';', ',']) >= 0) throw Refuse("Test-child logger paths with delimiters are unsupported.");
-                var arguments = launch.Arguments.Concat(new[] { "-bl:" + childLog + ";ProjectImports=None", "--logger", "trx;LogFileName=tests.trx", "--results-directory", resultDirectory,
-                    "--collect", "XPlat Code Coverage", "--", "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover",
-                    "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.IncludeTestAssembly=" +
-                        (launch.IncludeTests ? "true" : "false") }).ToArray();
+                var arguments = launch.Arguments.Concat(new[] { "-bl:" + childLog + ";ProjectImports=None", "--logger", "trx;LogFileName=tests.trx", "--results-directory", resultDirectory })
+                    .Concat(CreateCollectorArguments(proof, launch.IncludeTests)).ToArray();
                 // Preserve interrupted launch diagnostics without manufacturing an exit code.
                 outcomes[launch.Index] = new(launch.Node.Id, "failed", resultDirectory, logs, null);
                 LoggedProcessResult process;
@@ -151,12 +149,25 @@ internal static class TestExecutionAdapter
         return new(Array.AsReadOnly(results.ToArray()), Array.AsReadOnly(outcomes), failure);
     }
 
+    internal static IReadOnlyList<string> CreateCollectorArguments(CompilerRetainedProof? proof, bool includeTests)
+    {
+        var arguments = new List<string> { "--collect", "XPlat Code Coverage", "--",
+            "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover",
+            "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.IncludeTestAssembly=" + (includeTests ? "true" : "false") };
+        // RunVerified's existing opening ValidateCurrent has already proved the
+        // SAME retained argv/physical sources/PE/PDB map. Unverified/null keeps
+        // the collector default; caller-replaceable bound.Observations are not read.
+        if (proof?.HasRecordedPathMap == true)
+            arguments.Add("DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.ExcludeAssembliesWithoutSources=None");
+        return Array.AsReadOnly(arguments.ToArray());
+    }
+
     internal static IReadOnlyList<string> CreateArguments(ProjectBuildGraphNode node)
     {
         var arguments = new List<string> { "test", node.ProjectPath, "--no-build", "--no-restore", "-m:1", "-nr:false" };
         arguments.AddRange(MappedGlobalArguments.Create(node.GlobalProperties));
-        arguments.AddRange(MappedGlobalArguments.Create(new Dictionary<string,string>
-            { ["Configuration"] = node.Configuration, ["Platform"] = node.Platform, ["TargetFramework"] = node.TargetFramework }));
+        arguments.AddRange(MappedGlobalArguments.Create(new Dictionary<string, string>
+        { ["Configuration"] = node.Configuration, ["Platform"] = node.Platform, ["TargetFramework"] = node.TargetFramework }));
         // Mapped globals follow CLI switches and can override --no-build. Force the
         // effective supported VSTest property AFTER every mapped value and selector.
         arguments.Add("-p:VSTestNoBuild=true");

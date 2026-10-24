@@ -152,9 +152,13 @@ internal static class CompilerGraphExecution
             // independent actual Csc/reference PE/copy gate; no implementation fallback.
             var returned = await build(node, cancellation);
             using var bindingTiming = request.Timing?.Start("execution.compiler.nodeBinding");
-            var observation = returned with { GraphId = node.Id, Parameters = returned.Parameters.Select(p =>
+            var observation = returned with
+            {
+                GraphId = node.Id,
+                Parameters = returned.Parameters.Select(p =>
                 p with { Items = p.Items.ToArray(), ReferenceProperties = p.ReferenceProperties.ToArray() }).ToArray(),
-                RuntimeCopies = Array.AsReadOnly(returned.RuntimeCopies.Select(c => c with { }).ToArray()) };
+                RuntimeCopies = Array.AsReadOnly(returned.RuntimeCopies.Select(c => c with { }).ToArray())
+            };
             CompilerReferenceOutputBinding.Validate(byId[node.Id].Context, observation, cancellation);
             closure.Validate(observation, cancellation);
             snapshots[node.Id] = closure;
@@ -196,7 +200,7 @@ internal static class CompilerGraphExecution
         authoredSnapshot.Validate(retainedGraph, token);
         var documentSnapshot = CompilerDocumentSnapshot.Capture(retainedGraph, token);
         var proof = new CompilerRetainedProof(frozenRequest with
-            { WarmAcquisitionSelectionProbe = frozenRequest.WarmPostBuildProbe || frozenRequest.WarmAcquisitionSelectionProbe }, retainedGraph, authoredSnapshot,
+        { WarmAcquisitionSelectionProbe = frozenRequest.WarmPostBuildProbe || frozenRequest.WarmAcquisitionSelectionProbe }, retainedGraph, authoredSnapshot,
             new Dictionary<string, CompilerReferenceSnapshot>(snapshots, StringComparer.Ordinal),
             new Dictionary<string, string[]>(closures, StringComparer.Ordinal),
             new Dictionary<string, CompilerObservation>(completed, StringComparer.Ordinal), documentSnapshot,
@@ -407,6 +411,11 @@ internal sealed class CompilerRetainedProof
 {
     internal bool NativeSdkIdentityProbe => request.NativeSdkIdentityProbe;
     internal ProjectContextSdkResolution? FrozenSdk => request.FrozenSdk;
+    // Recorded metadata only. The verified test entry must validate this
+    // proof's own physical graph before using it to select collector settings.
+    internal bool HasRecordedPathMap => observations.Values.Any(observation =>
+        observation.CommandLineArguments.Any(argument => argument.Length > 1 &&
+            (argument[0] is '/' or '-') && argument[1..].StartsWith("pathmap:", StringComparison.OrdinalIgnoreCase)));
     private readonly ProjectContextLoadRequest request;
     private readonly ProjectContextLoadResult graph;
     private readonly CompilerPhaseSnapshot authored;
@@ -482,7 +491,7 @@ internal sealed class CompilerRetainedProof
         ProjectContextLoadResult current;
         using (timing?.Start(timingPrefix + ".graph"))
             current = await reload(timing is null ? request : request with
-                { CollectTiming = true, Timing = timing, TimingPrefix = timingPrefix + ".graph.loader" }, token);
+            { CollectTiming = true, Timing = timing, TimingPrefix = timingPrefix + ".graph.loader" }, token);
         token.ThrowIfCancellationRequested();
         using (timing?.Start(timingPrefix + ".physical"))
             ValidateAgainstCurrentGraph(current, token);

@@ -44,7 +44,9 @@ internal static class FreshManifestCapture
         var bindings = graph.GraphContexts.ToDictionary(b => b.GraphId, StringComparer.Ordinal);
         var logicalIds = graph.BuildGraph.ToDictionary(n => n.Id, n => LogicalContextIdentity.Create(preflight.Root, n), StringComparer.Ordinal);
         var prior = FreshPriorBuild.Prepare(execution, cancellation);
-        var observations = prior.Observations.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        // Mandatory compiler/PDB/TRX gates always consume the original full task evidence.
+        // Optional export selection must not strip a required test's same-task PathMap.
+        var observations = execution.Compiler.ByGraphId().ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
         var referenceEdges = CompilerReferenceGraph.Observe(graph, cancellation);
         var bytes = new Dictionary<string, ImmutableArray<byte>>(StringComparer.Ordinal);
         var artifacts = new List<ManifestArtifact>();
@@ -397,6 +399,23 @@ internal static class FreshManifestCapture
             }
             Artifact("test-closure-" + test.GraphId, "test-compiler-input-closure", ImmutableArray.Create(JsonSerializer.SerializeToUtf8Bytes(new
             { provider = "validated-csc-inputs-v1", project = RepositoryPath(test.ProjectPath), inputs = identities, reusableRecipe = false })), format: "json");
+            var testObservation = observations[test.GraphId];
+            if (requiredIds.Contains(test.GraphId, StringComparer.Ordinal) && FreshPriorBuild.HasPathMap(testObservation) &&
+                testObservation.InvocationRecipe is not null && CompilerRecipePayload.Classify(testObservation, preflight.Root, cancellation).IsSupported)
+            {
+                // Required tests remain unscored. Retain only bounded same-task prior DATA;
+                // no test compiler images or extra public compiler contexts are emitted.
+                optional.Add(() =>
+                {
+                    if (!FreshPriorBuild.TryCaptureTestRecipe(testObservation, preflight.Root, logicalIds[test.GraphId],
+                            test.GraphId, cancellation, out var metadata)) return;
+                    var id = "test-recipe-" + test.GraphId;
+                    var staged = new[] { (id, FreshPriorBuild.TestRecipeKind, metadata) };
+                    if (!AdmitOptional(testObservation, staged, out var contribution)) return;
+                    observations[test.GraphId] = testObservation; optionalPriorBytes += contribution;
+                    Artifact(id, FreshPriorBuild.TestRecipeKind, metadata, format: "json");
+                });
+            }
         }
         var available = contexts.SelectMany(c => c.Inputs.Where(i => i.Role == "source" && (!i.Generated || c.IncludeGenerated))
             .Select(i => i.RepositoryPath!)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();

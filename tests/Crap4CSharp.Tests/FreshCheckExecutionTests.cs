@@ -1802,7 +1802,7 @@ public sealed class FreshCheckExecutionTests
                                 }
                             });
                         }
-                        foreach (var closure in bundle.Manifest.Artifacts.Where(a => a.Kind is "compiler-input-closure" or "test-compiler-input-closure"))
+                        foreach (var closure in bundle.Manifest.Artifacts.Where(a => a.Kind is "compiler-input-closure" or "test-compiler-input-closure" or FreshPriorBuild.TestRecipeKind))
                         {
                             var altered = System.Collections.Immutable.ImmutableArray.Create(System.Text.Encoding.UTF8.GetBytes("{}"));
                             var hash = CanonicalIdentity.Sha256(altered.AsSpan()); var locator = "inputs/" + hash + ".bin";
@@ -2893,6 +2893,16 @@ public sealed class FreshCheckExecutionTests
                 }
                 if (pathMapped)
                 {
+                    var testRecipe = Assert.Single(bundle.Manifest.Artifacts, artifact => artifact.Kind == FreshPriorBuild.TestRecipeKind);
+                    Assert.Null(testRecipe.ContextId); Assert.Null(testRecipe.BuildId);
+                    using var metadata = JsonDocument.Parse(bundle.Bytes[testRecipe.Locator].AsSpan().ToArray());
+                    var testGraphId = metadata.RootElement.GetProperty("graphId").GetString();
+                    Assert.Equal("required-test-prior-compiler-v1", metadata.RootElement.GetProperty("provider").GetString());
+                    Assert.DoesNotContain(bundle.Manifest.Artifacts, artifact => artifact.BuildId == "build-" + testGraphId && artifact.Kind == CompilerRecipePayload.ImageKind);
+                    var priorArtifact = Assert.Single(bundle.Manifest.Artifacts, artifact => artifact.Kind == FreshPriorBuild.Kind);
+                    using var prior = JsonDocument.Parse(bundle.Bytes[priorArtifact.Locator].AsSpan().ToArray());
+                    var testNode = Assert.Single(prior.RootElement.GetProperty("nodes").EnumerateArray(), node => node.GetProperty("id").GetString() == testGraphId);
+                    Assert.Equal(testNode.GetProperty("compilerRecipe").GetRawText(), metadata.RootElement.GetProperty("recipe").GetRawText());
                     Assert.NotEmpty(terminal.RootElement.GetProperty("evaluation").GetProperty("metrics").EnumerateArray());
                     Assert.All(bundle.Manifest.Contexts, context => Assert.Contains(context.PathPolicy!.ReportRootMappings,
                         mapping => mapping.ReportRoot.StartsWith("/_/", StringComparison.Ordinal)));

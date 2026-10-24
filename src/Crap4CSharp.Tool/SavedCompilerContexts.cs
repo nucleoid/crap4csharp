@@ -101,6 +101,16 @@ internal static class SavedCompilerContexts
                     }
                     Artifact("test-closure-" + binding.GraphId, "test-compiler-input-closure", Json(new
                     { provider = "validated-csc-inputs-v1", project = Logical(binding.ProjectPath), inputs = identities, reusableRecipe = false }), "json");
+                    // The same original selection owns optional test metadata too.
+                    // It never makes excluded tests scored or supplies image artifacts.
+                    var testRecipe = optionalRecipes?.OptionalView(compiler, observation, root, token) ?? observation;
+                    if (testRecipe.InvocationRecipe is not null && FreshPriorBuild.HasPathMap(testRecipe) &&
+                        CompilerRecipePayload.Classify(testRecipe, root, token).IsSupported)
+                    {
+                        if (!FreshPriorBuild.TryCaptureTestRecipe(testRecipe, root, logicalIds[binding.GraphId],
+                            binding.GraphId, token, out var metadata)) throw Refuse();
+                        Artifact("test-recipe-" + binding.GraphId, FreshPriorBuild.TestRecipeKind, metadata, "json");
+                    }
                     continue;
                 }
                 var contextId = logicalIds[binding.GraphId];
@@ -222,7 +232,7 @@ internal static class SavedCompilerContexts
                         references.Select(reference => reference.Input).ToArray(), recipeFiles, token));
                 }
             }
-            var excluded = bundle.Manifest.Artifacts.Where(a => a.Kind is "test-compiler-source" or "test-compiler-reference" or "test-compiler-input-closure").ToArray();
+            var excluded = bundle.Manifest.Artifacts.Where(a => a.Kind is "test-compiler-source" or "test-compiler-reference" or "test-compiler-input-closure" or FreshPriorBuild.TestRecipeKind).ToArray();
             if (excluded.Length != testArtifacts.Count || !testArtifacts.SetEquals(excluded.Select(a => a.Id))) throw Refuse();
             var optionalArtifacts = bundle.Manifest.Artifacts.Where(artifact => artifact.Kind is
                 CompilerRecipePayload.Kind or CompilerRecipePayload.UnsupportedKind or CompilerRecipePayload.ImageKind or CompilerRecipePayload.ClosureKind).ToArray();

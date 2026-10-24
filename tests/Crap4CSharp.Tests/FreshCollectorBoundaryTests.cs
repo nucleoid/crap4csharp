@@ -22,7 +22,8 @@ public sealed class FreshCollectorBoundaryTests
 
     private static async Task RunCase(string variant, bool requireOutcome = false)
     {
-        using var fixture = TestDirectory.Create("crap4csharp-collector-boundary");
+        // Retain actual compiler, PDB and collector evidence for boundary failures.
+        var fixture = TestDirectory.Create("crap4csharp-collector-boundary");
         const string counter = "<Target Name=\"CountCompile\" BeforeTargets=\"CoreCompile\" Condition=\"'$(DesignTimeBuild)' != 'true'\"><WriteLinesToFile File=\"$(MSBuildProjectDirectory)/build-count.txt\" Lines=\"once\" Overwrite=\"false\" /></Target>";
         fixture.Write("Directory.Build.props", "<Project><PropertyGroup><ContinuousIntegrationBuild>" +
             (variant is "ci" or "pathmap" ? "true" : "false") + "</ContinuousIntegrationBuild><Deterministic>true</Deterministic>" +
@@ -73,21 +74,18 @@ public sealed class FreshCollectorBoundaryTests
         var pe = File.ReadAllBytes(Path.Combine(fixture.Path, "Library/bin/Debug/net10.0/Library.dll"));
         var pdb = File.ReadAllBytes(Path.Combine(fixture.Path, "Library/bin/Debug/net10.0/Library.pdb"));
         var inspected = ArtifactEvidenceInspector.InspectBuild(ImmutableArray.CreateRange(pe), ImmutableArray.CreateRange(pdb));
+        if (variant == "pathmap")
+            Assert.Contains(inspected.Documents.Keys, p => p.StartsWith("/crap4csharp-mapped/", StringComparison.Ordinal));
         Assert.Contains(inspected.Methods, m => m.MethodName == "Covered" && m.SequencePoints.Count > 0);
         Assert.Contains(inspected.Methods, m => m.MethodName == "Other" && m.SequencePoints.Count > 0);
         if (variant == "ci")
         {
             Assert.Equal(1, exit);
             Assert.Contains("compiler.outputsUnproven", output.ToString(), StringComparison.Ordinal);
-            if (variant == "pathmap")
-                Assert.Contains(inspected.Documents.Keys, p => p.StartsWith("/crap4csharp-mapped/", StringComparison.Ordinal));
-            else
-            {
-                var testBuild = ArtifactEvidenceInspector.InspectBuild(
-                    ImmutableArray.CreateRange(File.ReadAllBytes(Path.Combine(fixture.Path, "Tests/bin/Debug/net10.0/Tests.dll"))),
-                    ImmutableArray.CreateRange(File.ReadAllBytes(Path.Combine(fixture.Path, "Tests/bin/Debug/net10.0/Tests.pdb"))));
-                Assert.Contains(testBuild.Documents.Keys, p => !File.Exists(p));
-            }
+            var testBuild = ArtifactEvidenceInspector.InspectBuild(
+                ImmutableArray.CreateRange(File.ReadAllBytes(Path.Combine(fixture.Path, "Tests/bin/Debug/net10.0/Tests.dll"))),
+                ImmutableArray.CreateRange(File.ReadAllBytes(Path.Combine(fixture.Path, "Tests/bin/Debug/net10.0/Tests.pdb"))));
+            Assert.Contains(testBuild.Documents.Keys, p => !File.Exists(p));
             Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests/build-count.txt")));
             Assert.Empty(Directory.GetFiles(fixture.Path, "test-count.txt", SearchOption.AllDirectories));
             Assert.Empty(Directory.GetFiles(privatePath, "tests.trx", SearchOption.AllDirectories));

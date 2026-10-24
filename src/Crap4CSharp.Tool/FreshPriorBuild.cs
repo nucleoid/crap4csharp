@@ -8,6 +8,7 @@ using Crap4CSharp.Core;
 internal static class FreshPriorBuild
 {
     internal const string Kind = "prior-compiler-graph";
+    internal const string TestRecipeKind = "test-prior-compiler-recipe";
     private const string Provider = "finite-sdk-prior-compiler-v1";
     internal const int MaximumBytes = 4 * 1024 * 1024;
     internal const int MaximumOptionalBytes = 4 * 1024 * 1024;
@@ -52,9 +53,11 @@ internal static class FreshPriorBuild
             var directory = Path.GetDirectoryName(node.ProjectPath)!;
             return new SavedNode(node.Id, observed.Parameters.Select(p => new SavedParameter(p.Name,
                     p.Items.Select(i => SavePath(root, Path.GetFullPath(i, directory))).ToArray())
-                    { ReferenceProperties = p.ReferenceProperties.Select(reference => new SavedReferenceProperties(
-                        SavePath(root, Path.GetFullPath(reference.ItemSpec, directory)),
-                        CompilerReferenceSnapshot.NormalizeAliases(reference.Aliases), reference.EmbedInteropTypes)).ToArray() }).ToArray(),
+            {
+                ReferenceProperties = p.ReferenceProperties.Select(reference => new SavedReferenceProperties(
+                SavePath(root, Path.GetFullPath(reference.ItemSpec, directory)),
+                CompilerReferenceSnapshot.NormalizeAliases(reference.Aliases), reference.EmbedInteropTypes)).ToArray()
+            }).ToArray(),
                 Output(observed.Assembly ?? throw Refuse()), Output(observed.Pdb ?? throw Refuse()),
                 observed.ReferenceAssembly is null ? null : Output(observed.ReferenceAssembly),
                 observed.RuntimeCopies.Where(c => targets.Contains(c.Source))
@@ -94,6 +97,24 @@ internal static class FreshPriorBuild
         if (!CompilerRecipeBudget.TrySerialize(new { compilerRecipe = retained }, Json, MaximumEnvelopeBytes, out var data)) return false;
         contribution = data.Length - 1;
         return contribution <= MaximumOptionalBytes;
+    }
+
+    // Metadata only for an excluded required test: this is not a scored public
+    // compiler recipe or authority to load an image. Existing optional ledgers own it.
+    internal static bool HasPathMap(CompilerObservation observation) => observation.CommandLineArguments.Any(argument =>
+        argument.Length > 1 && (argument[0] is '/' or '-') && argument[1..].StartsWith("pathmap:", StringComparison.OrdinalIgnoreCase));
+
+    internal static bool TryCaptureTestRecipe(CompilerObservation observation, string root, string contextId, string graphId,
+        CancellationToken token, out ImmutableArray<byte> bytes)
+    {
+        token.ThrowIfCancellationRequested();
+        var retained = CompilerRecipePayload.Retain(observation, root, token);
+        if (!HasPathMap(observation) || retained.UnsupportedReasons.Count != 0) throw Refuse();
+        var fits = CompilerRecipeBudget.TrySerialize(new
+        { provider = "required-test-prior-compiler-v1", graphId, contextId, recipe = retained },
+            Json, CompilerEvidence.MaximumTransportBytes, out var data);
+        bytes = fits ? ImmutableArray.Create(data) : [];
+        return fits;
     }
 
     // Explicit --no-build and saved verification never compile on SDK drift.
@@ -196,6 +217,7 @@ internal static class FreshPriorBuild
             return new(Resolve(output.Path), output.Sha256, output.Length);
         }
         var accepted = new Dictionary<string, CompilerObservation>(StringComparer.Ordinal);
+        var testRecipeArtifacts = new HashSet<string>(StringComparer.Ordinal);
         foreach (var saved in recipe.Nodes)
         {
             token.ThrowIfCancellationRequested();
@@ -218,26 +240,47 @@ internal static class FreshPriorBuild
             var observation = new CompilerObservation(node.ProjectPath, parameters)
             {
                 GraphId = node.Id,
-                Assembly = Output(saved.Assembly), Pdb = Output(saved.Pdb),
+                Assembly = Output(saved.Assembly),
+                Pdb = Output(saved.Pdb),
                 ReferenceAssembly = saved.ReferenceAssembly is null ? null : Output(saved.ReferenceAssembly),
                 RuntimeCopies = saved.Copies.Select(c => c is null ? throw Refuse() : new CompilerCopy(Resolve(c.Source), Resolve(c.Destination))).ToArray()
             };
             if (saved.CompilerRecipe is { } retained)
             {
-                var supported = bundle.Manifest.Artifacts.Where(artifact => artifact.BuildId == "build-" + saved.Id && artifact.Kind == CompilerRecipePayload.Kind).ToArray();
-                var unsupported = bundle.Manifest.Artifacts.Where(artifact => artifact.BuildId == "build-" + saved.Id && artifact.Kind == CompilerRecipePayload.UnsupportedKind).ToArray();
-                var expectedKind = retained.UnsupportedReasons?.Count == 0 ? CompilerRecipePayload.Kind : CompilerRecipePayload.UnsupportedKind;
-                var selected = supported.Concat(unsupported).ToArray();
-                if (selected.Length != 1 || selected[0].Kind != expectedKind || selected[0].ContextId != LogicalContextIdentity.Create(root, node) ||
-                    selected[0].ExecutionId is not null || selected[0].Format != "json" || selected[0].CoordinateKind is not null) throw Refuse();
+                var binding = graph.GraphContexts.Single(b => b.GraphId == saved.Id);
+                var excludedTest = binding.IsTestProject && !binding.Context.ExclusionPolicy.IncludeTests;
                 var sdk = graph.SelectedSdk ?? throw Refuse();
                 observation = RestoreCurrentRecipe(retained, observation, root, sdk, token);
+                if (excludedTest)
+                {
+                    var id = "test-recipe-" + saved.Id;
+                    var metadata = bundle.Manifest.Artifacts.Where(artifact => artifact.Id == id).ToArray();
+                    if (metadata.Length != 1 || metadata[0].Kind != TestRecipeKind || metadata[0].ContextId is not null ||
+                        metadata[0].BuildId is not null || metadata[0].ExecutionId is not null || metadata[0].Format != "json" ||
+                        metadata[0].CoordinateKind is not null || !testRecipeArtifacts.Add(id) ||
+                        !bundle.Manifest.Artifacts.Any(artifact => artifact.Id == "required-test-" + saved.Id + "-trx" && artifact.Kind == "required-test-result") ||
+                        bundle.Manifest.Artifacts.Any(artifact => artifact.BuildId == "build-" + saved.Id &&
+                            artifact.Kind is CompilerRecipePayload.Kind or CompilerRecipePayload.UnsupportedKind or CompilerRecipePayload.ImageKind or CompilerRecipePayload.ClosureKind) ||
+                        !TryCaptureTestRecipe(observation, root, LogicalContextIdentity.Create(root, node), saved.Id, token, out var expected) ||
+                        !bundle.Bytes.TryGetValue(metadata[0].Locator, out var actual) || !actual.AsSpan().SequenceEqual(expected.AsSpan())) throw Refuse();
+                }
+                else
+                {
+                    var supported = bundle.Manifest.Artifacts.Where(artifact => artifact.BuildId == "build-" + saved.Id && artifact.Kind == CompilerRecipePayload.Kind).ToArray();
+                    var unsupported = bundle.Manifest.Artifacts.Where(artifact => artifact.BuildId == "build-" + saved.Id && artifact.Kind == CompilerRecipePayload.UnsupportedKind).ToArray();
+                    var expectedKind = retained.UnsupportedReasons?.Count == 0 ? CompilerRecipePayload.Kind : CompilerRecipePayload.UnsupportedKind;
+                    var selected = supported.Concat(unsupported).ToArray();
+                    if (selected.Length != 1 || selected[0].Kind != expectedKind || selected[0].ContextId != LogicalContextIdentity.Create(root, node) ||
+                        selected[0].ExecutionId is not null || selected[0].Format != "json" || selected[0].CoordinateKind is not null) throw Refuse();
+                }
             }
             else if (bundle.Manifest.Artifacts.Any(artifact => artifact.BuildId == "build-" + saved.Id &&
                 artifact.Kind is CompilerRecipePayload.Kind or CompilerRecipePayload.UnsupportedKind or CompilerRecipePayload.ImageKind or CompilerRecipePayload.ClosureKind))
                 throw Refuse(); // A required recipe cannot disappear on prior-graph import.
             if (!accepted.TryAdd(saved.Id, observation)) throw Refuse();
         }
+        var retainedTests = bundle.Manifest.Artifacts.Where(artifact => artifact.Kind == TestRecipeKind).ToArray();
+        if (retainedTests.Length != testRecipeArtifacts.Count || !testRecipeArtifacts.SetEquals(retainedTests.Select(artifact => artifact.Id))) throw Refuse();
         return accepted;
     }
 
