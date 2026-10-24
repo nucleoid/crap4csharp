@@ -141,12 +141,120 @@ public sealed class CompilerOutputBindingTests
         Assert.ThrowsAny<OperationCanceledException>(() => CompilerOutputBinding.Validate(context, observed, cancelled.Token));
     }
 
-    private static (ProjectAnalysisContext, CompilerObservation) Valid(TestDirectory fixture, string name = "App", string source = "public class Code { public int M() => 1; }")
+    [Fact]
+    public void ActualRoslynPathMapBindsPhysicalSourcesAndKeepsExecutableMethodsEligible()
+    {
+        using var fixture = TestDirectory.Create("crap-output-pathmap");
+        var (context, observed) = Valid(fixture, pathMap: fixture.Path + "=/_/");
+        var output = CompilerOutputBinding.ValidateAndInspect(context, observed, TestContext.Current.CancellationToken);
+        var binding = CompilerDocumentBinding.Create(context, observed, output.Build, TestContext.Current.CancellationToken);
+        Assert.All(output.Build.Documents.Keys, name => Assert.StartsWith("/_/", name, StringComparison.Ordinal));
+        Assert.Contains(context.CompilerDocuments[0].ResolvedPath!, binding.PhysicalPathsWithPdb);
+        var eligible = binding.EligiblePdbNames(context.CompilerDocuments);
+        Assert.NotEmpty(output.Build.Methods.Where(m => m.SequencePoints.Any(p => eligible.Contains(p.Document))));
+        Assert.Equal(context.CompilerDocuments[0].ResolvedPath, binding.PhysicalPathForReport("/_/App/Code.cs"));
+        Assert.False(context.Capabilities.CompiledInputBindingComplete);
+    }
+
+    [Theory]
+    [InlineData("checksum")]
+    [InlineData("missing-task")]
+    [InlineData("unproven-command")]
+    [InlineData("argument-drift")]
+    public void ActualMappedArtifactsStillRefuseUnboundOrChangedSources(string defect)
+    {
+        using var fixture = TestDirectory.Create("crap-output-pathmap-negative");
+        var (context, observed) = Valid(fixture, pathMap: fixture.Path + "=/_/");
+        if (defect == "checksum")
+        {
+            File.AppendAllText(context.CompilerDocuments[0].ResolvedPath!, " // changed");
+            context = context with
+            {
+                CompilerDocuments = [context.CompilerDocuments[0] with
+                { ContentIdentity = ProjectAnalysisContext.ContentHash(File.ReadAllBytes(context.CompilerDocuments[0].ResolvedPath!)) }]
+            };
+        }
+        else if (defect == "missing-task") observed = observed with { InvocationRecipe = null };
+        else if (defect == "unproven-command")
+            observed = observed with
+            {
+                InvocationRecipe = observed.InvocationRecipe! with
+                { CommandBinding = "unproven", UnsupportedReasons = observed.InvocationRecipe.UnsupportedReasons.Append("recipe.commandEventMissing").ToArray() }
+            };
+        else observed = observed with { CommandLineArguments = ["/pathmap:" + fixture.Path + "=/other/"] };
+        Assert.Throws<ProjectContextException>(() => CompilerOutputBinding.Validate(context, observed, TestContext.Current.CancellationToken));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RoslynLongestPrefixAndDirectoryBoundaryArePreserved(bool nested)
+    {
+        using var fixture = TestDirectory.Create("crap-output-pathmap-prefix");
+        var map = nested ? fixture.Path + "=/_/," + Path.Combine(fixture.Path, "App") + "=/specific/" :
+            Path.Combine(fixture.Path, "App") + "=/_/";
+        var (context, observed) = Valid(fixture, name: nested ? "App" : "App2", pathMap: map);
+        var output = CompilerOutputBinding.ValidateAndInspect(context, observed, TestContext.Current.CancellationToken);
+        if (nested) Assert.Contains("/specific/Code.cs", output.Build.Documents.Keys);
+        else Assert.Contains(output.Build.Documents.Keys, name => name.EndsWith("/App2/Code.cs", StringComparison.Ordinal) && !name.StartsWith("/_/", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MappedNamesCannotHaveTwoPhysicalOwnersEvenWhenBytesMatch(bool physicalAlias)
+    {
+        Assert.SkipWhen(physicalAlias && OperatingSystem.IsWindows(), "The supported POSIX mapped-name profile cannot equal a Windows drive-qualified physical filename.");
+        using var fixture = TestDirectory.Create("crap-output-pathmap-collision");
+        var map = physicalAlias ? Path.Combine(fixture.Path, "App") + "=" + Path.Combine(fixture.Path, "Other").Replace('\\', '/') + "/" :
+            Path.Combine(fixture.Path, "App") + "=/_/," + Path.Combine(fixture.Path, "Other") + "=/_/";
+        var (context, observed) = Valid(fixture, pathMap: map);
+        var same = fixture.Write("Other/Code.cs", File.ReadAllText(context.CompilerDocuments[0].ResolvedPath!));
+        context = context with
+        {
+            CompilerDocuments = context.CompilerDocuments.Append(context.CompilerDocuments[0] with
+            { LogicalPath = "Other.cs", ResolvedPath = same }).ToArray()
+        };
+        var build = ArtifactEvidenceInspector.InspectBuild([.. File.ReadAllBytes(observed.Assembly!.Path)], [.. File.ReadAllBytes(observed.Pdb!.Path)]);
+        Assert.Equal("compiler.outputsUnproven", Assert.Throws<ProjectContextException>(() =>
+            CompilerDocumentBinding.Create(context, observed, build, TestContext.Current.CancellationToken)).Reason);
+    }
+
+    [Fact]
+    public void DeclaredLineChecksumCannotInventCompilerDocumentOwnership()
+    {
+        using var fixture = TestDirectory.Create("crap-output-pathmap-line");
+        var source = "#pragma checksum \"Foreign.cs\" \"{8829d00f-11b8-4213-878b-770e8597ac16}\" \"" + new string('a', 64) + "\"\n" +
+            "#line 100 \"Foreign.cs\"\npublic class Code { public int M() => 1; }";
+        var (context, observed) = Valid(fixture, source: source, pathMap: fixture.Path + "=/_/");
+        var build = ArtifactEvidenceInspector.InspectBuild([.. File.ReadAllBytes(observed.Assembly!.Path)], [.. File.ReadAllBytes(observed.Pdb!.Path)]);
+        Assert.Contains(build.Documents, document => document.Key.EndsWith("Foreign.cs", StringComparison.Ordinal) && document.Value == new string('a', 64));
+        Assert.Equal("compiler.outputsUnproven", Assert.Throws<ProjectContextException>(() =>
+            CompilerOutputBinding.Validate(context, observed, TestContext.Current.CancellationToken)).Reason);
+    }
+
+    private static CompilerObservation WithMapObservation(CompilerObservation observed, string root, string map)
+    {
+        var sdk = Path.Combine(root, "sdk"); var host = Path.Combine(root, "dotnet");
+        var capture = new CompilerRecipeObservation(sdk, host, "1:2:3:4:5", Path.Combine(sdk, "Roslyn", "Microsoft.CSharp.Core.targets"));
+        string[] arguments = ["/pathmap:" + map];
+        capture.Arguments(arguments, TestContext.Current.CancellationToken);
+        capture.Command("\"" + host + "\" exec \"" + Path.Combine(sdk, "Roslyn", "bincore", "csc.dll") + "\" " +
+            string.Join(" ", arguments.Select(argument => "\"" + argument + "\"")), TestContext.Current.CancellationToken);
+        capture.Close();
+        // Same-task protocol DATA for real emitted Roslyn artifacts; this is not
+        // an installed-SDK or process conformance claim.
+        return observed with { InvocationRecipe = capture.Finish(), CommandLineArguments = arguments };
+    }
+
+    private static (ProjectAnalysisContext, CompilerObservation) Valid(TestDirectory fixture, string name = "App", string source = "public class Code { public int M() => 1; }", string? pathMap = null)
     {
         var project = fixture.Write(name + "/" + name + ".csproj", "<Project />");
         var path = fixture.Write(name + "/Code.cs", source);
         var tree = CSharpSyntaxTree.ParseText(SourceText.From(source, new UTF8Encoding(false), SourceHashAlgorithm.Sha256), new CSharpParseOptions(LanguageVersion.CSharp14, preprocessorSymbols: ["BOUND"]), path);
-        var compilation = CSharpCompilation.Create(name, [tree], [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)], new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, optimizationLevel: OptimizationLevel.Debug, deterministic: true));
+        var compilation = CSharpCompilation.Create(name, [tree], [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)], new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, optimizationLevel: OptimizationLevel.Debug, deterministic: true)
+            .WithSourceReferenceResolver(pathMap is null ? null : new SourceFileResolver([], fixture.Path,
+                CSharpCommandLineParser.Default.Parse(["/pathmap:" + pathMap], fixture.Path, sdkDirectory: null).PathMap)));
         using var pe = new MemoryStream(); using var pdb = new MemoryStream();
         var emitted = compilation.Emit(pe, pdb, options: new EmitOptions(debugInformationFormat: DebugInformationFormat.PortablePdb, pdbFilePath: name + ".pdb"));
         Assert.True(emitted.Success, string.Join("\n", emitted.Diagnostics));
@@ -156,12 +264,16 @@ public sealed class CompilerOutputBindingTests
         var targetPdb = fixture.Write(name + "/bin/" + name + ".pdb", ""); File.WriteAllBytes(targetPdb, pdb.ToArray());
         var context = ProjectAnalysisContext.Create(name + ".csproj", name, "net10.0", "Release", "AnyCPU", LanguageVersion.CSharp14, ["BOUND"], SourceCodeKind.Regular, [], [], new(false, false), new("sdk", "msbuild", "roslyn")) with
         {
-            ResolvedProjectPath = project, EvaluatedTargetPath = target, EvaluatedIntermediateDirectory = Path.GetDirectoryName(assembly),
+            ResolvedProjectPath = project,
+            EvaluatedTargetPath = target,
+            EvaluatedIntermediateDirectory = Path.GetDirectoryName(assembly),
             CompilerDocuments = [new("Code.cs", "Code.cs", ProjectAnalysisContext.ContentHash(File.ReadAllBytes(path)), false, false) { ResolvedPath = path }],
             PhaseInputs = [new(project, "project", false), new(path, "source", false)]
         };
         // Real Roslyn artifacts; supplied parameters here are protocol mutations, not an actual SDK Csc event.
-        return (context, new(project, [new("Sources", [path]), new("OutputAssembly", [assembly])]) { Assembly = Capture(assembly), Pdb = Capture(symbols) });
+        var observed = new CompilerObservation(project, [new("Sources", [path]), new("OutputAssembly", [assembly])])
+        { Assembly = Capture(assembly), Pdb = Capture(symbols) };
+        return (context, pathMap is null ? observed : WithMapObservation(observed, fixture.Path, pathMap));
     }
 
     private static CompilerOutput Capture(string path) => new(path, ProjectAnalysisContext.ContentHash(File.ReadAllBytes(path)), new FileInfo(path).Length);

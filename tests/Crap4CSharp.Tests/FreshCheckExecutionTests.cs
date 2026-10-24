@@ -174,6 +174,14 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, false, policyScope: "all", local: true, thresholdViolation: true);
 
     [Fact]
+    public Task ActualPathMappedSavedContextRejectsResealedAliasRetargeting()
+        => RunCase(false, true, policyScope: "all", local: true, contextAgreement: true, pathMapped: true);
+
+    [Fact]
+    public Task ActualPathMappedFreshCaptureRetainsNonemptyMetricsAndSavedCurrentReuse()
+        => RunCase(false, false, policyScope: "all", local: true, completedReuse: true, pathMapped: true);
+
+    [Fact]
     public Task CompletedFreshEvidenceReusesRequiredTestsWithoutRestoreCompileOrTestAndPreservesDecisions()
         => RunCase(false, false, policyScope: "all", completedReuse: true);
 
@@ -560,10 +568,12 @@ public sealed class FreshCheckExecutionTests
     }
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false, bool warmPostBuild = false, bool warmSaved = false, bool warmSavedEligibility = false, bool nativeSdkIdentity = global::App.DefaultNativeSdkIdentity, bool privateArtifactOnly = false, bool aliasedReference = false, bool localIncremental = false, bool lateLocalJson = false, string? writerProbe = null, bool writerOrdering = false, bool includeTests = false, string? optionalRecipeLoss = null)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false, bool warmPostBuild = false, bool warmSaved = false, bool warmSavedEligibility = false, bool nativeSdkIdentity = global::App.DefaultNativeSdkIdentity, bool privateArtifactOnly = false, bool aliasedReference = false, bool localIncremental = false, bool lateLocalJson = false, string? writerProbe = null, bool writerOrdering = false, bool includeTests = false, string? optionalRecipeLoss = null, bool pathMapped = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
+        if (pathMapped)
+            fixture.Write("Directory.Build.props", "<Project><PropertyGroup><PathMap>$(MSBuildThisFileDirectory)=/_/</PathMap></PropertyGroup></Project>");
         if (outputLayout is not null)
             fixture.Write("Directory.Build.props", outputLayout == "artifacts"
                 ? "<Project><PropertyGroup><UseArtifactsOutput>true</UseArtifactsOutput><ArtifactsPath>$(MSBuildThisFileDirectory)artifacts</ArtifactsPath></PropertyGroup></Project>"
@@ -1780,6 +1790,18 @@ public sealed class FreshCheckExecutionTests
                         Reject(savedContext with { ParseOptions = savedContext.ParseOptions! with { Features = new Dictionary<string, string> { ["foreign"] = "true" } } });
                         Reject(savedContext with { PathPolicy = savedContext.PathPolicy! with { CasePolicy = "foreign" } });
                         Reject(savedContext with { PathPolicy = savedContext.PathPolicy! with { ReportRootMappings = [] } });
+                        if (pathMapped)
+                        {
+                            Assert.Contains(savedContext.PathPolicy.ReportRootMappings, mapping => mapping.ReportRoot.StartsWith("/_/", StringComparison.Ordinal));
+                            Reject(savedContext with
+                            {
+                                PathPolicy = savedContext.PathPolicy with
+                                {
+                                    ReportRootMappings = savedContext.PathPolicy.ReportRootMappings.Select(mapping =>
+                                        mapping.ReportRoot.StartsWith("/_/", StringComparison.Ordinal) ? mapping with { LogicalRoot = "wrong.cs" } : mapping).ToArray()
+                                }
+                            });
+                        }
                         foreach (var closure in bundle.Manifest.Artifacts.Where(a => a.Kind is "compiler-input-closure" or "test-compiler-input-closure"))
                         {
                             var altered = System.Collections.Immutable.ImmutableArray.Create(System.Text.Encoding.UTF8.GetBytes("{}"));
@@ -2868,6 +2890,13 @@ public sealed class FreshCheckExecutionTests
                     using var noBase = JsonDocument.Parse(noBaseOutput.ToString());
                     Assert.Equal("operationalError", noBase.RootElement.GetProperty("run").GetProperty("status").GetString());
                     Assert.Single(File.ReadAllLines(testCounter));
+                }
+                if (pathMapped)
+                {
+                    Assert.NotEmpty(terminal.RootElement.GetProperty("evaluation").GetProperty("metrics").EnumerateArray());
+                    Assert.All(bundle.Manifest.Contexts, context => Assert.Contains(context.PathPolicy!.ReportRootMappings,
+                        mapping => mapping.ReportRoot.StartsWith("/_/", StringComparison.Ordinal)));
+
                 }
                 var reusedOutput = new StringWriter(); var reusedErrors = new StringWriter();
                 var reusedExit = await global::App.RunAsync(["check", "--reuse-artifacts", locator, "--policy", "policy.json",

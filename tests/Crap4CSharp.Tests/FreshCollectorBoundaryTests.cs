@@ -75,7 +75,7 @@ public sealed class FreshCollectorBoundaryTests
         var inspected = ArtifactEvidenceInspector.InspectBuild(ImmutableArray.CreateRange(pe), ImmutableArray.CreateRange(pdb));
         Assert.Contains(inspected.Methods, m => m.MethodName == "Covered" && m.SequencePoints.Count > 0);
         Assert.Contains(inspected.Methods, m => m.MethodName == "Other" && m.SequencePoints.Count > 0);
-        if (variant is "ci" or "pathmap")
+        if (variant == "ci")
         {
             Assert.Equal(1, exit);
             Assert.Contains("compiler.outputsUnproven", output.ToString(), StringComparison.Ordinal);
@@ -113,8 +113,15 @@ public sealed class FreshCollectorBoundaryTests
             var report = XDocument.Load(attachmentPath);
             var module = report.Descendants("Module").Single(m => m.Element("ModuleName")!.Value == "Library");
             Assert.All(module.Descendants("Method"), m => Assert.Empty(m.Element("MetadataToken")!.Value));
-            var sourceMappings = inspected.Documents.Keys.Select(p => new ManifestReportRootMapping(p,
-                Path.GetRelativePath(fixture.Path, p).Replace('\\', '/'))).ToArray();
+            var sourceMappings = inspected.Documents.Keys.SelectMany(p =>
+            {
+                var logical = variant == "pathmap" ? p["/crap4csharp-mapped/".Length..] :
+                    Path.GetRelativePath(fixture.Path, p).Replace('\\', '/');
+                return variant == "pathmap"
+                    ? new[] { new ManifestReportRootMapping(p, logical),
+                        new ManifestReportRootMapping(Path.Combine(fixture.Path, logical), logical) }
+                    : new[] { new ManifestReportRootMapping(p, logical) };
+            }).ToArray();
             var represented = ArtifactEvidenceInspector.MatchedMethodTokens(
                 ImmutableArray.CreateRange(File.ReadAllBytes(attachmentPath)), "coverage.opencover.xml", inspected,
                 sourceMappings.Select(m => m.LogicalRoot).ToArray(), new CapturedPathPolicy(!OperatingSystem.IsWindows(), sourceMappings),
@@ -149,7 +156,7 @@ public sealed class FreshCollectorBoundaryTests
                 Assert.Equal(0, outcome.GetProperty("exitCode").GetInt32());
             }
         }
-        if (variant != "deterministic")
+        if (variant is "ci" or "excluded")
         {
             Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));
             Assert.Empty(evaluation.GetProperty("metrics").EnumerateArray());

@@ -53,8 +53,8 @@ internal static class FreshPartialAnalysis
                     .Select((m, i) => new CapturedCoverage("partial-" + i + ".xml", m.LineProjection, "opencover", "line")).ToArray();
                 // Already-normalized line projections use captured logical paths,
                 // while Coverlet retains physical paths in each module File table.
-                var pathPolicy = new CapturedPathPolicy(!OperatingSystem.IsWindows(), context.CompilerDocuments
-                    .Select(d => new ManifestReportRootMapping(d.ResolvedPath!, d.LogicalPath)).ToArray());
+                var pathPolicy = new CapturedPathPolicy(!OperatingSystem.IsWindows(),
+                    CompilerDocumentBinding.Create(context, compiler, build, token).ReportMappings);
                 var analysis = new CallableAnalysisContext(Path.GetRelativePath(evidence.Preflight.Root, binding.ProjectPath).Replace('\\', '/'),
                     context.TargetFramework, context.Configuration, context.Platform, contextId, context.ParseOptions);
                 partitions.Add(AnalyzeCommand.EvaluateBoundCallables(analysis,
@@ -78,12 +78,16 @@ internal static class FreshPartialAnalysis
             var allCallables = partitions.SelectMany(p => p.Callables).ToArray();
             var allFamilies = partitions.SelectMany(p => p.Families).ToArray();
             var selections = allCallables.ToDictionary(c => c.ObservationId, Selected, StringComparer.Ordinal);
-            var diagnosticInventory = terminal with { Evaluation = terminal.Evaluation with
+            var diagnosticInventory = terminal with
             {
-                Contexts = partitions.Select(p => new EvaluationContext(p.ContextId, "project", p.Project, p.TargetFramework,
-                    p.Configuration, p.SourceSetHash, null)).ToArray(),
-                Callables = allCallables, Families = allFamilies
-            }};
+                Evaluation = terminal.Evaluation with
+                {
+                    Contexts = partitions.Select(p => new EvaluationContext(p.ContextId, "project", p.Project, p.TargetFramework,
+                        p.Configuration, p.SourceSetHash, null)).ToArray(),
+                    Callables = allCallables,
+                    Families = allFamilies
+                }
+            };
             var policy = evidence.Preflight.Policy;
             var observationsForPolicy = PolicyCheckCommand.PolicyObservations(diagnosticInventory, policy, selections,
                 (contextId, logicalPath) => repositoryPaths[(contextId, logicalPath)]).ToArray();
@@ -110,19 +114,26 @@ internal static class FreshPartialAnalysis
                 if (current.Attachment.Sha256 != reports.Single(r => r.GraphId == test.GraphId).Attachment.Sha256)
                     throw new ProjectContextException("coverage.partialAttachmentChanged", "Partial collector attachment changed.");
             }
-            return terminal with { Evaluation = terminal.Evaluation with
+            return terminal with
             {
-                Scope = new(".", metrics.Select(m => m.Path).Distinct(StringComparer.Ordinal).ToArray()),
-                Contexts = partitions.Select(p => new EvaluationContext(p.ContextId, "project", p.Project, p.TargetFramework,
-                    p.Configuration, p.SourceSetHash, null)).ToArray(),
-                Metrics = metrics, Findings = findings, Callables = callables, Families = families,
-                CallableExemptions = exemptions.Matches, ExemptionErrors = diagnosticPolicy.OperationalReasons,
-                Coverage = new(metrics.Length, metrics.Length - unknown.Length, unknown.Length,
+                Evaluation = terminal.Evaluation with
+                {
+                    Scope = new(".", metrics.Select(m => m.Path).Distinct(StringComparer.Ordinal).ToArray()),
+                    Contexts = partitions.Select(p => new EvaluationContext(p.ContextId, "project", p.Project, p.TargetFramework,
+                        p.Configuration, p.SourceSetHash, null)).ToArray(),
+                    Metrics = metrics,
+                    Findings = findings,
+                    Callables = callables,
+                    Families = families,
+                    CallableExemptions = exemptions.Matches,
+                    ExemptionErrors = diagnosticPolicy.OperationalReasons,
+                    Coverage = new(metrics.Length, metrics.Length - unknown.Length, unknown.Length,
                     unknown.GroupBy(m => m.CoverageReason ?? CoverageReasonCodes.Unavailable).ToDictionary(g => g.Key, g => g.Count())),
-                CoverageDiagnostics = partitions.SelectMany(p => p.Diagnostics).ToArray(),
-                Checks = terminal.Evaluation.Checks.Select(c => c.Name == "coverage" ? c with { Reason = "coverage.boundPartialObservations" } :
-                    c.Name == "crap" ? c with { Reason = "crap.partialObservationsNotPolicyDecision" } : c).ToArray()
-            }};
+                    CoverageDiagnostics = partitions.SelectMany(p => p.Diagnostics).ToArray(),
+                    Checks = terminal.Evaluation.Checks.Select(c => c.Name == "coverage" ? c with { Reason = "coverage.boundPartialObservations" } :
+                        c.Name == "crap" ? c with { Reason = "crap.partialObservationsNotPolicyDecision" } : c).ToArray()
+                }
+            };
         }
         catch (Exception error) when (error is ProjectContextException or PolicyException or IOException or UnauthorizedAccessException or
             ArgumentException or InvalidOperationException or OperationCanceledException or ProcessTimeoutException)
@@ -132,8 +143,11 @@ internal static class FreshPartialAnalysis
             var reason = error is OperationCanceledException ? "coverage.partialAnalysisCancelled" :
                 error is ProcessTimeoutException ? "coverage.partialAnalysisTimedOut" :
                 error is ProjectContextException context ? context.Reason : error is PolicyException policy ? policy.Code : "coverage.partialAnalysisRefused";
-            return terminal with { Evaluation = terminal.Evaluation with
-                { Checks = terminal.Evaluation.Checks.Select(c => c.Name == "coverage" ? c with { Reason = reason } : c).ToArray() } };
+            return terminal with
+            {
+                Evaluation = terminal.Evaluation with
+                { Checks = terminal.Evaluation.Checks.Select(c => c.Name == "coverage" ? c with { Reason = reason } : c).ToArray() }
+            };
         }
     }
 

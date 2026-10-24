@@ -51,16 +51,7 @@ internal static class CompilerOutputBinding
                 !LanguageVersionFacts.TryParse(inspected.LanguageVersion, out var language) ||
                 language != context.ParseOptions.LanguageVersion ||
                 !inspected.PreprocessorSymbols.SequenceEqual(context.PreprocessorSymbols.Order(StringComparer.Ordinal), StringComparer.Ordinal)) throw Refuse();
-            var documents = context.CompilerDocuments.ToDictionary(d => Canonical(d.ResolvedPath), paths);
-            foreach (var (name, hash) in inspected.Documents)
-            {
-                token.ThrowIfCancellationRequested();
-                // Conservatively refuse path-mapped/#line aliases that do not resolve to
-                // an independently enumerated compiler source. Sources without points
-                // need not have a PDB document; the complete Sources gate ran first.
-                var path = Path.GetFullPath(name, directory);
-                if (!documents.TryGetValue(path, out var source) || source.ContentIdentity != hash) throw Refuse();
-            }
+            _ = CompilerDocumentBinding.Create(context, observation, inspected, token);
             token.ThrowIfCancellationRequested();
             return new(context, observation, peBytes, pdbBytes, inspected);
         }

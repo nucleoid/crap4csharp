@@ -88,6 +88,16 @@ internal static class CoverageGraphBinding
                     context.CompilerDocuments.Select(d => d.LogicalPath).Distinct(paths).Count() != context.CompilerDocuments.Count) throw Refuse();
                 stage = "point-projection";
                 var singleModule = new XDocument(new XElement("CoverageSession", new XElement("Modules", new XElement(module))));
+                var documentBinding = CompilerDocumentBinding.Create(context, observations[selected.Id], selected.Build, token);
+                // Preserve raw collector bytes. Only the copied normalized module
+                // translates an exact validated PDB/physical alias to its physical source.
+                foreach (var file in singleModule.Descendants("File"))
+                {
+                    var reported = Required(file, "fullPath");
+                    var physical = documentBinding.PhysicalPathForReport(reported);
+                    if (!paths.Equals(reported.Replace('\\', '/'), physical.Replace('\\', '/')))
+                        file.SetAttributeValue("fullPath", physical);
+                }
                 // Coverlet's OpenCover writer projects line observations with dummy
                 // columns 1..2 and no IL offset. Require that proven writer shape;
                 // normalize ONLY the copied parse document to line evidence. Never
@@ -120,7 +130,7 @@ internal static class CoverageGraphBinding
                     continue; // Do not manufacture coverage/module token observations.
                 }
                 stage = "normalized-module";
-                var matched = ValidateNormalizedModule(bytes, selected.Id, context, selected.Build, token);
+                var matched = ValidateNormalizedModule(bytes, selected.Id, context, selected.Build, observations[selected.Id], token);
                 covered.Add(selected.Id);
                 moduleBindings.Add(matched);
             }
@@ -191,7 +201,7 @@ internal static class CoverageGraphBinding
     // Actual fresh line projections and saved normalized bytes use this SAME conservative
     // module/document/method/PDB matcher. This never reconstructs a raw collector report.
     internal static BoundModuleCoverage ValidateNormalizedModule(ImmutableArray<byte> bytes, string graphId,
-        ProjectAnalysisContext context, InspectedBuildEvidence build, CancellationToken token)
+        ProjectAnalysisContext context, InspectedBuildEvidence build, CompilerObservation observation, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         var root = TestResultBinding.Parse(bytes).Root ?? throw Refuse();
@@ -203,7 +213,7 @@ internal static class CoverageGraphBinding
         var paths = PathIdentityPolicy.Current.Comparer;
         var sources = context.CompilerDocuments.Select(d => d.LogicalPath).ToArray();
         if (sources.Distinct(paths).Count() != sources.Length) throw Refuse();
-        var mappings = context.CompilerDocuments.Select(d => new ManifestReportRootMapping(d.ResolvedPath!, d.LogicalPath)).ToArray();
+        var mappings = CompilerDocumentBinding.Create(context, observation, build, token).ReportMappings;
         var policy = new CapturedPathPolicy(!OperatingSystem.IsWindows(), mappings);
         var pathIndex = new CapturedLogicalPathIndex(sources, policy);
         var files = module.Elements("Files").Single().Elements().ToArray();
@@ -259,7 +269,8 @@ internal static class CoverageGraphBinding
         catch (OperationCanceledException) { throw; }
         catch (Exception error) when (error is PolicyException or ProjectContextException or IOException or
             UnauthorizedAccessException or ArgumentException or InvalidOperationException or KeyNotFoundException or
-            OverflowException or System.Xml.XmlException) { throw SavedRefuse(); }
+            OverflowException or System.Xml.XmlException)
+        { throw SavedRefuse(); }
     }
 
     // Fresh required-results refusal precedes the coverage wrapper, just as in
@@ -310,7 +321,7 @@ internal static class CoverageGraphBinding
                     var selected = builds[module.GraphId];
                     var artifact = bundle.Manifest.Artifacts.Single(a => a.Id == module.Artifact);
                     var matched = ValidateNormalizedModule(bundle.Bytes[artifact.Locator], module.GraphId, selected.Context,
-                        selected.Build, token);
+                        selected.Build, observations[module.GraphId], token);
                     modules.Add(matched);
                     if (!covered.TryGetValue(module.GraphId, out var tokens)) covered.Add(module.GraphId, tokens = []);
                     tokens.UnionWith(matched.ActualMethodTokens);
@@ -327,7 +338,8 @@ internal static class CoverageGraphBinding
         catch (OperationCanceledException) { throw; }
         catch (Exception error) when (error is PolicyException or ProjectContextException or IOException or
             UnauthorizedAccessException or ArgumentException or InvalidOperationException or KeyNotFoundException or
-            OverflowException or System.Xml.XmlException) { throw SavedRefuse(); }
+            OverflowException or System.Xml.XmlException)
+        { throw SavedRefuse(); }
     }
 
     private static void ValidateClosurePresence(
@@ -342,7 +354,8 @@ internal static class CoverageGraphBinding
             if (excludedTests.Contains(selected.Id)) continue;
             if (selected.Context.Sources.Any(s => string.IsNullOrWhiteSpace(s.ResolvedPath) ||
                 !Path.IsPathFullyQualified(s.ResolvedPath) || Path.GetFullPath(s.ResolvedPath) != s.ResolvedPath)) throw Refuse();
-            var eligible = selected.Context.Sources.Select(s => s.ResolvedPath!.Replace('\\', '/')).ToHashSet(paths);
+            var eligible = CompilerDocumentBinding.Create(selected.Context, observations[selected.Id], selected.Build, token)
+                .EligiblePdbNames(selected.Context.Sources);
             if (represented.Contains(selected.Id)) continue;
             var methods = selected.Build.Methods.Where(m => m.SequencePoints.Any(p => eligible.Contains(p.Document))).ToArray();
             if (methods.Length == 0) continue;
@@ -367,9 +380,9 @@ internal static class CoverageGraphBinding
             var context = binding.Context;
             if (context.Sources.Any(s => string.IsNullOrWhiteSpace(s.ResolvedPath) ||
                 !Path.IsPathFullyQualified(s.ResolvedPath) || Path.GetFullPath(s.ResolvedPath) != s.ResolvedPath)) throw AggregateRefuse();
-            var eligible = context.Sources.Select(s => s.ResolvedPath!.Replace('\\', '/')).ToHashSet(paths);
             var compiler = observations[binding.GraphId];
             var build = ReadOutput(binding.GraphId, context, compiler, ref total, token, scope).Build;
+            var eligible = CompilerDocumentBinding.Create(context, compiler, build, token).EligiblePdbNames(context.Sources);
             var methods = build.Methods.Where(m => m.SequencePoints.Any(p => eligible.Contains(p.Document)))
                 .Select(m => m.MetadataToken).ToHashSet();
             if (covered.TryGetValue(binding.GraphId, out var represented) && methods.IsSubsetOf(represented))
@@ -405,8 +418,7 @@ internal static class CoverageGraphBinding
         var references = CompilerReferenceSnapshot.ResolveSemanticReferences(compiler, token).Select(reference =>
             Microsoft.CodeAnalysis.MetadataReference.CreateFromImage(CompilerOutputBinding.Read(reference.Path, ref semanticBytes, token), reference.Properties)).ToArray();
         var compilation = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(context.AssemblyName, trees, references);
-        var documents = context.CompilerDocuments.ToDictionary(document => document.ResolvedPath!.Replace('\\', '/'),
-            document => document.LogicalPath, StringComparer.Ordinal);
+        var documents = CompilerDocumentBinding.Create(context, compiler, build, token).PdbLogicalPaths;
         return CompilerMethodEligibility.Classify(compilation, build, documents, token);
     }
 

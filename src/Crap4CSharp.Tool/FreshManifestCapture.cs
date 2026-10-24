@@ -161,8 +161,8 @@ internal static class FreshManifestCapture
             var pdb = ReadCaptured(observation.Pdb!.Path, ref readTotal, cancellation);
             CompilerOutputBinding.Match(observation.Assembly, assembly); CompilerOutputBinding.Match(observation.Pdb, pdb);
             var inspected = ArtifactEvidenceInspector.InspectBuild(assembly, pdb);
-            var pdbPaths = inspected.Documents.Keys.Select(p => Path.GetFullPath(p, Path.GetDirectoryName(binding.ProjectPath)!))
-                .ToHashSet(PathIdentityPolicy.Current.Comparer);
+            var documentBinding = CompilerDocumentBinding.Create(context, observation, inspected, cancellation);
+            var pdbPaths = documentBinding.PhysicalPathsWithPdb;
             var inputs = new List<ManifestInput>();
             var recipeSources = new Dictionary<string, ManifestInput>(PathIdentityPolicy.Current.Comparer);
             var recipeReferences = new List<ManifestInput>();
@@ -244,7 +244,7 @@ internal static class FreshManifestCapture
                 ParseOptions = new(inspected.LanguageVersion, context.SourceKind.ToString(), inspected.PreprocessorSymbols,
                     context.ParseOptions.Features.ToDictionary(p => p.Key, p => p.Value, StringComparer.Ordinal)),
                 PathPolicy = new(OperatingSystem.IsWindows() ? "insensitive" : "sensitive",
-                    context.CompilerDocuments.Select(d => new ManifestReportRootMapping(d.ResolvedPath!, d.LogicalPath)).ToArray())
+                    documentBinding.ReportMappings)
             };
             contexts.Add(captured);
             var buildId = "build-" + binding.GraphId;

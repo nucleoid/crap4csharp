@@ -111,8 +111,8 @@ internal static class SavedCompilerContexts
                 var pe = Read(observation.Assembly!.Path); var pdb = Read(observation.Pdb!.Path);
                 CompilerOutputBinding.Match(observation.Assembly, pe); CompilerOutputBinding.Match(observation.Pdb, pdb);
                 var inspected = ArtifactEvidenceInspector.InspectBuild(pe, pdb);
-                var paths = inspected.Documents.Keys.Select(p => Path.GetFullPath(p, Path.GetDirectoryName(binding.ProjectPath)!))
-                    .ToHashSet(PathIdentityPolicy.Current.Comparer);
+                var documentBinding = CompilerDocumentBinding.Create(current, observation, inspected, token);
+                var paths = documentBinding.PhysicalPathsWithPdb;
                 var expected = documents.Select(d => d.Input with
                 {
                     Role = paths.Contains(current.CompilerDocuments.Single(s => s.LogicalPath == d.Input.LogicalPath).ResolvedPath!)
@@ -136,7 +136,7 @@ internal static class SavedCompilerContexts
                     current.ParseOptions.Features.Any(p => !parse.Features.TryGetValue(p.Key, out var value) || value != p.Value)) throw Refuse();
                 var policy = saved.PathPolicy ?? throw Refuse();
                 if (policy.CasePolicy != (OperatingSystem.IsWindows() ? "insensitive" : "sensitive") ||
-                    !policy.ReportRootMappings.SequenceEqual(current.CompilerDocuments.Select(d => new ManifestReportRootMapping(d.ResolvedPath!, d.LogicalPath)))) throw Refuse();
+                    !policy.ReportRootMappings.SequenceEqual(documentBinding.ReportMappings)) throw Refuse();
                 var allSources = documents.Select(d => CapturedSource.Create(d.Input.LogicalPath, d.Bytes.AsSpan())).ToArray();
                 var eligible = documents.Where(d => !d.Input.Generated || current.ExclusionPolicy.IncludeGenerated)
                     .Select(d => CapturedSource.Create(d.Input.LogicalPath, d.Bytes.AsSpan())).ToArray();
