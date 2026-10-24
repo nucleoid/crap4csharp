@@ -151,7 +151,7 @@ public sealed class CompilerOutputBindingTests
         Assert.All(output.Build.Documents.Keys, name => Assert.StartsWith("/_/", name, StringComparison.Ordinal));
         Assert.Contains(context.CompilerDocuments[0].ResolvedPath!, binding.PhysicalPathsWithPdb);
         var eligible = binding.EligiblePdbNames(context.CompilerDocuments);
-        Assert.NotEmpty(output.Build.Methods.Where(m => m.SequencePoints.Any(p => eligible.Contains(p.Document))));
+        Assert.Contains(output.Build.Methods, m => m.SequencePoints.Any(p => eligible.Contains(p.Document)));
         Assert.Equal(context.CompilerDocuments[0].ResolvedPath, binding.PhysicalPathForReport("/_/App/Code.cs"));
         Assert.False(context.Capabilities.CompiledInputBindingComplete);
     }
