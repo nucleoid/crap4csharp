@@ -80,17 +80,11 @@ public sealed class FreshCollectorBoundaryTests
         Assert.Contains(inspected.Methods, m => m.MethodName == "Other" && m.SequencePoints.Count > 0);
         if (variant == "ci")
         {
-            Assert.Equal(1, exit);
-            Assert.Contains("compiler.outputsUnproven", output.ToString(), StringComparison.Ordinal);
             var testBuild = ArtifactEvidenceInspector.InspectBuild(
                 ImmutableArray.CreateRange(File.ReadAllBytes(Path.Combine(fixture.Path, "Tests/bin/Debug/net10.0/Tests.dll"))),
                 ImmutableArray.CreateRange(File.ReadAllBytes(Path.Combine(fixture.Path, "Tests/bin/Debug/net10.0/Tests.pdb"))));
-            Assert.Contains(testBuild.Documents.Keys, p => !File.Exists(p));
-            Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests/build-count.txt")));
-            Assert.Empty(Directory.GetFiles(fixture.Path, "test-count.txt", SearchOption.AllDirectories));
-            Assert.Empty(Directory.GetFiles(privatePath, "tests.trx", SearchOption.AllDirectories));
+            Assert.Contains(testBuild.Documents.Keys, path => !File.Exists(path));
         }
-        else
         {
             Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests/build-count.txt")));
             var testCounters = Directory.GetFiles(fixture.Path, "test-count.txt", SearchOption.AllDirectories);
@@ -109,6 +103,12 @@ public sealed class FreshCollectorBoundaryTests
             Assert.StartsWith(Path.GetFullPath(privatePath) + Path.DirectorySeparatorChar, attachmentPath,
                 OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
             var report = XDocument.Load(attachmentPath);
+            if (variant is "ci" or "pathmap")
+            {
+                var moduleNames = report.Descendants("Module").Select(module => module.Element("ModuleName")!.Value).ToArray();
+                Assert.Equal(new[] { "Library" }, moduleNames);
+                Assert.True(new FileInfo(attachmentPath).Length <= 16 * 1024 * 1024);
+            }
             var module = report.Descendants("Module").Single(m => m.Element("ModuleName")!.Value == "Library");
             Assert.All(module.Descendants("Method"), m => Assert.Empty(m.Element("MetadataToken")!.Value));
             var sourceMappings = inspected.Documents.Keys.SelectMany(p =>
@@ -154,7 +154,7 @@ public sealed class FreshCollectorBoundaryTests
                 Assert.Equal(0, outcome.GetProperty("exitCode").GetInt32());
             }
         }
-        if (variant is "ci" or "excluded")
+        if (variant == "excluded")
         {
             Assert.False(Directory.Exists(Path.Combine(fixture.Path, "bundle")));
             Assert.Empty(evaluation.GetProperty("metrics").EnumerateArray());

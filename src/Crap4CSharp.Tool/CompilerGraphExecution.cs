@@ -438,6 +438,23 @@ internal sealed class CompilerRetainedProof
         this.closures = closures; this.observations = observations; this.documents = documents; this.reload = reload;
     }
 
+    // Select from this proof's OWN frozen graph and originally recorded compiler
+    // reference closure, not caller-replaceable result DATA or scoring policy.
+    internal IReadOnlyList<string> RecordedInvocationModuleNames(string graphId)
+    {
+        if (!closures.TryGetValue(graphId, out var closure)) throw Refuse();
+        var bindings = graph.GraphContexts;
+        var test = bindings.SingleOrDefault(binding => binding.GraphId == graphId);
+        if (test is null || !test.IsTestProject) throw Refuse();
+        var paths = PathIdentityPolicy.Current.Comparer;
+        var references = new HashSet<string>(closure, paths);
+        if (references.Count != closure.Length) throw Refuse();
+        var selected = bindings.Where(binding => binding.GraphId == graphId ||
+            references.Contains(binding.Context.EvaluatedReferenceAssemblyPath!)).ToArray();
+        if (selected.Length != references.Count + 1) throw Refuse();
+        return Array.AsReadOnly(selected.Select(binding => binding.Context.AssemblyName).ToArray());
+    }
+
     internal void ValidateCurrent(CancellationToken token) => Validate(graph, token);
 
     // One synchronous saved-validation body, with fresh physical opening and

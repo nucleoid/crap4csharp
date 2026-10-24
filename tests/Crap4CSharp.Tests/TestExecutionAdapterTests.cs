@@ -11,14 +11,20 @@ public sealed class TestExecutionAdapterTests
     public Task ChangedSdkSelectorStopsBeforeActualMappedTestChild()
         => ActualMappedTestsRunOnceWithoutAnyImplicitBuildOrRestore(true, false, sdkDrift: true);
 
+    [Fact]
+    public Task ActualPathMappedCollectorUsesOnlyRetainedInvocationClosure()
+        => ActualMappedTestsRunOnceWithoutAnyImplicitBuildOrRestore(true, false, mapped: true);
+
     [Theory]
     [InlineData(true, false)]
     [InlineData(false, false)]
     [InlineData(true, true)]
     [InlineData(false, true)]
-    public async Task ActualMappedTestsRunOnceWithoutAnyImplicitBuildOrRestore(bool passes, bool opposingNoBuild, bool skipped = false, bool sdkDrift = false)
+    public async Task ActualMappedTestsRunOnceWithoutAnyImplicitBuildOrRestore(bool passes, bool opposingNoBuild, bool skipped = false, bool sdkDrift = false, bool mapped = false)
     {
         using var fixture = TestDirectory.Create("crap4csharp-actual-once-tests");
+        if (mapped)
+            fixture.Write("Directory.Build.props", "<Project><PropertyGroup><PathMap>$(MSBuildThisFileDirectory)=/_/</PathMap></PropertyGroup></Project>");
         var dependency = fixture.Write("Dep/Dep.csproj", """
             <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
             <Target Name="Count" BeforeTargets="CoreCompile" Condition="'$(DesignTimeBuild)' != 'true'">
@@ -81,7 +87,16 @@ public sealed class TestExecutionAdapterTests
             "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover",
             "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.IncludeTestAssembly=false" };
         Assert.Equal(expectedDefaultCollector, TestExecutionAdapter.CreateCollectorArguments(null, false));
-        Assert.Equal(expectedDefaultCollector, TestExecutionAdapter.CreateCollectorArguments(actualProof, false));
+        var testGraphId = Assert.Single(bound.FinalGraph.GraphContexts, binding => binding.IsTestProject).GraphId;
+        var actualCollector = TestExecutionAdapter.CreateCollectorArguments(actualProof, false, testGraphId);
+        if (mapped)
+        {
+            Assert.Equal(expectedDefaultCollector.Concat(new[] { noSourceHeuristic,
+                "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Include=[Dep]*,[Tests]*" }), actualCollector);
+            Assert.DoesNotContain(actualCollector, argument => argument.Contains("[Root]", StringComparison.Ordinal));
+            Assert.Throws<ProjectContextException>(() => TestExecutionAdapter.CreateCollectorArguments(actualProof, false, "foreign-graph"));
+        }
+        else Assert.Equal(expectedDefaultCollector, actualCollector);
         // This is the real once-built retained proof. Replacing the public
         // result DATA cannot manufacture a mapped collector selection.
         var replaced = bound with
@@ -90,7 +105,8 @@ public sealed class TestExecutionAdapterTests
             { CommandLineArguments = observed.CommandLineArguments.Append("/pathmap:" + fixture.Path + "=/_/").ToArray() }).ToArray()
         };
         Assert.Same(actualProof, replaced.RetainedProof);
-        Assert.DoesNotContain(noSourceHeuristic, TestExecutionAdapter.CreateCollectorArguments(replaced.RetainedProof, false));
+        Assert.Equal(actualCollector, TestExecutionAdapter.CreateCollectorArguments(replaced.RetainedProof, false, testGraphId));
+        if (!mapped) Assert.DoesNotContain(noSourceHeuristic, actualCollector);
         Assert.Single(File.ReadAllLines(System.IO.Path.Combine(fixture.Path, "Tests/build-count.txt")));
         Assert.Single(File.ReadAllLines(System.IO.Path.Combine(fixture.Path, "Dep/build-count.txt")));
         var authored = new[] { project, dependency, root, source }.ToDictionary(p => p,
@@ -503,6 +519,33 @@ public sealed class TestExecutionAdapterTests
         cancellation.Cancel();
         await Assert.ThrowsAsync<OperationCanceledException>(() => TestExecutionAdapter.RunAsync(null!, fixture.Path, TimeSpan.FromSeconds(10), cancellation.Token));
         Assert.Empty(Directory.GetFileSystemEntries(fixture.Path));
+    }
+
+    [Theory]
+    [InlineData("*")]
+    [InlineData("A?")]
+    [InlineData("A,B")]
+    [InlineData("A]B")]
+    [InlineData("A[B")]
+    [InlineData("A-B")]
+    [InlineData("A B")]
+    [InlineData("A\\B")]
+    [InlineData("Å")]
+    public void CollectorClosureNeverWidensAnUnsupportedLiteral(string unsafeName)
+    {
+        var error = Assert.Throws<ProjectContextException>(() =>
+            TestExecutionAdapter.CreateLiteralCollectorInclude(new[] { "Valid.Name_2", unsafeName }));
+        Assert.Equal("test.planInvalid", error.Reason);
+    }
+
+    [Fact]
+    public void CollectorClosureRequiresEveryUnambiguousModuleWithinItsCsvBound()
+    {
+        Assert.Equal("[Alpha.Name_2]*,[Beta]*", TestExecutionAdapter.CreateLiteralCollectorInclude(new[] { "Beta", "Alpha.Name_2" }));
+        Assert.Throws<ProjectContextException>(() => TestExecutionAdapter.CreateLiteralCollectorInclude(new[] { "Same", "same" }));
+        Assert.Throws<ProjectContextException>(() => TestExecutionAdapter.CreateLiteralCollectorInclude(Array.Empty<string>()));
+        Assert.Throws<ProjectContextException>(() => TestExecutionAdapter.CreateLiteralCollectorInclude(
+            Enumerable.Range(0, 100).Select(index => new string('A', 180) + index).ToArray()));
     }
 
     // Structural prelaunch controls; no fake Csc observation or successful SDK/test claim.
