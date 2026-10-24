@@ -80,9 +80,9 @@ internal static class FreshManifestCapture
             => artifacts.Add(new(id, kind, Store(content), content.Length, CanonicalIdentity.Sha256(content.AsSpan()),
                 context, build, invocation, format, coordinates));
         bool AdmitOptional(CompilerObservation candidate, IReadOnlyList<(string Id, string Kind, ImmutableArray<byte> Bytes)> staged,
-            out int priorBytes)
+            out int priorBytes, bool requiredUnscoredTest = false)
         {
-            if (!FreshPriorBuild.TryOptionalContribution(candidate, preflight.Root, cancellation, out priorBytes) ||
+            if (!FreshPriorBuild.TryOptionalContribution(candidate, preflight.Root, cancellation, out priorBytes, requiredUnscoredTest) ||
                 priorBytes > FreshPriorBuild.MaximumOptionalBytes - optionalPriorBytes) return false;
             var extra = staged.Select(item => item.Bytes).GroupBy(content => CanonicalIdentity.Sha256(content.AsSpan()), StringComparer.Ordinal)
                 .Where(group => !bytes.ContainsKey("inputs/" + group.Key + ".bin")).Sum(group => (long)group.First().Length);
@@ -401,7 +401,7 @@ internal static class FreshManifestCapture
             { provider = "validated-csc-inputs-v1", project = RepositoryPath(test.ProjectPath), inputs = identities, reusableRecipe = false })), format: "json");
             var testObservation = observations[test.GraphId];
             if (requiredIds.Contains(test.GraphId, StringComparer.Ordinal) && FreshPriorBuild.HasPathMap(testObservation) &&
-                testObservation.InvocationRecipe is not null && CompilerRecipePayload.Classify(testObservation, preflight.Root, cancellation).IsSupported)
+                testObservation.InvocationRecipe is not null && CompilerRecipePayload.ClassifyRequiredTest(testObservation, preflight.Root, cancellation).IsSupported)
             {
                 // Required tests remain unscored. Retain only bounded same-task prior DATA;
                 // no test compiler images or extra public compiler contexts are emitted.
@@ -411,7 +411,7 @@ internal static class FreshManifestCapture
                             test.GraphId, cancellation, out var metadata)) return;
                     var id = "test-recipe-" + test.GraphId;
                     var staged = new[] { (id, FreshPriorBuild.TestRecipeKind, metadata) };
-                    if (!AdmitOptional(testObservation, staged, out var contribution)) return;
+                    if (!AdmitOptional(testObservation, staged, out var contribution, requiredUnscoredTest: true)) return;
                     observations[test.GraphId] = testObservation; optionalPriorBytes += contribution;
                     Artifact(id, FreshPriorBuild.TestRecipeKind, metadata, format: "json");
                 });

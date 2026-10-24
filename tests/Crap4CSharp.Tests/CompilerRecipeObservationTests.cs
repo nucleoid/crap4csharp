@@ -397,8 +397,11 @@ public sealed class CompilerRecipeObservationTests
         var observation = original with
         {
             CompilerImages = closing.Files,
-            InvocationRecipe = original.InvocationRecipe! with { CommandBinding = binding,
-                Images = closing.Files.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() }
+            InvocationRecipe = original.InvocationRecipe! with
+            {
+                CommandBinding = binding,
+                Images = closing.Files.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray()
+            }
         };
         Assert.True(CompilerRecipePayload.Classify(observation, fixture.Path, TestContext.Current.CancellationToken).IsSupported);
         Assert.Null(CompilerEvidence.CompilerImageDisposition(closing, closing, observation.InvocationRecipe));
@@ -406,8 +409,11 @@ public sealed class CompilerRecipeObservationTests
         {
             Assert.Equal("recipe.compilerImagesChanged", CompilerEvidence.CompilerImageDisposition(opening, closing, observation.InvocationRecipe));
             Assert.Equal("recipe.compilerImageUnavailable", CompilerEvidence.CompilerImageDisposition(opening, opening, observation.InvocationRecipe));
-            var missing = observation with { CompilerImages = opening.Files,
-                InvocationRecipe = observation.InvocationRecipe with { Images = opening.Files.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() } };
+            var missing = observation with
+            {
+                CompilerImages = opening.Files,
+                InvocationRecipe = observation.InvocationRecipe with { Images = opening.Files.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() }
+            };
             Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() =>
                 CompilerRecipePayload.Classify(missing, fixture.Path, TestContext.Current.CancellationToken)).Reason);
         }
@@ -442,6 +448,57 @@ public sealed class CompilerRecipeObservationTests
             Assert.Equal("recipe.compilerImageUnavailable",
                 CompilerEvidence.CompilerImageDisposition(invalidPresent, invalidPresent, original.InvocationRecipe));
         }
+    }
+
+    [Theory]
+    [InlineData("library", true)]
+    [InlineData("exe", true)]
+    [InlineData("winexe", false)]
+    public void Required_unscored_mapped_test_target_is_metadata_only_and_does_not_broaden_ordinary_profile(string target, bool supported)
+    {
+        using var fixture = TestDirectory.Create("crap-required-mapped-test-target-DATA");
+        var token = TestContext.Current.CancellationToken;
+        var original = SupportedObservation(fixture.Path);
+        original = RebindArguments(original, original.CommandLineArguments.Select(argument => argument == "/target:library" ? "/target:" + target : argument)
+            .Append("/pathmap:" + fixture.Path + "=/_/").ToArray());
+        original = original with
+        {
+            InvocationRecipe = original.InvocationRecipe! with
+            { Options = [new("TargetType", "enum", target)] }
+        };
+        Assert.Equal(target == "library", CompilerRecipePayload.Classify(original, fixture.Path, token).IsSupported);
+        Assert.Equal(supported, CompilerRecipePayload.ClassifyRequiredTest(original, fixture.Path, token).IsSupported);
+        if (!supported) return;
+        var retained = CompilerRecipePayload.RetainRequiredTest(original, fixture.Path, token);
+        Assert.Empty(retained.UnsupportedReasons);
+        var serialized = JsonSerializer.Serialize(retained, ProjectContextLoader.JsonOptions);
+        var decoded = JsonSerializer.Deserialize<CompilerRetainedRecipe>(serialized, ProjectContextLoader.JsonOptions)!;
+        var prior = original with { InvocationRecipe = null, CommandLineArguments = [], EmitParameters = [], CompilerImages = [] };
+        var restored = CompilerRecipePayload.RestoreRequiredTest(decoded, prior, fixture.Path, SelectedSdk(fixture.Path), token);
+        Assert.Equal(original.CommandLineArguments, restored.CommandLineArguments);
+        Assert.Equal(original.InvocationRecipe.Arguments, restored.InvocationRecipe!.Arguments);
+        Assert.Equal(target == "library", CompilerRecipePayload.Classify(restored, fixture.Path, token).IsSupported);
+        if (target == "exe")
+            Assert.Equal("compiler.recipeBindingUnproven", Assert.Throws<ProjectContextException>(() =>
+                CompilerRecipePayload.Restore(decoded, prior, fixture.Path, SelectedSdk(fixture.Path), token)).Reason);
+    }
+
+    [Theory]
+    [InlineData("/main:ForeignEntry")]
+    [InlineData("/win32res:PRIVATE_UNKNOWN_RESOURCE")]
+    public void Required_mapped_executable_metadata_keeps_unknown_switches_unsupported(string extra)
+    {
+        using var fixture = TestDirectory.Create("crap-required-mapped-test-unknown-DATA");
+        var original = SupportedObservation(fixture.Path);
+        original = RebindArguments(original, original.CommandLineArguments.Select(argument => argument == "/target:library" ? "/target:exe" : argument)
+            .Append("/pathmap:" + fixture.Path + "=/_/").Append(extra).ToArray());
+        original = original with
+        {
+            InvocationRecipe = original.InvocationRecipe! with
+            { Options = [new("TargetType", "enum", "exe")] }
+        };
+        Assert.False(CompilerRecipePayload.ClassifyRequiredTest(original, fixture.Path, TestContext.Current.CancellationToken).IsSupported);
+        Assert.Empty(CompilerRecipePayload.RetainRequiredTest(original, fixture.Path, TestContext.Current.CancellationToken).KnownArguments);
     }
 
     private static CompilerObservation SupportedObservation(string root)

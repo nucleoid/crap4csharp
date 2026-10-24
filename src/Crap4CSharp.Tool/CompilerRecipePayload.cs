@@ -227,8 +227,18 @@ internal static class CompilerRecipePayload
     }
 
     internal static Projection Classify(CompilerObservation observation, string workspaceRoot, CancellationToken token)
+        => ClassifyCore(observation, workspaceRoot, token, requiredUnscoredTest: false);
+
+    // Only exact required, unscored mapped-test metadata callers select this
+    // profile. Ordinary scored compiler recipes remain library-only.
+    internal static Projection ClassifyRequiredTest(CompilerObservation observation, string workspaceRoot, CancellationToken token)
+        => ClassifyCore(observation, workspaceRoot, token, requiredUnscoredTest: true);
+
+    private static Projection ClassifyCore(CompilerObservation observation, string workspaceRoot, CancellationToken token,
+        bool requiredUnscoredTest)
     {
         ValidateObservation(observation, token);
+        if (requiredUnscoredTest && !FreshPriorBuild.HasPathMap(observation)) throw Refuse();
         if (observation.RetainedUnsupportedRecipe is { } retained) return new([], [], [], retained);
         var recipe = observation.InvocationRecipe!;
         var reasons = new HashSet<string>(StringComparer.Ordinal);
@@ -242,7 +252,7 @@ internal static class CompilerRecipePayload
         }
         // A proven same-task command still validates every recognized source,
         // reference and output role even if another optional feature is unsupported.
-        var profile = ProjectArguments(observation, workspaceRoot, token);
+        var profile = ProjectArgumentsCore(observation, workspaceRoot, token, requiredUnscoredTest);
         reasons.UnionWith(profile.UnsupportedReasons);
         if (recipe.UnsupportedReasons.Any(reason => reason is "recipe.languageVersionUnsupported" or "recipe.scalarOptionUnsupported" or "recipe.scalarOptionAmbiguous"))
             reasons.Add("recipe.scalarProfileUnsupported");
@@ -271,8 +281,15 @@ internal static class CompilerRecipePayload
     }
 
     internal static CompilerRetainedRecipe Retain(CompilerObservation observation, string root, CancellationToken token)
+        => RetainCore(observation, root, token, requiredUnscoredTest: false);
+
+    internal static CompilerRetainedRecipe RetainRequiredTest(CompilerObservation observation, string root, CancellationToken token)
+        => RetainCore(observation, root, token, requiredUnscoredTest: true);
+
+    private static CompilerRetainedRecipe RetainCore(CompilerObservation observation, string root, CancellationToken token,
+        bool requiredUnscoredTest)
     {
-        var profile = Classify(observation, root, token);
+        var profile = ClassifyCore(observation, root, token, requiredUnscoredTest);
         return new(observation.InvocationRecipe!, profile.IsSupported ? observation.CommandLineArguments.ToArray() : [],
             profile.IsSupported ? observation.EmitParameters.Select(input => new CompilerParameter(input.Name,
                 input.Items.Select(path => Resolve(path, observation.ProjectPath)).ToArray())).ToArray() : [], profile.UnsupportedReasons.ToArray());
@@ -280,6 +297,14 @@ internal static class CompilerRecipePayload
 
     internal static CompilerObservation Restore(CompilerRetainedRecipe retained, CompilerObservation prior, string root,
         ProjectContextSdkResolution selectedSdk, CancellationToken token)
+        => RestoreCore(retained, prior, root, selectedSdk, token, requiredUnscoredTest: false);
+
+    internal static CompilerObservation RestoreRequiredTest(CompilerRetainedRecipe retained, CompilerObservation prior, string root,
+        ProjectContextSdkResolution selectedSdk, CancellationToken token)
+        => RestoreCore(retained, prior, root, selectedSdk, token, requiredUnscoredTest: true);
+
+    private static CompilerObservation RestoreCore(CompilerRetainedRecipe retained, CompilerObservation prior, string root,
+        ProjectContextSdkResolution selectedSdk, CancellationToken token, bool requiredUnscoredTest)
     {
         token.ThrowIfCancellationRequested();
         if (retained.Observation is null || retained.KnownArguments is null || retained.EmitParameters is null || retained.UnsupportedReasons is null ||
@@ -297,7 +322,7 @@ internal static class CompilerRecipePayload
             CompilerImages = noImages ? [] : pool.Select((image, index) => new CompilerImageFile(image.Role, image.Path, identities[index].Length, identities[index].Sha256)).ToArray(),
             RetainedUnsupportedRecipe = retained.UnsupportedReasons.Count == 0 ? null : retained.UnsupportedReasons.ToArray()
         };
-        var profile = Classify(restored, root, token);
+        var profile = ClassifyCore(restored, root, token, requiredUnscoredTest);
         if (!profile.UnsupportedReasons.SequenceEqual(retained.UnsupportedReasons)) throw Refuse();
         return restored;
     }
@@ -356,6 +381,10 @@ internal static class CompilerRecipePayload
     private static bool Digest(string? value) => value is { Length: 64 } && value.All(char.IsAsciiHexDigitLower);
 
     internal static Projection ProjectArguments(CompilerObservation observation, string workspaceRoot, CancellationToken token)
+        => ProjectArgumentsCore(observation, workspaceRoot, token, requiredUnscoredTest: false);
+
+    private static Projection ProjectArgumentsCore(CompilerObservation observation, string workspaceRoot, CancellationToken token,
+        bool requiredUnscoredTest)
     {
         token.ThrowIfCancellationRequested();
         _ = CompilerRecipeObservation.Identities(observation.CommandLineArguments, token);
@@ -444,9 +473,9 @@ internal static class CompilerRecipePayload
             { roles.Add(new(ordinal, "source", sourceIndex++, null)); continue; }
             if (name is "out" or "refout" or "pdb")
             {
-                if (!SafeScalar(argument, name, value, observation, root)) throw Refuse();
+                if (!SafeScalar(argument, name, value, observation, root, requiredUnscoredTest)) throw Refuse();
             }
-            else if (!SafeScalar(argument, name, value, observation, root))
+            else if (!SafeScalar(argument, name, value, observation, root, requiredUnscoredTest))
             {
                 if (argument[0] != '/' || name.Length == 0) throw Refuse();
                 // A repeated known Unix source is an integrity mismatch, not
@@ -467,14 +496,17 @@ internal static class CompilerRecipePayload
             optional.Any(pair => indices[pair.Key] != pair.Value.Length) ||
             scalar.Count(argument => argument.StartsWith("/out:", StringComparison.Ordinal)) != 1 ||
             scalar.Count(argument => argument.StartsWith("/refout:", StringComparison.Ordinal)) != (observation.ReferenceAssembly is null ? 0 : 1)) throw Refuse();
+        var target = requiredUnscoredTest && scalar.Contains("/target:exe", StringComparer.Ordinal) ? "/target:exe" : "/target:library";
+        if (requiredUnscoredTest && scalar.Count(argument => argument.StartsWith("/target:", StringComparison.Ordinal)) != 1)
+            unsupported.Add("recipe.emitProfileUnsupported");
         if (!scalar.Contains("/noconfig", StringComparer.Ordinal) || !scalar.Contains("/nostdlib+", StringComparer.Ordinal) ||
-            !scalar.Contains("/target:library", StringComparer.Ordinal) || !scalar.Contains("/debug:portable", StringComparer.Ordinal) ||
+            !scalar.Contains(target, StringComparer.Ordinal) || !scalar.Contains("/debug:portable", StringComparer.Ordinal) ||
             !scalar.Contains("/deterministic+", StringComparer.Ordinal)) unsupported.Add("recipe.emitProfileUnsupported");
         return new(scalar.ToArray(), embedded, roles.ToArray(), unsupported.Order(StringComparer.Ordinal).ToArray());
         string[] Paths(string parameter) => observation.Parameters.SingleOrDefault(input => input.Name == parameter)?.Items.Select(path => Resolve(path, observation.ProjectPath)).ToArray() ?? [];
     }
 
-    private static bool SafeScalar(string argument, string name, string value, CompilerObservation observation, string root)
+    private static bool SafeScalar(string argument, string name, string value, CompilerObservation observation, string root, bool requiredUnscoredTest)
     {
         if (FlagArguments.Contains(argument)) return true;
         if (!argument.StartsWith('/')) return false;
@@ -487,7 +519,9 @@ internal static class CompilerRecipePayload
             case "define": return value.Length > 0 && value.Split([';', ',']).All(SyntaxFacts.IsValidIdentifier);
             case "nullable": return value is "enable" or "disable" or "warnings" or "annotations";
             case "debug": return value == "portable";
-            case "target": return value == "library";
+            case "target":
+                return value == "library" || requiredUnscoredTest && value == "exe" &&
+                observation.InvocationRecipe!.Options.SingleOrDefault(option => option.Name == "TargetType") is { Type: "enum", Value: "exe" };
             case "langversion": return CompilerRecipeObservation.SupportedLanguage(value);
             case "checksumalgorithm": return value is "SHA256" or "sha256" or "SHA1" or "sha1";
             case "features":

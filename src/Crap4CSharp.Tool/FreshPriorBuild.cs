@@ -35,7 +35,8 @@ internal static class FreshPriorBuild
     }
     internal sealed record Recipe(string Provider, string Workspace, string PhaseHash, SavedNode[] Nodes);
 
-    internal sealed record CapturePlan(Recipe Ordinary, IReadOnlyDictionary<string, CompilerObservation> Observations);
+    internal sealed record CapturePlan(Recipe Ordinary, IReadOnlyDictionary<string, CompilerObservation> Observations,
+        IReadOnlySet<string> RequiredUnscoredTests);
 
     internal static CapturePlan Prepare(FreshExecutionEvidence execution, CancellationToken token)
     {
@@ -84,16 +85,22 @@ internal static class FreshPriorBuild
             }
             selected[node.Id] = observed; optionalUsed += contribution;
         }
-        return new(ordinary, selected);
+        var requiredTests = execution.Plan.Tests.Select(test => test.GraphId).ToHashSet(StringComparer.Ordinal);
+        var requiredUnscoredTests = graph.GraphContexts.Where(binding => binding.IsTestProject &&
+            !binding.Context.ExclusionPolicy.IncludeTests && requiredTests.Contains(binding.GraphId))
+            .Select(binding => binding.GraphId).ToImmutableHashSet(StringComparer.Ordinal);
+        return new(ordinary, selected, requiredUnscoredTests);
     }
 
     // Exact delta of the nonnull compilerRecipe property on a SavedNode.
     // The wrapper adds two braces; the real node instead adds one comma.
-    internal static bool TryOptionalContribution(CompilerObservation observation, string root, CancellationToken token, out int contribution)
+    internal static bool TryOptionalContribution(CompilerObservation observation, string root, CancellationToken token, out int contribution,
+        bool requiredUnscoredTest = false)
     {
         contribution = 0;
         if (observation.InvocationRecipe is null) return true;
-        var retained = CompilerRecipePayload.Retain(observation, root, token);
+        var retained = requiredUnscoredTest ? CompilerRecipePayload.RetainRequiredTest(observation, root, token) :
+            CompilerRecipePayload.Retain(observation, root, token);
         if (!CompilerRecipeBudget.TrySerialize(new { compilerRecipe = retained }, Json, MaximumEnvelopeBytes, out var data)) return false;
         contribution = data.Length - 1;
         return contribution <= MaximumOptionalBytes;
@@ -108,7 +115,7 @@ internal static class FreshPriorBuild
         CancellationToken token, out ImmutableArray<byte> bytes)
     {
         token.ThrowIfCancellationRequested();
-        var retained = CompilerRecipePayload.Retain(observation, root, token);
+        var retained = CompilerRecipePayload.RetainRequiredTest(observation, root, token);
         if (!HasPathMap(observation) || retained.UnsupportedReasons.Count != 0) throw Refuse();
         var fits = CompilerRecipeBudget.TrySerialize(new
         { provider = "required-test-prior-compiler-v1", graphId, contextId, recipe = retained },
@@ -148,7 +155,12 @@ internal static class FreshPriorBuild
         {
             token.ThrowIfCancellationRequested();
             var observed = selected[node.Id];
-            return node with { CompilerRecipe = observed.InvocationRecipe is null ? null : CompilerRecipePayload.Retain(observed, root, token) };
+            return node with
+            {
+                CompilerRecipe = observed.InvocationRecipe is null ? null :
+                plan.RequiredUnscoredTests.Contains(node.Id) ? CompilerRecipePayload.RetainRequiredTest(observed, root, token) :
+                CompilerRecipePayload.Retain(observed, root, token)
+            };
         }).ToArray();
         var value = plan.Ordinary with { Nodes = nodes };
         if (!CompilerRecipeBudget.TrySerialize(value, Json, MaximumEnvelopeBytes, out var data)) throw Refuse();
@@ -250,7 +262,7 @@ internal static class FreshPriorBuild
                 var binding = graph.GraphContexts.Single(b => b.GraphId == saved.Id);
                 var excludedTest = binding.IsTestProject && !binding.Context.ExclusionPolicy.IncludeTests;
                 var sdk = graph.SelectedSdk ?? throw Refuse();
-                observation = RestoreCurrentRecipe(retained, observation, root, sdk, token);
+                observation = RestoreCurrentRecipe(retained, observation, root, sdk, token, requiredUnscoredTest: excludedTest);
                 if (excludedTest)
                 {
                     var id = "test-recipe-" + saved.Id;
@@ -285,11 +297,12 @@ internal static class FreshPriorBuild
     }
 
     internal static CompilerObservation RestoreCurrentRecipe(CompilerRetainedRecipe retained, CompilerObservation prior,
-        string root, ProjectContextSdkResolution sdk, CancellationToken token)
+        string root, ProjectContextSdkResolution sdk, CancellationToken token, bool requiredUnscoredTest = false)
     {
         // Validate even unsupported retained data before deciding whether any
         // current-image claim exists. Unsupported public DATA has no image files.
-        var restored = CompilerRecipePayload.Restore(retained, prior, root, sdk, token);
+        var restored = requiredUnscoredTest ? CompilerRecipePayload.RestoreRequiredTest(retained, prior, root, sdk, token) :
+            CompilerRecipePayload.Restore(retained, prior, root, sdk, token);
         if (retained.UnsupportedReasons.Count == 0 && retained.Observation.Images.Count != 0)
             RequireCurrentRecipeImages(retained.Observation.Images, sdk, token);
         return restored;

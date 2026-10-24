@@ -105,7 +105,7 @@ internal static class SavedCompilerContexts
                     // It never makes excluded tests scored or supplies image artifacts.
                     var testRecipe = optionalRecipes?.OptionalView(compiler, observation, root, token) ?? observation;
                     if (testRecipe.InvocationRecipe is not null && FreshPriorBuild.HasPathMap(testRecipe) &&
-                        CompilerRecipePayload.Classify(testRecipe, root, token).IsSupported)
+                        CompilerRecipePayload.ClassifyRequiredTest(testRecipe, root, token).IsSupported)
                     {
                         if (!FreshPriorBuild.TryCaptureTestRecipe(testRecipe, root, logicalIds[binding.GraphId],
                             binding.GraphId, token, out var testRecipeMetadata)) throw Refuse();
