@@ -108,8 +108,8 @@ internal static class SavedCompilerContexts
                         CompilerRecipePayload.Classify(testRecipe, root, token).IsSupported)
                     {
                         if (!FreshPriorBuild.TryCaptureTestRecipe(testRecipe, root, logicalIds[binding.GraphId],
-                            binding.GraphId, token, out var metadata)) throw Refuse();
-                        Artifact("test-recipe-" + binding.GraphId, FreshPriorBuild.TestRecipeKind, metadata, "json");
+                            binding.GraphId, token, out var testRecipeMetadata)) throw Refuse();
+                        Artifact("test-recipe-" + binding.GraphId, FreshPriorBuild.TestRecipeKind, testRecipeMetadata, "json");
                     }
                     continue;
                 }
