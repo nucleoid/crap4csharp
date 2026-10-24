@@ -96,9 +96,11 @@ internal sealed class CompilerDocumentBinding
             })
             throw Refuse();
         token.ThrowIfCancellationRequested();
-        // Only one literal scalar option enters Roslyn. Never pass the complete
-        // argv: Parse may otherwise open response/ruleset files or resolve inputs.
-        var parsed = CSharpCommandLineParser.Default.Parse(switches, directory, sdkDirectory: null);
+        // Only the selected scalar plus a fixed output marker enter Roslyn.
+        // The marker avoids the parser's no-source/no-output error; Parse does
+        // not emit it. Never pass the complete argv, response or ruleset inputs.
+        var parsed = CSharpCommandLineParser.Default.Parse(
+            switches.Append("/out:__crap_pathmap_validation.dll"), directory, sdkDirectory: null);
         if (parsed.Errors.Any(d => d.Severity == DiagnosticSeverity.Error) || parsed.PathMap.Length is < 1 or > 64 ||
             parsed.PathMap.Any(p => !Path.IsPathFullyQualified(p.Key) || string.IsNullOrEmpty(p.Value) || p.Value.Length > 4096 ||
                 !p.Value.StartsWith('/') || p.Value.Contains('\\') ||
