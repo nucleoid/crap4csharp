@@ -76,7 +76,8 @@ public sealed class FreshCollectorBoundaryTests
         var original = Directory.GetFiles(fixture.Path, "*", SearchOption.AllDirectories).ToDictionary(p => p, File.ReadAllBytes);
         var output = new StringWriter(); var errors = new StringWriter();
         var exit = await global::App.RunAsync(["check", "--project", "Tests/Tests.csproj", "--policy", "policy.json",
-            "--scope", "all", "--artifact-output", "bundle", "--format", "json", "--timeout-seconds", "300"],
+            "--scope", "all", "--artifact-output", "bundle", "--format", "json", "--timeout-seconds", "300",
+            .. (variant == "generator" ? new[] { "--include-generated" } : Array.Empty<string>())],
             fixture.Path, output, errors, TestContext.Current.CancellationToken);
         using var terminal = JsonDocument.Parse(output.ToString());
         var run = terminal.RootElement.GetProperty("run");
@@ -164,7 +165,7 @@ public sealed class FreshCollectorBoundaryTests
                 Assert.Contains(other.MetadataToken, represented);
                 Assert.True(exit == 0, errors + Environment.NewLine + output);
                 Assert.True(evaluation.GetProperty("decision").GetProperty("completed").GetBoolean());
-                Assert.Equal(2, evaluation.GetProperty("metrics").GetArrayLength());
+                Assert.Equal(variant == "generator" ? 3 : 2, evaluation.GetProperty("metrics").GetArrayLength());
                 var outcome = Assert.Single(run.GetProperty("testOutcomes").EnumerateArray());
                 Assert.Equal("completed", outcome.GetProperty("status").GetString());
                 Assert.Equal(0, outcome.GetProperty("exitCode").GetInt32());
@@ -181,21 +182,24 @@ public sealed class FreshCollectorBoundaryTests
         {
             var manifestPath = Path.Combine(fixture.Path, "bundle/manifest.json");
             var bundle = ArtifactBundle.Load(manifestPath, fixture.Path);
-            var generated = Assert.Single(Assert.Single(bundle.Manifest.Contexts).Inputs.Where(i => i.Generated && i.Role == "source"));
+            var generated = Assert.Single(Assert.Single(bundle.Manifest.Contexts).Inputs, i => i.Generated && i.Role == "source");
             Assert.Null(generated.RepositoryPath); // Virtual output is never committed-path authority.
+            Assert.StartsWith("<generated>/", generated.LogicalPath, StringComparison.Ordinal);
+            Assert.True(Assert.Single(bundle.Manifest.Contexts).IncludeGenerated);
+            Assert.Contains(generated.LogicalPath, CapturedEvaluationInputs.Read(bundle).Scope.Sources);
             Assert.Equal(generated.Sha256, CanonicalIdentity.Sha256(bundle.Bytes[generated.Locator].AsSpan()));
             var replayOutput = new StringWriter();
             Assert.Equal(0, await global::App.RunAsync(["analyze", "--reuse-artifacts", "bundle/manifest.json", "--format", "json"],
                 fixture.Path, replayOutput, new StringWriter(), TestContext.Current.CancellationToken));
             using var replay = JsonDocument.Parse(replayOutput.ToString());
-            Assert.Equal(2, replay.RootElement.GetProperty("evaluation").GetProperty("metrics").GetArrayLength());
+            Assert.Equal(3, replay.RootElement.GetProperty("evaluation").GetProperty("metrics").GetArrayLength());
             var priorOutput = new StringWriter(); var priorError = new StringWriter();
             var priorExit = await global::App.RunAsync(["check", "--project", "Tests/Tests.csproj", "--policy", "policy.json", "--scope", "all",
-                "--no-build", "--build-artifacts", "bundle/manifest.json", "--artifact-output", "bundle-prior", "--format", "json", "--timeout-seconds", "300"],
+                "--no-build", "--build-artifacts", "bundle/manifest.json", "--artifact-output", "bundle-prior", "--format", "json", "--timeout-seconds", "300", "--include-generated"],
                 fixture.Path, priorOutput, priorError, TestContext.Current.CancellationToken);
             Assert.True(priorExit == 0, priorError + Environment.NewLine + priorOutput);
             var prior = ArtifactBundle.Load(Path.Combine(fixture.Path, "bundle-prior/manifest.json"), fixture.Path);
-            var priorGenerated = Assert.Single(Assert.Single(prior.Manifest.Contexts).Inputs.Where(i => i.Generated && i.Role == "source"));
+            var priorGenerated = Assert.Single(Assert.Single(prior.Manifest.Contexts).Inputs, i => i.Generated && i.Role == "source");
             Assert.Equal(generated, priorGenerated);
             Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library/build-count.txt")));
             Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests/build-count.txt")));
