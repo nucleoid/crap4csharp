@@ -413,9 +413,7 @@ internal sealed class CompilerRetainedProof
     internal ProjectContextSdkResolution? FrozenSdk => request.FrozenSdk;
     // Recorded metadata only. The verified test entry must validate this
     // proof's own physical graph before using it to select collector settings.
-    internal bool HasRecordedPathMap => observations.Values.Any(observation =>
-        observation.CommandLineArguments.Any(argument => argument.Length > 1 &&
-            (argument[0] is '/' or '-') && argument[1..].StartsWith("pathmap:", StringComparison.OrdinalIgnoreCase)));
+    internal bool HasRecordedPathMap => observations.Values.Any(FreshPriorBuild.HasPathMap);
     private readonly ProjectContextLoadRequest request;
     private readonly ProjectContextLoadResult graph;
     private readonly CompilerPhaseSnapshot authored;
@@ -452,7 +450,18 @@ internal sealed class CompilerRetainedProof
         var selected = bindings.Where(binding => binding.GraphId == graphId ||
             references.Contains(binding.Context.EvaluatedReferenceAssemblyPath!)).ToArray();
         if (selected.Length != references.Count + 1) throw Refuse();
-        return Array.AsReadOnly(selected.Select(binding => binding.Context.AssemblyName).ToArray());
+        return Array.AsReadOnly(selected.Select(binding =>
+        {
+            if (!observations.TryGetValue(binding.GraphId, out var recorded) || recorded.Assembly is null)
+                throw Refuse();
+            // Coverlet filters the module filename. Use this proof's original
+            // validated compiler output, never caller-replaceable result DATA.
+            var stem = Path.GetFileNameWithoutExtension(recorded.Assembly.Path);
+            if (stem != binding.Context.AssemblyName)
+                throw new ProjectContextException("test.collectorAssemblyNameUnsupported",
+                    "Mapped collector requires the recorded output filename stem to equal its validated assembly name.");
+            return stem;
+        }).ToArray());
     }
 
     internal void ValidateCurrent(CancellationToken token) => Validate(graph, token);

@@ -4,6 +4,10 @@ using Microsoft.CodeAnalysis.CSharp;
 
 namespace Crap4CSharp.Core;
 
+internal sealed record CompilerDocumentPathMapPair(string SourcePrefix, string DestinationPrefix);
+internal sealed record CompilerDocumentPathMap(string TaskAssociationSha256,
+    ImmutableArray<CompilerDocumentPathMapPair> Pairs);
+
 // Private association from the actual same-task compiler argv to independently
 // enumerated and hash-bound physical sources. Never opens a PDB-reported path.
 internal sealed class CompilerDocumentBinding
@@ -29,7 +33,7 @@ internal sealed class CompilerDocumentBinding
         CompilerRecipeObservation.RequireKnownIntegrity(observation, token);
         var comparer = PathIdentityPolicy.Current.Comparer;
         var directory = Path.GetDirectoryName(Path.GetFullPath(context.ResolvedProjectPath!))!;
-        var maps = ParsePathMap(observation, directory, token);
+        var maps = RequirePathMap(observation, directory, token);
         var resolver = new SourceFileResolver(ImmutableArray<string>.Empty, directory, maps);
         var expected = new Dictionary<string, ProjectSourceIdentity>(maps.IsEmpty ? comparer : StringComparer.Ordinal);
         var aliases = new Dictionary<string, ProjectSourceIdentity>(comparer);
@@ -80,6 +84,71 @@ internal sealed class CompilerDocumentBinding
 
     internal string PhysicalPathForReport(string name)
         => byAlias.TryGetValue(name.Replace('\\', '/'), out var source) ? source.ResolvedPath! : throw Refuse();
+
+    internal static CompilerDocumentPathMap? CapturePathMap(CompilerObservation observation, CancellationToken token)
+    {
+        CompilerRecipeObservation.RequireKnownIntegrity(observation, token);
+        var directory = Path.GetDirectoryName(Path.GetFullPath(observation.ProjectPath))!;
+        var pairs = ParsePathMap(observation, directory, token);
+        if (pairs.IsEmpty) return null;
+        var sourceParameters = observation.Parameters.Where(parameter => parameter.Name == "Sources").ToArray();
+        if (sourceParameters.Length != 1 || sourceParameters[0].Items.Count == 0) throw Refuse();
+        var sources = sourceParameters[0].Items.Select(source => Path.GetFullPath(source, directory)).ToArray();
+        // Preserve the exact order of effective mappings. Unused SDK SourceRoot
+        // entries need not persist a foreign absolute prefix. Prove they are
+        // inert using Roslyn itself over EVERY actual same-task source before
+        // omitting them; do not infer resolver matching from a prefix heuristic.
+        var effective = pairs.Where(pair => sources.Any(source =>
+        {
+            var relative = Path.GetRelativePath(Path.TrimEndingDirectorySeparator(pair.Key), source);
+            return relative != ".." && !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) && !Path.IsPathRooted(relative);
+        })).ToImmutableArray();
+        var full = new SourceFileResolver(ImmutableArray<string>.Empty, directory, pairs);
+        var reduced = new SourceFileResolver(ImmutableArray<string>.Empty, directory, effective);
+        foreach (var source in sources)
+        {
+            var actualName = full.NormalizePath(source, null) ?? throw Refuse();
+            if (actualName != reduced.NormalizePath(source, null)) throw Refuse();
+        }
+        if (effective.IsEmpty) return null;
+        return new(observation.InvocationRecipe!.TaskAssociationSha256,
+            effective.Select(pair => new CompilerDocumentPathMapPair(pair.Key, pair.Value)).ToImmutableArray());
+    }
+
+    internal static bool SamePathMap(CompilerDocumentPathMap? first, CompilerDocumentPathMap? second)
+        => first is null ? second is null : second is not null &&
+            first.TaskAssociationSha256 == second.TaskAssociationSha256 && first.Pairs.SequenceEqual(second.Pairs);
+
+    internal static ImmutableArray<KeyValuePair<string, string>> RequirePathMap(CompilerObservation observation,
+        string directory, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var map = observation.DocumentPathMap;
+        if (map is null) return ParsePathMap(observation, directory, token);
+        ValidatePathMap(map, token);
+        if (observation.InvocationRecipe is { } recipe && recipe.TaskAssociationSha256 != map.TaskAssociationSha256)
+            throw Refuse();
+        // Raw argv, when retained, must assert exactly the same mandatory map.
+        // Unsupported/absent optional recipes never supply or alter this record.
+        if (observation.CommandLineArguments.Count != 0 && !SamePathMap(map, CapturePathMap(observation, token)))
+            throw Refuse();
+        return map.Pairs.Select(pair => new KeyValuePair<string, string>(pair.SourcePrefix, pair.DestinationPrefix)).ToImmutableArray();
+    }
+
+    internal static void ValidatePathMap(CompilerDocumentPathMap map, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        if (map.TaskAssociationSha256 is not { Length: 64 } || !map.TaskAssociationSha256.All(char.IsAsciiHexDigitLower) ||
+            map.Pairs.IsDefaultOrEmpty || map.Pairs.Length > 64 || map.Pairs.Any(pair => pair is null ||
+                string.IsNullOrEmpty(pair.SourcePrefix) || pair.SourcePrefix.Length > 4096 ||
+                !Path.IsPathFullyQualified(pair.SourcePrefix) || Path.GetFullPath(pair.SourcePrefix) != pair.SourcePrefix ||
+                pair.SourcePrefix.Any(char.IsControl) || string.IsNullOrEmpty(pair.DestinationPrefix) ||
+                pair.DestinationPrefix.Length > 4096 || !pair.DestinationPrefix.StartsWith('/') ||
+                pair.DestinationPrefix.Contains('\\') || pair.DestinationPrefix.Any(char.IsControl) ||
+                pair.DestinationPrefix.Split('/').Any(segment => segment is "." or "..")) ||
+            map.Pairs.Select(pair => pair.SourcePrefix).Distinct(StringComparer.Ordinal).Count() != map.Pairs.Length)
+            throw Refuse();
+    }
 
     private static ImmutableArray<KeyValuePair<string, string>> ParsePathMap(CompilerObservation observation,
         string directory, CancellationToken token)

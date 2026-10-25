@@ -39,7 +39,7 @@ internal static class CompilerBinlogReader
             }
             if (value.TaskName != "Csc") return;
             if (tasks.Count >= 16 || !tasks.TryAdd(Key(value.BuildEventContext), new Observation(value.ProjectFile)
-                { Recipe = new(request.SdkPath, request.HostPath, Key(value.BuildEventContext), value.TaskFile) }))
+            { Recipe = new(request.SdkPath, request.HostPath, Key(value.BuildEventContext), value.TaskFile) }))
                 throw new ProjectContextException("compiler.associationInvalid", "Unexpected compiler task association.");
         };
         events.TaskFinished += (_, value) =>
@@ -157,11 +157,16 @@ internal static class CompilerBinlogReader
                 runtime.Add(new(Path.GetFullPath(source[i], Path.GetDirectoryName(request.ProjectPath)!),
                     Path.GetFullPath(destination[i], Path.GetDirectoryName(request.ProjectPath)!)));
         }
-        var result = new CompilerObservation(request.ProjectPath, task.Parameters) { RuntimeCopies = runtime, InvocationRecipe = task.Recipe?.Finish(),
-            CommandLineArguments = task.Recipe?.RawArguments ?? [], EmitParameters = task.Recipe?.SizeDeclined == true ? [] : task.EmitParameters.ToArray(),
-            CommandRouteDiagnostic = task.Recipe?.CommandRouteDiagnostic };
+        var result = new CompilerObservation(request.ProjectPath, task.Parameters)
+        {
+            RuntimeCopies = runtime,
+            InvocationRecipe = task.Recipe?.Finish(),
+            CommandLineArguments = task.Recipe?.RawArguments ?? [],
+            EmitParameters = task.Recipe?.SizeDeclined == true ? [] : task.EmitParameters.ToArray(),
+            CommandRouteDiagnostic = task.Recipe?.CommandRouteDiagnostic
+        };
         CompilerRecipeObservation.RequireKnownIntegrity(result, token);
-        return result;
+        return result with { DocumentPathMap = CompilerDocumentBinding.CapturePathMap(result, token) };
     }
 
     private sealed class Observation(string? project)

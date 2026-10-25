@@ -22,6 +22,9 @@ internal sealed record CompilerObservation(string ProjectPath, IReadOnlyList<Com
     internal CompilerOutput? ReferenceAssembly { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public CompilerInvocationObservation? InvocationRecipe { get; init; }
+    // Mandatory same-task document naming, independent of optional recipe retention.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public CompilerDocumentPathMap? DocumentPathMap { get; init; }
     // Raw argv stays in private worker transport. The exporter admits each known
     // scalar/role before serialization; unknown option values are never exported.
     [JsonIgnore]
@@ -98,11 +101,16 @@ internal static class CompilerEvidence
         var closingImages = await CaptureCompilerImages(sdk, token);
         var imageUnsupported = CompilerImageDisposition(compilerImages, closingImages, observation.InvocationRecipe);
         if (observation.InvocationRecipe is { } recipe)
-            observation = observation with { InvocationRecipe = recipe with
-                { Images = imageUnsupported is null ? compilerImages.Files.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() : [],
+            observation = observation with
+            {
+                InvocationRecipe = recipe with
+                {
+                    Images = imageUnsupported is null ? compilerImages.Files.Select(image => new CompilerImageIdentity(image.Role, image.Length, image.Sha256)).ToArray() : [],
                     UnsupportedReasons = imageUnsupported is null ? recipe.UnsupportedReasons :
-                        recipe.UnsupportedReasons.Append(imageUnsupported).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray() },
-                CompilerImages = imageUnsupported is null ? compilerImages.Files : [] };
+                        recipe.UnsupportedReasons.Append(imageUnsupported).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray()
+                },
+                CompilerImages = imageUnsupported is null ? compilerImages.Files : []
+            };
         using var outputTiming = timing?.Start("execution.build.outputs");
         var output = observation.Parameters.Single(p => p.Name == "OutputAssembly").Items.Single();
         var assembly = Path.GetFullPath(output, Path.GetDirectoryName(node.ProjectPath)!);
@@ -111,8 +119,12 @@ internal static class CompilerEvidence
             throw new ProjectContextException("compiler.referenceOutputUnproven", "Actual reference output association is unsupported.");
         var reference = referenceParameters.Length == 0 ? null :
             await HashOutput(Path.GetFullPath(referenceParameters[0].Items[0], Path.GetDirectoryName(node.ProjectPath)!), token);
-        return observation with { Assembly = await HashOutput(assembly, token),
-            Pdb = await HashOutput(Path.ChangeExtension(assembly, ".pdb"), token), ReferenceAssembly = reference };
+        return observation with
+        {
+            Assembly = await HashOutput(assembly, token),
+            Pdb = await HashOutput(Path.ChangeExtension(assembly, ".pdb"), token),
+            ReferenceAssembly = reference
+        };
     }
 
     internal static async Task<CompilerObservation> ReadAsync(string binlog, string project, TimeSpan timeout,
@@ -136,7 +148,8 @@ internal static class CompilerEvidence
             var request = Path.Combine(scratch, "request.json");
             var response = Path.Combine(scratch, "response.json");
             await File.WriteAllTextAsync(request, JsonSerializer.Serialize(new CompilerReadRequest(sdk.Path,
-                Path.GetFullPath(binlog), Path.GetFullPath(project)) { HostPath = sdk.HostPath }, ProjectContextLoader.JsonOptions), token);
+                Path.GetFullPath(binlog), Path.GetFullPath(project))
+            { HostPath = sdk.HostPath }, ProjectContextLoader.JsonOptions), token);
             var process = await ProcessRunner.RunProtocolAsync(sdk.HostPath,
                 [typeof(CompilerEvidence).Assembly.Location, Command, request, response], Path.GetDirectoryName(project)!, timeout,
                 token, maximumBytesPerStream: 4096);
@@ -146,8 +159,12 @@ internal static class CompilerEvidence
             if (result?.FailureReason is { } reason) throw new ProjectContextException(reason, "Actual compiler evidence was refused.");
             if (process.ExitCode != 0 || result?.Observation is null)
                 throw new ProjectContextException("compiler.protocolInvalid", "Compiler worker failed.");
-            return result.Observation with { CommandLineArguments = result.CommandLineArguments ?? [], EmitParameters = result.EmitParameters ?? [],
-                CommandRouteDiagnostic = CompilerRecipeObservation.NormalizeCommandRouteDiagnostic(result.CommandRouteDiagnostic) };
+            return result.Observation with
+            {
+                CommandLineArguments = result.CommandLineArguments ?? [],
+                EmitParameters = result.EmitParameters ?? [],
+                CommandRouteDiagnostic = CompilerRecipeObservation.NormalizeCommandRouteDiagnostic(result.CommandRouteDiagnostic)
+            };
         }
         finally { Directory.Delete(scratch, true); }
     }

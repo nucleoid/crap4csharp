@@ -13,6 +13,17 @@ public sealed class FreshCheckExecutionTests
     public Task Actual_promoted_writer_preserves_mandatory_proof_under_fixture_optional_DATA_loss(string loss)
         => RunCase(false, true, policyScope: "all", local: true, optionalRecipeLoss: loss);
 
+    [Theory]
+    [InlineData("Library")]
+    [InlineData("Tests")]
+    public Task Actual_mapped_unsupported_recipe_survives_saved_and_prior_reuse(string project)
+        => RunCase(false, false, policyScope: "all", local: true, completedReuse: true,
+            priorBuild: true, pathMapped: true, mappedUnsupportedRecipeProject: project);
+
+    [Fact]
+    public Task Actual_mapped_optional_absence_survives_writer_saved_and_prior_reuse()
+        => RunCase(false, true, policyScope: "all", local: true, pathMapped: true, optionalRecipeLoss: "absence");
+
     [Fact]
     public Task IncludedCompletedTestOutcomeJoinsPublicScoredContext()
         // Exercise the real managed SDK/build/test/coverage route; native SDK
@@ -563,19 +574,35 @@ public sealed class FreshCheckExecutionTests
         Assert.Equal(1, calls); Assert.Equal(0, terminal.Result.Run.ExitCode);
         Assert.True(File.Exists(Path.Combine(root, "bundle", "manifest.json")));
         Assert.Throws<InvalidOperationException>(() => { _ = prepared.CompleteAtWriterAsync(_ => throw new InvalidOperationException("Never retry writer.")); });
+        if (original.DocumentPathMap is not null)
+        {
+            var published = ArtifactBundle.Load(Path.Combine(root, "bundle", "manifest.json"), root);
+            var current = await SavedCompletedProof.ValidateAsync(published, evidence.Preflight, token);
+            Assert.All(current.Observations.Where(item => item.DocumentPathMap is not null), item =>
+                CompilerDocumentBinding.ValidatePathMap(item.DocumentPathMap!, token));
+            var priorOutput = new StringWriter(); var priorErrors = new StringWriter();
+            var priorExit = await global::App.RunAsync(["check", "--project", request.Project!, "--policy", request.PolicyPath,
+                "--scope", "all", "--no-build", "--build-artifacts", "bundle/manifest.json",
+                "--artifact-output", "bundle-prior", "--format", "json", "--timeout-seconds", "180"],
+                root, priorOutput, priorErrors, token);
+            Assert.True(priorExit == 0, priorErrors + Environment.NewLine + priorOutput);
+            Assert.Single(File.ReadAllLines(Path.Combine(root, "Library", "build-count.txt")));
+            Assert.Single(File.ReadAllLines(Path.Combine(root, "Tests", "build-count.txt")));
+        }
         // Canonical optional DATA fault only: the real SDK, raw original Csc/task
         // argv, mandatory sources/outputs/tests/proof were never changed or rerun.
     }
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false, bool warmPostBuild = false, bool warmSaved = false, bool warmSavedEligibility = false, bool nativeSdkIdentity = global::App.DefaultNativeSdkIdentity, bool privateArtifactOnly = false, bool aliasedReference = false, bool localIncremental = false, bool lateLocalJson = false, string? writerProbe = null, bool writerOrdering = false, bool includeTests = false, string? optionalRecipeLoss = null, bool pathMapped = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false, bool warmPostBuild = false, bool warmSaved = false, bool warmSavedEligibility = false, bool nativeSdkIdentity = global::App.DefaultNativeSdkIdentity, bool privateArtifactOnly = false, bool aliasedReference = false, bool localIncremental = false, bool lateLocalJson = false, string? writerProbe = null, bool writerOrdering = false, bool includeTests = false, string? optionalRecipeLoss = null, bool pathMapped = false, string? mappedUnsupportedRecipeProject = null)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
         using var cleanupFixture = pathMapped ? null : fixture;
         if (pathMapped) TestContext.Current.TestOutputHelper!.WriteLine("RETAINED_MAPPED_FIXTURE " + fixture.Path);
         if (pathMapped)
-            fixture.Write("Directory.Build.props", "<Project><PropertyGroup><PathMap>$(MSBuildThisFileDirectory)=/_/</PathMap></PropertyGroup></Project>");
+            fixture.Write("Directory.Build.props", "<Project><PropertyGroup><PathMap>$(MSBuildThisFileDirectory)=/_/</PathMap></PropertyGroup>" +
+                (mappedUnsupportedRecipeProject is null ? "" : "<PropertyGroup Condition=\"'$(MSBuildProjectName)' == '" + mappedUnsupportedRecipeProject + "'\"><GenerateDocumentationFile>true</GenerateDocumentationFile></PropertyGroup>") + "</Project>");
         if (outputLayout is not null)
             fixture.Write("Directory.Build.props", outputLayout == "artifacts"
                 ? "<Project><PropertyGroup><UseArtifactsOutput>true</UseArtifactsOutput><ArtifactsPath>$(MSBuildThisFileDirectory)artifacts</ArtifactsPath></PropertyGroup></Project>"
@@ -1708,7 +1735,7 @@ public sealed class FreshCheckExecutionTests
                 }
                 if (contextOnly)
                 {
-                    var imported = FreshPriorBuild.Load(bundle, currentPlan.PreparedGraph, fixture.Path, token);
+                    var imported = FreshPriorBuild.Load(bundle, currentPlan.PreparedGraph, fixture.Path, token, currentPlan.Tests.Select(test => test.GraphId).ToHashSet(StringComparer.Ordinal));
                     // A matching public selector never authorizes prior evidence in
                     // another physical workspace. The original import above is the
                     // positive control, so unrelated missing inputs cannot pass this.
@@ -1720,7 +1747,7 @@ public sealed class FreshCheckExecutionTests
                             Assert.Equal(LogicalContextIdentity.Create(fixture.Path, node), LogicalContextIdentity.Create(foreign.Path, relocated));
                         }
                         Assert.Equal("check.priorBuildInvalid", Assert.Throws<PolicyException>(() =>
-                            FreshPriorBuild.Load(bundle, currentPlan.PreparedGraph, foreign.Path, token)).Code);
+                            FreshPriorBuild.Load(bundle, currentPlan.PreparedGraph, foreign.Path, token, currentPlan.Tests.Select(test => test.GraphId).ToHashSet(StringComparer.Ordinal))).Code);
                     }
                     var currentCompiler = await CompilerGraphExecution.RunBoundAsync(reloadRequest, currentPlan.PreparedGraph,
                         (node, cancellation) => { cancellation.ThrowIfCancellationRequested(); return Task.FromResult(imported[node.Id]); }, token);
@@ -1736,7 +1763,12 @@ public sealed class FreshCheckExecutionTests
                     var method = typeof(CoverageGraphBinding).GetMethod("ValidateSavedNormalized",
                         System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
                     Assert.NotNull(method);
-                    var imported = FreshPriorBuild.Load(bundle, currentPlan.PreparedGraph, fixture.Path, token);
+                    var imported = FreshPriorBuild.Load(bundle, currentPlan.PreparedGraph, fixture.Path, token, currentPlan.Tests.Select(test => test.GraphId).ToHashSet(StringComparer.Ordinal));
+                    if (pathMapped && bundle.Manifest.Artifacts.Any(artifact => artifact.Kind == FreshPriorBuild.TestRecipeKind))
+                        Assert.Equal("check.priorBuildInvalid", Assert.Throws<PolicyException>(() =>
+                            FreshPriorBuild.Load(bundle, currentPlan.PreparedGraph, fixture.Path, token,
+                                new HashSet<string>(StringComparer.Ordinal))).Code);
+
                     var currentCompiler = await CompilerGraphExecution.RunBoundAsync(reloadRequest, currentPlan.PreparedGraph,
                         (node, cancellation) => { cancellation.ThrowIfCancellationRequested(); return Task.FromResult(imported[node.Id]); }, token);
                     object Validate(ArtifactBundle candidate)
@@ -2012,7 +2044,7 @@ public sealed class FreshCheckExecutionTests
                     Assert.NotNull(type);
                     var method = type.GetMethod("Validate", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
                     Assert.NotNull(method);
-                    var imported = FreshPriorBuild.Load(bundle, currentPlan.PreparedGraph, fixture.Path, token);
+                    var imported = FreshPriorBuild.Load(bundle, currentPlan.PreparedGraph, fixture.Path, token, currentPlan.Tests.Select(test => test.GraphId).ToHashSet(StringComparer.Ordinal));
                     var currentCompiler = await CompilerGraphExecution.RunBoundAsync(reloadRequest, currentPlan.PreparedGraph,
                         (node, cancellation) => { cancellation.ThrowIfCancellationRequested(); return Task.FromResult(imported[node.Id]); }, token);
                     void Validate(ArtifactBundle candidate)
@@ -2709,6 +2741,17 @@ public sealed class FreshCheckExecutionTests
                     outcome => Assert.DoesNotContain(outcome.GetProperty("contextId").GetString(), physicalTestIds));
             }
             Assert.Contains(bundle.Manifest.Artifacts, a => a.Kind == "test-child-build");
+            if (mappedUnsupportedRecipeProject is not null)
+            {
+                var graphArtifact = Assert.Single(bundle.Manifest.Artifacts, artifact => artifact.Kind == FreshPriorBuild.Kind);
+                using var graphData = JsonDocument.Parse(bundle.Bytes[graphArtifact.Locator].ToArray());
+                var mappedNodes = graphData.RootElement.GetProperty("nodes").EnumerateArray().ToArray();
+                Assert.All(mappedNodes, node => Assert.True(node.TryGetProperty("documentPathMap", out _)));
+                if (mappedUnsupportedRecipeProject == "Library")
+                    Assert.Single(bundle.Manifest.Artifacts, artifact => artifact.Kind == CompilerRecipePayload.UnsupportedKind);
+                else
+                    Assert.DoesNotContain(bundle.Manifest.Artifacts, artifact => artifact.Kind == FreshPriorBuild.TestRecipeKind);
+            }
             Assert.DoesNotContain(bundle.Manifest.Artifacts, a => a.Kind == "binlog");
             if (thresholdViolation)
             {
@@ -2977,16 +3020,18 @@ public sealed class FreshCheckExecutionTests
                 Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(secondBundle.Manifest, secondBundle.Bytes).Status);
                 // Public App.RunAsync does not expose the first compiler observation here.
                 // Inspect only existing, bounded bundle DATA; this cannot establish a command route.
-                var inputRecipePresent = bundle.Manifest.Artifacts.Count(artifact => artifact.Kind == CompilerRecipePayload.Kind) == 1;
+                var expectedRecipeKind = mappedUnsupportedRecipeProject == "Library" ? CompilerRecipePayload.UnsupportedKind : CompilerRecipePayload.Kind;
+                var inputRecipePresent = bundle.Manifest.Artifacts.Count(artifact => artifact.Kind == expectedRecipeKind) == 1;
                 Assert.True(inputRecipePresent, inputRecipePresent ? null : BundleRecipeDiagnostic(bundle));
-                var inputRecipe = Assert.Single(bundle.Manifest.Artifacts, artifact => artifact.Kind == CompilerRecipePayload.Kind);
-                var importedRecipePresent = secondBundle.Manifest.Artifacts.Count(artifact => artifact.Kind == CompilerRecipePayload.Kind) == 1;
+                var inputRecipe = Assert.Single(bundle.Manifest.Artifacts, artifact => artifact.Kind == expectedRecipeKind);
+                var importedRecipePresent = secondBundle.Manifest.Artifacts.Count(artifact => artifact.Kind == expectedRecipeKind) == 1;
                 Assert.True(importedRecipePresent, importedRecipePresent ? null : BundleRecipeDiagnostic(secondBundle));
-                var importedRecipe = Assert.Single(secondBundle.Manifest.Artifacts, artifact => artifact.Kind == CompilerRecipePayload.Kind);
+                var importedRecipe = Assert.Single(secondBundle.Manifest.Artifacts, artifact => artifact.Kind == expectedRecipeKind);
                 Assert.Equal(inputRecipe.ContextId, importedRecipe.ContextId); Assert.Equal(inputRecipe.BuildId, importedRecipe.BuildId);
                 Assert.Equal(bundle.Bytes[inputRecipe.Locator], secondBundle.Bytes[importedRecipe.Locator]);
                 var recipeFiles = bundle.Manifest.Artifacts.Where(artifact => artifact.Kind is CompilerRecipePayload.ImageKind or CompilerRecipePayload.ClosureKind).ToArray();
-                Assert.Equal(2, recipeFiles.Count(artifact => artifact.Kind == CompilerRecipePayload.ImageKind));
+                Assert.Equal(expectedRecipeKind == CompilerRecipePayload.Kind ? 2 : 0,
+                    recipeFiles.Count(artifact => artifact.Kind == CompilerRecipePayload.ImageKind));
                 Assert.All(recipeFiles, artifact =>
                 {
                     var restored = Assert.Single(secondBundle.Manifest.Artifacts, item => item.Id == artifact.Id);

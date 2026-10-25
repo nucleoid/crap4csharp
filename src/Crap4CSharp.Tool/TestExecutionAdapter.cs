@@ -181,7 +181,8 @@ internal static class TestExecutionAdapter
             if (string.IsNullOrEmpty(name) || name.Length > 256 ||
                 name.Any(character => !((character is >= 'a' and <= 'z') || (character is >= 'A' and <= 'Z') ||
                     (character is >= '0' and <= '9') || character is '_' or '.')) || !names.Add(name))
-                throw Refuse("Collector closure contains an unsupported or ambiguous assembly name.");
+                throw new ProjectContextException("test.collectorAssemblyNameUnsupported",
+                    "Mapped collector assembly literals require ASCII letters, digits, underscore or dot, with no case-insensitive duplicates.");
             var filter = "[" + name + "]*";
             length += filter.Length + (filters.Count == 0 ? 0 : 1);
             if (length > 16 * 1024) throw Refuse("Collector closure filter exceeds its finite argument bound.");

@@ -15,8 +15,12 @@ internal static class CompilerEvidenceBootstrap
                 ?? throw new InvalidDataException();
             MSBuildLocator.RegisterMSBuildPath(request.SdkPath);
             var observed = CompilerBinlogReader.Read(request, token);
-            response = new(observed, null) { CommandLineArguments = observed.CommandLineArguments, EmitParameters = observed.EmitParameters,
-                CommandRouteDiagnostic = observed.CommandRouteDiagnostic };
+            response = new(observed, null)
+            {
+                CommandLineArguments = observed.CommandLineArguments,
+                EmitParameters = observed.EmitParameters,
+                CommandRouteDiagnostic = observed.CommandRouteDiagnostic
+            };
         }
         catch (OperationCanceledException) { response = new(null, "compiler.cancelled"); }
         catch (ProjectContextException exception) { response = new(null, exception.Reason); }
@@ -30,7 +34,16 @@ internal static class CompilerEvidenceBootstrap
         int maximumBytes = CompilerEvidence.MaximumTransportBytes)
     {
         token.ThrowIfCancellationRequested();
-        if (response.Observation is { } original) CompilerRecipeObservation.RequireKnownIntegrity(original, token);
+        if (response.Observation is { } original)
+        {
+            CompilerRecipeObservation.RequireKnownIntegrity(original, token);
+            if (original.DocumentPathMap is { } map)
+            {
+                CompilerDocumentBinding.ValidatePathMap(map, token);
+                _ = CompilerDocumentBinding.RequirePathMap(original,
+                    Path.GetDirectoryName(Path.GetFullPath(original.ProjectPath))!, token);
+            }
+        }
         // First preserve the complete mandatory observation under its existing
         // transport bound. Optional argv must not consume that capacity.
         var fits = CompilerRecipeBudget.TrySerialize(response, ProjectContextLoader.JsonOptions, maximumBytes, out var bytes);

@@ -27,11 +27,15 @@ internal static class FreshPriorBuild
     internal sealed record SavedReferenceProperties(SavedPath Item, string? Aliases, bool EmbedInteropTypes);
     internal sealed record SavedOutput(SavedPath Path, string Sha256, long Length);
     internal sealed record SavedCopy(SavedPath Source, SavedPath Destination);
+    internal sealed record SavedMapPair(SavedPath Source, bool TrailingSeparator, string Destination);
+    internal sealed record SavedMap(string TaskAssociationSha256, SavedMapPair[] Pairs);
     internal sealed record SavedNode(string Id, SavedParameter[] Parameters, SavedOutput Assembly,
         SavedOutput Pdb, SavedOutput? ReferenceAssembly, SavedCopy[] Copies)
     {
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public CompilerRetainedRecipe? CompilerRecipe { get; init; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public SavedMap? DocumentPathMap { get; init; }
     }
     internal sealed record Recipe(string Provider, string Workspace, string PhaseHash, SavedNode[] Nodes);
 
@@ -46,6 +50,7 @@ internal static class FreshPriorBuild
         var targets = graph.GraphContexts.Select(b => b.Context.EvaluatedTargetPath!)
             .ToHashSet(PathIdentityPolicy.Current.Comparer);
         var observations = execution.Compiler.ByGraphId();
+        var mapPrefixes = observations.Values.Any(HasPathMap) ? CreateMapPrefixPool(graph, root, token) : null;
         SavedOutput Output(CompilerOutput output) => new(SavePath(root, output.Path), output.Sha256, output.Length);
         var nodes = graph.BuildGraph.Select(node =>
         {
@@ -62,7 +67,8 @@ internal static class FreshPriorBuild
                 Output(observed.Assembly ?? throw Refuse()), Output(observed.Pdb ?? throw Refuse()),
                 observed.ReferenceAssembly is null ? null : Output(observed.ReferenceAssembly),
                 observed.RuntimeCopies.Where(c => targets.Contains(c.Source))
-                    .Select(c => new SavedCopy(SavePath(root, c.Source), SavePath(root, c.Destination))).ToArray());
+                    .Select(c => new SavedCopy(SavePath(root, c.Source), SavePath(root, c.Destination))).ToArray())
+            { DocumentPathMap = SaveMap(observed.DocumentPathMap ?? CompilerDocumentBinding.CapturePathMap(observed, token), root, mapPrefixes, token) };
         }).ToArray();
         var ordinary = new Recipe(Provider, PathKey(root), Fingerprint(graph, token), nodes);
         if (!CompilerRecipeBudget.TrySerialize(ordinary, Json, MaximumBytes, out _)) throw Refuse();
@@ -108,7 +114,7 @@ internal static class FreshPriorBuild
 
     // Metadata only for an excluded required test: this is not a scored public
     // compiler recipe or authority to load an image. Existing optional ledgers own it.
-    internal static bool HasPathMap(CompilerObservation observation) => observation.CommandLineArguments.Any(argument =>
+    internal static bool HasPathMap(CompilerObservation observation) => observation.DocumentPathMap is not null || observation.CommandLineArguments.Any(argument =>
         argument.Length > 1 && (argument[0] is '/' or '-') && argument[1..].StartsWith("pathmap:", StringComparison.OrdinalIgnoreCase));
 
     internal static bool TryCaptureTestRecipe(CompilerObservation observation, string root, string contextId, string graphId,
@@ -176,7 +182,7 @@ internal static class FreshPriorBuild
     }
 
     internal static IReadOnlyDictionary<string, CompilerObservation> Load(ArtifactBundle bundle,
-        ProjectContextLoadResult graph, string root, CancellationToken token)
+        ProjectContextLoadResult graph, string root, CancellationToken token, IReadOnlySet<string>? currentRequiredTests = null)
     {
         token.ThrowIfCancellationRequested();
         if (ProvenanceVerifier.VerifyCapture(bundle.Manifest, bundle.Bytes).Status != ProvenanceStatus.Captured)
@@ -203,6 +209,8 @@ internal static class FreshPriorBuild
                 .Concat(b.Context.CompilerDocuments.Select(d => d.ResolvedPath!))
                 .Concat(b.Context.ProtectedPaths)).Distinct(PathIdentityPolicy.Current.Comparer)
             .ToDictionary(PathKey, p => p, StringComparer.Ordinal);
+        var prefixPool = recipe.Nodes.Any(node => node.DocumentPathMap is not null)
+            ? CreateMapPrefixPool(graph, root, token) : new Dictionary<string, string>(StringComparer.Ordinal);
         string Resolve(SavedPath path)
         {
             token.ThrowIfCancellationRequested();
@@ -252,6 +260,7 @@ internal static class FreshPriorBuild
             var observation = new CompilerObservation(node.ProjectPath, parameters)
             {
                 GraphId = node.Id,
+                DocumentPathMap = RestoreMap(saved.DocumentPathMap, prefixPool, root, token),
                 Assembly = Output(saved.Assembly),
                 Pdb = Output(saved.Pdb),
                 ReferenceAssembly = saved.ReferenceAssembly is null ? null : Output(saved.ReferenceAssembly),
@@ -261,6 +270,7 @@ internal static class FreshPriorBuild
             {
                 var binding = graph.GraphContexts.Single(b => b.GraphId == saved.Id);
                 var excludedTest = binding.IsTestProject && !binding.Context.ExclusionPolicy.IncludeTests;
+                if (excludedTest && (currentRequiredTests is null || !currentRequiredTests.Contains(saved.Id))) throw Refuse();
                 var sdk = graph.SelectedSdk ?? throw Refuse();
                 observation = RestoreCurrentRecipe(retained, observation, root, sdk, token, requiredUnscoredTest: excludedTest);
                 if (excludedTest)
@@ -356,6 +366,63 @@ internal static class FreshPriorBuild
         readPaths.Complete();
         return CanonicalIdentity.Set(Provider, values);
     }
+    // Source spellings and their ancestors are current physical DATA only.
+    // One shared bounded implementation makes fresh capture prove that the
+    // exact ordered map can later be restored, including prefix case/spelling.
+    private static IReadOnlyDictionary<string, string> CreateMapPrefixPool(ProjectContextLoadResult graph,
+        string root, CancellationToken token)
+    {
+        var pool = new Dictionary<string, string>(StringComparer.Ordinal) { [PathKey(root)] = Path.GetFullPath(root) };
+        foreach (var source in graph.GraphContexts.SelectMany(binding => binding.Context.CompilerDocuments))
+        {
+            var ancestor = Path.GetFullPath(source.ResolvedPath!);
+            while (ancestor is not null)
+            {
+                token.ThrowIfCancellationRequested();
+                if (!pool.ContainsKey(PathKey(ancestor)) && pool.Count >= CompilerPhaseSnapshot.MaximumInputs) throw Refuse();
+                pool.TryAdd(PathKey(ancestor), ancestor); ancestor = Path.GetDirectoryName(ancestor);
+            }
+        }
+        return pool;
+    }
+    private static CompilerDocumentPathMap? RestoreMap(SavedMap? saved,
+        IReadOnlyDictionary<string, string> prefixPool, string root, CancellationToken token)
+    {
+        if (saved is null) return null;
+        if (saved.Pairs is null || saved.Pairs.Length is < 1 or > 64) throw Refuse();
+        var pairs = saved.Pairs.Select(pair =>
+        {
+            if (pair is null || pair.Source is null || !prefixPool.TryGetValue(pair.Source.Identity, out var physical)) throw Refuse();
+            var expected = SaveMapPrefix(root, physical);
+            if (pair.Source != expected) throw Refuse();
+            if (pair.TrailingSeparator)
+            {
+                if (Path.EndsInDirectorySeparator(physical)) throw Refuse();
+                physical += Path.DirectorySeparatorChar;
+            }
+            return new CompilerDocumentPathMapPair(physical, pair.Destination);
+        }).ToImmutableArray();
+        var map = new CompilerDocumentPathMap(saved.TaskAssociationSha256, pairs);
+        CompilerDocumentBinding.ValidatePathMap(map, token); return map;
+    }
+
+    private static SavedMap? SaveMap(CompilerDocumentPathMap? map, string root,
+        IReadOnlyDictionary<string, string>? prefixes, CancellationToken token)
+    {
+        if (map is null) return null;
+        CompilerDocumentBinding.ValidatePathMap(map, token);
+        var saved = new SavedMap(map.TaskAssociationSha256, map.Pairs.Select(pair =>
+        {
+            var trimmed = Path.TrimEndingDirectorySeparator(pair.SourcePrefix);
+            return new SavedMapPair(SaveMapPrefix(root, trimmed), trimmed != pair.SourcePrefix, pair.DestinationPrefix);
+        }).ToArray());
+        if (prefixes is null || !CompilerDocumentBinding.SamePathMap(map, RestoreMap(saved, prefixes, root, token))) throw Refuse();
+        return saved;
+    }
+    private static SavedPath SaveMapPrefix(string root, string path)
+        => PathIdentityPolicy.Current.Comparer.Equals(Path.GetFullPath(root), Path.GetFullPath(path))
+            ? new(".", PathKey(path)) : SavePath(root, path);
+
     private static SavedPath SavePath(string root, string path)
     {
         var physical = Path.GetFullPath(path);

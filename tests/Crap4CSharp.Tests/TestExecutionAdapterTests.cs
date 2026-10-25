@@ -535,7 +535,7 @@ public sealed class TestExecutionAdapterTests
     {
         var error = Assert.Throws<ProjectContextException>(() =>
             TestExecutionAdapter.CreateLiteralCollectorInclude(new[] { "Valid.Name_2", unsafeName }));
-        Assert.Equal("test.planInvalid", error.Reason);
+        Assert.Equal("test.collectorAssemblyNameUnsupported", error.Reason);
     }
 
     [Fact]

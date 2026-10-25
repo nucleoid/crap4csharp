@@ -25,7 +25,8 @@ internal sealed class FreshCompilerRecipeSelection
             var candidate = selected[id];
             if (candidate.ProjectPath != original.ProjectPath || candidate.GraphId != original.GraphId ||
                 !ReferenceEquals(candidate.Parameters, original.Parameters) || !ReferenceEquals(candidate.RuntimeCopies, original.RuntimeCopies) ||
-                candidate.Assembly != original.Assembly || candidate.Pdb != original.Pdb || candidate.ReferenceAssembly != original.ReferenceAssembly) throw Refuse();
+                candidate.Assembly != original.Assembly || candidate.Pdb != original.Pdb || candidate.ReferenceAssembly != original.ReferenceAssembly ||
+                !CompilerDocumentBinding.SamePathMap(candidate.DocumentPathMap, original.DocumentPathMap)) throw Refuse();
             CompilerRecipeObservation.RequireKnownIntegrity(original, token);
             if (original.InvocationRecipe is not null) _ = CompilerRecipePayload.Classify(original, root, token);
             Loss loss;

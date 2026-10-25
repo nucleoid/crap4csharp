@@ -12,6 +12,38 @@ namespace Crap4CSharp.Tests;
 public sealed class CompilerRecipeObservationTests
 {
     [Fact]
+    public void Mandatory_mapped_names_survive_optional_absence_size_and_image_downgrades()
+    {
+        using var fixture = TestDirectory.Create("crap-mandatory-map-data");
+        var token = TestContext.Current.CancellationToken;
+        var observed = SupportedObservation(fixture.Path);
+        var arguments = observed.CommandLineArguments.Append("/pathmap:" + fixture.Path + "=/_/").ToArray();
+        observed = RebindArguments(observed, arguments);
+        observed = observed with { DocumentPathMap = CompilerDocumentBinding.CapturePathMap(observed, token) };
+        var map = Assert.IsType<CompilerDocumentPathMap>(observed.DocumentPathMap);
+        var expected = CompilerDocumentBinding.RequirePathMap(observed, fixture.Path, token);
+        Assert.Single(expected);
+        foreach (var dropped in new[] { CompilerRecipeObservation.WithoutOptionalRecipe(observed, token),
+            CompilerRecipePayload.SizeUnsupported(observed), CompilerRecipePayload.ImagesChangedUnsupported(observed, token) })
+        {
+            Assert.Same(map, dropped.DocumentPathMap);
+            Assert.Equal(expected, CompilerDocumentBinding.RequirePathMap(dropped, fixture.Path, token));
+            var response = new CompilerReadResponse(dropped, null);
+            var transported = CompilerEvidenceBootstrap.SerializeResponse(ref response, token);
+            var restored = JsonSerializer.Deserialize<CompilerReadResponse>(transported, ProjectContextLoader.JsonOptions)!;
+            Assert.True(CompilerDocumentBinding.SamePathMap(map, restored.Observation!.DocumentPathMap));
+        }
+        var wrongTask = observed with { DocumentPathMap = map with { TaskAssociationSha256 = new string('0', 64) } };
+        Assert.Equal("compiler.outputsUnproven", Assert.Throws<ProjectContextException>(() =>
+            CompilerDocumentBinding.RequirePathMap(wrongTask, fixture.Path, token)).Reason);
+        var wrongPair = observed with { DocumentPathMap = map with { Pairs = [map.Pairs[0] with { DestinationPrefix = "/different/" }] } };
+        Assert.Equal("compiler.outputsUnproven", Assert.Throws<ProjectContextException>(() =>
+            CompilerDocumentBinding.RequirePathMap(wrongPair, fixture.Path, token)).Reason);
+        var earlyUnproven = CompilerRecipePayload.SizeUnsupported(observed) with { DocumentPathMap = null };
+        Assert.Null(CompilerDocumentBinding.CapturePathMap(earlyUnproven, token));
+    }
+
+    [Fact]
     public void Actual_terminal_is_required_and_late_events_cannot_claim_command_match()
     {
         using var fixture = TestDirectory.Create("crap-recipe-terminal-data");
