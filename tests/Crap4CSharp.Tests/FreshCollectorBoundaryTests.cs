@@ -82,7 +82,10 @@ public sealed class FreshCollectorBoundaryTests
         using var terminal = JsonDocument.Parse(output.ToString());
         var run = terminal.RootElement.GetProperty("run");
         var evaluation = terminal.RootElement.GetProperty("evaluation");
-        var privateArtifact = Assert.Single(run.GetProperty("artifacts").EnumerateArray(), a => a.GetProperty("kind").GetString() == "private-diagnostics");
+        var privateArtifacts = run.GetProperty("artifacts").EnumerateArray()
+            .Where(a => a.GetProperty("kind").GetString() == "private-diagnostics").ToArray();
+        Assert.True(privateArtifacts.Length == 1, $"variant={variant}; exit={exit}\n{errors}\n{output}");
+        var privateArtifact = Assert.Single(privateArtifacts);
         var privatePath = privateArtifact.GetProperty("path").GetString()!;
         Assert.True(Directory.Exists(privatePath));
         Assert.False(privateArtifact.GetProperty("complete").GetBoolean());

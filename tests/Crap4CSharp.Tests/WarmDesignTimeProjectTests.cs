@@ -306,8 +306,8 @@ public sealed class WarmDesignTimeProjectTests
                 Assert.Equal(JsonSerializer.Serialize(original.Context, ProjectContextLoader.JsonOptions),
                     JsonSerializer.Serialize(actual.Context, ProjectContextLoader.JsonOptions));
                 Assert.Equal(behavior == "emit" ? 1 : 0, actual.Context.GeneratorOnlyTreeCount);
-                Assert.Equal(behavior == "emit" && includeGenerated,
-                    actual.Context.Sources.Any(source => source.IsGenerated && source.LogicalPath.EndsWith("Hidden.cs", StringComparison.Ordinal)));
+                Assert.Equal(behavior == "emit" && includeGenerated ? 1 : 0,
+                    actual.Context.Sources.Count(source => source.IsGenerated && source.LogicalPath.StartsWith("<generated>/", StringComparison.Ordinal)));
             }
             Assert.Equal(2, ordinary.ProjectObservations.Count);
             Assert.Equal(2, warm.ProjectObservations.Count);
