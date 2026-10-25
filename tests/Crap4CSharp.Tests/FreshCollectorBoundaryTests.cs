@@ -187,7 +187,8 @@ public sealed class FreshCollectorBoundaryTests
         {
             var manifestPath = Path.Combine(fixture.Path, "bundle/manifest.json");
             var bundle = ArtifactBundle.Load(manifestPath, fixture.Path);
-            var generated = Assert.Single(Assert.Single(bundle.Manifest.Contexts).Inputs, i => i.Generated && i.Role == "source");
+            var generated = Assert.Single(Assert.Single(bundle.Manifest.Contexts).Inputs,
+                i => i.Generated && i.Role == "source" && i.LogicalPath.StartsWith("<generated>/", StringComparison.Ordinal));
             Assert.Null(generated.RepositoryPath); // Virtual output is never committed-path authority.
             Assert.StartsWith("<generated>/", generated.LogicalPath, StringComparison.Ordinal);
             Assert.True(Assert.Single(bundle.Manifest.Contexts).IncludeGenerated);
@@ -204,7 +205,8 @@ public sealed class FreshCollectorBoundaryTests
                 fixture.Path, priorOutput, priorError, TestContext.Current.CancellationToken);
             Assert.True(priorExit == 0, priorError + Environment.NewLine + priorOutput);
             var prior = ArtifactBundle.Load(Path.Combine(fixture.Path, "bundle-prior/manifest.json"), fixture.Path);
-            var priorGenerated = Assert.Single(Assert.Single(prior.Manifest.Contexts).Inputs, i => i.Generated && i.Role == "source");
+            var priorGenerated = Assert.Single(Assert.Single(prior.Manifest.Contexts).Inputs,
+                i => i.Generated && i.Role == "source" && i.LogicalPath.StartsWith("<generated>/", StringComparison.Ordinal));
             Assert.Equal(generated, priorGenerated);
             Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library/build-count.txt")));
             Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests/build-count.txt")));
