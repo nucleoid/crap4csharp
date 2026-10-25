@@ -468,6 +468,7 @@ internal static partial class MsBuildProjectLoader
         if (observations is not null)
             observations.Add(new(projectPath, await WarmProjectObservation.CaptureAsync(project, cancellationToken)));
         var sources = new List<ProjectSourceIdentity>();
+        var generatorTreeSources = new HashSet<ProjectSourceIdentity>(ReferenceEqualityComparer.Instance);
         var compilerDocuments = new List<ProjectSourceIdentity>();
         var exclusions = new List<ProjectSourceExclusion>();
         var evaluatedCompileInputs = metadata.CompileInputs.ToHashSet(PathComparer);
@@ -580,10 +581,12 @@ internal static partial class MsBuildProjectLoader
                     var logical = generated?.LogicalPath ?? "<generated>/" + CanonicalIdentity.Tuple(
                         "unbound-generator-tree-v1", Logical(root, projectPath), tree.FilePath.Replace('\\', '/'),
                         ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture)) + ".cs";
-                    sources.Add(new ProjectSourceIdentity(logical, logical,
+                    var generatedSource = new ProjectSourceIdentity(logical, logical,
                         generated is null ? ProjectAnalysisContext.ContentHash(sourceText.ToString()) :
                             ProjectAnalysisContext.ContentHash(Convert.FromBase64String(generated.BytesBase64)), true, false)
-                    { ResolvedPath = generated?.Path });
+                    { ResolvedPath = generated?.Path };
+                    sources.Add(generatedSource);
+                    generatorTreeSources.Add(generatedSource);
                 }
             }
         }
@@ -647,7 +650,7 @@ internal static partial class MsBuildProjectLoader
                 .Concat(project.MetadataReferences.Select(reference => reference.Display)
                     .Where(path => path is not null && File.Exists(path)).Select(path => path!))
                 .Concat(sources.Where(source => source.ResolvedPath is not null &&
-                    !source.PhysicalPath.StartsWith("<", StringComparison.Ordinal)).Select(source => source.ResolvedPath!))
+                    !generatorTreeSources.Contains(source)).Select(source => source.ResolvedPath!))
                 .Select(Path.GetFullPath).Distinct(PathComparer).Order(StringComparer.Ordinal).ToArray()
         };
     }

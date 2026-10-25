@@ -241,12 +241,13 @@ public static class ProjectContextLoader
             // Existing input mutation/deletion remains forbidden, including existing generated files.
             var generatedPaths = loaded.Contexts.SelectMany(context =>
                 context.Sources.Where(source => source.IsGenerated && source.ResolvedPath is not null &&
-                        !source.PhysicalPath.StartsWith("<", StringComparison.Ordinal))
+                        !CompilerSourceSet.IsCapturedGeneratedSource(context, source))
                     .Select(source => source.ResolvedPath!)
                     .Concat(context.GeneratedTransitionPaths)
-                    .Concat(context.Exclusions.Where(item => item.Reason == "generated.defaultExcluded" &&
-                        !item.PhysicalPath.StartsWith("<", StringComparison.Ordinal))
-                        .Select(item => Path.GetFullPath(item.PhysicalPath, root))))
+                    .Concat(context.CompilerDocuments.Where(source => source.IsGenerated && source.ResolvedPath is not null &&
+                        context.Exclusions.Any(item => item.Reason == "generated.defaultExcluded" &&
+                            item.PhysicalPath == source.PhysicalPath && item.LogicalPath == source.LogicalPath))
+                        .Select(source => source.ResolvedPath!)))
                 .Select(path => Path.GetRelativePath(root, path).Replace('\\', '/')).ToHashSet(StringComparer.Ordinal);
             if (before.Any(pair => !after.TryGetValue(pair.Key, out var value) || value != pair.Value) ||
                 after.Keys.Except(before.Keys, StringComparer.Ordinal).Any(path => !generatedPaths.Contains(path)))

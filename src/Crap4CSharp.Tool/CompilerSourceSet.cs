@@ -71,6 +71,14 @@ internal sealed class CompilerSourceSet
         catch (Exception error) when (error is ArgumentException or FormatException or OverflowException)
         { throw Refuse(); }
     }
+    // Classification only, not compiler proof. Match the private captured-tree
+    // origin exactly; physical <external> identities remain physical inputs.
+    internal static bool IsCapturedGeneratedSource(ProjectAnalysisContext context, ProjectSourceIdentity source) =>
+        source.IsGenerated && source.ResolvedPath is not null &&
+        context.GeneratedCompilerDocuments.Any(document =>
+            document.Path == source.ResolvedPath && document.LogicalPath == source.LogicalPath &&
+            document.LogicalPath == source.PhysicalPath);
+
     internal bool IsGeneratorTree(ProjectSourceIdentity source) => generated.ContainsKey(source.ResolvedPath!);
     internal string? EncodingIdentity(ProjectSourceIdentity source) =>
         generated.TryGetValue(source.ResolvedPath!, out var document) ? document.EncodingIdentity : null;
