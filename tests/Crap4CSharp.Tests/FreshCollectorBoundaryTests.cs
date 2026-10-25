@@ -72,7 +72,9 @@ public sealed class FreshCollectorBoundaryTests
             {"schemaVersion":"repository-policy-v1","mode":"strict","productionProjects":["Library/Library.csproj"],
             "testProjects":["Tests/Tests.csproj"],"configuration":"Debug","targetFrameworks":["net10.0"],"scope":"all",
             "threshold":8,"missingCoverage":"fail","requiredChecks":["tests","coverage","crap"],"exclusions":[],"ruleset":"callables-v1"}
-            """);
+            """.Replace("\"ruleset\":\"callables-v1\"", variant == "generator" ?
+                "\"ruleset\":\"callables-v1\",\"allowedOverrides\":{\"includeGenerated\":true}" :
+                "\"ruleset\":\"callables-v1\"", StringComparison.Ordinal));
         var original = Directory.GetFiles(fixture.Path, "*", SearchOption.AllDirectories).ToDictionary(p => p, File.ReadAllBytes);
         var output = new StringWriter(); var errors = new StringWriter();
         var exit = await global::App.RunAsync(["check", "--project", "Tests/Tests.csproj", "--policy", "policy.json",
