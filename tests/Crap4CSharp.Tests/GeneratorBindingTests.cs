@@ -11,6 +11,25 @@ public sealed class GeneratorBindingTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public void PhysicalOnlyDocumentCollisionsUseOutputBindingReason(bool duplicateLogicalPath)
+    {
+        // DATA-only collision classification; this does not certify compiler output.
+        var firstPath = Path.GetFullPath("physical-first.cs");
+        var secondPath = duplicateLogicalPath ? Path.GetFullPath("physical-second.cs") : firstPath;
+        var first = new ProjectSourceIdentity("first.cs", "first.cs", new string('a', 64), false, false)
+        { ResolvedPath = firstPath };
+        var second = new ProjectSourceIdentity("second.cs", duplicateLogicalPath ? "first.cs" : "second.cs",
+            new string('b', 64), false, false) { ResolvedPath = secondPath };
+        var context = ProjectAnalysisContext.Create("App.csproj", "App", "net10.0", "Release", "AnyCPU",
+            LanguageVersion.CSharp14, [], SourceCodeKind.Regular, [], [], new(false, false),
+            new("sdk", "msbuild", "roslyn")) with { CompilerDocuments = [first, second] };
+        Assert.Equal(0, context.GeneratorOnlyTreeCount);
+        Assert.Equal("compiler.outputsUnproven", Assert.Throws<ProjectContextException>(() =>
+            CompilerSourceSet.Create(context, TestContext.Current.CancellationToken)).Reason);
+    }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task WarningOnlyNonGeneratorAnalyzerDoesNotInvalidateOrdinaryOrGraphLoading(bool includeGenerated)
     {
         using var fixture = TestDirectory.Create("crap4csharp-analyzer-warning");
@@ -79,6 +98,8 @@ public sealed class GeneratorBindingTests
     [InlineData(true, "declaration")]
     [InlineData(false, "empty")]
     [InlineData(true, "empty")]
+    [InlineData(false, "utf16")]
+    [InlineData(true, "utf16")]
     public async Task ActualGeneratorIsInspectedIndependentlyOfPublicInclusion(bool includeGenerated, string behavior)
     {
         var fixture = TestDirectory.Create("crap4csharp-generator-binding"); // Retain actual failed compiler evidence.
@@ -86,6 +107,7 @@ public sealed class GeneratorBindingTests
         {
             "emit" => "context.AddSource(\"Hidden.cs\", Microsoft.CodeAnalysis.Text.SourceText.From(\"public class Hidden { public int Risk(int x) => x > 0 ? 1 : 2; }\", System.Text.Encoding.UTF8, Microsoft.CodeAnalysis.Text.SourceHashAlgorithm.Sha256));",
             "declaration" => "context.AddSource(\"Hidden.cs\", Microsoft.CodeAnalysis.Text.SourceText.From(\"public class Hidden {}\", System.Text.Encoding.UTF8, Microsoft.CodeAnalysis.Text.SourceHashAlgorithm.Sha256));",
+            "utf16" => "context.AddSource(\"Hidden.cs\", Microsoft.CodeAnalysis.Text.SourceText.From(\"public class Hidden {}\", System.Text.Encoding.Unicode, Microsoft.CodeAnalysis.Text.SourceHashAlgorithm.Sha256));",
             "throw" => "throw new System.InvalidOperationException(\"fixture generator failed\");",
             _ => ""
         };
@@ -120,7 +142,7 @@ public sealed class GeneratorBindingTests
             Assert.True(loaded.Success, loaded.FailureReason + ": " + string.Join(" | ", loaded.Diagnostics));
             var context = Assert.Single(loaded.GraphContexts).Context;
             // Proposed private protocol marker: public exclusion cannot hide binding obligations.
-            Assert.Equal(behavior is "emit" or "declaration" ? 1 : 0, context.GeneratorOnlyTreeCount);
+            Assert.Equal(behavior is "emit" or "declaration" or "utf16" ? 1 : 0, context.GeneratorOnlyTreeCount);
             Assert.Equal((behavior is "emit" or "declaration") && includeGenerated,
                 context.Sources.Any(s => context.GeneratedCompilerDocuments.Any(d => d.LogicalPath == s.LogicalPath)));
             var copy = JsonSerializer.Deserialize<ProjectAnalysisContext>(JsonSerializer.Serialize(context, ProjectContextLoader.JsonOptions), ProjectContextLoader.JsonOptions)!;
@@ -128,6 +150,13 @@ public sealed class GeneratorBindingTests
             Assert.Equal(context.GeneratedCompilerDocuments.ToArray(), copy.GeneratedCompilerDocuments.ToArray());
             Assert.DoesNotContain("generatedCompilerDocuments", JsonSerializer.Serialize(context, new JsonSerializerOptions(JsonSerializerDefaults.Web)), StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("generatorOnlyTreeCount", JsonSerializer.Serialize(context, new JsonSerializerOptions(JsonSerializerDefaults.Web)), StringComparison.OrdinalIgnoreCase);
+            if (behavior == "utf16")
+            {
+                Assert.Empty(context.GeneratedCompilerDocuments);
+                Assert.Equal(includeGenerated, context.Sources.Any(source => source.PhysicalPath.StartsWith("<generated>/", StringComparison.Ordinal)));
+                Assert.Equal("compiler.generatorBindingUnsupported", Assert.Throws<ProjectContextException>(() =>
+                    CompilerSourceSet.Create(context, TestContext.Current.CancellationToken)).Reason);
+            }
             if (behavior is "emit" or "declaration")
             {
                 var privateDirectory = Path.Combine(fixture.Path, "private");
@@ -147,9 +176,11 @@ public sealed class GeneratorBindingTests
                     var inspected = ArtifactEvidenceInspector.InspectBuild([.. File.ReadAllBytes(observed.Assembly!.Path)],
                         [.. File.ReadAllBytes(observed.Pdb!.Path)]);
                     var name = generated.Path.Replace('\\', '/');
-                    if (!inspected.Documents.ContainsKey(name))
-                        Assert.Throws<ProjectContextException>(() => CompilerOutputBinding.Validate(finalContext,
-                            observed, TestContext.Current.CancellationToken));
+                    var hasGeneratedDocument = inspected.Documents.ContainsKey(name);
+                    TestContext.Current.TestOutputHelper!.WriteLine("DECLARATION_GENERATED_PDB_DOCUMENT " + hasGeneratedDocument);
+                    if (!hasGeneratedDocument)
+                        Assert.Equal("compiler.outputsUnproven", Assert.Throws<ProjectContextException>(() =>
+                            CompilerOutputBinding.Validate(finalContext, observed, TestContext.Current.CancellationToken)).Reason);
                     else
                     {
                         CompilerOutputBinding.Validate(finalContext, observed, TestContext.Current.CancellationToken);
@@ -158,8 +189,8 @@ public sealed class GeneratorBindingTests
                         // generated document cannot be inferred harmless from syntax.
                         var missing = inspected with { Documents = inspected.Documents.Where(pair => pair.Key != name)
                             .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal) };
-                        Assert.Throws<ProjectContextException>(() => CompilerDocumentBinding.Create(finalContext,
-                            observed, missing, TestContext.Current.CancellationToken));
+                        Assert.Equal("compiler.outputsUnproven", Assert.Throws<ProjectContextException>(() =>
+                            CompilerDocumentBinding.Create(finalContext, observed, missing, TestContext.Current.CancellationToken)).Reason);
                     }
                 }
                 else
@@ -258,6 +289,22 @@ public sealed class GeneratorBindingTests
         Assert.Contains(output.Build.Methods, method => method.MethodName == "Matches" && method.SequencePoints.Count > 0);
         Assert.DoesNotContain(context.Sources, source => sourceSet.IsGeneratorTree(source));
         Assert.False(context.Capabilities.CompiledInputBindingComplete);
+    }
+
+    [Fact]
+    public void GeneratedCompilerIdentityOutsideProjectDirectoryNeverBecomesAFileRead()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-generator-outside-project");
+        var directory = Path.Combine(fixture.Path, "App");
+        var path = Path.Combine(fixture.Path, "artifacts", "obj", "Generator", "Hidden.cs");
+        var text = Microsoft.CodeAnalysis.Text.SourceText.From("public class Hidden {}", System.Text.Encoding.UTF8,
+            Microsoft.CodeAnalysis.Text.SourceHashAlgorithm.Sha256);
+        var tree = CSharpSyntaxTree.ParseText(text, path: path, cancellationToken: TestContext.Current.CancellationToken);
+        var captured = CompilerSourceSet.Capture(tree, directory, "App/App.csproj", TestContext.Current.CancellationToken);
+        Assert.Equal(path, captured.Path);
+        Assert.StartsWith("<generated>/", captured.LogicalPath, StringComparison.Ordinal);
+        Assert.Equal(text.ToString(), System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(captured.BytesBase64)).TrimStart('\ufeff'));
+        Assert.False(File.Exists(path));
     }
 
     private static void InspectRetainedGeneratorOutputs(TestDirectory fixture, ProjectAnalysisContext context, CompilerObservation observation)

@@ -24,7 +24,9 @@ internal sealed class CompilerSourceSet
         var documents = new List<ProjectSourceIdentity>(context.CompilerDocuments);
         var paths = context.CompilerDocuments.Select(d => d.ResolvedPath!).ToHashSet(PathIdentityPolicy.Current.Comparer);
         var logical = context.CompilerDocuments.Select(d => d.LogicalPath).ToHashSet(StringComparer.Ordinal);
-        if (paths.Count != documents.Count || logical.Count != documents.Count) throw Refuse();
+        if (paths.Count != documents.Count || logical.Count != documents.Count)
+            throw new ProjectContextException("compiler.outputsUnproven",
+                "Physical compiler document paths or logical identities are duplicated.");
         long characters = 0, bytes = 0;
         foreach (var document in context.GeneratedCompilerDocuments)
         {
@@ -46,6 +48,9 @@ internal sealed class CompilerSourceSet
             characters = checked(characters + text.Length); bytes = checked(bytes + content.Length);
             if (characters > 16 * 1024 * 1024 || content.Length > CompilerPhaseSnapshot.MaximumFileBytes ||
                 bytes > CompilerPhaseSnapshot.MaximumClosureBytes) throw Refuse();
+            // SHA1 is private Workspace-transport consistency only. The source
+            // identity below is always SHA256, and actual output binding still
+            // requires SHA256 PDB documents through ArtifactEvidenceInspector.
             var checksum = document.ChecksumAlgorithm == "sha256" ? SHA256.HashData(content) : SHA1.HashData(content);
             if (Convert.ToHexStringLower(checksum) != document.Checksum) throw Refuse();
             var identity = new ProjectSourceIdentity(document.LogicalPath, document.LogicalPath,
@@ -84,6 +89,13 @@ internal sealed class CompilerSourceSet
     internal static ProjectGeneratedSourceDocument Capture(SyntaxTree tree, string directory, string project,
         CancellationToken token)
     {
+        try { return CaptureCore(tree, directory, project, token); }
+        catch (ArgumentException) { throw Refuse(); }
+    }
+
+    private static ProjectGeneratedSourceDocument CaptureCore(SyntaxTree tree, string directory, string project,
+        CancellationToken token)
+    {
         token.ThrowIfCancellationRequested();
         if (string.IsNullOrWhiteSpace(tree.FilePath)) throw Refuse();
         var text = tree.GetText(token);
@@ -91,7 +103,8 @@ internal sealed class CompilerSourceSet
             text.ChecksumAlgorithm is not (SourceHashAlgorithm.Sha1 or SourceHashAlgorithm.Sha256)) throw Refuse();
         var path = Path.GetFullPath(tree.FilePath, directory);
         var relative = Path.GetRelativePath(directory, path).Replace('\\', '/');
-        if (relative == ".." || relative.StartsWith("../", StringComparison.Ordinal) || Path.IsPathRooted(relative)) throw Refuse();
+        // This path is an opaque compiler identity, never a file to open. An
+        // evaluated intermediate directory may legitimately be outside the project.
         var logical = "<generated>/" + CanonicalIdentity.Tuple("actual-generator-tree-v1", project, relative) + ".cs";
         var body = Utf8.GetBytes(text.ToString());
         var preamble = text.Encoding.GetPreamble();

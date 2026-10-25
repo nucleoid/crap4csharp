@@ -562,12 +562,23 @@ internal static partial class MsBuildProjectLoader
                 generatedCharacters += sourceText.Length;
                 if (generatedCharacters > 16 * 1024 * 1024)
                     throw new ProjectContextException("context.generatedSourceLimit", "Generated text exceeds the private transport limit.");
-                var generated = CompilerSourceSet.Capture(tree, Path.GetDirectoryName(projectPath)!, Logical(root, projectPath), cancellationToken);
-                generatedDocuments.Add(generated);
+                ProjectGeneratedSourceDocument? generated = null;
+                try { generated = CompilerSourceSet.Capture(tree, Path.GetDirectoryName(projectPath)!, Logical(root, projectPath), cancellationToken); }
+                catch (ProjectContextException exception) when (exception.Reason == "compiler.generatorBindingUnsupported")
+                {
+                    // Ordinary semantic loading does not grant compiler evidence.
+                    // Preserve the full tree count: the incomplete byte vector
+                    // must still refuse when compiler binding is requested.
+                }
+                if (generated is not null) generatedDocuments.Add(generated);
                 if (request.IncludeGenerated)
-                    sources.Add(new ProjectSourceIdentity(generated.LogicalPath, generated.LogicalPath,
-                        ProjectAnalysisContext.ContentHash(Convert.FromBase64String(generated.BytesBase64)), true, false)
-                    { ResolvedPath = generated.Path });
+                {
+                    var logical = generated?.LogicalPath ?? "<generated>/" + ProjectAnalysisContext.ContentHash(sourceText.ToString()) + ".cs";
+                    sources.Add(new ProjectSourceIdentity(logical, logical,
+                        generated is null ? ProjectAnalysisContext.ContentHash(sourceText.ToString()) :
+                            ProjectAnalysisContext.ContentHash(Convert.FromBase64String(generated.BytesBase64)), true, false)
+                    { ResolvedPath = generated?.Path });
+                }
             }
         }
         // Keep precise input roles separate from output protection and from public analysis exclusions.

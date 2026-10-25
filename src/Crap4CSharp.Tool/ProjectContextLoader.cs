@@ -240,7 +240,8 @@ public static class ProjectContextLoader
             // Only new, independently classified generated compiler files are expected loader transitions.
             // Existing input mutation/deletion remains forbidden, including existing generated files.
             var generatedPaths = loaded.Contexts.SelectMany(context =>
-                context.Sources.Where(source => source.IsGenerated && source.ResolvedPath is not null)
+                context.Sources.Where(source => source.IsGenerated && source.ResolvedPath is not null &&
+                        !source.PhysicalPath.StartsWith("<", StringComparison.Ordinal))
                     .Select(source => source.ResolvedPath!)
                     .Concat(context.GeneratedTransitionPaths)
                     .Concat(context.Exclusions.Where(item => item.Reason == "generated.defaultExcluded" &&

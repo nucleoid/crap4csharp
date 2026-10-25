@@ -108,7 +108,8 @@ internal static class CurrentEvidenceAdapter
             if (!expectedSources.SequenceEqual(currentSources))
                 throw new InvalidDataException("Current project source membership or content differs from captured tested inputs.");
             foreach (var path in current.ProtectedPaths) protectedPaths.Add(path);
-            foreach (var source in current.Sources.Where(source => source.ResolvedPath is not null))
+            foreach (var source in current.Sources.Where(source => source.ResolvedPath is not null &&
+                         !source.PhysicalPath.StartsWith("<", StringComparison.Ordinal)))
                 protectedPaths.Add(source.ResolvedPath!);
             foreach (var source in current.Sources.Where(source => !source.IsGenerated))
             {
