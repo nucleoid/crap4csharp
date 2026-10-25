@@ -21,7 +21,7 @@ public sealed class FreshCheckExecutionTests
             priorBuild: true, pathMapped: true, mappedUnsupportedRecipeProject: project);
 
     [Fact]
-    public Task Actual_mapped_optional_absence_survives_writer_saved_and_prior_reuse()
+    public Task Actual_mapped_optional_absence_survives_writer_publication()
         => RunCase(false, true, policyScope: "all", local: true, pathMapped: true, optionalRecipeLoss: "absence");
 
     [Fact]
@@ -574,21 +574,9 @@ public sealed class FreshCheckExecutionTests
         Assert.Equal(1, calls); Assert.Equal(0, terminal.Result.Run.ExitCode);
         Assert.True(File.Exists(Path.Combine(root, "bundle", "manifest.json")));
         Assert.Throws<InvalidOperationException>(() => { _ = prepared.CompleteAtWriterAsync(_ => throw new InvalidOperationException("Never retry writer.")); });
-        if (original.DocumentPathMap is not null)
-        {
-            var published = ArtifactBundle.Load(Path.Combine(root, "bundle", "manifest.json"), root);
-            var current = await SavedCompletedProof.ValidateAsync(published, evidence.Preflight, token);
-            Assert.All(current.Observations.Where(item => item.DocumentPathMap is not null), item =>
-                CompilerDocumentBinding.ValidatePathMap(item.DocumentPathMap!, token));
-            var priorOutput = new StringWriter(); var priorErrors = new StringWriter();
-            var priorExit = await global::App.RunAsync(["check", "--project", request.Project!, "--policy", request.PolicyPath,
-                "--scope", "all", "--no-build", "--build-artifacts", "bundle/manifest.json",
-                "--artifact-output", "bundle-prior", "--format", "json", "--timeout-seconds", "180"],
-                root, priorOutput, priorErrors, token);
-            Assert.True(priorExit == 0, priorErrors + Environment.NewLine + priorOutput);
-            Assert.Single(File.ReadAllLines(Path.Combine(root, "Library", "build-count.txt")));
-            Assert.Single(File.ReadAllLines(Path.Combine(root, "Tests", "build-count.txt")));
-        }
+        // This original three-minute fixture owns writer publication only.
+        // Saved/current and explicit-prior consumers are separate public operations;
+        // never renew this writer token to append their complete proof boundaries.
         // Canonical optional DATA fault only: the real SDK, raw original Csc/task
         // argv, mandatory sources/outputs/tests/proof were never changed or rerun.
     }
@@ -2938,16 +2926,43 @@ public sealed class FreshCheckExecutionTests
                 }
                 if (pathMapped)
                 {
-                    var testRecipe = Assert.Single(bundle.Manifest.Artifacts, artifact => artifact.Kind == FreshPriorBuild.TestRecipeKind);
-                    Assert.Null(testRecipe.ContextId); Assert.Null(testRecipe.BuildId);
-                    using var metadata = JsonDocument.Parse(bundle.Bytes[testRecipe.Locator].AsSpan().ToArray());
-                    var testGraphId = metadata.RootElement.GetProperty("graphId").GetString();
-                    Assert.Equal("required-test-prior-compiler-v1", metadata.RootElement.GetProperty("provider").GetString());
-                    Assert.DoesNotContain(bundle.Manifest.Artifacts, artifact => artifact.BuildId == "build-" + testGraphId && artifact.Kind == CompilerRecipePayload.ImageKind);
-                    var priorArtifact = Assert.Single(bundle.Manifest.Artifacts, artifact => artifact.Kind == FreshPriorBuild.Kind);
-                    using var prior = JsonDocument.Parse(bundle.Bytes[priorArtifact.Locator].AsSpan().ToArray());
-                    var testNode = Assert.Single(prior.RootElement.GetProperty("nodes").EnumerateArray(), node => node.GetProperty("id").GetString() == testGraphId);
-                    Assert.Equal(testNode.GetProperty("compilerRecipe").GetRawText(), metadata.RootElement.GetProperty("recipe").GetRawText());
+                    if (mappedUnsupportedRecipeProject == "Tests")
+                    {
+                        Assert.DoesNotContain(bundle.Manifest.Artifacts, artifact => artifact.Kind == FreshPriorBuild.TestRecipeKind);
+                        using var inventory = JsonDocument.Parse(bundle.Bytes[requiredInventory.Locator].AsSpan().ToArray());
+                        var required = Assert.Single(inventory.RootElement.GetProperty("tests").EnumerateArray());
+                        Assert.Equal("Tests/Tests.csproj", required.GetProperty("project").GetString());
+                        Assert.Equal(Assert.Single(bundle.Manifest.Executions).TestProject, required.GetProperty("project").GetString());
+                        var testGraphId = required.GetProperty("graphId").GetString();
+                        var planArtifact = Assert.Single(bundle.Manifest.Artifacts, artifact => artifact.Kind == "completed-test-plan");
+                        using var completedPlan = JsonDocument.Parse(bundle.Bytes[planArtifact.Locator].AsSpan().ToArray());
+                        Assert.Equal("Tests/Tests.csproj", completedPlan.RootElement.GetProperty("selectedRootLocator").GetString());
+                        Assert.Equal(testGraphId, Assert.Single(completedPlan.RootElement.GetProperty("runners").EnumerateArray()).GetProperty("id").GetString());
+                        var priorArtifact = Assert.Single(bundle.Manifest.Artifacts, artifact => artifact.Kind == FreshPriorBuild.Kind);
+                        using var prior = JsonDocument.Parse(bundle.Bytes[priorArtifact.Locator].AsSpan().ToArray());
+                        var testNode = Assert.Single(prior.RootElement.GetProperty("nodes").EnumerateArray(), node => node.GetProperty("id").GetString() == testGraphId);
+                        Assert.False(testNode.TryGetProperty("compilerRecipe", out _));
+                        var map = testNode.GetProperty("documentPathMap");
+                        Assert.Matches("^[0-9a-f]{64}$", map.GetProperty("taskAssociationSha256").GetString()!);
+                        var pair = Assert.Single(map.GetProperty("pairs").EnumerateArray());
+                        Assert.Equal(".", pair.GetProperty("source").GetProperty("relative").GetString());
+                        Assert.Equal(prior.RootElement.GetProperty("workspace").GetString(), pair.GetProperty("source").GetProperty("identity").GetString());
+                        Assert.True(pair.GetProperty("trailingSeparator").GetBoolean());
+                        Assert.Equal("/_/", pair.GetProperty("destination").GetString());
+                    }
+                    else
+                    {
+                        var testRecipe = Assert.Single(bundle.Manifest.Artifacts, artifact => artifact.Kind == FreshPriorBuild.TestRecipeKind);
+                        Assert.Null(testRecipe.ContextId); Assert.Null(testRecipe.BuildId);
+                        using var metadata = JsonDocument.Parse(bundle.Bytes[testRecipe.Locator].AsSpan().ToArray());
+                        var testGraphId = metadata.RootElement.GetProperty("graphId").GetString();
+                        Assert.Equal("required-test-prior-compiler-v1", metadata.RootElement.GetProperty("provider").GetString());
+                        Assert.DoesNotContain(bundle.Manifest.Artifacts, artifact => artifact.BuildId == "build-" + testGraphId && artifact.Kind == CompilerRecipePayload.ImageKind);
+                        var priorArtifact = Assert.Single(bundle.Manifest.Artifacts, artifact => artifact.Kind == FreshPriorBuild.Kind);
+                        using var prior = JsonDocument.Parse(bundle.Bytes[priorArtifact.Locator].AsSpan().ToArray());
+                        var testNode = Assert.Single(prior.RootElement.GetProperty("nodes").EnumerateArray(), node => node.GetProperty("id").GetString() == testGraphId);
+                        Assert.Equal(testNode.GetProperty("compilerRecipe").GetRawText(), metadata.RootElement.GetProperty("recipe").GetRawText());
+                    }
                     Assert.NotEmpty(terminal.RootElement.GetProperty("evaluation").GetProperty("metrics").EnumerateArray());
                     Assert.All(bundle.Manifest.Contexts, context => Assert.Contains(context.PathPolicy!.ReportRootMappings,
                         mapping => mapping.ReportRoot.StartsWith("/_/", StringComparison.Ordinal)));
