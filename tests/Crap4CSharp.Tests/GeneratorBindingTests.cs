@@ -156,6 +156,9 @@ public sealed class GeneratorBindingTests
                 Assert.Equal(includeGenerated, context.Sources.Any(source => source.PhysicalPath.StartsWith("<generated>/", StringComparison.Ordinal)));
                 Assert.Equal("compiler.generatorBindingUnsupported", Assert.Throws<ProjectContextException>(() =>
                     CompilerSourceSet.Create(context, TestContext.Current.CancellationToken)).Reason);
+                var ordinary = await ProjectContextLoader.LoadAsync(request, TestContext.Current.CancellationToken);
+                Assert.True(ordinary.Success, ordinary.FailureReason + ": " + string.Join(" | ", ordinary.Diagnostics));
+                Assert.Equal(1, Assert.Single(ordinary.Contexts).GeneratorOnlyTreeCount);
             }
             if (behavior is "emit" or "declaration")
             {
@@ -305,6 +308,15 @@ public sealed class GeneratorBindingTests
         Assert.StartsWith("<generated>/", captured.LogicalPath, StringComparison.Ordinal);
         Assert.Equal(text.ToString(), System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(captured.BytesBase64)).TrimStart('\ufeff'));
         Assert.False(File.Exists(path));
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, "public class Foreign {}");
+        var context = ProjectAnalysisContext.Create("App/App.csproj", "App", "net10.0", "Release", "AnyCPU",
+            LanguageVersion.CSharp14, [], SourceCodeKind.Regular, [], [], new(false, false), new("sdk", "msbuild", "roslyn"))
+            with { GeneratorOnlyTreeCount = 1, GeneratedCompilerDocuments = [captured] };
+        var sources = CompilerSourceSet.Create(context, TestContext.Current.CancellationToken);
+        long total = 0;
+        var bytes = sources.Read(Assert.Single(sources.GeneratedDocuments), ref total, TestContext.Current.CancellationToken);
+        Assert.Equal(Convert.FromBase64String(captured.BytesBase64), bytes.ToArray());
     }
 
     private static void InspectRetainedGeneratorOutputs(TestDirectory fixture, ProjectAnalysisContext context, CompilerObservation observation)
