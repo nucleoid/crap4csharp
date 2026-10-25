@@ -107,7 +107,7 @@ public sealed class GeneratorBindingTests
         {
             "emit" => "context.AddSource(\"Hidden.cs\", Microsoft.CodeAnalysis.Text.SourceText.From(\"public class Hidden { public int Risk(int x) => x > 0 ? 1 : 2; }\", System.Text.Encoding.UTF8, Microsoft.CodeAnalysis.Text.SourceHashAlgorithm.Sha256));",
             "declaration" => "context.AddSource(\"Hidden.cs\", Microsoft.CodeAnalysis.Text.SourceText.From(\"public class Hidden {}\", System.Text.Encoding.UTF8, Microsoft.CodeAnalysis.Text.SourceHashAlgorithm.Sha256));",
-            "utf16" => "context.AddSource(\"Hidden.cs\", Microsoft.CodeAnalysis.Text.SourceText.From(\"public class Hidden {}\", System.Text.Encoding.Unicode, Microsoft.CodeAnalysis.Text.SourceHashAlgorithm.Sha256));",
+            "utf16" => "context.AddSource(\"First.cs\", Microsoft.CodeAnalysis.Text.SourceText.From(\"public partial class Hidden {}\", System.Text.Encoding.Unicode, Microsoft.CodeAnalysis.Text.SourceHashAlgorithm.Sha256)); context.AddSource(\"Second.cs\", Microsoft.CodeAnalysis.Text.SourceText.From(\"public partial class Hidden {}\", System.Text.Encoding.Unicode, Microsoft.CodeAnalysis.Text.SourceHashAlgorithm.Sha256));",
             "throw" => "throw new System.InvalidOperationException(\"fixture generator failed\");",
             _ => ""
         };
@@ -142,7 +142,9 @@ public sealed class GeneratorBindingTests
             Assert.True(loaded.Success, loaded.FailureReason + ": " + string.Join(" | ", loaded.Diagnostics));
             var context = Assert.Single(loaded.GraphContexts).Context;
             // Proposed private protocol marker: public exclusion cannot hide binding obligations.
-            Assert.Equal(behavior is "emit" or "declaration" or "utf16" ? 1 : 0, context.GeneratorOnlyTreeCount);
+            Assert.Equal(behavior == "utf16" ? 2 : behavior is "emit" or "declaration" ? 1 : 0, context.GeneratorOnlyTreeCount);
+            Assert.DoesNotContain(context.GeneratedCompilerDocuments, generated => context.ProtectedPaths.Contains(generated.Path,
+                OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal));
             Assert.Equal((behavior is "emit" or "declaration") && includeGenerated,
                 context.Sources.Any(s => context.GeneratedCompilerDocuments.Any(d => d.LogicalPath == s.LogicalPath)));
             var copy = JsonSerializer.Deserialize<ProjectAnalysisContext>(JsonSerializer.Serialize(context, ProjectContextLoader.JsonOptions), ProjectContextLoader.JsonOptions)!;
@@ -153,12 +155,17 @@ public sealed class GeneratorBindingTests
             if (behavior == "utf16")
             {
                 Assert.Empty(context.GeneratedCompilerDocuments);
-                Assert.Equal(includeGenerated, context.Sources.Any(source => source.PhysicalPath.StartsWith("<generated>/", StringComparison.Ordinal)));
+                var semanticGenerated = context.Sources.Where(source => source.PhysicalPath.StartsWith("<generated>/", StringComparison.Ordinal)).ToArray();
+                Assert.Equal(includeGenerated ? 2 : 0, semanticGenerated.Length);
+                Assert.Equal(semanticGenerated.Length, semanticGenerated.Select(source => source.LogicalPath).Distinct(StringComparer.Ordinal).Count());
+                Assert.Equal(semanticGenerated.Length, semanticGenerated.Select(source => source.PhysicalPath).Distinct(StringComparer.Ordinal).Count());
+                Assert.All(semanticGenerated, source => Assert.Null(source.ResolvedPath));
+                if (includeGenerated) Assert.Single(semanticGenerated.Select(source => source.ContentIdentity).Distinct(StringComparer.Ordinal));
                 Assert.Equal("compiler.generatorBindingUnsupported", Assert.Throws<ProjectContextException>(() =>
                     CompilerSourceSet.Create(context, TestContext.Current.CancellationToken)).Reason);
                 var ordinary = await ProjectContextLoader.LoadAsync(request, TestContext.Current.CancellationToken);
                 Assert.True(ordinary.Success, ordinary.FailureReason + ": " + string.Join(" | ", ordinary.Diagnostics));
-                Assert.Equal(1, Assert.Single(ordinary.Contexts).GeneratorOnlyTreeCount);
+                Assert.Equal(2, Assert.Single(ordinary.Contexts).GeneratorOnlyTreeCount);
             }
             if (behavior is "emit" or "declaration")
             {
@@ -171,6 +178,8 @@ public sealed class GeneratorBindingTests
                 Assert.True(final.Success, final.FailureReason + ": " + string.Join(" | ", final.Diagnostics));
                 var finalContext = Assert.Single(final.GraphContexts).Context;
                 Assert.Equal(1, finalContext.GeneratorOnlyTreeCount);
+                Assert.DoesNotContain(finalContext.GeneratedCompilerDocuments, generated => finalContext.ProtectedPaths.Contains(generated.Path,
+                    OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal));
                 if (behavior == "declaration")
                 {
                     // Declaration syntax is not evidence that a compiler omitted

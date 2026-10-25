@@ -556,8 +556,10 @@ internal static partial class MsBuildProjectLoader
             }
             generatorOnlyTreeCount = extraTrees.Length;
             long generatedCharacters = 0;
+            var generatedOrdinal = 0;
             foreach (var tree in extraTrees)
             {
+                var ordinal = generatedOrdinal++;
                 var sourceText = await tree.GetTextAsync(cancellationToken);
                 generatedCharacters += sourceText.Length;
                 if (generatedCharacters > 16 * 1024 * 1024)
@@ -573,7 +575,11 @@ internal static partial class MsBuildProjectLoader
                 if (generated is not null) generatedDocuments.Add(generated);
                 if (request.IncludeGenerated)
                 {
-                    var logical = generated?.LogicalPath ?? "<generated>/" + ProjectAnalysisContext.ContentHash(sourceText.ToString()) + ".cs";
+                    // Unbound semantic identities remain distinct even for identical
+                    // text. Tree spelling is opaque DATA, never a filesystem lookup.
+                    var logical = generated?.LogicalPath ?? "<generated>/" + CanonicalIdentity.Tuple(
+                        "unbound-generator-tree-v1", Logical(root, projectPath), tree.FilePath.Replace('\\', '/'),
+                        ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture)) + ".cs";
                     sources.Add(new ProjectSourceIdentity(logical, logical,
                         generated is null ? ProjectAnalysisContext.ContentHash(sourceText.ToString()) :
                             ProjectAnalysisContext.ContentHash(Convert.FromBase64String(generated.BytesBase64)), true, false)
@@ -640,7 +646,8 @@ internal static partial class MsBuildProjectLoader
                 .Append(projectPath).Append(metadata.AssetsFile)
                 .Concat(project.MetadataReferences.Select(reference => reference.Display)
                     .Where(path => path is not null && File.Exists(path)).Select(path => path!))
-                .Concat(sources.Where(source => source.ResolvedPath is not null).Select(source => source.ResolvedPath!))
+                .Concat(sources.Where(source => source.ResolvedPath is not null &&
+                    !source.PhysicalPath.StartsWith("<", StringComparison.Ordinal)).Select(source => source.ResolvedPath!))
                 .Select(Path.GetFullPath).Distinct(PathComparer).Order(StringComparer.Ordinal).ToArray()
         };
     }
