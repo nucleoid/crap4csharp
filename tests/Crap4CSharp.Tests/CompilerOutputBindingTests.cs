@@ -233,6 +233,84 @@ public sealed class CompilerOutputBindingTests
             CompilerOutputBinding.Validate(context, observed, TestContext.Current.CancellationToken)).Reason);
     }
 
+    [Theory]
+    [InlineData("retained-argv")]
+    [InlineData("unique-dropped-argv")]
+    [InlineData("unmapped")]
+    public void RealDuplicateContentDocumentsRequireIndependentMapOwnership(string mode)
+    {
+        // Retain these small actual Roslyn artifacts if any assertion fails.
+        var fixture = TestDirectory.Create("crap-output-restored-map-positive");
+        const string code = "file class Local { public int M() => 1; }";
+        var map = mode == "unmapped" ? null : fixture.Path + "=/_/";
+        var (context, observed) = Valid(fixture, pathMap: map, documents:
+        [
+            ("A/Code.cs", code),
+            ("B/Code.cs", mode == "unique-dropped-argv" ? code.Replace("=> 1", "=> 2", StringComparison.Ordinal) : code)
+        ]);
+        var build = ArtifactEvidenceInspector.InspectBuild([.. File.ReadAllBytes(observed.Assembly!.Path)], [.. File.ReadAllBytes(observed.Pdb!.Path)]);
+        Assert.Equal(2, build.Documents.Count);
+        if (mode == "unique-dropped-argv")
+        {
+            observed = observed with { DocumentPathMap = CompilerDocumentBinding.CapturePathMap(observed, TestContext.Current.CancellationToken) };
+            observed = CompilerRecipeObservation.WithoutOptionalRecipe(observed, TestContext.Current.CancellationToken);
+        }
+        var binding = CompilerDocumentBinding.Create(context, observed, build, TestContext.Current.CancellationToken);
+        Assert.Equal(2, binding.PhysicalPathsWithPdb.Count);
+        var eligible = binding.EligiblePdbNames(context.CompilerDocuments);
+        Assert.Contains(build.Methods, method => method.SequencePoints.Any(point => eligible.Contains(point.Document)));
+        foreach (var source in context.CompilerDocuments)
+        {
+            var name = map is null ? source.ResolvedPath!.Replace('\\', '/') : "/_/App/" + source.LogicalPath;
+            Assert.Equal(source.ResolvedPath, binding.PhysicalPathForReport(name));
+        }
+        Assert.False(context.Capabilities.CompiledInputBindingComplete);
+    }
+
+    [Theory]
+    [InlineData("absent")]
+    [InlineData("unsupported")]
+    [InlineData("size")]
+    [InlineData("swapped")]
+    [InlineData("one-pdb-row")]
+    public void RestoredMappedChecksumCannotChooseBetweenDistinctPhysicalOwners(string mode)
+    {
+        var fixture = TestDirectory.Create("crap-output-restored-map-ambiguous");
+        const string code = "file class Local { public int M() => 1; }";
+        var (context, observed) = Valid(fixture, pathMap: fixture.Path + "=/_/", documents:
+            [("A/Code.cs", code), ("B/Code.cs", code)]);
+        var build = ArtifactEvidenceInspector.InspectBuild([.. File.ReadAllBytes(observed.Assembly!.Path)], [.. File.ReadAllBytes(observed.Pdb!.Path)]);
+        Assert.Equal(2, build.Documents.Count);
+        Assert.Single(build.Documents.Values.Distinct(StringComparer.Ordinal));
+        // Positive first: the real compiler map and retained matched argv bind both.
+        Assert.Equal(2, CompilerDocumentBinding.Create(context, observed, build, TestContext.Current.CancellationToken).PhysicalPathsWithPdb.Count);
+        observed = observed with { DocumentPathMap = CompilerDocumentBinding.CapturePathMap(observed, TestContext.Current.CancellationToken) };
+        observed = mode == "size" ? CompilerRecipePayload.SizeUnsupported(observed) : mode == "unsupported"
+            ? observed with { CommandLineArguments = [], RetainedUnsupportedRecipe = ["recipe.scalarProfileUnsupported"] }
+            : CompilerRecipeObservation.WithoutOptionalRecipe(observed, TestContext.Current.CancellationToken);
+        if (mode == "swapped")
+            observed = observed with
+            {
+                DocumentPathMap = observed.DocumentPathMap! with
+                {
+                    Pairs =
+                    [
+                        new(Path.Combine(fixture.Path, "App", "A") + Path.DirectorySeparatorChar, "/_/App/B/"),
+                        new(Path.Combine(fixture.Path, "App", "B") + Path.DirectorySeparatorChar, "/_/App/A/")
+                    ]
+                }
+            };
+        if (mode == "one-pdb-row")
+            // A selected-row DATA mutation proves the other enumerated owner is
+            // still considered. It does not claim this subset is an actual PDB.
+            build = build with { Documents = build.Documents.Take(1).ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal) };
+        CompilerRecipeObservation.RequireKnownIntegrity(observed, TestContext.Current.CancellationToken);
+        Assert.False(CompilerDocumentBinding.RequirePathMap(observed, Path.GetDirectoryName(context.ResolvedProjectPath!)!, TestContext.Current.CancellationToken).IsEmpty);
+        Assert.Equal("compiler.outputsUnproven", Assert.Throws<ProjectContextException>(() =>
+            CompilerDocumentBinding.Create(context, observed, build, TestContext.Current.CancellationToken)).Reason);
+        Assert.False(context.Capabilities.CompiledInputBindingComplete);
+    }
+
     private static CompilerObservation WithMapObservation(CompilerObservation observed, string root, string map)
     {
         var sdk = Path.Combine(root, "sdk"); var host = Path.Combine(root, "dotnet");
@@ -247,12 +325,16 @@ public sealed class CompilerOutputBindingTests
         return observed with { InvocationRecipe = capture.Finish(), CommandLineArguments = arguments };
     }
 
-    private static (ProjectAnalysisContext, CompilerObservation) Valid(TestDirectory fixture, string name = "App", string source = "public class Code { public int M() => 1; }", string? pathMap = null)
+    private static (ProjectAnalysisContext, CompilerObservation) Valid(TestDirectory fixture, string name = "App", string source = "public class Code { public int M() => 1; }", string? pathMap = null,
+        IReadOnlyList<(string LogicalPath, string Text)>? documents = null)
     {
         var project = fixture.Write(name + "/" + name + ".csproj", "<Project />");
-        var path = fixture.Write(name + "/Code.cs", source);
-        var tree = CSharpSyntaxTree.ParseText(SourceText.From(source, new UTF8Encoding(false), SourceHashAlgorithm.Sha256), new CSharpParseOptions(LanguageVersion.CSharp14, preprocessorSymbols: ["BOUND"]), path);
-        var compilation = CSharpCompilation.Create(name, [tree], [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)], new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, optimizationLevel: OptimizationLevel.Debug, deterministic: true)
+        documents ??= [("Code.cs", source)];
+        var physical = documents.Select(document => (document.LogicalPath, document.Text,
+            Path: fixture.Write(name + "/" + document.LogicalPath, document.Text))).ToArray();
+        var trees = physical.Select(document => CSharpSyntaxTree.ParseText(SourceText.From(document.Text, new UTF8Encoding(false), SourceHashAlgorithm.Sha256),
+            new CSharpParseOptions(LanguageVersion.CSharp14, preprocessorSymbols: ["BOUND"]), document.Path)).ToArray();
+        var compilation = CSharpCompilation.Create(name, trees, [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)], new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, optimizationLevel: OptimizationLevel.Debug, deterministic: true)
             .WithSourceReferenceResolver(pathMap is null ? null : new SourceFileResolver([], fixture.Path,
                 CSharpCommandLineParser.Default.Parse(["/pathmap:" + pathMap], fixture.Path, sdkDirectory: null).PathMap)));
         using var pe = new MemoryStream(); using var pdb = new MemoryStream();
@@ -267,11 +349,13 @@ public sealed class CompilerOutputBindingTests
             ResolvedProjectPath = project,
             EvaluatedTargetPath = target,
             EvaluatedIntermediateDirectory = Path.GetDirectoryName(assembly),
-            CompilerDocuments = [new("Code.cs", "Code.cs", ProjectAnalysisContext.ContentHash(File.ReadAllBytes(path)), false, false) { ResolvedPath = path }],
-            PhaseInputs = [new(project, "project", false), new(path, "source", false)]
+            CompilerDocuments = physical.Select(document => new ProjectSourceIdentity(document.LogicalPath, document.LogicalPath,
+                ProjectAnalysisContext.ContentHash(File.ReadAllBytes(document.Path)), false, false)
+            { ResolvedPath = document.Path }).ToArray(),
+            PhaseInputs = [new(project, "project", false), .. physical.Select(document => new ProjectPhaseInput(document.Path, "source", false))]
         };
         // Real Roslyn artifacts; supplied parameters here are protocol mutations, not an actual SDK Csc event.
-        var observed = new CompilerObservation(project, [new("Sources", [path]), new("OutputAssembly", [assembly])])
+        var observed = new CompilerObservation(project, [new("Sources", physical.Select(document => document.Path).ToArray()), new("OutputAssembly", [assembly])])
         { Assembly = Capture(assembly), Pdb = Capture(symbols) };
         return (context, pathMap is null ? observed : WithMapObservation(observed, fixture.Path, pathMap));
     }

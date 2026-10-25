@@ -39,8 +39,7 @@ internal static class FreshPriorBuild
     }
     internal sealed record Recipe(string Provider, string Workspace, string PhaseHash, SavedNode[] Nodes);
 
-    internal sealed record CapturePlan(Recipe Ordinary, IReadOnlyDictionary<string, CompilerObservation> Observations,
-        IReadOnlySet<string> RequiredUnscoredTests);
+    internal sealed record CapturePlan(Recipe Ordinary, IReadOnlySet<string> RequiredUnscoredTests);
 
     internal static CapturePlan Prepare(FreshExecutionEvidence execution, CancellationToken token)
     {
@@ -72,30 +71,18 @@ internal static class FreshPriorBuild
         }).ToArray();
         var ordinary = new Recipe(Provider, PathKey(root), Fingerprint(graph, token), nodes);
         if (!CompilerRecipeBudget.TrySerialize(ordinary, Json, MaximumBytes, out _)) throw Refuse();
-        var selected = observations.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
-        var eligible = graph.GraphContexts.Where(binding => !binding.IsTestProject || binding.Context.ExclusionPolicy.IncludeTests)
-            .Select(binding => binding.GraphId).ToHashSet(StringComparer.Ordinal);
-        var optionalUsed = 0;
-        foreach (var node in nodes)
+        // Validate known integrity before any optional export can be dropped.
+        // FreshManifestCapture owns the single optional admission ledger.
+        foreach (var observed in observations.Values)
         {
             token.ThrowIfCancellationRequested();
-            var observed = selected[node.Id];
-            if (!eligible.Contains(node.Id) || observed.InvocationRecipe is null)
-            { selected[node.Id] = observed with { InvocationRecipe = null }; continue; }
-            // Classify/Retain validates recognized integrity before any drop.
-            if (!TryOptionalContribution(observed, root, token, out var contribution) || contribution > MaximumOptionalBytes - optionalUsed)
-            {
-                observed = CompilerRecipePayload.SizeUnsupported(observed);
-                if (!TryOptionalContribution(observed, root, token, out contribution) || contribution > MaximumOptionalBytes - optionalUsed)
-                { selected[node.Id] = CompilerRecipeObservation.WithoutOptionalRecipe(observed, token); continue; }
-            }
-            selected[node.Id] = observed; optionalUsed += contribution;
+            CompilerRecipeObservation.RequireKnownIntegrity(observed, token);
         }
         var requiredTests = execution.Plan.Tests.Select(test => test.GraphId).ToHashSet(StringComparer.Ordinal);
         var requiredUnscoredTests = graph.GraphContexts.Where(binding => binding.IsTestProject &&
             !binding.Context.ExclusionPolicy.IncludeTests && requiredTests.Contains(binding.GraphId))
             .Select(binding => binding.GraphId).ToImmutableHashSet(StringComparer.Ordinal);
-        return new(ordinary, selected, requiredUnscoredTests);
+        return new(ordinary, requiredUnscoredTests);
     }
 
     // Exact delta of the nonnull compilerRecipe property on a SavedNode.

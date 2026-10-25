@@ -38,6 +38,12 @@ internal sealed class CompilerDocumentBinding
         var expected = new Dictionary<string, ProjectSourceIdentity>(maps.IsEmpty ? comparer : StringComparer.Ordinal);
         var aliases = new Dictionary<string, ProjectSourceIdentity>(comparer);
         var mappings = new List<ManifestReportRootMapping>();
+        // A restored map without matched argv cannot distinguish two physical
+        // owners with identical bytes. Keep checksum agreement from becoming
+        // source-path authority, including documents without a selected PDB row.
+        var restoredOwners = !maps.IsEmpty && observation.CommandLineArguments.Count == 0
+            ? new Dictionary<string, string>(StringComparer.Ordinal) : null;
+        var ambiguousContent = restoredOwners is null ? null : new HashSet<string>(StringComparer.Ordinal);
         void Alias(string name, ProjectSourceIdentity source)
         {
             var reportName = name;
@@ -54,6 +60,8 @@ internal sealed class CompilerDocumentBinding
         {
             token.ThrowIfCancellationRequested();
             var physical = Path.GetFullPath(source.ResolvedPath!);
+            if (restoredOwners is not null && !restoredOwners.TryAdd(source.ContentIdentity, physical) &&
+                !comparer.Equals(restoredOwners[source.ContentIdentity], physical)) ambiguousContent!.Add(source.ContentIdentity);
             var name = (resolver.NormalizePath(physical, null) ?? throw Refuse()).Replace('\\', '/');
             if (!expected.TryAdd(name, source)) throw Refuse();
             Alias(physical, source);
@@ -70,6 +78,7 @@ internal sealed class CompilerDocumentBinding
             // stay compiler strings rather than host-rooted filesystem candidates.
             var expectedName = maps.IsEmpty ? Path.GetFullPath(name, directory).Replace('\\', '/') : name;
             if (!expected.TryGetValue(expectedName, out var source) || source.ContentIdentity != checksum ||
+                ambiguousContent?.Contains(checksum) == true ||
                 !bound.TryAdd(name, source)) throw Refuse();
             Alias(name, source); physicalWithPdb.Add(source.ResolvedPath!);
         }
