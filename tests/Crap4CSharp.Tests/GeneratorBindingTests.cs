@@ -81,7 +81,7 @@ public sealed class GeneratorBindingTests
     [InlineData(true, "empty")]
     public async Task ActualGeneratorIsInspectedIndependentlyOfPublicInclusion(bool includeGenerated, string behavior)
     {
-        using var fixture = TestDirectory.Create("crap4csharp-generator-binding");
+        var fixture = TestDirectory.Create("crap4csharp-generator-binding"); // Retain actual failed compiler evidence.
         var action = behavior switch
         {
             "emit" => "context.AddSource(\"Hidden.cs\", \"public class Hidden { public int Risk(int x) => x > 0 ? 1 : 2; }\");",
@@ -148,6 +148,7 @@ public sealed class GeneratorBindingTests
                 }
                 else
                 {
+                    InspectRetainedGeneratorOutputs(fixture, finalContext, observed);
                     var output = CompilerOutputBinding.ValidateAndInspect(finalContext, observed, TestContext.Current.CancellationToken);
                     var binding = CompilerDocumentBinding.Create(finalContext, observed, output.Build, TestContext.Current.CancellationToken);
                     var generated = Assert.Single(finalContext.GeneratedCompilerDocuments);
@@ -190,7 +191,7 @@ public sealed class GeneratorBindingTests
     [Fact]
     public async Task ActualSdkRegexGeneratorBindsEveryCurrentGeneratedDocument()
     {
-        using var fixture = TestDirectory.Create("crap4csharp-sdk-regex-binding");
+        var fixture = TestDirectory.Create("crap4csharp-sdk-regex-binding"); // Retain actual failed compiler evidence.
         var project = fixture.Write("App/App.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework><PathMap>$(MSBuildProjectDirectory)=/_/</PathMap></PropertyGroup></Project>");
         fixture.Write("App/Code.cs", "using System.Text.RegularExpressions; public static partial class Code { [GeneratedRegex(\"^a+$\")] private static partial Regex Pattern(); public static bool Matches(string value) => Pattern().IsMatch(value); }");
         var request = new ProjectContextLoadRequest(project, "Release", "AnyCPU", [], false, false, TimeSpan.FromMinutes(2));
@@ -205,6 +206,7 @@ public sealed class GeneratorBindingTests
         var context = Assert.Single(final.GraphContexts).Context;
         Assert.True(context.GeneratorOnlyTreeCount > 0);
         Assert.Equal(context.GeneratorOnlyTreeCount, context.GeneratedCompilerDocuments.Count);
+        InspectRetainedGeneratorOutputs(fixture, context, observation);
         var output = CompilerOutputBinding.ValidateAndInspect(context, observation, TestContext.Current.CancellationToken);
         var sourceSet = CompilerSourceSet.Create(context, TestContext.Current.CancellationToken);
         var binding = CompilerDocumentBinding.Create(context, observation, output.Build, TestContext.Current.CancellationToken);
@@ -213,6 +215,21 @@ public sealed class GeneratorBindingTests
         Assert.Contains(output.Build.Methods, method => method.MethodName == "Matches" && method.SequencePoints.Count > 0);
         Assert.DoesNotContain(context.Sources, source => sourceSet.IsGeneratorTree(source));
         Assert.False(context.Capabilities.CompiledInputBindingComplete);
+    }
+
+    private static void InspectRetainedGeneratorOutputs(TestDirectory fixture, ProjectAnalysisContext context, CompilerObservation observation)
+    {
+        File.WriteAllText(Path.Combine(fixture.Path, "retained-context.json"), JsonSerializer.Serialize(context, ProjectContextLoader.JsonOptions));
+        File.WriteAllText(Path.Combine(fixture.Path, "retained-observation.json"), JsonSerializer.Serialize(observation, ProjectContextLoader.JsonOptions));
+        try
+        {
+            _ = ArtifactEvidenceInspector.InspectBuild([.. File.ReadAllBytes(observation.Assembly!.Path)],
+                [.. File.ReadAllBytes(observation.Pdb!.Path)]);
+        }
+        catch (InvalidDataException error)
+        {
+            Assert.Fail("Actual generator PE/PDB inspection failed; retained fixture: " + fixture.Path + ": " + error.Message);
+        }
     }
 
 }
