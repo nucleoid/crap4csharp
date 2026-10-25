@@ -338,6 +338,10 @@ internal static class FreshPriorBuild
             }
             values.AddRange(context.CompilerDocuments.Select(d => CanonicalIdentity.Tuple("document", node.Id,
                 PathKey(d.ResolvedPath!), d.ContentIdentity, d.IsGenerated.ToString())));
+            _ = CompilerSourceSet.Create(context, token);
+            values.AddRange(context.GeneratedCompilerDocuments.Select(d => CanonicalIdentity.Tuple("generated-document", node.Id,
+                PathKey(d.Path), d.LogicalPath, d.ChecksumAlgorithm, d.Checksum, d.EncodingName, d.EncodingPreambleBase64,
+                CanonicalIdentity.Sha256(Convert.FromBase64String(d.BytesBase64)))));
             foreach (var reference in context.ReferencePaths)
             {
                 token.ThrowIfCancellationRequested();

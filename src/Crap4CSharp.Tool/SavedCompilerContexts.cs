@@ -35,6 +35,7 @@ internal static class SavedCompilerContexts
             {
                 token.ThrowIfCancellationRequested();
                 var current = binding.Context;
+                var sourceSet = CompilerSourceSet.Create(current, token);
                 var excludedTest = binding.IsTestProject && !current.ExclusionPolicy.IncludeTests;
                 var observation = observations[binding.GraphId];
                 using (timing?.StartSynchronous(prefix + ".compiler.outputBinding"))
@@ -42,13 +43,13 @@ internal static class SavedCompilerContexts
                 var documents = new List<(ManifestInput Input, ImmutableArray<byte> Bytes)>();
                 var references = new List<(ManifestInput Input, ImmutableArray<byte> Bytes)>();
                 using (timing?.StartSynchronous(prefix + ".compiler.documents"))
-                    foreach (var source in current.CompilerDocuments)
+                    foreach (var source in sourceSet.Documents)
                     {
-                        var content = Read(source.ResolvedPath!);
+                        var content = sourceSet.IsGeneratorTree(source) ? sourceSet.Read(source, ref total, token) : Read(source.ResolvedPath!);
                         if (CanonicalIdentity.Sha256(content.AsSpan()) != source.ContentIdentity) throw Refuse();
                         _ = CapturedSource.Create(source.LogicalPath, content.AsSpan());
                         documents.Add((Input("compiler-source", source.LogicalPath, content, source.IsGenerated,
-                            excludedTest ? null : Logical(source.ResolvedPath!), "utf-8"), content));
+                            excludedTest || sourceSet.IsGeneratorTree(source) ? null : Logical(source.ResolvedPath!), "utf-8"), content));
                     }
                 using (timing?.StartSynchronous(prefix + ".compiler.references"))
                     foreach (var reference in CompilerReferenceSnapshot.ResolveSemanticReferences(observation, token))
@@ -125,7 +126,7 @@ internal static class SavedCompilerContexts
                 var paths = documentBinding.PhysicalPathsWithPdb;
                 var expected = documents.Select(d => d.Input with
                 {
-                    Role = paths.Contains(current.CompilerDocuments.Single(s => s.LogicalPath == d.Input.LogicalPath).ResolvedPath!)
+                    Role = paths.Contains(sourceSet.Documents.Single(s => s.LogicalPath == d.Input.LogicalPath).ResolvedPath!)
                     ? "source" : "compiler-source"
                 }).Concat(references.Select(r => r.Input))
                     .GroupBy(i => (i.Role, i.LogicalPath)).Select(g =>

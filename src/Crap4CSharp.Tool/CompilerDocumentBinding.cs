@@ -56,7 +56,16 @@ internal sealed class CompilerDocumentBinding
             }
             aliases.Add(name, source); mappings.Add(new(reportName, source.LogicalPath));
         }
-        foreach (var source in context.CompilerDocuments)
+        var sourceSet = CompilerSourceSet.Create(context, token);
+        if (sourceSet.GeneratedDocuments.Count != 0 && observation.CommandLineArguments.Count != 0)
+        {
+            // The existing saved map may omit prefixes inert for physical Csc
+            // Sources. They must also be inert for EVERY actual generated path.
+            var full = new SourceFileResolver(ImmutableArray<string>.Empty, directory, ParsePathMap(observation, directory, token));
+            foreach (var generated in sourceSet.GeneratedDocuments)
+                if (full.NormalizePath(generated.ResolvedPath!, null) != resolver.NormalizePath(generated.ResolvedPath!, null)) throw Refuse();
+        }
+        foreach (var source in sourceSet.Documents)
         {
             token.ThrowIfCancellationRequested();
             var physical = Path.GetFullPath(source.ResolvedPath!);
@@ -82,6 +91,9 @@ internal sealed class CompilerDocumentBinding
                 !bound.TryAdd(name, source)) throw Refuse();
             Alias(name, source); physicalWithPdb.Add(source.ResolvedPath!);
         }
+        // Even declaration-only generated output is unsupported without its own
+        // actual PDB document. Public exclusion never removes this obligation.
+        if (sourceSet.GeneratedDocuments.Any(source => !physicalWithPdb.Contains(source.ResolvedPath!))) throw Refuse();
         return new(bound, aliases, physicalWithPdb, Array.AsReadOnly(mappings.ToArray()));
     }
 

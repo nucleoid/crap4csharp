@@ -497,6 +497,7 @@ internal static partial class MsBuildProjectLoader
         }
         var unresolvedReferences = warmProject?.UnresolvedProjectReferencePaths ?? [];
         var generatorOnlyTreeCount = 0;
+        var generatedDocuments = new List<ProjectGeneratedSourceDocument>();
         if (unresolvedReferences.Count == 0)
         {
             if (project.AnalyzerReferences.Any(reference => reference is UnresolvedAnalyzerReference))
@@ -554,19 +555,19 @@ internal static partial class MsBuildProjectLoader
                     throw new ProjectContextException("context.generatedSourceUnavailable", "Workspace and diagnostic generator tree inventories disagree.");
             }
             generatorOnlyTreeCount = extraTrees.Length;
-            if (request.IncludeGenerated)
+            long generatedCharacters = 0;
+            foreach (var tree in extraTrees)
             {
-                long generatedCharacters = 0;
-                foreach (var tree in extraTrees)
-                {
-                    var sourceText = await tree.GetTextAsync(cancellationToken);
-                    generatedCharacters += sourceText.Length;
-                    if (generatedCharacters > 16 * 1024 * 1024)
-                        throw new ProjectContextException("context.generatedSourceLimit", "Included generator text exceeds the private transport limit.");
-                    var text = sourceText.ToString();
-                    var path = string.IsNullOrWhiteSpace(tree.FilePath) ? $"<generated>/{ProjectAnalysisContext.ContentHash(text)}.cs" : Logical(root, tree.FilePath);
-                    sources.Add(new ProjectSourceIdentity(path, path, ProjectAnalysisContext.ContentHash(text), true, !IsWithin(root, tree.FilePath)));
-                }
+                var sourceText = await tree.GetTextAsync(cancellationToken);
+                generatedCharacters += sourceText.Length;
+                if (generatedCharacters > 16 * 1024 * 1024)
+                    throw new ProjectContextException("context.generatedSourceLimit", "Generated text exceeds the private transport limit.");
+                var generated = CompilerSourceSet.Capture(tree, Path.GetDirectoryName(projectPath)!, Logical(root, projectPath), cancellationToken);
+                generatedDocuments.Add(generated);
+                if (request.IncludeGenerated)
+                    sources.Add(new ProjectSourceIdentity(generated.LogicalPath, generated.LogicalPath,
+                        ProjectAnalysisContext.ContentHash(Convert.FromBase64String(generated.BytesBase64)), true, false)
+                    { ResolvedPath = generated.Path });
             }
         }
         // Keep precise input roles separate from output protection and from public analysis exclusions.
@@ -602,6 +603,7 @@ internal static partial class MsBuildProjectLoader
             UnresolvedProjectReferencePaths = unresolvedReferences.ToArray(),
             ResolvedProjectPath = Path.GetFullPath(projectPath),
             GeneratorOnlyTreeCount = generatorOnlyTreeCount,
+            GeneratedCompilerDocuments = Array.AsReadOnly(generatedDocuments.ToArray()),
             CompilerDocuments = compilerDocuments.OrderBy(source => source.ResolvedPath, StringComparer.Ordinal).ToArray(),
             PhaseInputs = phaseInputs.Distinct().OrderBy(p => p.Path, StringComparer.Ordinal).ThenBy(p => p.Role, StringComparer.Ordinal).ToArray(),
             ReferencePaths = project.MetadataReferences.Select(r => r.Display)

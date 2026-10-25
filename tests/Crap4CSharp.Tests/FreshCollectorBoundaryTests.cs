@@ -13,6 +13,7 @@ public sealed class FreshCollectorBoundaryTests
     [InlineData("excluded")]
     [InlineData("ci")]
     [InlineData("pathmap")]
+    [InlineData("generator")]
     public Task ActualCollectorAndCompilerBoundariesNeverInventEligibleCoverage(string variant)
         => RunCase(variant);
 
@@ -28,10 +29,25 @@ public sealed class FreshCollectorBoundaryTests
         fixture.Write("Directory.Build.props", "<Project><PropertyGroup><ContinuousIntegrationBuild>" +
             (variant is "ci" or "pathmap" ? "true" : "false") + "</ContinuousIntegrationBuild><Deterministic>true</Deterministic>" +
             (variant == "pathmap" ? "<PathMap>$(MSBuildThisFileDirectory)=/crap4csharp-mapped/</PathMap>" : "") + "</PropertyGroup></Project>");
-        fixture.Write("Library/Library.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>" + counter + "</Project>");
+        var analyzerItem = "";
+        if (variant == "generator")
+        {
+            const string generator = "using Microsoft.CodeAnalysis; [Generator] public sealed class FixtureGenerator : ISourceGenerator { public void Initialize(GeneratorInitializationContext context) {} public void Execute(GeneratorExecutionContext context) => context.AddSource(\"Hidden.cs\", \"public class Hidden { public int Risk(int value) => value > 0 ? 1 : 2; }\"); }";
+            var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator)
+                .Append(typeof(Microsoft.CodeAnalysis.ISourceGenerator).Assembly.Location).Distinct()
+                .Select(p => Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(p));
+            var compilation = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create("FixtureGenerator",
+                [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(generator, cancellationToken: TestContext.Current.CancellationToken)], references,
+                new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
+            using var stream = File.Create(Path.Combine(fixture.Path, "FixtureGenerator.dll"));
+            var emitted = compilation.Emit(stream, cancellationToken: TestContext.Current.CancellationToken);
+            Assert.True(emitted.Success, string.Join(" | ", emitted.Diagnostics));
+            analyzerItem = "<ItemGroup><Analyzer Include=\"../FixtureGenerator.dll\" /></ItemGroup>";
+        }
+        fixture.Write("Library/Library.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>" + counter + analyzerItem + "</Project>");
         fixture.Write("Library/Code.cs", "public static class Library\n{\n public static int Covered() => 42;\n" +
             (variant == "excluded" ? " [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]\n" : "") +
-            " public static int Other() => 43;\n}\n");
+            (variant == "generator" ? " public static int Other() => new Hidden().Risk(1) + 42;\n}\n" : " public static int Other() => 43;\n}\n"));
         fixture.Write("Tests/Tests.csproj", """
             <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><IsPackable>false</IsPackable></PropertyGroup>
             <ItemGroup><PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" PrivateAssets="all" />
@@ -160,6 +176,29 @@ public sealed class FreshCollectorBoundaryTests
             Assert.Empty(evaluation.GetProperty("metrics").EnumerateArray());
             Assert.False(evaluation.GetProperty("decision").GetProperty("completed").GetBoolean());
             Assert.DoesNotContain(run.GetProperty("artifacts").EnumerateArray(), a => a.GetProperty("kind").GetString() == "manifest" || a.GetProperty("complete").GetBoolean() || a.GetProperty("reusable").GetBoolean());
+        }
+        if (variant == "generator")
+        {
+            var manifestPath = Path.Combine(fixture.Path, "bundle/manifest.json");
+            var bundle = ArtifactBundle.Load(manifestPath, fixture.Path);
+            var generated = Assert.Single(Assert.Single(bundle.Manifest.Contexts).Inputs.Where(i => i.Generated && i.Role == "source"));
+            Assert.Null(generated.RepositoryPath); // Virtual output is never committed-path authority.
+            Assert.Equal(generated.Sha256, CanonicalIdentity.Sha256(bundle.Bytes[generated.Locator].AsSpan()));
+            var replayOutput = new StringWriter();
+            Assert.Equal(0, await global::App.RunAsync(["analyze", "--reuse-artifacts", "bundle/manifest.json", "--format", "json"],
+                fixture.Path, replayOutput, new StringWriter(), TestContext.Current.CancellationToken));
+            using var replay = JsonDocument.Parse(replayOutput.ToString());
+            Assert.Equal(2, replay.RootElement.GetProperty("evaluation").GetProperty("metrics").GetArrayLength());
+            var priorOutput = new StringWriter(); var priorError = new StringWriter();
+            var priorExit = await global::App.RunAsync(["check", "--project", "Tests/Tests.csproj", "--policy", "policy.json", "--scope", "all",
+                "--no-build", "--build-artifacts", "bundle/manifest.json", "--artifact-output", "bundle-prior", "--format", "json", "--timeout-seconds", "300"],
+                fixture.Path, priorOutput, priorError, TestContext.Current.CancellationToken);
+            Assert.True(priorExit == 0, priorError + Environment.NewLine + priorOutput);
+            var prior = ArtifactBundle.Load(Path.Combine(fixture.Path, "bundle-prior/manifest.json"), fixture.Path);
+            var priorGenerated = Assert.Single(Assert.Single(prior.Manifest.Contexts).Inputs.Where(i => i.Generated && i.Role == "source"));
+            Assert.Equal(generated, priorGenerated);
+            Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library/build-count.txt")));
+            Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Tests/build-count.txt")));
         }
         foreach (var (path, bytes) in original) Assert.Equal(bytes, File.ReadAllBytes(path));
     }

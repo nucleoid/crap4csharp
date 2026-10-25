@@ -16,8 +16,7 @@ internal static class CompilerOutputBinding
         CompilerObservation observation, CancellationToken token, CompilerFileReadScope? scope = null)
     {
         token.ThrowIfCancellationRequested();
-        if (context.GeneratorOnlyTreeCount != 0)
-            throw new ProjectContextException("compiler.generatorBindingUnsupported", "Generator-only syntax trees require actual compiler binding that this adapter does not support.");
+        _ = CompilerSourceSet.Create(context, token); // The complete generated vector remains an output obligation below.
         CompilerInputBinding.Validate(context, observation, token, scope);
         try
         {

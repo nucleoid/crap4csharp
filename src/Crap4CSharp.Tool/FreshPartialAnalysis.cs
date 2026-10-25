@@ -33,12 +33,14 @@ internal static class FreshPartialAnalysis
                 var pdb = CompilerOutputBinding.Read(compiler.Pdb!.Path, ref total, token);
                 CompilerOutputBinding.Match(compiler.Assembly, pe); CompilerOutputBinding.Match(compiler.Pdb, pdb);
                 var build = ArtifactEvidenceInspector.InspectBuild(pe, pdb);
-                var sources = context.CompilerDocuments.Select(d =>
+                var sourceSet = CompilerSourceSet.Create(context, token);
+                var sources = sourceSet.Documents.Select(d =>
                 {
-                    var bytes = CompilerOutputBinding.Read(d.ResolvedPath!, ref total, token);
+                    var bytes = sourceSet.Read(d, ref total, token);
                     if (CanonicalIdentity.Sha256(bytes.AsSpan()) != d.ContentIdentity)
                         throw new ProjectContextException("provenance.partialSourceChanged", "Partial analysis source changed.");
-                    var relative = Path.GetRelativePath(evidence.Preflight.Root, d.ResolvedPath!).Replace('\\', '/');
+                    var relative = sourceSet.IsGeneratorTree(d) ? CapturedEvaluationInputs.RepositorySourcePath(context.ProjectPath, d.LogicalPath) :
+                        Path.GetRelativePath(evidence.Preflight.Root, d.ResolvedPath!).Replace('\\', '/');
                     if (relative == ".." || relative.StartsWith("../", StringComparison.Ordinal) || Path.IsPathRooted(relative))
                         throw new ProjectContextException("provenance.partialSourceUnsupported", "Partial source is outside the selected root.");
                     repositoryPaths.Add((contextId, d.LogicalPath), relative);
@@ -47,7 +49,7 @@ internal static class FreshPartialAnalysis
                 var references = CompilerReferenceSnapshot.ResolveSemanticReferences(compiler, token)
                     .Select(p => MetadataReference.CreateFromImage(CompilerOutputBinding.Read(p.Path, ref total, token), p.Properties)).ToArray();
                 var syntax = sources.Select(s => CSharpSyntaxTree.ParseText(s.Text, context.ParseOptions, s.LogicalPath)).ToArray();
-                var eligible = context.CompilerDocuments.Where(d => !d.IsGenerated || context.ExclusionPolicy.IncludeGenerated)
+                var eligible = sourceSet.Documents.Where(d => !d.IsGenerated || context.ExclusionPolicy.IncludeGenerated)
                     .Select(d => d.LogicalPath).ToHashSet(StringComparer.Ordinal);
                 var coverage = reports.SelectMany(r => r.Modules).Where(m => m.GraphId == binding.GraphId)
                     .Select((m, i) => new CapturedCoverage("partial-" + i + ".xml", m.LineProjection, "opencover", "line")).ToArray();

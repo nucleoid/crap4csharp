@@ -75,6 +75,8 @@ public sealed class GeneratorBindingTests
     [InlineData(true, "throw")]
     [InlineData(false, "constructor")]
     [InlineData(true, "constructor")]
+    [InlineData(false, "declaration")]
+    [InlineData(true, "declaration")]
     [InlineData(false, "empty")]
     [InlineData(true, "empty")]
     public async Task ActualGeneratorIsInspectedIndependentlyOfPublicInclusion(bool includeGenerated, string behavior)
@@ -83,6 +85,7 @@ public sealed class GeneratorBindingTests
         var action = behavior switch
         {
             "emit" => "context.AddSource(\"Hidden.cs\", \"public class Hidden { public int Risk(int x) => x > 0 ? 1 : 2; }\");",
+            "declaration" => "context.AddSource(\"Hidden.cs\", \"public class Hidden {}\");",
             "throw" => "throw new System.InvalidOperationException(\"fixture generator failed\");",
             _ => ""
         };
@@ -117,13 +120,15 @@ public sealed class GeneratorBindingTests
             Assert.True(loaded.Success, loaded.FailureReason + ": " + string.Join(" | ", loaded.Diagnostics));
             var context = Assert.Single(loaded.GraphContexts).Context;
             // Proposed private protocol marker: public exclusion cannot hide binding obligations.
-            Assert.Equal(behavior == "emit" ? 1 : 0, context.GeneratorOnlyTreeCount);
-            Assert.Equal(behavior == "emit" && includeGenerated,
-                context.Sources.Any(s => s.IsGenerated && s.LogicalPath.EndsWith("Hidden.cs", StringComparison.Ordinal)));
+            Assert.Equal(behavior is "emit" or "declaration" ? 1 : 0, context.GeneratorOnlyTreeCount);
+            Assert.Equal((behavior is "emit" or "declaration") && includeGenerated,
+                context.Sources.Any(s => context.GeneratedCompilerDocuments.Any(d => d.LogicalPath == s.LogicalPath)));
             var copy = JsonSerializer.Deserialize<ProjectAnalysisContext>(JsonSerializer.Serialize(context, ProjectContextLoader.JsonOptions), ProjectContextLoader.JsonOptions)!;
             Assert.Equal(context.GeneratorOnlyTreeCount, copy.GeneratorOnlyTreeCount);
+            Assert.Equal(context.GeneratedCompilerDocuments.ToArray(), copy.GeneratedCompilerDocuments.ToArray());
+            Assert.DoesNotContain("generatedCompilerDocuments", JsonSerializer.Serialize(context, new JsonSerializerOptions(JsonSerializerDefaults.Web)), StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("generatorOnlyTreeCount", JsonSerializer.Serialize(context, new JsonSerializerOptions(JsonSerializerDefaults.Web)), StringComparison.OrdinalIgnoreCase);
-            if (behavior == "emit")
+            if (behavior is "emit" or "declaration")
             {
                 var privateDirectory = Path.Combine(fixture.Path, "private");
                 Directory.CreateDirectory(privateDirectory);
@@ -134,11 +139,46 @@ public sealed class GeneratorBindingTests
                 Assert.True(final.Success, final.FailureReason + ": " + string.Join(" | ", final.Diagnostics));
                 var finalContext = Assert.Single(final.GraphContexts).Context;
                 Assert.Equal(1, finalContext.GeneratorOnlyTreeCount);
-                // Real successful Csc produced a PE/PDB, yet generator source binding
-                // remains unsupported even when public generated analysis is disabled.
-                var exception = Assert.Throws<ProjectContextException>(() => CompilerOutputBinding.Validate(finalContext,
-                    observed, TestContext.Current.CancellationToken));
-                Assert.Equal("compiler.generatorBindingUnsupported", exception.Reason);
+                if (behavior == "declaration")
+                {
+                    // A declaration-only generated tree lacks actual PDB document
+                    // evidence and remains outside the supported binding profile.
+                    Assert.Throws<ProjectContextException>(() => CompilerOutputBinding.Validate(finalContext,
+                        observed, TestContext.Current.CancellationToken));
+                }
+                else
+                {
+                    var output = CompilerOutputBinding.ValidateAndInspect(finalContext, observed, TestContext.Current.CancellationToken);
+                    var binding = CompilerDocumentBinding.Create(finalContext, observed, output.Build, TestContext.Current.CancellationToken);
+                    var generated = Assert.Single(finalContext.GeneratedCompilerDocuments);
+                    var generatedSource = Assert.Single(CompilerSourceSet.Create(finalContext, TestContext.Current.CancellationToken).GeneratedDocuments);
+                    Assert.Contains(generated.Path, binding.PhysicalPathsWithPdb);
+                    Assert.False(File.Exists(generated.Path)); // It is an identity, not an opened/emitted file.
+                    Assert.Contains(output.Build.Methods, method => method.SequencePoints.Any(point =>
+                        binding.EligiblePdbNames([generatedSource]).Contains(point.Document)));
+                    Assert.False(finalContext.Capabilities.CompiledInputBindingComplete);
+                    foreach (var defect in new[] { "bytes", "name", "duplicate", "missing", "ordinary-collision", "module" })
+                    {
+                        var changed = generated;
+                        var contextWithDefect = finalContext;
+                        if (defect == "bytes")
+                        {
+                            var bytes = Convert.FromBase64String(generated.BytesBase64).Concat(new byte[] { 32 }).ToArray();
+                            var hash = generated.ChecksumAlgorithm == "sha256" ? System.Security.Cryptography.SHA256.HashData(bytes) :
+                                System.Security.Cryptography.SHA1.HashData(bytes);
+                            changed = generated with { BytesBase64 = Convert.ToBase64String(bytes), Checksum = Convert.ToHexStringLower(hash) };
+                        }
+                        if (defect == "name") changed = generated with { Path = Path.Combine(Path.GetDirectoryName(generated.Path)!, "Foreign.g.cs") };
+                        if (defect == "ordinary-collision") changed = generated with { Path = finalContext.CompilerDocuments[0].ResolvedPath! };
+                        contextWithDefect = contextWithDefect with { GeneratedCompilerDocuments = [changed] };
+                        if (defect == "duplicate") contextWithDefect = contextWithDefect with
+                        { GeneratorOnlyTreeCount = 2, GeneratedCompilerDocuments = [changed, changed] };
+                        if (defect == "missing") contextWithDefect = contextWithDefect with { GeneratedCompilerDocuments = [] };
+                        if (defect == "module") contextWithDefect = contextWithDefect with { AssemblyName = "ForeignModule" };
+                        Assert.Throws<ProjectContextException>(() => CompilerOutputBinding.Validate(contextWithDefect,
+                            observed, TestContext.Current.CancellationToken));
+                    }
+                }
             }
         }
         foreach (var (path, saved) in authored)
@@ -147,4 +187,32 @@ public sealed class GeneratorBindingTests
             Assert.Equal(saved.Mtime, File.GetLastWriteTimeUtc(path));
         }
     }
+    [Fact]
+    public async Task ActualSdkRegexGeneratorBindsEveryCurrentGeneratedDocument()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-sdk-regex-binding");
+        var project = fixture.Write("App/App.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework><PathMap>$(MSBuildProjectDirectory)=/_/</PathMap></PropertyGroup></Project>");
+        fixture.Write("App/Code.cs", "using System.Text.RegularExpressions; public static partial class Code { [GeneratedRegex(\"^a+$\")] private static partial Regex Pattern(); public static bool Matches(string value) => Pattern().IsMatch(value); }");
+        var request = new ProjectContextLoadRequest(project, "Release", "AnyCPU", [], false, false, TimeSpan.FromMinutes(2));
+        Assert.Equal(0, (await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken)).ExitCode);
+        var loaded = await ProjectContextLoader.LoadGraphAsync(request, TestContext.Current.CancellationToken);
+        Assert.True(loaded.Success, loaded.FailureReason + ": " + string.Join(" | ", loaded.Diagnostics));
+        var privateDirectory = Path.Combine(fixture.Path, "private"); Directory.CreateDirectory(privateDirectory);
+        var observation = await CompilerEvidence.BuildAsync(Assert.Single(loaded.BuildGraph), privateDirectory,
+            request.Timeout, TestContext.Current.CancellationToken);
+        var final = await ProjectContextLoader.LoadGraphAsync(request, TestContext.Current.CancellationToken);
+        Assert.True(final.Success, final.FailureReason + ": " + string.Join(" | ", final.Diagnostics));
+        var context = Assert.Single(final.GraphContexts).Context;
+        Assert.True(context.GeneratorOnlyTreeCount > 0);
+        Assert.Equal(context.GeneratorOnlyTreeCount, context.GeneratedCompilerDocuments.Count);
+        var output = CompilerOutputBinding.ValidateAndInspect(context, observation, TestContext.Current.CancellationToken);
+        var sourceSet = CompilerSourceSet.Create(context, TestContext.Current.CancellationToken);
+        var binding = CompilerDocumentBinding.Create(context, observation, output.Build, TestContext.Current.CancellationToken);
+        Assert.All(sourceSet.GeneratedDocuments, source => Assert.Contains(source.ResolvedPath!, binding.PhysicalPathsWithPdb));
+        Assert.All(output.Build.Documents.Keys, name => Assert.StartsWith("/_/", name, StringComparison.Ordinal));
+        Assert.Contains(output.Build.Methods, method => method.MethodName == "Matches" && method.SequencePoints.Count > 0);
+        Assert.DoesNotContain(context.Sources, source => sourceSet.IsGeneratorTree(source));
+        Assert.False(context.Capabilities.CompiledInputBindingComplete);
+    }
+
 }

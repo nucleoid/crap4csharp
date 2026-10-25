@@ -78,6 +78,7 @@ internal static class CoverageGraphBinding
                 var name = module.Elements("ModuleName").Single().Value;
                 if (!names.Add(name) || !builds.TryGetValue(name, out var selected)) throw Refuse();
                 var context = selected.Context;
+                var sourceSet = CompilerSourceSet.Create(context, token);
                 var files = module.Elements("Files").Single().Elements().ToArray();
                 var rawMethods = module.Descendants("Method").ToArray();
                 // Preserve the original pre-empty-module shape guards as well as
@@ -85,7 +86,7 @@ internal static class CoverageGraphBinding
                 if (files.Any(f => f.Name != "File") || files.Length != module.Descendants().Count(e => e.Name.LocalName == "File") ||
                     rawMethods.Length != module.Descendants().Count(e => e.Name.LocalName == "Method") ||
                     rawMethods.Length > TestResultBinding.MaximumTests ||
-                    context.CompilerDocuments.Select(d => d.LogicalPath).Distinct(paths).Count() != context.CompilerDocuments.Count) throw Refuse();
+                    sourceSet.Documents.Select(d => d.LogicalPath).Distinct(paths).Count() != sourceSet.Documents.Count) throw Refuse();
                 stage = "point-projection";
                 var singleModule = new XDocument(new XElement("CoverageSession", new XElement("Modules", new XElement(module))));
                 var documentBinding = CompilerDocumentBinding.Create(context, observations[selected.Id], selected.Build, token);
@@ -115,9 +116,9 @@ internal static class CoverageGraphBinding
                     // Actual Coverlet can emit a named empty module. It is not zero
                     // coverage: accept only independently empty executable inventory.
                     if (files.Length != 0 || module.Descendants("SequencePoint").Any()) throw Refuse();
-                    var capturedSources = context.CompilerDocuments.Select(d =>
+                    var capturedSources = sourceSet.Documents.Select(d =>
                     {
-                        var content = CompilerOutputBinding.Read(d.ResolvedPath!, ref total, token);
+                        var content = sourceSet.Read(d, ref total, token);
                         if (CanonicalIdentity.Sha256(content.AsSpan()) != d.ContentIdentity) throw Refuse();
                         return CapturedSource.Create(d.LogicalPath, content.AsSpan());
                     }).ToArray();
@@ -211,7 +212,8 @@ internal static class CoverageGraphBinding
             root.Element("Modules")!.Elements().Count() != 1 ||
             module.Elements("ModuleName").Single().Value != build.ModuleIdentity) throw Refuse();
         var paths = PathIdentityPolicy.Current.Comparer;
-        var sources = context.CompilerDocuments.Select(d => d.LogicalPath).ToArray();
+        var sourceSet = CompilerSourceSet.Create(context, token);
+        var sources = sourceSet.Documents.Select(d => d.LogicalPath).ToArray();
         if (sources.Distinct(paths).Count() != sources.Length) throw Refuse();
         var mappings = CompilerDocumentBinding.Create(context, observation, build, token).ReportMappings;
         var policy = new CapturedPathPolicy(!OperatingSystem.IsWindows(), mappings);
@@ -225,7 +227,7 @@ internal static class CoverageGraphBinding
             var physical = Required(file, "fullPath");
             // A normalized capture must retain the actual physical compiler document,
             // not silently accept a resealed alternate logical/path-root declaration.
-            if (!Path.IsPathFullyQualified(physical) || !context.CompilerDocuments.Any(d =>
+            if (!Path.IsPathFullyQualified(physical) || !sourceSet.Documents.Any(d =>
                 paths.Equals(d.ResolvedPath!.Replace('\\', '/'), physical.Replace('\\', '/'))) ||
                 !sources.Contains(pathIndex.Resolve(physical), StringComparer.Ordinal)) throw Refuse();
         }
@@ -407,9 +409,10 @@ internal static class CoverageGraphBinding
     {
         if (!build.Methods.Any(method => method.CompilerGenerated || method.MethodName == ".ctor")) return new HashSet<int>();
         long semanticBytes = 0;
-        var trees = context.CompilerDocuments.Select(document =>
+        var sourceSet = CompilerSourceSet.Create(context, token);
+        var trees = sourceSet.Documents.Select(document =>
         {
-            var bytes = CompilerOutputBinding.Read(document.ResolvedPath!, ref semanticBytes, token);
+            var bytes = sourceSet.Read(document, ref semanticBytes, token);
             if (CanonicalIdentity.Sha256(bytes.AsSpan()) != document.ContentIdentity) throw AggregateRefuse();
             var source = CapturedSource.Create(document.LogicalPath, bytes.AsSpan());
             return Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(source.Text, context.ParseOptions,

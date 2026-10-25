@@ -36,21 +36,28 @@ internal sealed class CompilerDocumentSnapshot
         foreach (var binding in graph.GraphContexts)
         {
             var membership = new HashSet<string>(paths);
-            foreach (var document in binding.Context.CompilerDocuments)
+            var sourceSet = CompilerSourceSet.Create(binding.Context, token);
+            foreach (var document in sourceSet.Documents)
             {
                 token.ThrowIfCancellationRequested();
                 if (++count > CompilerPhaseSnapshot.MaximumInputs || string.IsNullOrWhiteSpace(binding.GraphId) ||
                     string.IsNullOrWhiteSpace(document.ResolvedPath) || !Path.IsPathFullyQualified(document.ResolvedPath) ||
                     document.ResolvedPath != Path.GetFullPath(document.ResolvedPath) || !membership.Add(document.ResolvedPath))
                     throw Refuse();
-                if (!cache.TryGetValue(document.ResolvedPath, out var identity))
+                Identity identity;
+                if (sourceSet.IsGeneratorTree(document))
+                {
+                    var bytes = sourceSet.Read(document, ref total, token);
+                    identity = new(CanonicalIdentity.Sha256(bytes.AsSpan()), bytes.Length, 0);
+                }
+                else if (!cache.TryGetValue(document.ResolvedPath, out identity!))
                 {
                     identity = ReadFile(document.ResolvedPath, ref total, token, scope);
                     cache.Add(document.ResolvedPath, identity);
                 }
                 var key = new DocumentKey(binding.GraphId,
                     OperatingSystem.IsWindows() ? document.ResolvedPath.ToUpperInvariant() : document.ResolvedPath,
-                    document.LogicalPath, document.IsGenerated);
+                    document.LogicalPath, document.IsGenerated, sourceSet.EncodingIdentity(document));
                 if (!result.TryAdd(key, identity) || identity.Sha256 != document.ContentIdentity) throw Refuse();
             }
         }
@@ -100,7 +107,7 @@ internal sealed class CompilerDocumentSnapshot
         { throw Refuse(); }
     }
 
-    private sealed record DocumentKey(string GraphId, string Path, string LogicalPath, bool Generated);
+    private sealed record DocumentKey(string GraphId, string Path, string LogicalPath, bool Generated, string? GenerationIdentity = null);
     private sealed record Identity(string Sha256, long Length, long MtimeTicks);
     private static ProjectContextException Refuse() => new("compiler.documentsMutated",
         "Post-build compiler document bytes, timestamps, generated classification or membership changed during required tests.");

@@ -165,19 +165,21 @@ internal static class FreshManifestCapture
             var inspected = ArtifactEvidenceInspector.InspectBuild(assembly, pdb);
             var documentBinding = CompilerDocumentBinding.Create(context, observation, inspected, cancellation);
             var pdbPaths = documentBinding.PhysicalPathsWithPdb;
+            var sourceSet = CompilerSourceSet.Create(context, cancellation);
             var inputs = new List<ManifestInput>();
             var recipeSources = new Dictionary<string, ManifestInput>(PathIdentityPolicy.Current.Comparer);
             var recipeReferences = new List<ManifestInput>();
-            foreach (var source in context.CompilerDocuments)
+            foreach (var source in sourceSet.Documents)
             {
-                var content = ReadCaptured(source.ResolvedPath!, ref readTotal, cancellation);
+                var content = sourceSet.Read(source, ref readTotal, cancellation, readPaths);
                 if (CanonicalIdentity.Sha256(content.AsSpan()) != source.ContentIdentity) throw Refuse();
                 _ = CapturedSource.Create(source.LogicalPath, content.AsSpan());
                 // A valid Csc source need not have a PDB document. Preserve it in the
                 // closure without inventing a document or asking replay to bind it.
                 var input = Input(pdbPaths.Contains(source.ResolvedPath!) ? "source" : "compiler-source",
-                    source.LogicalPath, content, source.IsGenerated, RepositoryPath(source.ResolvedPath!));
-                inputs.Add(input); recipeSources.Add(Path.GetFullPath(source.ResolvedPath!), input);
+                    source.LogicalPath, content, source.IsGenerated, sourceSet.IsGeneratorTree(source) ? null : RepositoryPath(source.ResolvedPath!));
+                inputs.Add(input);
+                if (!sourceSet.IsGeneratorTree(source)) recipeSources.Add(Path.GetFullPath(source.ResolvedPath!), input);
             }
             foreach (var reference in CompilerReferenceSnapshot.ResolveSemanticReferences(observation, cancellation))
             {
@@ -211,7 +213,7 @@ internal static class FreshManifestCapture
                 if (g.Select(i => i.Sha256).Distinct(StringComparer.Ordinal).Count() != 1) throw Refuse();
                 return g.First();
             }).ToList();
-            var syntax = context.CompilerDocuments.Select(d => Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(
+            var syntax = sourceSet.Documents.Select(d => Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(
                 CapturedSource.Create(d.LogicalPath, bytes[inputs.Single(i => i.LogicalPath == d.LogicalPath && i.Role is "source" or "compiler-source").Locator].AsSpan()).Text,
                 context.ParseOptions, d.LogicalPath)).ToArray();
             var metadataReferences = inputs.Where(i => i.Role == "reference").Select(i =>
@@ -353,9 +355,10 @@ internal static class FreshManifestCapture
         foreach (var test in graph.GraphContexts.Where(b => b.IsTestProject && !b.Context.ExclusionPolicy.IncludeTests))
         {
             var identities = new List<object>(); var index = 0;
-            foreach (var source in test.Context.CompilerDocuments)
+            var sourceSet = CompilerSourceSet.Create(test.Context, cancellation);
+            foreach (var source in sourceSet.Documents)
             {
-                var content = ReadCaptured(source.ResolvedPath!, ref readTotal, cancellation);
+                var content = sourceSet.Read(source, ref readTotal, cancellation, readPaths);
                 if (CanonicalIdentity.Sha256(content.AsSpan()) != source.ContentIdentity) throw Refuse();
                 _ = CapturedSource.Create(source.LogicalPath, content.AsSpan());
                 var locator = Store(content);
@@ -418,7 +421,7 @@ internal static class FreshManifestCapture
             }
         }
         var available = contexts.SelectMany(c => c.Inputs.Where(i => i.Role == "source" && (!i.Generated || c.IncludeGenerated))
-            .Select(i => i.RepositoryPath!)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+            .Select(i => i.RepositoryPath is null ? i.LogicalPath : CapturedEvaluationInputs.DeclaredRepositorySourcePath(c, i))).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         var selected = preflight.Scope is null || preflight.Scope.Completeness == ScopeCompleteness.ContextIncomplete ? available :
             preflight.Scope.Files.Select(f => f.NewPath).Where(p => p is not null && available.Contains(p, StringComparer.Ordinal))
                 .Select(p => p!).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
