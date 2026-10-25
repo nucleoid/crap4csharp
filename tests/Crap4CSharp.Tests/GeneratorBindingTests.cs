@@ -84,8 +84,8 @@ public sealed class GeneratorBindingTests
         var fixture = TestDirectory.Create("crap4csharp-generator-binding"); // Retain actual failed compiler evidence.
         var action = behavior switch
         {
-            "emit" => "context.AddSource(\"Hidden.cs\", \"public class Hidden { public int Risk(int x) => x > 0 ? 1 : 2; }\");",
-            "declaration" => "context.AddSource(\"Hidden.cs\", \"public class Hidden {}\");",
+            "emit" => "context.AddSource(\"Hidden.cs\", Microsoft.CodeAnalysis.Text.SourceText.From(\"public class Hidden { public int Risk(int x) => x > 0 ? 1 : 2; }\", System.Text.Encoding.UTF8, Microsoft.CodeAnalysis.Text.SourceHashAlgorithm.Sha256));",
+            "declaration" => "context.AddSource(\"Hidden.cs\", Microsoft.CodeAnalysis.Text.SourceText.From(\"public class Hidden {}\", System.Text.Encoding.UTF8, Microsoft.CodeAnalysis.Text.SourceHashAlgorithm.Sha256));",
             "throw" => "throw new System.InvalidOperationException(\"fixture generator failed\");",
             _ => ""
         };
@@ -141,10 +141,26 @@ public sealed class GeneratorBindingTests
                 Assert.Equal(1, finalContext.GeneratorOnlyTreeCount);
                 if (behavior == "declaration")
                 {
-                    // A declaration-only generated tree lacks actual PDB document
-                    // evidence and remains outside the supported binding profile.
-                    Assert.Throws<ProjectContextException>(() => CompilerOutputBinding.Validate(finalContext,
-                        observed, TestContext.Current.CancellationToken));
+                    // Declaration syntax is not evidence that a compiler omitted
+                    // its PDB document. Inspect the actual SHA256 output first.
+                    var generated = Assert.Single(finalContext.GeneratedCompilerDocuments);
+                    var inspected = ArtifactEvidenceInspector.InspectBuild([.. File.ReadAllBytes(observed.Assembly!.Path)],
+                        [.. File.ReadAllBytes(observed.Pdb!.Path)]);
+                    var name = generated.Path.Replace('\\', '/');
+                    if (!inspected.Documents.ContainsKey(name))
+                        Assert.Throws<ProjectContextException>(() => CompilerOutputBinding.Validate(finalContext,
+                            observed, TestContext.Current.CancellationToken));
+                    else
+                    {
+                        CompilerOutputBinding.Validate(finalContext, observed, TestContext.Current.CancellationToken);
+                        Assert.DoesNotContain(inspected.Methods, method => method.SequencePoints.Any(point => point.Document == name));
+                        // DATA-only negative over a real accepted output: a missing
+                        // generated document cannot be inferred harmless from syntax.
+                        var missing = inspected with { Documents = inspected.Documents.Where(pair => pair.Key != name)
+                            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal) };
+                        Assert.Throws<ProjectContextException>(() => CompilerDocumentBinding.Create(finalContext,
+                            observed, missing, TestContext.Current.CancellationToken));
+                    }
                 }
                 else
                 {
@@ -189,7 +205,7 @@ public sealed class GeneratorBindingTests
         }
     }
     [Fact]
-    public async Task ActualSdkRegexGeneratorBindsEveryCurrentGeneratedDocument()
+    public async Task ActualSdkRegexGeneratorRequiresSupportedDocumentChecksumsBeforeBinding()
     {
         var fixture = TestDirectory.Create("crap4csharp-sdk-regex-binding"); // Retain actual failed compiler evidence.
         var project = fixture.Write("App/App.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework><PathMap>$(MSBuildProjectDirectory)=/_/</PathMap></PropertyGroup></Project>");
@@ -206,6 +222,33 @@ public sealed class GeneratorBindingTests
         var context = Assert.Single(final.GraphContexts).Context;
         Assert.True(context.GeneratorOnlyTreeCount > 0);
         Assert.Equal(context.GeneratorOnlyTreeCount, context.GeneratedCompilerDocuments.Count);
+        // The preserved SDK103 RegexGenerator emits SHA1-header documents.
+        // Current SDK401 target PDBs are SHA256; actual public full-quality is
+        // their acceptance route. This test never broadens the product guard.
+        var assemblyBytes = System.Collections.Immutable.ImmutableArray.Create(File.ReadAllBytes(observation.Assembly!.Path));
+        var pdbBytes = System.Collections.Immutable.ImmutableArray.Create(File.ReadAllBytes(observation.Pdb!.Path));
+        using (var provider = System.Reflection.Metadata.MetadataReaderProvider.FromPortablePdbImage(pdbBytes))
+        {
+            var reader = provider.GetMetadataReader();
+            var sha256 = new Guid("8829d00f-11b8-4213-878b-770e8597ac16");
+            var nonSha256 = reader.Documents.Select(handle => reader.GetDocument(handle))
+                .Where(document => document.HashAlgorithm.IsNil || reader.GetGuid(document.HashAlgorithm) != sha256).ToArray();
+            if (nonSha256.Length != 0)
+            {
+                Assert.All(nonSha256, document =>
+                {
+                    Assert.False(document.HashAlgorithm.IsNil);
+                    Assert.Equal(new Guid("ff1816ec-aa5e-4d10-87f7-6f4963833460"), reader.GetGuid(document.HashAlgorithm));
+                    Assert.Equal(20, reader.GetBlobBytes(document.Hash).Length);
+                });
+                var error = Assert.Throws<InvalidDataException>(() => ArtifactEvidenceInspector.InspectBuild(assemblyBytes, pdbBytes));
+                Assert.Contains("unsupported checksum algorithm", error.ToString(), StringComparison.Ordinal);
+                Assert.Equal("compiler.outputsUnproven", Assert.Throws<ProjectContextException>(() =>
+                    CompilerOutputBinding.Validate(context, observation, TestContext.Current.CancellationToken)).Reason);
+                Assert.False(context.Capabilities.CompiledInputBindingComplete);
+                return; // A verified refusal, not a skipped or positive SDK fixture.
+            }
+        }
         InspectRetainedGeneratorOutputs(fixture, context, observation);
         var output = CompilerOutputBinding.ValidateAndInspect(context, observation, TestContext.Current.CancellationToken);
         var sourceSet = CompilerSourceSet.Create(context, TestContext.Current.CancellationToken);

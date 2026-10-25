@@ -32,7 +32,7 @@ public sealed class FreshCollectorBoundaryTests
         var analyzerItem = "";
         if (variant == "generator")
         {
-            const string generator = "using Microsoft.CodeAnalysis; [Generator] public sealed class FixtureGenerator : ISourceGenerator { public void Initialize(GeneratorInitializationContext context) {} public void Execute(GeneratorExecutionContext context) => context.AddSource(\"Hidden.cs\", \"public class Hidden { public int Risk(int value) => value > 0 ? 1 : 2; }\"); }";
+            const string generator = "using Microsoft.CodeAnalysis; [Generator] public sealed class FixtureGenerator : ISourceGenerator { public void Initialize(GeneratorInitializationContext context) {} public void Execute(GeneratorExecutionContext context) => context.AddSource(\"Hidden.cs\", Microsoft.CodeAnalysis.Text.SourceText.From(\"public class Hidden { public int Risk(int value) => value > 0 ? 1 : 2; }\", System.Text.Encoding.UTF8, Microsoft.CodeAnalysis.Text.SourceHashAlgorithm.Sha256)); }";
             var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator)
                 .Append(typeof(Microsoft.CodeAnalysis.ISourceGenerator).Assembly.Location).Distinct()
                 .Select(p => Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(p));
