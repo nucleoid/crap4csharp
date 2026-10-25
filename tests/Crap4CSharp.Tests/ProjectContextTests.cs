@@ -139,6 +139,46 @@ public sealed class ProjectContextTests
     }
 
     [Fact]
+    public async Task TargetAddedOutOfRootPhysicalWorkspaceSourceRemainsProtected()
+    {
+        using var fixture = TestDirectory.Create("crap4csharp-target-added-external-protection");
+        var project = fixture.Write("Repo/App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net10.0</TargetFramework><EnableDefaultCompileItems>false</EnableDefaultCompileItems></PropertyGroup>
+              <ItemGroup><Compile Include="Code.cs" /></ItemGroup>
+              <Target Name="AddExternalGate" BeforeTargets="CoreCompile">
+                <ItemGroup><Compile Include="../Outside/Gate.cs" Link="Linked/Gate.cs" /></ItemGroup>
+              </Target>
+            </Project>
+            """);
+        var local = fixture.Write("Repo/Code.cs", "public class Code { public int Value() => 1; }");
+        var external = fixture.Write("Outside/Gate.cs", "public class Gate { public int Value() => 2; }");
+        var originals = new[] { project, local, external }.ToDictionary(path => path,
+            path => (Bytes: File.ReadAllBytes(path), Modified: File.GetLastWriteTimeUtc(path)));
+        var request = new ProjectContextLoadRequest(project, "Debug", null, [], false, true, TimeSpan.FromMinutes(2));
+        var restore = await ProjectBuildPreparation.RestoreAsync(request, TestContext.Current.CancellationToken);
+        Assert.True(restore.ExitCode == 0, restore.StandardOutput + restore.StandardError);
+        var loaded = await ProjectContextLoader.LoadAsync(request, TestContext.Current.CancellationToken);
+        Assert.True(loaded.Success, loaded.FailureReason + ": " + string.Join(Environment.NewLine, loaded.Diagnostics));
+        var context = Assert.Single(loaded.Contexts);
+        // This real physical document appears only after the CoreCompile target:
+        // it was not an evaluated Compile item rescued by metadata.AuthoredInputs.
+        var source = Assert.Single(context.Sources, item => item.ResolvedPath == external);
+        Assert.StartsWith("<external>/", source.PhysicalPath, StringComparison.Ordinal);
+        Assert.True(source.IsExternal);
+        Assert.False(source.IsGenerated);
+        Assert.Contains(context.CompilerDocuments, item => item.ResolvedPath == external);
+        Assert.Contains(context.PhaseInputs, input => input.Role == "source" && input.Path == external);
+        Assert.Contains(local, context.ProtectedPaths); // Ordinary physical positive control.
+        Assert.Contains(external, context.ProtectedPaths); // Causal RED on the old '<' filter.
+        foreach (var (path, original) in originals)
+        {
+            Assert.Equal(original.Bytes, File.ReadAllBytes(path));
+            Assert.Equal(original.Modified, File.GetLastWriteTimeUtc(path));
+        }
+    }
+
+    [Fact]
     public async Task ActualIntermediateOutputLayoutIsGeneratedWithoutAnObjLogicalPrefix()
     {
         using var fixture = TestDirectory.Create("crap4csharp-artifacts-generated");
