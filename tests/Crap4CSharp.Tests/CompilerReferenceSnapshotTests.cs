@@ -5,6 +5,34 @@ namespace Crap4CSharp.Tests;
 
 public sealed class CompilerReferenceSnapshotTests
 {
+    [Theory]
+    [InlineData("GLOBAL")]
+    [InlineData("GlObAl")]
+    public void Global_task_keyword_gives_the_same_global_metadata_reference(string globalKeyword)
+    {
+        var properties = CompilerReferenceSnapshot.SemanticProperties(globalKeyword, false);
+        Assert.Empty(properties.Aliases);
+        var token = TestContext.Current.CancellationToken;
+        var compilation = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create("GlobalKeyword",
+            [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("public sealed class Value { public object Item = new object(); }", cancellationToken: token)],
+            [Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(typeof(object).Assembly.Location, properties)],
+            new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
+        Assert.DoesNotContain(compilation.GetDiagnostics(token), diagnostic => diagnostic.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error);
+        Assert.Equal("Foo,global", CompilerReferenceSnapshot.NormalizeAliases("Foo," + globalKeyword));
+        Assert.Equal(new[] { "Foo", "foo" }, CompilerReferenceSnapshot.SemanticProperties("Foo,foo", false).Aliases);
+    }
+
+    [Theory]
+    [InlineData("global,GLOBAL")]
+    [InlineData("GLOBAL,GlObAl")]
+    [InlineData("Foo,Foo")]
+    [InlineData("Foo,")]
+    [InlineData(",global")]
+    [InlineData("Foo,,global")]
+    public void Duplicate_or_empty_task_aliases_remain_unproven(string aliases)
+        => Assert.Equal("compiler.referencesUnproven", Assert.Throws<ProjectContextException>(() =>
+            CompilerReferenceSnapshot.NormalizeAliases(aliases)).Reason);
+
     [Fact]
     public void AliasedReferenceMetadataSurvivesCaptureAndBindsOnlyItsDeclaredAlias()
     {
@@ -25,7 +53,8 @@ public sealed class CompilerReferenceSnapshotTests
         var reference = Assert.Single(CompilerReferenceSnapshot.ResolveSemanticReferences(observation, token));
         var hash = CanonicalIdentity.Sha256(bytes.AsSpan());
         var input = new ManifestInput("reference", CompilerReferenceSnapshot.LogicalReference(hash, reference.Aliases, false),
-            "reference.dll", bytes.Length, hash, null, false) { ReferenceAliases = reference.Aliases };
+            "reference.dll", bytes.Length, hash, null, false)
+        { ReferenceAliases = reference.Aliases };
         var captured = CompilerReferenceSnapshot.CapturedReference(input, bytes);
         Assert.Equal(["ProbeLibrary"], captured.Properties.Aliases);
         var consumer = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create("Consumer",
@@ -38,8 +67,12 @@ public sealed class CompilerReferenceSnapshotTests
         var stripped = input with { ReferenceAliases = null };
         Assert.Throws<ProjectContextException>(() => CompilerReferenceSnapshot.CapturedReference(stripped, bytes));
         Assert.Throws<InvalidDataException>(() => SemanticEligibility.CapturedReference(stripped, bytes));
-        var embedded = input with { ReferenceAliases = null, EmbedInteropTypes = true,
-            LogicalPath = CompilerReferenceSnapshot.LogicalReference(hash, null, true) };
+        var embedded = input with
+        {
+            ReferenceAliases = null,
+            EmbedInteropTypes = true,
+            LogicalPath = CompilerReferenceSnapshot.LogicalReference(hash, null, true)
+        };
         Assert.True(SemanticEligibility.CapturedReference(embedded, bytes).Properties.EmbedInteropTypes);
         Assert.Throws<InvalidDataException>(() => SemanticEligibility.CapturedReference(embedded with { EmbedInteropTypes = null }, bytes));
         Assert.Empty(SemanticEligibility.CapturedReference(stripped with { LogicalPath = "refs/app.dll" }, bytes).Properties.Aliases);

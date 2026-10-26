@@ -7,7 +7,7 @@ internal static class FreshRetainedCompletedProof
     internal static async Task<CurrentEvidence> ValidateAsync(FreshExecutionEvidence execution,
         ArtifactBundle bundle, FreshCheckPreflight preflight, CancellationToken token,
         Func<CancellationToken, Task>? beforeFinalValidation = null,
-        CompletedProofTiming? timing = null)
+        CompletedProofTiming? timing = null, FreshCompilerRecipeSelection? optionalRecipes = null)
     {
         token.ThrowIfCancellationRequested();
         if (execution.Coverage is null || execution.Tests.Failure is not null ||
@@ -92,8 +92,12 @@ internal static class FreshRetainedCompletedProof
             ProjectContextLoadResult graph;
             using (timing?.Start(boundary + ".graph"))
                 graph = await ProjectContextLoader.LoadGraphAsync(request with
-                { CollectTiming = timing is not null, Timing = timing, TimingPrefix = boundary + ".graph.loader",
-                    WarmAcquisitionSelectionProbe = preflight.Request.WarmPostBuildProbe }, token);
+                {
+                    CollectTiming = timing is not null,
+                    Timing = timing,
+                    TimingPrefix = boundary + ".graph.loader",
+                    WarmAcquisitionSelectionProbe = preflight.Request.WarmPostBuildProbe
+                }, token);
             FreshCheckExecution.RequirePolicyTargets(preflight, graph);
             FreshCheckExecution.RequirePolicyTargets(execution.Preflight, graph);
             var plan = CheckExecutionPlan.Create(runners, graph, token);
@@ -110,9 +114,9 @@ internal static class FreshRetainedCompletedProof
         {
             retained.ValidateObservedSynchronousBoundary(current.FinalGraph, token, () =>
             {
-                SavedProductionExecutions.ValidateFreshBoundary(bundle, plan, current, root, token, timing, boundary);
+                SavedProductionExecutions.ValidateFreshBoundary(bundle, plan, current, root, token, timing, boundary, optionalRecipes);
                 using (timing?.Start(boundary + ".saved.compilerContexts"))
-                    SavedCompilerContexts.ValidateObserved(bundle, current, root, token, timing, boundary);
+                    SavedCompilerContexts.ValidateObserved(bundle, current, root, token, timing, boundary, optionalRecipes);
                 using (timing?.Start(boundary + ".saved.originalPhysical"))
                     retained.ValidateAgainstCurrentGraph(current.FinalGraph, token);
             }, timing, boundary);

@@ -20,6 +20,7 @@ internal static class CompilerBinlogReader
         events.TargetFinished += (_, value) => targets.Remove(TargetKey(value.BuildEventContext));
         int eventCount = 0, itemCount = 0;
         long characters = 0;
+        var optionalBudget = new CompilerRecipeBudget();
         bool buildCompleted = false;
         static string Key(BuildEventContext? context) => context is null ? "null" :
             $"{context.SubmissionId}:{context.NodeId}:{context.ProjectContextId}:{context.TargetId}:{context.TaskId}";
@@ -37,19 +38,65 @@ internal static class CompilerBinlogReader
                     throw new ProjectContextException("compiler.runtimeCopiesUnproven", "Unexpected selected-SDK copy task association.");
             }
             if (value.TaskName != "Csc") return;
-            if (tasks.Count >= 16 || !tasks.TryAdd(Key(value.BuildEventContext), new Observation(value.ProjectFile)))
+            if (tasks.Count >= 16 || !tasks.TryAdd(Key(value.BuildEventContext), new Observation(value.ProjectFile)
+            { Recipe = new(request.SdkPath, request.HostPath, Key(value.BuildEventContext), value.TaskFile) }))
                 throw new ProjectContextException("compiler.associationInvalid", "Unexpected compiler task association.");
         };
         events.TaskFinished += (_, value) =>
         {
-            if (tasks.TryGetValue(Key(value.BuildEventContext), out var observed)) observed.Succeeded = value.Succeeded;
+            if (tasks.TryGetValue(Key(value.BuildEventContext), out var observed))
+            { observed.Succeeded = value.Succeeded; observed.Recipe?.Close(); }
             if (copies.TryGetValue(Key(value.BuildEventContext), out var copied)) copied.Succeeded = value.Succeeded;
         };
         events.AnyEventRaised += (_, value) =>
         {
             token.ThrowIfCancellationRequested();
             if (++eventCount > 200000) throw new ProjectContextException("compiler.evidenceLimit", "Compiler event limit exceeded.");
-            if (value is not TaskParameterEventArgs parameter || parameter.Kind != TaskParameterMessageKind.TaskInput) return;
+            if (value is TaskCommandLineEventArgs command && command.TaskName == "Csc" &&
+                tasks.TryGetValue(Key(command.BuildEventContext), out var commanded))
+            {
+                if (!optionalBudget.TryCharge(command.CommandLine.Length))
+                { commanded.Recipe?.DeclineSize(); commanded.Recipe?.Command("", token); }
+                else commanded.Recipe?.Command(command.CommandLine, token);
+                return;
+            }
+            if (value is not TaskParameterEventArgs parameter) return;
+            if (tasks.TryGetValue(Key(parameter.BuildEventContext), out var recipeTask) &&
+                (parameter.Kind == TaskParameterMessageKind.TaskOutput && parameter.ParameterName == "CommandLineArgs" ||
+                 parameter.Kind == TaskParameterMessageKind.TaskInput && CompilerRecipeObservation.ProjectsOption(parameter.ParameterName)))
+            {
+                var values = new List<string>();
+                foreach (var item in parameter.Items)
+                {
+                    token.ThrowIfCancellationRequested();
+                    var text = item is IItemData itemData ? itemData.EvaluatedInclude : item is ITaskItem taskItem ? taskItem.ItemSpec : item?.ToString() ?? "";
+                    if (!optionalBudget.TryCharge(text.Length))
+                    { recipeTask.Recipe?.DeclineSize(); values.Clear(); break; }
+                    values.Add(text);
+                }
+                if (parameter.Kind == TaskParameterMessageKind.TaskOutput) recipeTask.Recipe?.Arguments(values, token);
+                else recipeTask.Recipe?.Option(parameter.ParameterName, values, token);
+                return;
+            }
+            if (parameter.Kind != TaskParameterMessageKind.TaskInput) return;
+            if (tasks.TryGetValue(Key(parameter.BuildEventContext), out var emitTask) &&
+                parameter.ParameterName is "EmbeddedFiles" or "GeneratedFilesOutputPath" or "PdbFile")
+            {
+                if (emitTask.Recipe?.BeginEmitParameter(parameter.ParameterName) != true ||
+                    emitTask.EmitParameters.Any(input => input.Name == parameter.ParameterName))
+                    throw new ProjectContextException("compiler.associationInvalid", "Late or duplicate compiler emit parameter.");
+                var values = new List<string>();
+                foreach (var item in parameter.Items)
+                {
+                    token.ThrowIfCancellationRequested();
+                    var text = item is IItemData data ? data.EvaluatedInclude : item is ITaskItem taskItem ? taskItem.ItemSpec : item?.ToString() ?? "";
+                    if (!optionalBudget.TryCharge(text.Length))
+                    { emitTask.Recipe?.DeclineSize(); values.Clear(); break; }
+                    values.Add(text);
+                }
+                if (!optionalBudget.Exceeded) emitTask.EmitParameters.Add(new(parameter.ParameterName, values));
+                return;
+            }
             Observation? observed;
             if (copies.TryGetValue(Key(parameter.BuildEventContext), out var copy))
             {
@@ -110,13 +157,24 @@ internal static class CompilerBinlogReader
                 runtime.Add(new(Path.GetFullPath(source[i], Path.GetDirectoryName(request.ProjectPath)!),
                     Path.GetFullPath(destination[i], Path.GetDirectoryName(request.ProjectPath)!)));
         }
-        return new(request.ProjectPath, task.Parameters) { RuntimeCopies = runtime };
+        var result = new CompilerObservation(request.ProjectPath, task.Parameters)
+        {
+            RuntimeCopies = runtime,
+            InvocationRecipe = task.Recipe?.Finish(),
+            CommandLineArguments = task.Recipe?.RawArguments ?? [],
+            EmitParameters = task.Recipe?.SizeDeclined == true ? [] : task.EmitParameters.ToArray(),
+            CommandRouteDiagnostic = task.Recipe?.CommandRouteDiagnostic
+        };
+        CompilerRecipeObservation.RequireKnownIntegrity(result, token);
+        return result with { DocumentPathMap = CompilerDocumentBinding.CapturePathMap(result, token) };
     }
 
     private sealed class Observation(string? project)
     {
+        internal CompilerRecipeObservation? Recipe { get; init; }
         internal string? Project { get; } = project;
         internal bool? Succeeded { get; set; }
         internal List<CompilerParameter> Parameters { get; } = [];
+        internal List<CompilerParameter> EmitParameters { get; } = [];
     }
 }

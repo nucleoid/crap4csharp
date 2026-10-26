@@ -23,7 +23,7 @@ try{
                         discoverySha256=('7'*64);worktreeSha256=('8'*64);runtimeInventorySha256=('9'*64);files=$files}}
             })}
     })
-    $controls=@('positive','older-attempt','mixed-attempt','future-union','missing-os','duplicate-os','legacy-schema','wrong-package','wrong-head','wrong-tree','wrong-run','wrong-attempt',
+    $controls=@('positive','windows-max-skips','older-attempt','mixed-attempt','future-union','missing-os','duplicate-os','legacy-schema','wrong-package','wrong-head','wrong-tree','wrong-run','wrong-attempt',
         'wrong-sdk','missing-config','missing-union','duplicate-config','wrong-union-os','wrong-union-head','wrong-union-package',
         'wrong-union-run','failed-union','unknown-field','private-union-field','private-identity-field','private-assembly-field',
         'string-count','float-count','boolean-count','forged-count','no-passes','invalid-case-hash','invalid-receipt-hash',
@@ -41,7 +41,10 @@ try{
             numeric-attempt {$current[1].workflowAttempt=1}
             array-head {$current[1].commit=@('a'*40)}
             linux-skipped {$coverage.passed=119;$coverage.skipped=1}
-            too-many-windows-skips {$current[0].partitionCoverage[0].passed=109;$current[0].partitionCoverage[0].skipped=11}
+            windows-max-skips {
+                foreach($union in $current[0].partitionCoverage){$union.passed=109;$union.skipped=11}
+            }
+            too-many-windows-skips {$current[0].partitionCoverage[0].passed=108;$current[0].partitionCoverage[0].skipped=12}
             duplicate-os {$current[1].operatingSystem='Windows'}
             legacy-schema {$current[1].schemaVersion='candidate-acceptance-v1'}
             wrong-package {$current[1].packageSha256='e'*64}
@@ -84,7 +87,7 @@ try{
         $accepted=$true
         try{& "$PSScriptRoot/assert-partitioned-platform-acceptance.ps1" -CandidateDirectory $candidateDir -AcceptanceDirectory $acceptanceDir `
             -Version $candidate.version -Commit $candidate.commit -WorkflowRun '123' -WorkflowAttempt $expectedAttempt | Out-Null}catch{$accepted=$false}
-        if($accepted -ne ($control -cin @('positive','older-attempt','mixed-attempt'))){throw "Unexpected partitioned platform acceptance: $control"}
+        if($accepted -ne ($control -cin @('positive','windows-max-skips','older-attempt','mixed-attempt'))){throw "Unexpected partitioned platform acceptance: $control"}
     }
     Write-Output "Partitioned platform controls passed ($($controls.Count)); synthetic verifier evidence only."
 }finally{

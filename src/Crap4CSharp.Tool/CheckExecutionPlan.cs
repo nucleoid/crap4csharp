@@ -80,6 +80,7 @@ internal sealed class CheckExecutionPlan
         PreprocessorSymbols = ReadOnly(context.PreprocessorSymbols), Imports = ReadOnly(context.Imports),
         Sources = ReadOnly(context.Sources), Exclusions = ReadOnly(context.Exclusions),
         CompilerDocuments = ReadOnly(context.CompilerDocuments), PhaseInputs = ReadOnly(context.PhaseInputs),
+        GeneratedCompilerDocuments = ReadOnly(context.GeneratedCompilerDocuments),
         ReferencePaths = ReadOnly(context.ReferencePaths), ProtectedPaths = ReadOnly(context.ProtectedPaths),
         GeneratedTransitionPaths = ReadOnly(context.GeneratedTransitionPaths)
     };

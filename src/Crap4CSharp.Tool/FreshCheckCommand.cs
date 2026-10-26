@@ -18,12 +18,15 @@ internal static class FreshCheckCommand
         ResultDocument RetainArtifactOutput(ResultDocument refusal)
         {
             if (retainedArtifactDirectory is null) return refusal;
-            return refusal with { Run = refusal.Run with
+            return refusal with
             {
-                Artifacts = refusal.Run.Artifacts.Concat(new[] { new RunArtifact("retained-artifact-output",
+                Run = refusal.Run with
+                {
+                    Artifacts = refusal.Run.Artifacts.Concat(new[] { new RunArtifact("retained-artifact-output",
                     retainedArtifactDirectory, "retained", false, false) }).ToArray(),
-                DiagnosticLocations = refusal.Run.DiagnosticLocations.Concat(new[] { retainedArtifactDirectory }).ToArray()
-            } };
+                    DiagnosticLocations = refusal.Run.DiagnosticLocations.Concat(new[] { retainedArtifactDirectory }).ToArray()
+                }
+            };
         }
         try
         {
@@ -35,6 +38,7 @@ internal static class FreshCheckCommand
         }
         catch (Exception error) when (retainedEvidence is not null && App.IsHandled(error))
         {
+            FreshPrivateFailureEvidence.TryRetain(retainedEvidence.PrivateDirectory, error, deadline.Token);
             return FreshCheckPreparation.Immediate(RetainArtifactOutput(FreshFailureResult.Refuse(retainedEvidence, error, started, elapsed.Elapsed,
                 deadlineExpired: !cancellation.IsCancellationRequested && deadline.IsCancellationRequested)));
         }
@@ -48,13 +52,6 @@ internal static class FreshCheckCommand
         DateTimeOffset started, Stopwatch elapsed, CancellationToken cancellation, CancellationTokenSource deadline, Action<FreshFailureOutputProof>? retainFailureOutputProof, Action<string>? retainPrivateDirectory, Action<Func<Task>>? retainTerminalProof, Action<FreshExecutionEvidence> retainEvidence, Action<string> retainArtifactDirectory, CompletedProofTiming? timing,
         Action<string>? onStagingCreated)
     {
-        void RetainCreatedStaging(string path)
-        {
-            retainArtifactDirectory(path);
-            // This observer belongs only to initial staging, before writer proof.
-            // CommitExport updates its retained locator without invoking it again.
-            onStagingCreated?.Invoke(path);
-        }
         var token = deadline.Token;
         FreshCheckPreflight preflight;
         using (timing?.Start("public.preflight"))
@@ -67,6 +64,7 @@ internal static class FreshCheckCommand
         retainEvidence(evidence);
         if (evidence.Tests.Failure is not null || evidence.Tests.Count != evidence.Plan.Tests.Count || evidence.Tests.Any(t => t.Process.ExitCode != 0))
         {
+            FreshPrivateFailureEvidence.TryRetain(evidence.PrivateDirectory, evidence.Tests.Failure, token);
             var failure = FreshFailureResult.Create(evidence, started, elapsed.Elapsed,
                 deadlineExpired: !cancellation.IsCancellationRequested && deadline.IsCancellationRequested);
             // Interrupted proof cannot support partial analysis. Keep the actual
@@ -86,6 +84,29 @@ internal static class FreshCheckCommand
             captured = promote
                 ? await FreshManifestCapture.PrepareCompletedAsync(evidence, token, timing)
                 : await FreshManifestCapture.CaptureAsync(evidence, token, timing);
+        return await PrepareCapturedForWriterAsync(request, evidence, captured, started, elapsed, cancellation, token,
+            retainTerminalProof, retainArtifactDirectory, timing, onStagingCreated);
+    }
+
+    // Existing post-capture composition. Pending is never proof: the same actual
+    // terminal validator, remaining original clock and guarded writer still run.
+    internal static async Task<FreshCheckPreparation> PrepareCapturedForWriterAsync(FreshCheckRequest request,
+        FreshExecutionEvidence evidence, FreshCapturedBundle captured, DateTimeOffset started, Stopwatch elapsed,
+        CancellationToken cancellation, CancellationToken token, Action<Func<Task>>? retainTerminalProof,
+        Action<string> retainArtifactDirectory, CompletedProofTiming? timing = null, Action<string>? onStagingCreated = null)
+    {
+        var preflight = evidence.Preflight;
+        var promote = preflight.GitSnapshot is not null ||
+            preflight.Policy.Mode == RepositoryPolicyMode.Strict && preflight.Policy.Scope == "all";
+        if (promote && retainTerminalProof is null)
+            throw new InvalidOperationException("Fresh completed results require the terminal publication boundary.");
+        void RetainCreatedStaging(string path)
+        {
+            retainArtifactDirectory(path);
+            // This observer belongs only to initial staging, before writer proof.
+            // CommitExport updates its retained locator without invoking it again.
+            onStagingCreated?.Invoke(path);
+        }
         if (promote)
             using (timing?.Start("public.promotion"))
                 captured = FreshCompletedCapture.PrepareForValidation(evidence, captured, token);
@@ -130,7 +151,7 @@ internal static class FreshCheckCommand
         // requires the complete independently current writer proof of the
         // actual bytes. The export remains absent until that outer proof succeeds.
         FreshCheckExecution.ProtectPreparedDestinations(preflight with
-            { Request = request with { ArtifactOutput = null } }, evidence.Compiler.FinalGraph);
+        { Request = request with { ArtifactOutput = null } }, evidence.Compiler.FinalGraph);
         var complete = policy.Evaluation.ExitCode != 1;
         ProvenanceResult? completedProof = null;
         Func<ProvenanceResult?, ResultDocument>? createResult = null;
@@ -162,7 +183,7 @@ internal static class FreshCheckCommand
                 // Operationally incomplete scoring keeps its established failure
                 // materialization/output path; it never advertises reusable success.
                 using (timing?.Start("public.finalProof"))
-                    completedProof = await FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token, timing: timing);
+                    completedProof = await FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token, timing: timing, optionalRecipes: captured.OptionalRecipes);
                 retainTerminalProof?.Invoke(() => ValidateAtWriterAsync((current, proof, writerToken) =>
                     CommitExport(current.ProtectedPaths, writerToken, finalBundle, proof)));
             }
@@ -180,7 +201,8 @@ internal static class FreshCheckCommand
                 {
                     using (timing?.Start("public.outerProof"))
                         await FreshCompletedCapture.ValidateAsync(evidence, finalBundle, finalDeadline.Token, timing: timing,
-                            beforePublication: (current, proof) => publish(current, proof, finalDeadline.Token));
+                            beforePublication: (current, proof) => publish(current, proof, finalDeadline.Token),
+                            optionalRecipes: captured.OptionalRecipes);
                 }
                 catch (OperationCanceledException) when (!cancellation.IsCancellationRequested && finalDeadline.IsCancellationRequested)
                 { throw new ProcessTimeoutException("Fresh check", request.Timeout); }
@@ -250,26 +272,30 @@ internal static class FreshCheckCommand
                 preflight.Policy.RequiredChecks.Contains("crap"))
         };
         var differences = TrustedPolicyLoader.CompareProposed(preflight.Root, preflight.Trusted)
-            .Select(d => new PolicyDifferenceResult(d.Path,d.Status,d.TrustedHash,d.ProposedHash)).ToArray();
+            .Select(d => new PolicyDifferenceResult(d.Path, d.Status, d.TrustedHash, d.ProposedHash)).ToArray();
         createResult = proof => replay with
         {
             Evaluation = replay.Evaluation with
             {
-                InvocationMode = "check", Policy = new(preflight.Policy.Threshold, false), Checks = checks, Findings = policy.Findings,
+                InvocationMode = "check",
+                Policy = new(preflight.Policy.Threshold, false),
+                Checks = checks,
+                Findings = policy.Findings,
                 Decision = new(complete, policy.Evaluation.Decision, policy.Evaluation.OperationalReasons.FirstOrDefault() ??
                     (policy.Evaluation.ExitCode == 2 ? "crap.thresholdExceeded" : "crap.withinThreshold")),
                 Provenance = new("verified", "currentWorkspaceMatch", true, complete && (proof?.Reusable ?? false), proof?.Reasons ?? [ProvenanceReasonCodes.ReuseRecipeIncomplete]),
                 PolicyTrust = new(preflight.Trusted.Trust, preflight.Trusted.Revision, preflight.Trusted.Policy.PolicyPath,
-                    preflight.Trusted.Policy.Hash, policy.CompatibilityHash), PolicyDifferences = differences,
-                CallableExemptions = policy.Exemptions.Matches, ExemptionErrors = []
+                    preflight.Trusted.Policy.Hash, policy.CompatibilityHash),
+                PolicyDifferences = differences,
+                CallableExemptions = policy.Exemptions.Matches,
+                ExemptionErrors = []
             },
             Run = replay.Run with
             {
-                Status = complete ? "completed" : "operationalError", ExitCode = policy.Evaluation.ExitCode,
+                Status = complete ? "completed" : "operationalError",
+                ExitCode = policy.Evaluation.ExitCode,
                 Artifacts = [new("manifest", manifest, "retained", complete, complete && (proof?.Reusable ?? false))],
-                TestOutcomes = evidence.Tests.Outcomes.Select(o => new TestExecutionOutcomeResult(o.GraphId,
-                    evidence.Plan.Tests.Single(t => t.GraphId == o.GraphId).ProjectPath, o.State, o.Process?.ExitCode,
-                    o.ResultsDirectory, o.LogDirectory)).ToArray()
+                TestOutcomes = FreshTestOutcomeProjection.Create(evidence)
             }
         };
         if (completeAtWriter is not null)

@@ -26,11 +26,13 @@ internal static class SavedCompletedProof
         var request = new ProjectContextLoadRequest(selected, preflight.Policy.Configuration, platform,
             preflight.Policy.TargetFrameworks.ToArray(), preflight.Request.Overrides.IncludeTests ?? false,
             preflight.Request.Overrides.IncludeGenerated ?? false, preflight.Request.Timeout)
-        { WarmAcquisitionSelectionProbe = preflight.Request.WarmPostBuildProbe,
-            NativeSdkIdentityProbe = preflight.Request.NativeSdkIdentityProbe };
+        {
+            WarmAcquisitionSelectionProbe = preflight.Request.WarmPostBuildProbe,
+            NativeSdkIdentityProbe = preflight.Request.NativeSdkIdentityProbe
+        };
         var plan = await LoadPlanAsync();
         CompletedTestPlanRecipe.Validate(bytes.ToArray(), plan, root, selected, token);
-        var imported = FreshPriorBuild.Load(bundle, plan.PreparedGraph, root, token);
+        var imported = FreshPriorBuild.Load(bundle, plan.PreparedGraph, root, token, plan.Tests.Select(test => test.GraphId).ToHashSet(StringComparer.Ordinal));
         var compiler = await CompilerGraphExecution.RunBoundAsync(request, plan.PreparedGraph,
             (node, cancellation) => { cancellation.ThrowIfCancellationRequested(); return Task.FromResult(imported[node.Id]); }, token);
         SavedRequiredTestResults.Validate(bundle, plan, compiler, root, token);

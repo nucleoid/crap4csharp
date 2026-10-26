@@ -37,7 +37,7 @@ function Observe([string]$Label) {
     $path=Join-Path $ResultsDirectory "$Label.json"
     & "$PSScriptRoot/write-suite-partition-diagnostic.ps1" -DiscoveryPath $discovery -ShardCount 1 -ShardIndex 0 -TrxPath $trx -ExitCode 1 -OutputPath $path -RepositoryRoot (Join-Path $ResultsDirectory 'repo')
     $raw=Get-Content -LiteralPath $path -Raw
-    foreach ($secret in @('PRIVATE_MESSAGE','PRIVATE_STACK','Consumer.cs','C:\private','SECRET_ARGUMENT','OwnedFixture.cs','Owned.Private','999999')) {
+    foreach ($secret in @('PRIVATE_MESSAGE','PRIVATE_STACK','Consumer.cs','C:\private','SECRET_ARGUMENT','OwnedFixture.cs','Owned.Private','999999','recipe.PRIVATE_UNKNOWN_OPTION')) {
         if ($raw.Contains($secret)) { throw 'Private diagnostic details leaked.' }
     }
     return ($raw | ConvertFrom-Json)
@@ -49,6 +49,29 @@ if (@($failure.observedDiagnosticTokens).Count -ne 1 -or $failure.observedDiagno
 if (@(Compare-Object @(2,3) @($failure.observedRepositoryTestSites.line)).Count) { throw 'Source line bounds or separator handling failed.' }
 $expectedDigest=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes('tests/Crap4CSharp.Tests/OwnedFixture.cs'))).ToLowerInvariant()
 foreach ($site in $failure.observedRepositoryTestSites) { if ($site.sourceDigest -cne $expectedDigest) { throw 'Source digest mismatch.' } }
+# Fixed optional-recipe tokens survive; unknown/private values still cannot leave diagnostics.
+$message.InnerText+=' recipe.bindingUnsupported recipe.compilerCommandPrefixUnproven diagnostic.compilerBinding.unproven diagnostic.compilerRoute.selectedSdkUnixApphost recipe.PRIVATE_UNKNOWN_OPTION'
+$doc.Save($trx); $recipeValue=Observe 'recipe-binding-fixed-tokens'
+$expectedTokens=@('run.timedOut','recipe.bindingUnsupported','recipe.compilerCommandPrefixUnproven','diagnostic.compilerBinding.unproven','diagnostic.compilerRoute.selectedSdkUnixApphost')
+if (@(Compare-Object $expectedTokens @($recipeValue.failures[0].observedDiagnosticTokens)).Count) { throw 'Closed recipe route observations missing.' }
+# Each new closed route token is independent; unknown/private values remain excluded.
+$originalMessage=$message.InnerText
+$routeTokens=@('diagnostic.compilerRoute.hostExecSelectedCscOtherHost','diagnostic.compilerRoute.hostExecOtherCsc','diagnostic.compilerRoute.notSelectedCscLauncher','diagnostic.compilerRoute.lateEvent','diagnostic.compilerRoute.notTransported')
+for($routeIndex=0;$routeIndex -lt $routeTokens.Count;$routeIndex++){
+    $message.InnerText='PRIVATE_MESSAGE recipe.PRIVATE_UNKNOWN_OPTION '+$routeTokens[$routeIndex]
+    $doc.Save($trx);$routeValue=Observe ('closed-route-'+$routeIndex)
+    $observedTokens=@($routeValue.failures[0].observedDiagnosticTokens)
+    if($observedTokens.Count -ne 1 -or $observedTokens[0] -cne $routeTokens[$routeIndex]){throw 'Closed route distinction missing or ambiguous.'}
+}
+# Bundle diagnostics transport only independent fixed cardinalities/reasons, never payload text.
+$bundleTokens=@('diagnostic.recipeArtifact.none','diagnostic.recipeArtifact.one','diagnostic.recipeArtifact.multiple','diagnostic.recipeUnsupported.none','diagnostic.recipeUnsupported.one','diagnostic.recipeUnsupported.multiple','diagnostic.recipeInspection.unavailable','compiler.recipeBindingUnproven')
+for($bundleIndex=0;$bundleIndex -lt $bundleTokens.Count;$bundleIndex++){
+    $message.InnerText='PRIVATE_MESSAGE recipe.PRIVATE_UNKNOWN_OPTION '+$bundleTokens[$bundleIndex]
+    $doc.Save($trx);$bundleValue=Observe ('closed-bundle-'+$bundleIndex)
+    $observedTokens=@($bundleValue.failures[0].observedDiagnosticTokens)
+    if($observedTokens.Count -ne 1 -or $observedTokens[0] -cne $bundleTokens[$bundleIndex]){throw 'Closed bundle distinction missing or ambiguous.'}
+}
+$message.InnerText=$originalMessage
 $originalStack=$stack.InnerText
 $stack.InnerText=(1..12 | ForEach-Object {' at test in /owned/tests/Crap4CSharp.Tests/OwnedFixture.cs:line 2'}) -join "`n"
 $doc.Save($trx)

@@ -73,7 +73,11 @@ public sealed record ProjectAnalysisContext(
     [JsonIgnore]
     public IReadOnlyList<ProjectSourceIdentity> CompilerDocuments { get; init; } = [];
 
-    // Private unsupported-binding marker; public inclusion does not waive compiler proof.
+    // Actual Workspace-only tree bytes are private transport, never physical Csc inputs.
+    [JsonIgnore]
+    public IReadOnlyList<ProjectGeneratedSourceDocument> GeneratedCompilerDocuments { get; init; } = [];
+
+    // Public inclusion does not waive actual generated compiler proof.
     [JsonIgnore]
     public int GeneratorOnlyTreeCount { get; init; }
 
@@ -163,3 +167,8 @@ public sealed record ProjectAnalysisContext(
 public sealed record ContextualSourceMethod(string ContextId, SourceMethod Method);
 public sealed record ProjectReferenceOutputIdentity(string ProjectPath, string OutputPath);
 public sealed record ContextualCoverageReport(string ContextId, IReadOnlyList<CoverageMethod> Methods);
+
+// Immutable exact byte representation from an actual Workspace compilation tree.
+// Generated paths are compiler identities, never a request to open a file.
+public sealed record ProjectGeneratedSourceDocument(string Path, string LogicalPath, string BytesBase64,
+    string EncodingName, string EncodingPreambleBase64, string ChecksumAlgorithm, string Checksum);

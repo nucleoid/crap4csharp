@@ -111,10 +111,8 @@ internal static class TestExecutionAdapter
                 var sdk = frozenSdk is null ? currentSdk : SdkExecutionIdentity.Validate(frozenSdk, currentSdk);
                 var childLog = Path.Combine(logs, "test-child.binlog");
                 if (childLog.IndexOfAny([';', ',']) >= 0) throw Refuse("Test-child logger paths with delimiters are unsupported.");
-                var arguments = launch.Arguments.Concat(new[] { "-bl:" + childLog + ";ProjectImports=None", "--logger", "trx;LogFileName=tests.trx", "--results-directory", resultDirectory,
-                    "--collect", "XPlat Code Coverage", "--", "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover",
-                    "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.IncludeTestAssembly=" +
-                        (launch.IncludeTests ? "true" : "false") }).ToArray();
+                var arguments = launch.Arguments.Concat(new[] { "-bl:" + childLog + ";ProjectImports=None", "--logger", "trx;LogFileName=tests.trx", "--results-directory", resultDirectory })
+                    .Concat(CreateCollectorArguments(proof, launch.IncludeTests, launch.Node.Id)).ToArray();
                 // Preserve interrupted launch diagnostics without manufacturing an exit code.
                 outcomes[launch.Index] = new(launch.Node.Id, "failed", resultDirectory, logs, null);
                 LoggedProcessResult process;
@@ -151,12 +149,54 @@ internal static class TestExecutionAdapter
         return new(Array.AsReadOnly(results.ToArray()), Array.AsReadOnly(outcomes), failure);
     }
 
+    internal static IReadOnlyList<string> CreateCollectorArguments(CompilerRetainedProof? proof, bool includeTests, string? graphId = null)
+    {
+        var arguments = new List<string> { "--collect", "XPlat Code Coverage", "--",
+            "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover",
+            "DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.IncludeTestAssembly=" + (includeTests ? "true" : "false") };
+        // RunVerified's existing opening ValidateCurrent has already proved the
+        // SAME retained argv/physical sources/PE/PDB map. Unverified/null keeps
+        // the collector default; caller-replaceable bound.Observations are not read.
+        if (proof?.HasRecordedPathMap == true)
+        {
+            if (graphId is null) throw Refuse("Mapped collector selection requires the admitted test invocation.");
+            var include = CreateLiteralCollectorInclude(proof.RecordedInvocationModuleNames(graphId));
+            arguments.Add("DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.ExcludeAssembliesWithoutSources=None");
+            arguments.Add("DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Include=" + include);
+        }
+        return Array.AsReadOnly(arguments.ToArray());
+    }
+
+    // Coverlet 6.0.4 splits Include on commas and treats [assembly]* as a
+    // wildcard filter. Admit only unambiguous literals; never omit an unsafe
+    // closure member or widen it to a wildcard. All types remain included.
+    internal static string CreateLiteralCollectorInclude(IReadOnlyList<string> moduleNames)
+    {
+        if (moduleNames.Count is 0 or > 4096) throw Refuse("Collector closure is empty or too large.");
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var filters = new List<string>();
+        var length = 0;
+        foreach (var name in moduleNames)
+        {
+            if (string.IsNullOrEmpty(name) || name.Length > 256 ||
+                name.Any(character => !((character is >= 'a' and <= 'z') || (character is >= 'A' and <= 'Z') ||
+                    (character is >= '0' and <= '9') || character is '_' or '.')) || !names.Add(name))
+                throw new ProjectContextException("test.collectorAssemblyNameUnsupported",
+                    "Mapped collector assembly literals require ASCII letters, digits, underscore or dot, with no case-insensitive duplicates.");
+            var filter = "[" + name + "]*";
+            length += filter.Length + (filters.Count == 0 ? 0 : 1);
+            if (length > 16 * 1024) throw Refuse("Collector closure filter exceeds its finite argument bound.");
+            filters.Add(filter);
+        }
+        return string.Join(",", filters.Order(StringComparer.Ordinal));
+    }
+
     internal static IReadOnlyList<string> CreateArguments(ProjectBuildGraphNode node)
     {
         var arguments = new List<string> { "test", node.ProjectPath, "--no-build", "--no-restore", "-m:1", "-nr:false" };
         arguments.AddRange(MappedGlobalArguments.Create(node.GlobalProperties));
-        arguments.AddRange(MappedGlobalArguments.Create(new Dictionary<string,string>
-            { ["Configuration"] = node.Configuration, ["Platform"] = node.Platform, ["TargetFramework"] = node.TargetFramework }));
+        arguments.AddRange(MappedGlobalArguments.Create(new Dictionary<string, string>
+        { ["Configuration"] = node.Configuration, ["Platform"] = node.Platform, ["TargetFramework"] = node.TargetFramework }));
         // Mapped globals follow CLI switches and can override --no-build. Force the
         // effective supported VSTest property AFTER every mapped value and selector.
         arguments.Add("-p:VSTestNoBuild=true");

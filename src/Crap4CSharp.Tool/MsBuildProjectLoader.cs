@@ -468,6 +468,7 @@ internal static partial class MsBuildProjectLoader
         if (observations is not null)
             observations.Add(new(projectPath, await WarmProjectObservation.CaptureAsync(project, cancellationToken)));
         var sources = new List<ProjectSourceIdentity>();
+        var generatorTreeSources = new HashSet<ProjectSourceIdentity>(ReferenceEqualityComparer.Instance);
         var compilerDocuments = new List<ProjectSourceIdentity>();
         var exclusions = new List<ProjectSourceExclusion>();
         var evaluatedCompileInputs = metadata.CompileInputs.ToHashSet(PathComparer);
@@ -497,6 +498,7 @@ internal static partial class MsBuildProjectLoader
         }
         var unresolvedReferences = warmProject?.UnresolvedProjectReferencePaths ?? [];
         var generatorOnlyTreeCount = 0;
+        var generatedDocuments = new List<ProjectGeneratedSourceDocument>();
         if (unresolvedReferences.Count == 0)
         {
             if (project.AnalyzerReferences.Any(reference => reference is UnresolvedAnalyzerReference))
@@ -554,18 +556,37 @@ internal static partial class MsBuildProjectLoader
                     throw new ProjectContextException("context.generatedSourceUnavailable", "Workspace and diagnostic generator tree inventories disagree.");
             }
             generatorOnlyTreeCount = extraTrees.Length;
-            if (request.IncludeGenerated)
+            long generatedCharacters = 0;
+            var generatedOrdinal = 0;
+            foreach (var tree in extraTrees)
             {
-                long generatedCharacters = 0;
-                foreach (var tree in extraTrees)
+                var ordinal = generatedOrdinal++;
+                var sourceText = await tree.GetTextAsync(cancellationToken);
+                generatedCharacters += sourceText.Length;
+                if (generatedCharacters > 16 * 1024 * 1024)
+                    throw new ProjectContextException("context.generatedSourceLimit", "Generated text exceeds the private transport limit.");
+                ProjectGeneratedSourceDocument? generated = null;
+                try { generated = CompilerSourceSet.Capture(tree, Path.GetDirectoryName(projectPath)!, Logical(root, projectPath), cancellationToken); }
+                catch (ProjectContextException exception) when (exception.Reason == "compiler.generatorBindingUnsupported")
                 {
-                    var sourceText = await tree.GetTextAsync(cancellationToken);
-                    generatedCharacters += sourceText.Length;
-                    if (generatedCharacters > 16 * 1024 * 1024)
-                        throw new ProjectContextException("context.generatedSourceLimit", "Included generator text exceeds the private transport limit.");
-                    var text = sourceText.ToString();
-                    var path = string.IsNullOrWhiteSpace(tree.FilePath) ? $"<generated>/{ProjectAnalysisContext.ContentHash(text)}.cs" : Logical(root, tree.FilePath);
-                    sources.Add(new ProjectSourceIdentity(path, path, ProjectAnalysisContext.ContentHash(text), true, !IsWithin(root, tree.FilePath)));
+                    // Ordinary semantic loading does not grant compiler evidence.
+                    // Preserve the full tree count: the incomplete byte vector
+                    // must still refuse when compiler binding is requested.
+                }
+                if (generated is not null) generatedDocuments.Add(generated);
+                if (request.IncludeGenerated)
+                {
+                    // Unbound semantic identities remain distinct even for identical
+                    // text. Tree spelling is opaque DATA, never a filesystem lookup.
+                    var logical = generated?.LogicalPath ?? "<generated>/" + CanonicalIdentity.Tuple(
+                        "unbound-generator-tree-v1", Logical(root, projectPath), tree.FilePath.Replace('\\', '/'),
+                        ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture)) + ".cs";
+                    var generatedSource = new ProjectSourceIdentity(logical, logical,
+                        generated is null ? ProjectAnalysisContext.ContentHash(sourceText.ToString()) :
+                            ProjectAnalysisContext.ContentHash(Convert.FromBase64String(generated.BytesBase64)), true, false)
+                    { ResolvedPath = generated?.Path };
+                    sources.Add(generatedSource);
+                    generatorTreeSources.Add(generatedSource);
                 }
             }
         }
@@ -602,6 +623,7 @@ internal static partial class MsBuildProjectLoader
             UnresolvedProjectReferencePaths = unresolvedReferences.ToArray(),
             ResolvedProjectPath = Path.GetFullPath(projectPath),
             GeneratorOnlyTreeCount = generatorOnlyTreeCount,
+            GeneratedCompilerDocuments = Array.AsReadOnly(generatedDocuments.ToArray()),
             CompilerDocuments = compilerDocuments.OrderBy(source => source.ResolvedPath, StringComparer.Ordinal).ToArray(),
             PhaseInputs = phaseInputs.Distinct().OrderBy(p => p.Path, StringComparer.Ordinal).ThenBy(p => p.Role, StringComparer.Ordinal).ToArray(),
             ReferencePaths = project.MetadataReferences.Select(r => r.Display)
@@ -627,7 +649,8 @@ internal static partial class MsBuildProjectLoader
                 .Append(projectPath).Append(metadata.AssetsFile)
                 .Concat(project.MetadataReferences.Select(reference => reference.Display)
                     .Where(path => path is not null && File.Exists(path)).Select(path => path!))
-                .Concat(sources.Where(source => source.ResolvedPath is not null).Select(source => source.ResolvedPath!))
+                .Concat(sources.Where(source => source.ResolvedPath is not null &&
+                    !generatorTreeSources.Contains(source)).Select(source => source.ResolvedPath!))
                 .Select(Path.GetFullPath).Distinct(PathComparer).Order(StringComparer.Ordinal).ToArray()
         };
     }

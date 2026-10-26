@@ -29,15 +29,22 @@ internal static class FreshCheckExecution
         var request = new ProjectContextLoadRequest(selected, preflight.Policy.Configuration, platform,
             preflight.Policy.TargetFrameworks.ToArray(), preflight.Request.Overrides.IncludeTests ?? false,
             preflight.Request.Overrides.IncludeGenerated ?? false, preflight.Request.Timeout)
-        { Timing = timing, CollectTiming = timing is not null, TimingPrefix = "execution.loader",
+        {
+            Timing = timing,
+            CollectTiming = timing is not null,
+            TimingPrefix = "execution.loader",
             WarmPostBuildProbe = preflight.Request.WarmPostBuildProbe,
-            NativeSdkIdentityProbe = preflight.Request.NativeSdkIdentityProbe };
+            NativeSdkIdentityProbe = preflight.Request.NativeSdkIdentityProbe
+        };
         ProjectContextLoadResult metadata;
         using (timing?.Start("execution.metadata"))
             metadata = await ProjectContextLoader.DiscoverAsync(request, token);
         Require(metadata);
-        request = request with { FrozenSdk = metadata.SelectedSdk ?? throw new ProjectContextException(
-            "context.sdkResolutionFailed", "Initial SDK execution identity was not retained.") };
+        request = request with
+        {
+            FrozenSdk = metadata.SelectedSdk ?? throw new ProjectContextException(
+            "context.sdkResolutionFailed", "Initial SDK execution identity was not retained.")
+        };
         ProjectContextLoadResult graph;
         using (timing?.Start("execution.graph"))
             graph = await ProjectContextLoader.DiscoverGraphAsync(request, token);
@@ -67,7 +74,7 @@ internal static class FreshCheckExecution
         if (preflight.Request.Output is not null)
             retainFailureOutputProof?.Invoke(new FreshFailureOutputProof(preflight, request, plan.PreparedGraph,
                 priorBundle is null ? [] : priorBundle.ResolvedInputs.Append(priorBundle.ManifestPath).ToArray()));
-        var priorObservations = priorBundle is null ? null : FreshPriorBuild.Load(priorBundle, plan.PreparedGraph, preflight.Root, token);
+        var priorObservations = priorBundle is null ? null : FreshPriorBuild.Load(priorBundle, plan.PreparedGraph, preflight.Root, token, plan.Tests.Select(test => test.GraphId).ToHashSet(StringComparer.Ordinal));
         var owned = Directory.CreateTempSubdirectory("crap4csharp-fresh-private-").FullName;
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(owned, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         // Record the invocation-owned location before any build/test/capture can
@@ -144,10 +151,10 @@ internal static class FreshCheckExecution
     {
         var paths = PathIdentityPolicy.Current.Comparer;
         foreach (var project in preflight.Policy.ProductionProjects.Concat(preflight.Policy.TestProjects))
-        foreach (var framework in preflight.Policy.TargetFrameworks)
-            if (!graph.BuildGraph.Any(n => paths.Equals(n.ProjectPath, Path.GetFullPath(project, preflight.Root)) &&
-                n.TargetFramework == framework && n.Configuration == preflight.Policy.Configuration))
-                throw new PolicyException("policy.requiredContextMissing", "Selected root graph does not include every trusted required project/configuration/framework.");
+            foreach (var framework in preflight.Policy.TargetFrameworks)
+                if (!graph.BuildGraph.Any(n => paths.Equals(n.ProjectPath, Path.GetFullPath(project, preflight.Root)) &&
+                    n.TargetFramework == framework && n.Configuration == preflight.Policy.Configuration))
+                    throw new PolicyException("policy.requiredContextMissing", "Selected root graph does not include every trusted required project/configuration/framework.");
         if (graph.GraphContexts.Count == 0) return;
         foreach (var binding in graph.GraphContexts)
             if (binding.IsTestProject && !preflight.Policy.TestProjects.Any(p => paths.Equals(Path.GetFullPath(p, preflight.Root), binding.ProjectPath)) ||
@@ -162,10 +169,10 @@ internal static class FreshCheckExecution
             contexts.SelectMany(c => c.ProtectedPaths.Concat(c.PhaseInputs.Select(i => i.Path)))
                 .Concat(contexts.SelectMany(c => new[] { c.EvaluatedTargetPath!, c.EvaluatedReferenceAssemblyPath! })));
         foreach (var destination in new[] { preflight.Request.Output, preflight.Request.ArtifactOutput }.Where(p => p is not null).Select(p => Path.GetFullPath(p!, preflight.Root)))
-        foreach (var directory in contexts.SelectMany(c => new[] { c.EvaluatedIntermediateDirectory!, Path.GetDirectoryName(c.EvaluatedTargetPath!)! }))
-            if (PathIdentityPolicy.Current.Comparer.Equals(destination, directory) || destination.StartsWith(
-                Path.TrimEndingDirectorySeparator(directory) + Path.DirectorySeparatorChar,
-                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
-                throw new PolicyException("output.aliasesPolicyInput", "Fresh result/bundle cannot occupy a selected compiler output directory.");
+            foreach (var directory in contexts.SelectMany(c => new[] { c.EvaluatedIntermediateDirectory!, Path.GetDirectoryName(c.EvaluatedTargetPath!)! }))
+                if (PathIdentityPolicy.Current.Comparer.Equals(destination, directory) || destination.StartsWith(
+                    Path.TrimEndingDirectorySeparator(directory) + Path.DirectorySeparatorChar,
+                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                    throw new PolicyException("output.aliasesPolicyInput", "Fresh result/bundle cannot occupy a selected compiler output directory.");
     }
 }

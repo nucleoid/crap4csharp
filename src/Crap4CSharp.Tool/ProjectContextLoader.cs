@@ -116,7 +116,7 @@ public static class ProjectContextLoader
         {
             var propertyNames = info.Type == typeof(ProjectSourceIdentity) ? new[] { nameof(ProjectSourceIdentity.ResolvedPath) } :
                 info.Type == typeof(ProjectAnalysisContext) ? new[] { nameof(ProjectAnalysisContext.ResolvedProjectPath), nameof(ProjectAnalysisContext.ProtectedPaths),
-                    nameof(ProjectAnalysisContext.CompilerDocuments), nameof(ProjectAnalysisContext.GeneratorOnlyTreeCount), nameof(ProjectAnalysisContext.PhaseInputs), nameof(ProjectAnalysisContext.ReferencePaths), nameof(ProjectAnalysisContext.UnresolvedProjectReferencePaths), nameof(ProjectAnalysisContext.ProjectReferenceOutputs), nameof(ProjectAnalysisContext.GeneratedTransitionPaths), nameof(ProjectAnalysisContext.EvaluatedTargetPath),
+                    nameof(ProjectAnalysisContext.CompilerDocuments), nameof(ProjectAnalysisContext.GeneratorOnlyTreeCount), nameof(ProjectAnalysisContext.GeneratedCompilerDocuments), nameof(ProjectAnalysisContext.PhaseInputs), nameof(ProjectAnalysisContext.ReferencePaths), nameof(ProjectAnalysisContext.UnresolvedProjectReferencePaths), nameof(ProjectAnalysisContext.ProjectReferenceOutputs), nameof(ProjectAnalysisContext.GeneratedTransitionPaths), nameof(ProjectAnalysisContext.EvaluatedTargetPath),
                     nameof(ProjectAnalysisContext.EvaluatedIntermediateDirectory), nameof(ProjectAnalysisContext.EvaluatedReferenceAssemblyPath) } :
                 info.Type == typeof(ProjectContextLoadResult) ? new[] { nameof(ProjectContextLoadResult.TestRunners), nameof(ProjectContextLoadResult.WorkerTimings), nameof(ProjectContextLoadResult.ProjectObservations) } :
                 info.Type == typeof(ProjectContextLoadRequest) ? new[] { nameof(ProjectContextLoadRequest.CollectTiming), nameof(ProjectContextLoadRequest.WarmAcquisitionProbe), nameof(ProjectContextLoadRequest.WarmAcquisitionSelectionProbe), nameof(ProjectContextLoadRequest.CollectProjectObservation), nameof(ProjectContextLoadRequest.NativeSdkIdentityProbe) } : [];
@@ -240,12 +240,14 @@ public static class ProjectContextLoader
             // Only new, independently classified generated compiler files are expected loader transitions.
             // Existing input mutation/deletion remains forbidden, including existing generated files.
             var generatedPaths = loaded.Contexts.SelectMany(context =>
-                context.Sources.Where(source => source.IsGenerated && source.ResolvedPath is not null)
+                context.Sources.Where(source => source.IsGenerated && source.ResolvedPath is not null &&
+                        !CompilerSourceSet.IsCapturedGeneratedSource(context, source))
                     .Select(source => source.ResolvedPath!)
                     .Concat(context.GeneratedTransitionPaths)
-                    .Concat(context.Exclusions.Where(item => item.Reason == "generated.defaultExcluded" &&
-                        !item.PhysicalPath.StartsWith("<", StringComparison.Ordinal))
-                        .Select(item => Path.GetFullPath(item.PhysicalPath, root))))
+                    .Concat(context.CompilerDocuments.Where(source => source.IsGenerated && source.ResolvedPath is not null &&
+                        context.Exclusions.Any(item => item.Reason == "generated.defaultExcluded" &&
+                            item.PhysicalPath == source.PhysicalPath && item.LogicalPath == source.LogicalPath))
+                        .Select(source => source.ResolvedPath!)))
                 .Select(path => Path.GetRelativePath(root, path).Replace('\\', '/')).ToHashSet(StringComparer.Ordinal);
             if (before.Any(pair => !after.TryGetValue(pair.Key, out var value) || value != pair.Value) ||
                 after.Keys.Except(before.Keys, StringComparer.Ordinal).Any(path => !generatedPaths.Contains(path)))

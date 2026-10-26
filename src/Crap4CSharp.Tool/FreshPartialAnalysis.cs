@@ -26,36 +26,39 @@ internal static class FreshPartialAnalysis
             foreach (var binding in graph.GraphContexts.Where(b => !b.IsTestProject || b.Context.ExclusionPolicy.IncludeTests))
             {
                 token.ThrowIfCancellationRequested();
+                var contextId = LogicalContextIdentity.Create(evidence.Preflight.Root, graph.BuildGraph.Single(n => n.Id == binding.GraphId));
                 var context = binding.Context; var compiler = observations[binding.GraphId];
                 CompilerOutputBinding.Validate(context, compiler, token);
                 var pe = CompilerOutputBinding.Read(compiler.Assembly!.Path, ref total, token);
                 var pdb = CompilerOutputBinding.Read(compiler.Pdb!.Path, ref total, token);
                 CompilerOutputBinding.Match(compiler.Assembly, pe); CompilerOutputBinding.Match(compiler.Pdb, pdb);
                 var build = ArtifactEvidenceInspector.InspectBuild(pe, pdb);
-                var sources = context.CompilerDocuments.Select(d =>
+                var sourceSet = CompilerSourceSet.Create(context, token);
+                var sources = sourceSet.Documents.Select(d =>
                 {
-                    var bytes = CompilerOutputBinding.Read(d.ResolvedPath!, ref total, token);
+                    var bytes = sourceSet.Read(d, ref total, token);
                     if (CanonicalIdentity.Sha256(bytes.AsSpan()) != d.ContentIdentity)
                         throw new ProjectContextException("provenance.partialSourceChanged", "Partial analysis source changed.");
-                    var relative = Path.GetRelativePath(evidence.Preflight.Root, d.ResolvedPath!).Replace('\\', '/');
+                    var relative = sourceSet.IsGeneratorTree(d) ? CapturedEvaluationInputs.RepositorySourcePath(context.ProjectPath, d.LogicalPath) :
+                        Path.GetRelativePath(evidence.Preflight.Root, d.ResolvedPath!).Replace('\\', '/');
                     if (relative == ".." || relative.StartsWith("../", StringComparison.Ordinal) || Path.IsPathRooted(relative))
                         throw new ProjectContextException("provenance.partialSourceUnsupported", "Partial source is outside the selected root.");
-                    repositoryPaths.Add((binding.GraphId, d.LogicalPath), relative);
+                    repositoryPaths.Add((contextId, d.LogicalPath), relative);
                     return CapturedSource.Create(d.LogicalPath, bytes.AsSpan());
                 }).ToArray();
                 var references = CompilerReferenceSnapshot.ResolveSemanticReferences(compiler, token)
                     .Select(p => MetadataReference.CreateFromImage(CompilerOutputBinding.Read(p.Path, ref total, token), p.Properties)).ToArray();
                 var syntax = sources.Select(s => CSharpSyntaxTree.ParseText(s.Text, context.ParseOptions, s.LogicalPath)).ToArray();
-                var eligible = context.CompilerDocuments.Where(d => !d.IsGenerated || context.ExclusionPolicy.IncludeGenerated)
+                var eligible = sourceSet.Documents.Where(d => !d.IsGenerated || context.ExclusionPolicy.IncludeGenerated)
                     .Select(d => d.LogicalPath).ToHashSet(StringComparer.Ordinal);
                 var coverage = reports.SelectMany(r => r.Modules).Where(m => m.GraphId == binding.GraphId)
                     .Select((m, i) => new CapturedCoverage("partial-" + i + ".xml", m.LineProjection, "opencover", "line")).ToArray();
                 // Already-normalized line projections use captured logical paths,
                 // while Coverlet retains physical paths in each module File table.
-                var pathPolicy = new CapturedPathPolicy(!OperatingSystem.IsWindows(), context.CompilerDocuments
-                    .Select(d => new ManifestReportRootMapping(d.ResolvedPath!, d.LogicalPath)).ToArray());
+                var pathPolicy = new CapturedPathPolicy(!OperatingSystem.IsWindows(),
+                    CompilerDocumentBinding.Create(context, compiler, build, token).ReportMappings);
                 var analysis = new CallableAnalysisContext(Path.GetRelativePath(evidence.Preflight.Root, binding.ProjectPath).Replace('\\', '/'),
-                    context.TargetFramework, context.Configuration, context.Platform, binding.GraphId, context.ParseOptions);
+                    context.TargetFramework, context.Configuration, context.Platform, contextId, context.ParseOptions);
                 partitions.Add(AnalyzeCommand.EvaluateBoundCallables(analysis,
                     CanonicalIdentity.Set("partial-source-set-v1", sources.Select(s => CanonicalIdentity.Tuple(s.LogicalPath, s.ContentIdentity))),
                     build.ModuleIdentity, sources.Where(s => eligible.Contains(s.LogicalPath)).ToArray(), coverage,
@@ -77,12 +80,16 @@ internal static class FreshPartialAnalysis
             var allCallables = partitions.SelectMany(p => p.Callables).ToArray();
             var allFamilies = partitions.SelectMany(p => p.Families).ToArray();
             var selections = allCallables.ToDictionary(c => c.ObservationId, Selected, StringComparer.Ordinal);
-            var diagnosticInventory = terminal with { Evaluation = terminal.Evaluation with
+            var diagnosticInventory = terminal with
             {
-                Contexts = partitions.Select(p => new EvaluationContext(p.ContextId, "project", p.Project, p.TargetFramework,
-                    p.Configuration, p.SourceSetHash, null)).ToArray(),
-                Callables = allCallables, Families = allFamilies
-            }};
+                Evaluation = terminal.Evaluation with
+                {
+                    Contexts = partitions.Select(p => new EvaluationContext(p.ContextId, "project", p.Project, p.TargetFramework,
+                        p.Configuration, p.SourceSetHash, null)).ToArray(),
+                    Callables = allCallables,
+                    Families = allFamilies
+                }
+            };
             var policy = evidence.Preflight.Policy;
             var observationsForPolicy = PolicyCheckCommand.PolicyObservations(diagnosticInventory, policy, selections,
                 (contextId, logicalPath) => repositoryPaths[(contextId, logicalPath)]).ToArray();
@@ -109,29 +116,40 @@ internal static class FreshPartialAnalysis
                 if (current.Attachment.Sha256 != reports.Single(r => r.GraphId == test.GraphId).Attachment.Sha256)
                     throw new ProjectContextException("coverage.partialAttachmentChanged", "Partial collector attachment changed.");
             }
-            return terminal with { Evaluation = terminal.Evaluation with
+            return terminal with
             {
-                Scope = new(".", metrics.Select(m => m.Path).Distinct(StringComparer.Ordinal).ToArray()),
-                Contexts = partitions.Select(p => new EvaluationContext(p.ContextId, "project", p.Project, p.TargetFramework,
-                    p.Configuration, p.SourceSetHash, null)).ToArray(),
-                Metrics = metrics, Findings = findings, Callables = callables, Families = families,
-                CallableExemptions = exemptions.Matches, ExemptionErrors = diagnosticPolicy.OperationalReasons,
-                Coverage = new(metrics.Length, metrics.Length - unknown.Length, unknown.Length,
+                Evaluation = terminal.Evaluation with
+                {
+                    Scope = new(".", metrics.Select(m => m.Path).Distinct(StringComparer.Ordinal).ToArray()),
+                    Contexts = partitions.Select(p => new EvaluationContext(p.ContextId, "project", p.Project, p.TargetFramework,
+                        p.Configuration, p.SourceSetHash, null)).ToArray(),
+                    Metrics = metrics,
+                    Findings = findings,
+                    Callables = callables,
+                    Families = families,
+                    CallableExemptions = exemptions.Matches,
+                    ExemptionErrors = diagnosticPolicy.OperationalReasons,
+                    Coverage = new(metrics.Length, metrics.Length - unknown.Length, unknown.Length,
                     unknown.GroupBy(m => m.CoverageReason ?? CoverageReasonCodes.Unavailable).ToDictionary(g => g.Key, g => g.Count())),
-                CoverageDiagnostics = partitions.SelectMany(p => p.Diagnostics).ToArray(),
-                Checks = terminal.Evaluation.Checks.Select(c => c.Name == "coverage" ? c with { Reason = "coverage.boundPartialObservations" } :
-                    c.Name == "crap" ? c with { Reason = "crap.partialObservationsNotPolicyDecision" } : c).ToArray()
-            }};
+                    CoverageDiagnostics = partitions.SelectMany(p => p.Diagnostics).ToArray(),
+                    Checks = terminal.Evaluation.Checks.Select(c => c.Name == "coverage" ? c with { Reason = "coverage.boundPartialObservations" } :
+                        c.Name == "crap" ? c with { Reason = "crap.partialObservationsNotPolicyDecision" } : c).ToArray()
+                }
+            };
         }
         catch (Exception error) when (error is ProjectContextException or PolicyException or IOException or UnauthorizedAccessException or
             ArgumentException or InvalidOperationException or OperationCanceledException or ProcessTimeoutException)
         {
+            FreshPrivateFailureEvidence.TryRetain(evidence.PrivateDirectory, error, token);
             // Preserve the original raw outcomes and fail closed without stale metrics.
             var reason = error is OperationCanceledException ? "coverage.partialAnalysisCancelled" :
                 error is ProcessTimeoutException ? "coverage.partialAnalysisTimedOut" :
                 error is ProjectContextException context ? context.Reason : error is PolicyException policy ? policy.Code : "coverage.partialAnalysisRefused";
-            return terminal with { Evaluation = terminal.Evaluation with
-                { Checks = terminal.Evaluation.Checks.Select(c => c.Name == "coverage" ? c with { Reason = reason } : c).ToArray() } };
+            return terminal with
+            {
+                Evaluation = terminal.Evaluation with
+                { Checks = terminal.Evaluation.Checks.Select(c => c.Name == "coverage" ? c with { Reason = reason } : c).ToArray() }
+            };
         }
     }
 

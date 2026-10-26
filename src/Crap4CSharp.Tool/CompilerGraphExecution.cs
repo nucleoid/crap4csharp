@@ -92,6 +92,7 @@ internal static class CompilerGraphExecution
                 PhaseInputs = b.Context.PhaseInputs.ToArray(),
                 PreprocessorSymbols = b.Context.PreprocessorSymbols.ToArray(),
                 CompilerDocuments = b.Context.CompilerDocuments.ToArray(),
+                GeneratedCompilerDocuments = b.Context.GeneratedCompilerDocuments.ToArray(),
                 ReferencePaths = b.Context.ReferencePaths.ToArray(),
                 ProjectReferenceOutputs = b.Context.ProjectReferenceOutputs.ToArray(),
                 Sources = b.Context.Sources.ToArray(),
@@ -152,9 +153,13 @@ internal static class CompilerGraphExecution
             // independent actual Csc/reference PE/copy gate; no implementation fallback.
             var returned = await build(node, cancellation);
             using var bindingTiming = request.Timing?.Start("execution.compiler.nodeBinding");
-            var observation = returned with { GraphId = node.Id, Parameters = returned.Parameters.Select(p =>
+            var observation = returned with
+            {
+                GraphId = node.Id,
+                Parameters = returned.Parameters.Select(p =>
                 p with { Items = p.Items.ToArray(), ReferenceProperties = p.ReferenceProperties.ToArray() }).ToArray(),
-                RuntimeCopies = Array.AsReadOnly(returned.RuntimeCopies.Select(c => c with { }).ToArray()) };
+                RuntimeCopies = Array.AsReadOnly(returned.RuntimeCopies.Select(c => c with { }).ToArray())
+            };
             CompilerReferenceOutputBinding.Validate(byId[node.Id].Context, observation, cancellation);
             closure.Validate(observation, cancellation);
             snapshots[node.Id] = closure;
@@ -196,7 +201,7 @@ internal static class CompilerGraphExecution
         authoredSnapshot.Validate(retainedGraph, token);
         var documentSnapshot = CompilerDocumentSnapshot.Capture(retainedGraph, token);
         var proof = new CompilerRetainedProof(frozenRequest with
-            { WarmAcquisitionSelectionProbe = frozenRequest.WarmPostBuildProbe || frozenRequest.WarmAcquisitionSelectionProbe }, retainedGraph, authoredSnapshot,
+        { WarmAcquisitionSelectionProbe = frozenRequest.WarmPostBuildProbe || frozenRequest.WarmAcquisitionSelectionProbe }, retainedGraph, authoredSnapshot,
             new Dictionary<string, CompilerReferenceSnapshot>(snapshots, StringComparer.Ordinal),
             new Dictionary<string, string[]>(closures, StringComparer.Ordinal),
             new Dictionary<string, CompilerObservation>(completed, StringComparer.Ordinal), documentSnapshot,
@@ -221,6 +226,7 @@ internal static class CompilerGraphExecution
                 Sources = Array.AsReadOnly(source[node.Id].Context.Sources.ToArray()),
                 Exclusions = Array.AsReadOnly(source[node.Id].Context.Exclusions.ToArray()),
                 CompilerDocuments = Array.AsReadOnly(source[node.Id].Context.CompilerDocuments.ToArray()),
+                GeneratedCompilerDocuments = Array.AsReadOnly(source[node.Id].Context.GeneratedCompilerDocuments.ToArray()),
                 PhaseInputs = Array.AsReadOnly(source[node.Id].Context.PhaseInputs.ToArray()),
                 ReferencePaths = Array.AsReadOnly(source[node.Id].Context.ReferencePaths.ToArray()),
                 ProjectReferenceOutputs = Array.AsReadOnly(source[node.Id].Context.ProjectReferenceOutputs.ToArray()),
@@ -407,6 +413,9 @@ internal sealed class CompilerRetainedProof
 {
     internal bool NativeSdkIdentityProbe => request.NativeSdkIdentityProbe;
     internal ProjectContextSdkResolution? FrozenSdk => request.FrozenSdk;
+    // Recorded metadata only. The verified test entry must validate this
+    // proof's own physical graph before using it to select collector settings.
+    internal bool HasRecordedPathMap => observations.Values.Any(FreshPriorBuild.HasPathMap);
     private readonly ProjectContextLoadRequest request;
     private readonly ProjectContextLoadResult graph;
     private readonly CompilerPhaseSnapshot authored;
@@ -427,6 +436,34 @@ internal sealed class CompilerRetainedProof
     {
         this.request = request; this.graph = graph; this.authored = authored; this.references = references;
         this.closures = closures; this.observations = observations; this.documents = documents; this.reload = reload;
+    }
+
+    // Select from this proof's OWN frozen graph and originally recorded compiler
+    // reference closure, not caller-replaceable result DATA or scoring policy.
+    internal IReadOnlyList<string> RecordedInvocationModuleNames(string graphId)
+    {
+        if (!closures.TryGetValue(graphId, out var closure)) throw Refuse();
+        var bindings = graph.GraphContexts;
+        var test = bindings.SingleOrDefault(binding => binding.GraphId == graphId);
+        if (test is null || !test.IsTestProject) throw Refuse();
+        var paths = PathIdentityPolicy.Current.Comparer;
+        var references = new HashSet<string>(closure, paths);
+        if (references.Count != closure.Length) throw Refuse();
+        var selected = bindings.Where(binding => binding.GraphId == graphId ||
+            references.Contains(binding.Context.EvaluatedReferenceAssemblyPath!)).ToArray();
+        if (selected.Length != references.Count + 1) throw Refuse();
+        return Array.AsReadOnly(selected.Select(binding =>
+        {
+            if (!observations.TryGetValue(binding.GraphId, out var recorded) || recorded.Assembly is null)
+                throw Refuse();
+            // Coverlet filters the module filename. Use this proof's original
+            // validated compiler output, never caller-replaceable result DATA.
+            var stem = Path.GetFileNameWithoutExtension(recorded.Assembly.Path);
+            if (stem != binding.Context.AssemblyName)
+                throw new ProjectContextException("test.collectorAssemblyNameUnsupported",
+                    "Mapped collector requires the recorded output filename stem to equal its validated assembly name.");
+            return stem;
+        }).ToArray());
     }
 
     internal void ValidateCurrent(CancellationToken token) => Validate(graph, token);
@@ -482,7 +519,7 @@ internal sealed class CompilerRetainedProof
         ProjectContextLoadResult current;
         using (timing?.Start(timingPrefix + ".graph"))
             current = await reload(timing is null ? request : request with
-                { CollectTiming = true, Timing = timing, TimingPrefix = timingPrefix + ".graph.loader" }, token);
+            { CollectTiming = true, Timing = timing, TimingPrefix = timingPrefix + ".graph.loader" }, token);
         token.ThrowIfCancellationRequested();
         using (timing?.Start(timingPrefix + ".physical"))
             ValidateAgainstCurrentGraph(current, token);

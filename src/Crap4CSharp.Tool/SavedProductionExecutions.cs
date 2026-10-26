@@ -28,28 +28,29 @@ internal static class SavedProductionExecutions
     // production refusal ordering; the generic saved-only entry point is unchanged.
     internal static void ValidateFreshBoundary(ArtifactBundle bundle, CheckExecutionPlan current,
         CompilerGraphPhaseResult compiler, string root, CancellationToken token,
-        CompletedProofTiming? timing = null, string boundary = "fresh")
+        CompletedProofTiming? timing = null, string boundary = "fresh", FreshCompilerRecipeSelection? optionalRecipes = null)
     {
         var proof = CoverageGraphBinding.ValidateFreshRequiredAndNormalized(
             bundle, current, compiler, root, token, timing, boundary);
         using (timing?.Start(boundary + ".saved.production"))
-            ValidateCore(bundle, current, compiler, root, token, proof.Required, proof.Coverage);
+            ValidateCore(bundle, current, compiler, root, token, proof.Required, proof.Coverage, optionalRecipes);
     }
 
     private static void ValidateCore(ArtifactBundle bundle, CheckExecutionPlan current,
         CompilerGraphPhaseResult compiler, string root, CancellationToken token,
-        IReadOnlyList<SavedRequiredTest> required, BoundSavedGraphCoverage coverage)
+        IReadOnlyList<SavedRequiredTest> required, BoundSavedGraphCoverage coverage, FreshCompilerRecipeSelection? optionalRecipes = null)
     {
         token.ThrowIfCancellationRequested();
         try
         {
             var nodes = CompilerGraphExecution.ValidateAndFreeze(compiler.FinalGraph).ToDictionary(n => n.Id, StringComparer.Ordinal);
             var bindings = compiler.FinalGraph.GraphContexts.ToDictionary(b => b.GraphId, StringComparer.Ordinal);
+            var logicalIds = nodes.ToDictionary(p => p.Key, p => LogicalContextIdentity.Create(root, p.Value), StringComparer.Ordinal);
             var observed = compiler.ByGraphId();
             var referenceEdges = CompilerReferenceGraph.Observe(compiler.FinalGraph, token);
             var production = bindings.Values.Where(b => !b.IsTestProject || b.Context.ExclusionPolicy.IncludeTests).ToArray();
             if (bundle.Manifest.Contexts.Count != production.Length ||
-                !bundle.Manifest.Contexts.Select(c => c.Id).ToHashSet(StringComparer.Ordinal).SetEquals(production.Select(b => b.GraphId)) ||
+                !bundle.Manifest.Contexts.Select(c => c.Id).ToHashSet(StringComparer.Ordinal).SetEquals(production.Select(b => logicalIds[b.GraphId])) ||
                 bundle.Manifest.Builds.Count != production.Length) throw Refuse();
             var expectedExecutions = new HashSet<string>(StringComparer.Ordinal);
             var expectedArtifacts = new HashSet<string>(StringComparer.Ordinal);
@@ -57,11 +58,14 @@ internal static class SavedProductionExecutions
             foreach (var binding in production)
             {
                 token.ThrowIfCancellationRequested();
-                var context = bundle.Manifest.Contexts.Single(c => c.Id == binding.GraphId);
+                var contextId = logicalIds[binding.GraphId];
+                var context = bundle.Manifest.Contexts.Single(c => c.Id == contextId);
                 if (context.Project != Logical(binding.ProjectPath) || context.Configuration != binding.Context.Configuration ||
                     context.TargetFramework != binding.Context.TargetFramework || context.Platform != binding.Context.Platform) throw Refuse();
+                // Security boundary: keep build/execution/artifact IDs bound to
+                // the current physical graph even when public selectors match.
                 var buildId = "build-" + binding.GraphId;
-                var build = bundle.Manifest.Builds.Single(b => b.ContextId == binding.GraphId);
+                var build = bundle.Manifest.Builds.Single(b => b.ContextId == contextId);
                 var observation = observed[binding.GraphId];
                 CompilerOutputBinding.Validate(binding.Context, observation, token);
                 var pe = CompilerOutputBinding.Read(observation.Assembly!.Path, ref total, token);
@@ -75,6 +79,22 @@ internal static class SavedProductionExecutions
                 Match(buildId + "-pdb", "pdb", pdb, null, null, null);
                 // Closure metadata is not executable XML and is not a reusable input recipe.
                 Read(buildId + "-closure", "compiler-input-closure", null, "json", null);
+                // Membership for optional recipe artifacts follows only the
+                // same invocation-private loss selection. Mandatory output,
+                // execution, coverage and physical gates retain originals.
+                var recipeObservation = optionalRecipes?.OptionalView(compiler, observation, root, token) ?? observation;
+                if (recipeObservation.InvocationRecipe is not null)
+                {
+                    var profile = CompilerRecipePayload.Classify(recipeObservation, root, token);
+                    if (!profile.IsSupported)
+                        Read(buildId + "-recipe-unsupported", CompilerRecipePayload.UnsupportedKind, null, "json", null);
+                    else
+                    {
+                        Read(buildId + "-recipe", CompilerRecipePayload.Kind, null, "json", null);
+                        foreach (var file in CompilerRecipePayload.ExpectedFiles(recipeObservation, buildId))
+                            Read(file.Id, file.Kind, null, null, null);
+                    }
+                }
                 foreach (var saved in required.Where(t => Reaches(t.GraphId, binding.GraphId, new(StringComparer.Ordinal))))
                 {
                     var id = "test-" + binding.GraphId + "-" + saved.GraphId;
@@ -82,7 +102,7 @@ internal static class SavedProductionExecutions
                     var execution = bundle.Manifest.Executions.Single(e => e.Id == id);
                     var trx = Bytes(saved.Trx); var testPe = Bytes(saved.Assembly); var testPdb = Bytes(saved.Pdb);
                     var counters = ArtifactEvidenceInspector.InspectTrx(trx);
-                    if (execution.ContextId != binding.GraphId || execution.BuildId != buildId || !execution.Completed || execution.ExitCode != 0 ||
+                    if (execution.ContextId != contextId || execution.BuildId != buildId || !execution.Completed || execution.ExitCode != 0 ||
                         execution.TotalTests != counters.Total || execution.PassedTests != counters.Passed || execution.FailedTests != counters.Failed ||
                         execution.SkippedTests != counters.Skipped || execution.TestProject != saved.Project || execution.TestModuleIdentity != saved.ModuleIdentity ||
                         execution.TestMvid != saved.Mvid || execution.TestDebugIdentity != saved.DebugIdentity ||
@@ -109,7 +129,7 @@ internal static class SavedProductionExecutions
                 {
                     if (!expectedArtifacts.Add(id)) throw Refuse();
                     var artifact = bundle.Manifest.Artifacts.Single(a => a.Id == id);
-                    if (artifact.Kind != kind || artifact.ContextId != binding.GraphId || artifact.BuildId != buildId ||
+                    if (artifact.Kind != kind || artifact.ContextId != contextId || artifact.BuildId != buildId ||
                         artifact.ExecutionId != execution || artifact.Format != format || artifact.CoordinateKind != coordinates) throw Refuse();
                     return Bytes(id);
                 }
