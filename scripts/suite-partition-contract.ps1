@@ -2,12 +2,13 @@
 
 function Test-SuiteAllowedPlatformSkip($Case,[string]$OperatingSystem){
     if($OperatingSystem -cne 'Windows'){return $false}
-    # These eleven existing cases explicitly require Linux utilities/special files
-    # or Windows symlink privileges. Process cleanup cases are never allowed.
+    # These twelve existing cases explicitly require Linux utilities/special files,
+    # Windows symlink privileges or POSIX-only mapped names. Process cleanup cases are never allowed.
     $allowed=@(
         'Crap4CSharp.Tests.CompilerInputBindingTests.BoundReadsRefuseUnsupportedInputs(defect: "symlink-source")',
         'Crap4CSharp.Tests.CompilerOutputBindingTests.UnsupportedOutputFilesRefuse(defect: "symlink")',
         'Crap4CSharp.Tests.CompilerReferenceSnapshotTests.SymlinkReferenceRefusesWithoutFollowingItsTarget',
+        'Crap4CSharp.Tests.CompilerOutputBindingTests.MappedNamesCannotHaveTwoPhysicalOwnersEvenWhenBytesMatch(physicalAlias: True)',
         'Crap4CSharp.Tests.SavedBundleFootprintTests.LinkedFileCannotBecomeAProvenBundleFootprint',
         'Crap4CSharp.Tests.FreshPrivateFailureEvidenceTests.ReparseAncestorRefusalIsRecordedOnPrimaryWithoutFollowingIt',
         'Crap4CSharp.Tests.LinuxSessionUtilityTests.OwnedSessionResolvesUtilitiesFromEffectiveChildPath',
@@ -79,7 +80,7 @@ function Assert-SuitePartitionCoverage($Value){
         $Value.passed -le 0 -or $Value.caseCount -ne $Value.passed+$Value.skipped -or
         $Value.processControlsRequired -isnot [bool] -or !$Value.processControlsRequired -or
         ($Value.identity.operatingSystem -ceq 'Linux' -and $Value.skipped -ne 0) -or
-        ($Value.identity.operatingSystem -ceq 'Windows' -and $Value.skipped -gt 11) -or
+        ($Value.identity.operatingSystem -ceq 'Windows' -and $Value.skipped -gt 12) -or
         $Value.caseSetSha256 -cnotmatch '^[0-9a-f]{64}$' -or $Value.receiptSetSha256 -cnotmatch '^[0-9a-f]{64}$'){
         throw 'Invalid complete partition coverage.'
     }

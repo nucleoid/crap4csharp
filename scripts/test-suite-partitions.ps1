@@ -163,18 +163,21 @@ try{
     if($theoryShard.Count -ne 1 -or $cases[0].ID -cnotin $theoryShard[0].cases.ID){throw 'Theory method split across shards.'}
     $skip=[pscustomobject]@{DisplayName='Crap4CSharp.Tests.CompilerReferenceSnapshotTests.SymlinkReferenceRefusesWithoutFollowingItsTarget'}
     if(!(Test-SuiteAllowedPlatformSkip $skip 'Windows') -or (Test-SuiteAllowedPlatformSkip $skip 'Linux')){throw 'Named platform skip policy differs.'}
-    # Exercise the actual producer, not only the name-policy helper: the one new
-    # source-declared Windows-only case may skip; an unrelated case and Linux may not.
-    foreach($skipControl in @('named-windows','unrelated-windows','named-linux')){
-        $class='Crap4CSharp.Tests.FreshPrivateFailureEvidenceTests'
-        $method=if($skipControl -ceq 'unrelated-windows'){'UnrelatedFixture'}else{'ReparseAncestorRefusalIsRecordedOnPrimaryWithoutFollowingIt'}
-        $skipCases=@([pscustomobject]@{ID='declared-skip';DisplayName=$class+'.'+$method;Class=$class;Method=$method},
+    # Exercise the actual producer, not only the name-policy helper: exact
+    # source-declared Windows-only cases may skip; unrelated rows and Linux may not.
+    foreach($skipControl in @('named-windows','unrelated-windows','named-linux','mapped-windows','mapped-false-windows','mapped-linux')){
+        $mapped=$skipControl.StartsWith('mapped-',[StringComparison]::Ordinal)
+        $class=if($mapped){'Crap4CSharp.Tests.CompilerOutputBindingTests'}else{'Crap4CSharp.Tests.FreshPrivateFailureEvidenceTests'}
+        $method=if($mapped){'MappedNamesCannotHaveTwoPhysicalOwnersEvenWhenBytesMatch'}elseif($skipControl -ceq 'unrelated-windows'){'UnrelatedFixture'}else{'ReparseAncestorRefusalIsRecordedOnPrimaryWithoutFollowingIt'}
+        $display=$class+'.'+$method
+        if($mapped){$display+='(physicalAlias: '+$(if($skipControl -ceq 'mapped-false-windows'){'False'}else{'True'})+')'}
+        $skipCases=@([pscustomobject]@{ID='declared-skip';DisplayName=$display;Class=$class;Method=$method},
             [pscustomobject]@{ID='passed-control';DisplayName='Crap4CSharp.Tests.OtherTests.PassedControl';Class='Crap4CSharp.Tests.OtherTests';Method='PassedControl'})
         $skipDiscovery=Join-Path $owned ($skipControl+'.discovery.json')
         $skipCases | ConvertTo-Json -Depth 4 -AsArray | Set-Content -LiteralPath $skipDiscovery
         $skipIdentity=$identity | ConvertTo-Json -Depth 6 | ConvertFrom-Json
         $skipIdentity.discoverySha256=(Get-FileHash -LiteralPath $skipDiscovery).Hash.ToLowerInvariant()
-        if($skipControl -ceq 'named-linux'){$skipIdentity.operatingSystem='Linux'}
+        if($skipControl.EndsWith('-linux',[StringComparison]::Ordinal)){$skipIdentity.operatingSystem='Linux'}
         $skipBinding=Join-Path $owned ($skipControl+'.binding.json')
         [ordered]@{schemaVersion='suite-identity-binding-v1';outcome='passed';identity=$skipIdentity;beforeSha256=('3'*64);afterSha256=('4'*64)} |
             ConvertTo-Json -Depth 7 | Set-Content -LiteralPath $skipBinding
@@ -191,23 +194,23 @@ try{
         $skipReceipt=Join-Path $owned ($skipControl+'.receipt.json');$accepted=$true
         try{& "$PSScriptRoot/write-suite-partition-receipt.ps1" -DiscoveryPath $skipDiscovery -ShardCount 1 -ShardIndex 0 `
             -TrxPath $skipTrx -ExitCode 0 -IdentityBindingPath $skipBinding -OutputPath $skipReceipt}catch{$accepted=$false}
-        if($accepted -ne ($skipControl -ceq 'named-windows')){throw "Unexpected exact declared skip acceptance: $skipControl"}
+        if($accepted -ne ($skipControl -cin @('named-windows','mapped-windows'))){throw "Unexpected exact declared skip acceptance: $skipControl"}
         $observed=Get-Content -LiteralPath $skipReceipt -Raw | ConvertFrom-Json
         if($accepted -and ($observed.outcome -cne 'passed' -or @($observed.cases | Where-Object {$_.outcome -ceq 'NotExecuted'}).Count -ne 1)){
             throw 'Declared skip terminal receipt differs.'
         }
         if(!$accepted -and $observed.outcome -cne 'failed'){throw 'Invalid platform skip did not retain refusal.'}
     }
-    # Eleven is the exact current source-declared Windows inventory, not an
+    # Twelve is the exact current source-declared Windows inventory, not an
     # arbitrary skip allowance. Per-case producer/union checks remain mandatory.
-    foreach($skipCount in @(11,12)){
+    foreach($skipCount in @(12,13)){
         $coverage=[ordered]@{schemaVersion='suite-partition-coverage-v1';outcome='passed';identity=$identity;shardCount=2;
             caseCount=60;passed=60-$skipCount;skipped=$skipCount;processControlsRequired=$true;caseSetSha256=('a'*64);receiptSetSha256=('b'*64)}
         $coverage=$coverage | ConvertTo-Json -Depth 8 | ConvertFrom-Json
         $accepted=$true;try{Assert-SuitePartitionCoverage $coverage}catch{$accepted=$false}
-        if($accepted -ne ($skipCount -eq 11)){throw 'Exact Windows declared skip ceiling differs.'}
+        if($accepted -ne ($skipCount -eq 12)){throw 'Exact Windows declared skip ceiling differs.'}
     }
-    Write-Output "Complete partition controls passed ($($controls.Count+5+$producerControls.Count+11)); synthetic evidence, no full-suite execution acceptance."
+    Write-Output "Complete partition controls passed ($($controls.Count+5+$producerControls.Count+14)); synthetic evidence, no full-suite execution acceptance."
 }finally{
     $absolute=[IO.Path]::GetFullPath($owned);$prefix=[IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath([IO.Path]::GetTempPath()))+[IO.Path]::DirectorySeparatorChar
     if(!$absolute.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($absolute) -notlike 'crap4csharp-partition-controls-*'){throw 'Unsafe fixture cleanup target.'}
