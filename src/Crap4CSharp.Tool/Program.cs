@@ -16,6 +16,9 @@ if (args.Length == 3 && args[0] == CompilerEvidence.Command)
 if (args.Length == 3 && args[0] == ProjectContextLoader.LoaderCommand)
     return await MsBuildLoaderBootstrap.RunAsync(args[1], args[2], CancellationToken.None);
 
+if (args.Length == 3 && args[0] == WarmAcquisitionDiagnosticBootstrap.Command)
+    return await WarmAcquisitionDiagnosticBootstrap.RunAsync(args[1], args[2]);
+
 using var cancellationSource = new CancellationTokenSource();
 ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
 {
@@ -232,7 +235,10 @@ internal static class App
                     new PolicyOverrides(Threshold: options.ThresholdExplicit ? options.Threshold : null,
                         Frameworks: options.Frameworks.Count == 0 ? null : options.Frameworks,
                         Configuration: options.Configuration, ExemptionFile: options.Exemptions,
-                        IncludeTests: options.IncludeTests, IncludeGenerated: options.IncludeGenerated), options.Timeout);
+                        IncludeTests: options.IncludeTests, IncludeGenerated: options.IncludeGenerated), options.Timeout)
+                { WarmPostBuildProbe = true };
+                // This parent-only flag selects fresh graph acquisition AFTER once builds.
+                // Cold preparation, metadata and runner discovery remain ordinary.
                 freshResult = await FreshCheckCommand.RunAsync(request, workingDirectory, startedAt, cancellationToken,
                     proof => failureOutputProof = proof, directory => privateDiagnostics = directory,
                     proof => terminalProof = proof, refusal => freshTerminalFailure = refusal, freshTiming);

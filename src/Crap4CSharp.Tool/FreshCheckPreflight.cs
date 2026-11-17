@@ -3,7 +3,12 @@ using Crap4CSharp.Core;
 internal sealed record FreshCheckRequest(string? Project, string PolicyPath, string? BaseRef,
     string? Scope, string? Head, string SourceState, string Granularity,
     string? Output, string? ArtifactOutput, bool NoRestore, bool NoBuild, string? BuildArtifacts,
-    PolicyOverrides Overrides, TimeSpan Timeout);
+    PolicyOverrides Overrides, TimeSpan Timeout)
+{
+    // Parent-only post-build acquisition control; no CLI selector. Public
+    // orchestration enables it explicitly; direct ordinary controls default off.
+    internal bool WarmPostBuildProbe { get; init; }
+}
 internal sealed record FreshCheckPreflight(string Root, FreshCheckRequest Request,
     TrustedPolicyResolution Trusted, RepositoryPolicy Policy, CapturedChangeScope? Scope)
 {

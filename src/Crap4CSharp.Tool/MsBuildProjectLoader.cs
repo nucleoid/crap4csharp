@@ -16,6 +16,12 @@ internal static partial class MsBuildProjectLoader
     public static async Task<ProjectContextLoadResult> LoadAsync(ProjectContextLoadRequest request, CancellationToken cancellationToken)
     {
         var diagnostics = new List<string>();
+        // The private warm probe requires complete graph preflight. Never acquire a
+        // project through a non-graph route that could hide mapped dependencies.
+        if (request.WarmAcquisitionProbe && request.WarmAcquisitionSelectionProbe)
+            throw new ProjectContextException("context.warmModeConflict", "Select only one private warm acquisition mode.");
+        if ((request.WarmAcquisitionProbe || request.WarmAcquisitionSelectionProbe) && !request.LoadGraphContexts)
+            throw new ProjectContextException("context.warmGraphRequired", "Warm acquisition requires complete graph-context preflight.");
         var root = Path.GetDirectoryName(request.Target)!;
         var excludedProjects = new List<ProjectContextProjectExclusion>();
         ProjectSelection[] projects;
@@ -45,7 +51,18 @@ internal static partial class MsBuildProjectLoader
             ProjectContextLoadResult graph;
             using (request.Timing?.Start("worker.graph"))
                 graph = await DiscoverGraph(request, projects, diagnostics, excludedProjects, cancellationToken);
+            if (request.WarmAcquisitionSelectionProbe)
+            {
+                // Choose ONCE for the entire graph, before any design-time target.
+                // No exception after LoadContext may switch acquisition paths.
+                var useWarm = WarmGraphSupported(graph.BuildGraph);
+                request = request with { WarmAcquisitionProbe = useWarm };
+                diagnostics.Add(useWarm ? "Private warm selection: warm." : "Private warm selection: ordinary.");
+            }
+            else if (request.WarmAcquisitionProbe)
+                EnsureWarmGraphSupported(graph.BuildGraph);
             var bindings = new List<ProjectGraphContextBinding>();
+            var observations = request.CollectProjectObservation ? new List<WarmProjectObservationResult>() : null;
             using var graphWorkspace = new GraphWorkspace(diagnostics);
             foreach (var node in graph.BuildGraph)
             {
@@ -57,11 +74,11 @@ internal static partial class MsBuildProjectLoader
                 EnsurePreparedAssets(metadata, node.ProjectPath);
                 // Required execution contexts are independent of production inventory filtering.
                 var context = await LoadContext(root, node.ProjectPath, node.TargetFramework, selected, diagnostics,
-                    cancellationToken, node.GlobalProperties, metadata, graphWorkspace);
+                    cancellationToken, node.GlobalProperties, metadata, graphWorkspace, observations);
                 bindings.Add(new(node.Id, node.ProjectPath, context, metadata.IsTestProject));
             }
             return new(true, bindings.Select(binding => binding.Context).ToArray(), diagnostics, null, excludedProjects)
-            { BuildGraph = graph.BuildGraph, GraphContexts = bindings };
+            { BuildGraph = graph.BuildGraph, GraphContexts = bindings, ProjectObservations = observations?.ToArray() ?? [] };
         }
         if (request.GraphOnly)
             return await DiscoverGraph(request, projects, diagnostics, excludedProjects, cancellationToken);
@@ -179,6 +196,37 @@ internal static partial class MsBuildProjectLoader
         return new(true, [], diagnostics, null, exclusions) { BuildGraph = result };
     }
 
+    private static void EnsureWarmGraphSupported(IReadOnlyList<ProjectBuildGraphNode> nodes)
+    {
+        if (!WarmGraphSupported(nodes))
+            throw new ProjectContextException("context.warmMappedGraphUnsupported", "Warm acquisition does not support mapped dependency globals; no design-time targets were executed.");
+    }
+
+    private static bool WarmGraphSupported(IReadOnlyList<ProjectBuildGraphNode> nodes)
+    {
+        // Check the entire normalized graph before the first design-time target.
+        // Mapped references can cause ordinary Workspace to retain additional
+        // recursively loaded ProjectReferences, which this probe cannot reproduce.
+        var byId = nodes.ToDictionary(node => node.Id, StringComparer.Ordinal);
+        foreach (var node in nodes)
+        foreach (var dependencyId in node.Dependencies)
+        {
+            if (!byId.TryGetValue(dependencyId, out var dependency))
+                return false;
+            // Compare the exact dictionaries both acquisition paths actually use.
+            // Graph references may omit the TargetFramework global while their
+            // evaluated framework is equal; WorkspaceProperties sets it explicitly.
+            var parentGlobals = WorkspaceProperties(node.Configuration, node.Platform, node.TargetFramework, node.GlobalProperties);
+            var childGlobals = WorkspaceProperties(dependency.Configuration, dependency.Platform, dependency.TargetFramework, dependency.GlobalProperties);
+            if (node.Configuration != dependency.Configuration || node.Platform != dependency.Platform ||
+                node.TargetFramework != dependency.TargetFramework ||
+                parentGlobals.Count != childGlobals.Count ||
+                parentGlobals.Any(pair => !childGlobals.TryGetValue(pair.Key, out var value) || value != pair.Value))
+                return false;
+        }
+        return true;
+    }
+
     private static string GraphIdentity(ProjectGraphNode node)
     {
         // All mapped globals distinguish contexts, including custom AdditionalProperties.
@@ -246,7 +294,7 @@ internal static partial class MsBuildProjectLoader
     private static async Task<ProjectAnalysisContext> LoadContext(string root, string projectPath, string framework,
         ProjectContextLoadRequest request, List<string> diagnostics, CancellationToken cancellationToken,
         IReadOnlyDictionary<string, string>? globalProperties = null, EvaluatedMetadata? evaluatedMetadata = null,
-        GraphWorkspace? graphWorkspace = null)
+        GraphWorkspace? graphWorkspace = null, ICollection<WarmProjectObservationResult>? observations = null)
     {
         using var contextTiming = request.Timing?.Start("worker.context");
         EvaluatedMetadata metadata;
@@ -260,17 +308,39 @@ internal static partial class MsBuildProjectLoader
         using (request.Timing?.Start("worker.authoredBefore"))
             beforeInputs = SnapshotInputs(metadata.AuthoredInputs);
         List<WorkspaceDiagnostic> workspaceDiagnostics = [];
-        using var ownedWorkspace = graphWorkspace is null
+        using var ownedWorkspace = !request.WarmAcquisitionProbe && graphWorkspace is null
             ? CreateWorkspace(request.Configuration, request.Platform, framework, diagnostics, out workspaceDiagnostics, globalProperties)
             : null;
-        var workspace = ownedWorkspace ?? graphWorkspace!.Acquire(request.Configuration, request.Platform, framework,
-            globalProperties, out workspaceDiagnostics);
+        WarmDesignTimeProject? acquiredWarmProject = null;
         Microsoft.CodeAnalysis.Project project;
-        using (request.Timing?.Start("worker.workspace"))
-            project = await workspace.OpenProjectAsync(projectPath, cancellationToken: cancellationToken);
+        try
+        {
+            using var workspaceTiming = request.Timing?.Start("worker.workspace");
+            if (request.WarmAcquisitionProbe)
+            {
+                acquiredWarmProject = await WarmDesignTimeProject.AcquireAsync(projectPath,
+                    WorkspaceProperties(request.Configuration, request.Platform, framework, globalProperties), diagnostics, cancellationToken,
+                    timing: request.Timing);
+                project = acquiredWarmProject.Project;
+            }
+            else
+            {
+                var workspace = ownedWorkspace ?? graphWorkspace!.Acquire(request.Configuration, request.Platform, framework,
+                    globalProperties, out workspaceDiagnostics);
+                project = await workspace.OpenProjectAsync(projectPath, cancellationToken: cancellationToken);
+            }
+        }
+        catch
+        {
+            acquiredWarmProject?.Dispose();
+            throw;
+        }
+        using var warmProject = acquiredWarmProject;
         ThrowOnWorkspaceFailure(workspaceDiagnostics, projectPath);
         if (project.ParseOptions is not CSharpParseOptions parseOptions)
             throw new ProjectContextException("context.parseOptionsUnavailable", $"C# parse options were unavailable for {projectPath}.");
+        if (observations is not null)
+            observations.Add(new(projectPath, await WarmProjectObservation.CaptureAsync(project, cancellationToken)));
         var sources = new List<ProjectSourceIdentity>();
         var compilerDocuments = new List<ProjectSourceIdentity>();
         var exclusions = new List<ProjectSourceExclusion>();

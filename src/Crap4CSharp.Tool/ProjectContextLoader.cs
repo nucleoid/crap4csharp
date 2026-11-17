@@ -13,7 +13,11 @@ public sealed record ProjectContextLoadRequest(
     bool IncludeGenerated,
     TimeSpan Timeout)
 {
+    internal bool WarmPostBuildProbe { get; init; }
     internal bool CollectTiming { get; init; }
+    internal bool WarmAcquisitionProbe { get; init; }
+    internal bool WarmAcquisitionSelectionProbe { get; init; }
+    internal bool CollectProjectObservation { get; init; }
     internal CompletedProofTiming? Timing { get; init; }
     internal string TimingPrefix { get; init; } = "loader";
     public bool TestRunnersOnly { get; init; }
@@ -37,10 +41,13 @@ public sealed record ProjectContextLoadResult(
     [JsonIgnore]
     public IReadOnlyList<ProjectTestRunnerMetadata> TestRunners { get; init; } = [];
     internal IReadOnlyList<CompletedProofTiming.Span> WorkerTimings { get; init; } = [];
+    internal IReadOnlyList<WarmProjectObservationResult> ProjectObservations { get; init; } = [];
     public IReadOnlyList<ProjectDiscoveryMetadata> Metadata { get; init; } = [];
     public IReadOnlyList<ProjectBuildGraphNode> BuildGraph { get; init; } = [];
     public IReadOnlyList<ProjectGraphContextBinding> GraphContexts { get; init; } = [];
 }
+
+internal sealed record WarmProjectObservationResult(string ProjectPath, string Observation);
 
 public sealed record ProjectTestRunnerMetadata(string GraphId, string ProjectPath, string Configuration, string Platform,
     string TargetFramework, string Runner, string TestSdkVersion, string CollectorVersion);
@@ -107,8 +114,8 @@ public static class ProjectContextLoader
                 info.Type == typeof(ProjectAnalysisContext) ? new[] { nameof(ProjectAnalysisContext.ResolvedProjectPath), nameof(ProjectAnalysisContext.ProtectedPaths),
                     nameof(ProjectAnalysisContext.CompilerDocuments), nameof(ProjectAnalysisContext.GeneratorOnlyTreeCount), nameof(ProjectAnalysisContext.PhaseInputs), nameof(ProjectAnalysisContext.ReferencePaths), nameof(ProjectAnalysisContext.GeneratedTransitionPaths), nameof(ProjectAnalysisContext.EvaluatedTargetPath),
                     nameof(ProjectAnalysisContext.EvaluatedIntermediateDirectory), nameof(ProjectAnalysisContext.EvaluatedReferenceAssemblyPath) } :
-                info.Type == typeof(ProjectContextLoadResult) ? new[] { nameof(ProjectContextLoadResult.TestRunners), nameof(ProjectContextLoadResult.WorkerTimings) } :
-                info.Type == typeof(ProjectContextLoadRequest) ? new[] { nameof(ProjectContextLoadRequest.CollectTiming) } : [];
+                info.Type == typeof(ProjectContextLoadResult) ? new[] { nameof(ProjectContextLoadResult.TestRunners), nameof(ProjectContextLoadResult.WorkerTimings), nameof(ProjectContextLoadResult.ProjectObservations) } :
+                info.Type == typeof(ProjectContextLoadRequest) ? new[] { nameof(ProjectContextLoadRequest.CollectTiming), nameof(ProjectContextLoadRequest.WarmAcquisitionProbe), nameof(ProjectContextLoadRequest.WarmAcquisitionSelectionProbe), nameof(ProjectContextLoadRequest.CollectProjectObservation) } : [];
             foreach (var propertyName in propertyNames)
             {
                 var member = info.Type.GetProperty(propertyName,
@@ -119,10 +126,12 @@ public static class ProjectContextLoader
                 var property = info.CreateJsonPropertyInfo(member.PropertyType, name);
                 property.Get = member.GetValue;
                 property.Set = member.SetValue;
-                if (propertyName == nameof(ProjectContextLoadRequest.CollectTiming))
+                if (propertyName is nameof(ProjectContextLoadRequest.CollectTiming) or nameof(ProjectContextLoadRequest.WarmAcquisitionProbe) or nameof(ProjectContextLoadRequest.WarmAcquisitionSelectionProbe) or nameof(ProjectContextLoadRequest.CollectProjectObservation))
                     property.ShouldSerialize = (_, value) => value is true;
                 if (propertyName == nameof(ProjectContextLoadResult.WorkerTimings))
                     property.ShouldSerialize = (_, value) => value is IReadOnlyList<CompletedProofTiming.Span> { Count: > 0 };
+                if (propertyName == nameof(ProjectContextLoadResult.ProjectObservations))
+                    property.ShouldSerialize = (_, value) => value is IReadOnlyList<WarmProjectObservationResult> { Count: > 0 };
                 info.Properties.Add(property);
             }
         });

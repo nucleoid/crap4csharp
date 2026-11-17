@@ -56,7 +56,10 @@ internal static class CompilerGraphExecution
         var snapshot = CompilerPhaseSnapshot.Capture(frozen, token);
         var observations = await RunAsync(frozen, build, token);
         token.ThrowIfCancellationRequested();
-        var final = await (reload ?? ProjectContextLoader.LoadGraphAsync)(frozenRequest, token);
+        // Only AFTER every once build has completed. Initial discovery/loading
+        // and runner requests retain their ordinary acquisition path.
+        var final = await (reload ?? ProjectContextLoader.LoadGraphAsync)(frozenRequest with
+        { WarmAcquisitionSelectionProbe = frozenRequest.WarmPostBuildProbe || frozenRequest.WarmAcquisitionSelectionProbe }, token);
         token.ThrowIfCancellationRequested();
         ValidateFinalGraph(frozen, final);
         snapshot.Validate(final, token); // Rediscovered membership, not the old file list.
@@ -171,7 +174,8 @@ internal static class CompilerGraphExecution
         var retainedGraph = FreezeGraph(result.FinalGraph);
         authoredSnapshot.Validate(retainedGraph, token);
         var documentSnapshot = CompilerDocumentSnapshot.Capture(retainedGraph, token);
-        var proof = new CompilerRetainedProof(frozenRequest, retainedGraph, authoredSnapshot,
+        var proof = new CompilerRetainedProof(frozenRequest with
+            { WarmAcquisitionSelectionProbe = frozenRequest.WarmPostBuildProbe || frozenRequest.WarmAcquisitionSelectionProbe }, retainedGraph, authoredSnapshot,
             new Dictionary<string, CompilerReferenceSnapshot>(snapshots, StringComparer.Ordinal),
             new Dictionary<string, string[]>(closures, StringComparer.Ordinal),
             new Dictionary<string, CompilerObservation>(completed, StringComparer.Ordinal), documentSnapshot,

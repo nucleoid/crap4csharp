@@ -29,7 +29,8 @@ internal static class FreshCheckExecution
         var request = new ProjectContextLoadRequest(selected, preflight.Policy.Configuration, platform,
             preflight.Policy.TargetFrameworks.ToArray(), preflight.Request.Overrides.IncludeTests ?? false,
             preflight.Request.Overrides.IncludeGenerated ?? false, preflight.Request.Timeout)
-        { Timing = timing, CollectTiming = timing is not null, TimingPrefix = "execution.loader" };
+        { Timing = timing, CollectTiming = timing is not null, TimingPrefix = "execution.loader",
+            WarmPostBuildProbe = preflight.Request.WarmPostBuildProbe };
         ProjectContextLoadResult metadata;
         using (timing?.Start("execution.metadata"))
             metadata = await ProjectContextLoader.DiscoverAsync(request, token);

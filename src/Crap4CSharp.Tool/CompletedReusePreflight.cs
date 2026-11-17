@@ -35,7 +35,10 @@ internal static class CompletedReusePreflight
             selectors.Scope, null, "worktree", selectors.Granularity, baselineLocal ? null : output, null, true, false, null,
             new PolicyOverrides(Threshold: captured.Policy.Threshold,
                 IncludeTests: selectors.IncludeTests ? true : null,
-                IncludeGenerated: selectors.IncludeGenerated ? true : null), timeout);
+                IncludeGenerated: selectors.IncludeGenerated ? true : null), timeout)
+        { WarmPostBuildProbe = true };
+        // Saved execution has already completed. Only current graph acquisition
+        // selects the supported warm path; independently current runners do not.
         var preflight = localTrust
             ? await FreshCheckPreflightLoader.LoadLocalIdentityAsync(request, root, identityBase, token)
             : await FreshCheckPreflightLoader.LoadAsync(request, root, token);

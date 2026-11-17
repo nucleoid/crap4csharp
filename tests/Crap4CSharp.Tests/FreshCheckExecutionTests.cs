@@ -84,6 +84,16 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, false, includeGenerated: includeGenerated, generatedFixture: true,
             policyScope: scope, granularity: granularity);
 
+    [Fact]
+    public Task OriginalGeneratedBaseFileDeadlineMeasuresUnchangedPublicProofBoundaries()
+        => RunCase(false, false, includeGenerated: true, generatedFixture: true,
+            policyScope: "base", granularity: "file", publicTiming: true);
+
+    [Fact]
+    public Task OriginalGeneratedExcludedBaseFileDeadlineMeasuresUnchangedPublicProofBoundaries()
+        => RunCase(false, false, includeGenerated: false, generatedFixture: true,
+            policyScope: "base", granularity: "file", publicTiming: true);
+
     [Theory]
     [InlineData("Library/Code.cs", true)]
     [InlineData("Library/Other.cs", false)]
@@ -116,6 +126,13 @@ public sealed class FreshCheckExecutionTests
     public Task FreshCompletePublicationRejectsAfterIntermediateTimestampDriftAndRestoresOriginalOnceExecution()
         => RunCase(false, true, policyScope: "all", local: true, measure: true, standaloneTest: true,
             promotionMeasure: true, promotionDrift: true, promotionIntermediateDrift: true);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task PrivateWarmPostBuildRetainsTwoContextCompleteProofAndEightIntermediateDriftRefusals(bool drift)
+        => RunCase(false, true, policyScope: "all", local: true, measure: true, standaloneTest: true,
+            promotionMeasure: true, promotionDrift: drift, promotionIntermediateDrift: drift, warmPostBuild: true);
 
     [Fact]
     public Task PublicStrictMetricViolationRetainsSuccessfulOnceTestsAndCompleteReusableReplay()
@@ -192,6 +209,24 @@ public sealed class FreshCheckExecutionTests
     [InlineData(true)]
     public Task SavedCompleteBoundaryRechecksTwoRequiredContextsAndRejectsBetweenGateDrift(bool shared)
         => RunCase(false, true, standaloneTest: true, savedCoverage: true, sharedCoverage: shared, compositeProof: true);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task PrivateWarmSavedBoundaryRetainsTwoContextsAndIntermediatePhysicalDriftOrdering(bool shared)
+        => RunCase(false, true, policyScope: "all", local: true, standaloneTest: true,
+            savedCoverage: true, sharedCoverage: shared, compositeProof: true,
+            physicalComposite: true, warmSaved: true);
+
+    [Theory]
+    [InlineData(true, false, false)]
+    [InlineData(true, false, true)]
+    [InlineData(false, true, false)]
+    [InlineData(false, true, true)]
+    public Task PrivateWarmSavedEligibilityRetainsBothRequiredClosures(bool empty, bool generated, bool shared)
+        => RunCase(false, true, emptyEligible: empty, includeGenerated: generated,
+            policyScope: "all", local: true, standaloneTest: true, sharedCoverage: shared,
+            warmSavedEligibility: true);
 
     [Theory]
     [InlineData(true, false)]
@@ -370,7 +405,7 @@ public sealed class FreshCheckExecutionTests
         => RunCase(false, false, policyScope: "all", standaloneTest: true, savedResults: true, freshTerminalCancellation: true, freshTerminalDeadline: true);
 
     private static async Task RunCase(bool failing, bool coordinatorOnly, bool emptyEligible = false, bool includeGenerated = false,
-        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false)
+        bool generatedFixture = false, string policyScope = "base", string granularity = "method", bool local = false, bool priorBuild = false, bool partial = false, bool partialDrift = false, bool scopedEmpty = false, bool staleOutput = false, bool staleRawOutput = false, bool replaceRawOutput = false, string? outputLayout = null, string? outputMutation = null, string? partialExclusion = null, bool partialExpectedExcluded = false, bool measure = false, bool thresholdViolation = false, bool completedReuse = false, bool standaloneTest = false, bool savedResults = false, bool savedCoverage = false, bool sharedCoverage = false, bool productionAgreement = false, bool contextAgreement = false, bool contextOnly = false, bool compositeProof = false, bool physicalComposite = false, bool bundleEvidence = false, bool newPreflight = false, bool inWorkspaceBundle = false, bool trustedPolicyBinding = false, bool completeProviderDispatch = false, bool policyMembership = false, string? publicCompleteConsumer = null, bool completedSelectors = false, bool reconstructedPreflight = false, bool baselineLocal = false, bool outerTerminalDrift = false, string? outerTerminalMutation = null, bool freshTerminalCancellation = false, bool freshTerminalDeadline = false, bool promotionMeasure = false, bool promotionDrift = false, bool promotionIntermediateDrift = false, bool defaultSolution = false, bool publicTiming = false, bool warmPostBuild = false, bool warmSaved = false, bool warmSavedEligibility = false)
     {
         var hasGenerated = includeGenerated || generatedFixture;
         using var fixture = TestDirectory.Create("crap4csharp-public-cold-check");
@@ -409,7 +444,7 @@ public sealed class FreshCheckExecutionTests
                 (outputMutation == "source" ? "Authored.cs" : "Rules.json") +
                 "\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); ") +
             (partialDrift ? "var p = System.IO.Path.GetFullPath(\"../../../../Library/Code.cs\", System.AppContext.BaseDirectory); var time = System.IO.File.GetLastWriteTimeUtc(p); System.IO.File.WriteAllText(p, System.IO.File.ReadAllText(p).Replace(\"42\", \"43\")); System.IO.File.SetLastWriteTimeUtc(p, time); " : "") +
-            (priorBuild || measure || thresholdViolation || completedReuse || savedResults || savedCoverage || contextOnly || bundleEvidence ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
+            (priorBuild || measure || thresholdViolation || completedReuse || savedResults || savedCoverage || contextOnly || bundleEvidence || warmSavedEligibility ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") +
             "Assert.Equal(" + (failing ? "99" : "42") + ", " + (emptyEligible ? "42" : hasGenerated ? "Extra.Value" : "Library.Value") + "); } }");
         fixture.Write("policy.json", """
             {"schemaVersion":"repository-policy-v1","mode":"strict","productionProjects":["Library/Library.csproj"],
@@ -445,7 +480,7 @@ public sealed class FreshCheckExecutionTests
             fixture.Write("Independent/Independent.csproj", File.ReadAllText(Path.Combine(fixture.Path, "Tests/Tests.csproj"))
                 .Replace("<ProjectReference Include=\"../Library/Library.csproj\" />", sharedCoverage ? "<ProjectReference Include=\"../Library/Library.csproj\" />" : "", StringComparison.Ordinal));
             fixture.Write("Independent/Tests.cs", "using Xunit; public class IndependentTests { [Fact] public void Test() { " +
-                (savedResults || savedCoverage || bundleEvidence || promotionMeasure ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") + (sharedCoverage ? "Assert.Equal(42, Library.Value); } }" : "Assert.Equal(42, 42); } }"));
+                (savedResults || savedCoverage || bundleEvidence || promotionMeasure || warmSavedEligibility ? "System.IO.File.AppendAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, \"test-count.txt\"), \"once\\n\"); " : "") + (sharedCoverage ? "Assert.Equal(42, " + (emptyEligible ? "42" : hasGenerated ? "Extra.Value" : "Library.Value") + "); } }" : "Assert.Equal(42, 42); } }"));
             fixture.Write("Root.slnx", defaultSolution
                 ? "<Solution><Project Path=\"Tests/Tests.csproj\" /><Project Path=\"Independent/Independent.csproj\" /></Solution>"
                 : "<Solution><Configurations><Platform Name=\"AnyCPU\" /></Configurations><Project Path=\"Tests/Tests.csproj\" /><Project Path=\"Independent/Independent.csproj\" /></Solution>");
@@ -488,7 +523,8 @@ public sealed class FreshCheckExecutionTests
                 return value;
             }
             var request = new FreshCheckRequest(standaloneTest ? "Root.slnx" : "Tests/Tests.csproj", "policy.json", local ? null : "HEAD", local || newPreflight ? "all" : null, null, "worktree", granularity,
-                null, "bundle", false, false, null, new PolicyOverrides(IncludeGenerated: includeGenerated ? true : null), TimeSpan.FromMinutes(3));
+                null, "bundle", false, false, null, new PolicyOverrides(IncludeGenerated: includeGenerated ? true : null), TimeSpan.FromMinutes(3))
+                { WarmPostBuildProbe = warmPostBuild };
             var preflight = await MeasureAsync("trustedPreflight", () => FreshCheckPreflightLoader.LoadAsync(request, fixture.Path, token));
             var evidence = await MeasureAsync("executionComposite", () => FreshCheckExecution.RunAsync(preflight, token));
             Assert.Equal(standaloneTest ? 3 : 2, evidence.Compiler.Observations.Count);
@@ -681,6 +717,71 @@ public sealed class FreshCheckExecutionTests
                     File.GetUnixFileMode(Path.GetDirectoryName(manifest)!));
                 var bundle = Measure("bundleLoad", () => ArtifactBundle.Load(manifest, evidence.PrivateDirectory));
                 Assert.Equal(ProvenanceStatus.Captured, ProvenanceVerifier.VerifyCapture(bundle.Manifest, bundle.Bytes).Status);
+                if (warmSavedEligibility)
+                {
+                    Assert.Equal(2, currentPlan.Tests.Count);
+                    Assert.Equal(2, parsedRequired.Count);
+                    Assert.All(evidence.Tests.Outcomes, o =>
+                    { Assert.Equal("completed", o.State); Assert.Equal(0, o.Process!.ExitCode); });
+                    var warm = await SavedCompletedProof.ValidateAsync(bundle,
+                        preflight with { Request = preflight.Request with { WarmPostBuildProbe = true } }, token);
+                    var ordinary = await SavedCompletedProof.ValidateAsync(bundle, preflight, token);
+                    const string diagnostic = "Private warm selection: warm.";
+                    Assert.Single(warm.FinalGraph.Diagnostics, d => d == diagnostic);
+                    Assert.DoesNotContain(diagnostic, ordinary.FinalGraph.Diagnostics);
+                    Assert.Equal(JsonSerializer.Serialize(ordinary.FinalGraph), JsonSerializer.Serialize(warm.FinalGraph with
+                    { Diagnostics = warm.FinalGraph.Diagnostics.Where(d => d != diagnostic).ToArray() }));
+                    Assert.Equal(JsonSerializer.Serialize(ordinary.Observations), JsonSerializer.Serialize(warm.Observations));
+                    Assert.All(warm.FinalGraph.GraphContexts, b => Assert.Equal(includeGenerated, b.Context.ExclusionPolicy.IncludeGenerated));
+                    var scored = Assert.Single(bundle.Manifest.Contexts);
+                    var production = Assert.Single(warm.FinalGraph.GraphContexts, b => !b.IsTestProject);
+                    Assert.Equal(production.GraphId, scored.Id);
+                    Assert.Equal(emptyEligible ? "semantic-empty" : null, scored.CoverageApplicability);
+                    Assert.Equal(includeGenerated, scored.IncludeGenerated);
+                    Assert.False(scored.ReuseRecipeComplete);
+                    if (includeGenerated)
+                    {
+                        Assert.Contains(production.Context.CompilerDocuments, d => d.IsGenerated && d.LogicalPath.EndsWith("Extra.cs", StringComparison.Ordinal));
+                        Assert.Contains(scored.Inputs, i => i.Generated && i.LogicalPath.EndsWith("Extra.cs", StringComparison.Ordinal));
+                    }
+                    var eligibilityReplay = AnalyzeCommand.Replay(bundle, fixture.Path, DateTimeOffset.UtcNow, TimeSpan.Zero, token, allSources: true);
+                    Assert.Equal(0, eligibilityReplay.Run.ExitCode);
+                    if (emptyEligible) Assert.DoesNotContain(eligibilityReplay.Evaluation.Callables!, c => c.Applicability == "applicable");
+                    else Assert.Contains(eligibilityReplay.Evaluation.Callables!, c => c.SemanticSignature?.Contains("Extra", StringComparison.Ordinal) == true && c.Coverage is not null);
+                    foreach (var required in currentPlan.Tests)
+                    {
+                        var binding = Assert.Single(warm.FinalGraph.GraphContexts, b => b.GraphId == required.GraphId);
+                        var reachesProduction = warm.FinalGraph.BuildGraph.Single(n => n.Id == required.GraphId).Dependencies.Contains(production.GraphId);
+                        Assert.Equal(Path.GetFileName(required.ProjectPath) == "Tests.csproj" || sharedCoverage, reachesProduction);
+                        var source = binding.Context.CompilerDocuments.Single(d => !d.IsGenerated && d.LogicalPath.EndsWith("Tests.cs", StringComparison.Ordinal));
+                        var text = File.ReadAllText(source.ResolvedPath!);
+                        if (includeGenerated && reachesProduction) Assert.Contains("Extra.Value", text, StringComparison.Ordinal);
+                        if (emptyEligible) Assert.DoesNotContain("Library.Value", text, StringComparison.Ordinal);
+                        var closure = Assert.Single(bundle.Manifest.Artifacts, a => a.Id == "test-closure-" + required.GraphId);
+                        Assert.Equal("test-compiler-input-closure", closure.Kind);
+                        var missingClosure = bundle with { Manifest = ManifestIdentity.Seal(bundle.Manifest with
+                        { Artifacts = bundle.Manifest.Artifacts.Where(a => a.Id != closure.Id).ToArray() }) };
+                        Assert.Equal("provenance.savedCompilerContextsUnproven", Assert.Throws<PolicyException>(() =>
+                            SavedCompilerContexts.Validate(missingClosure, warm, fixture.Path, token)).Code);
+                        var sourceBytes = File.ReadAllBytes(source.ResolvedPath!);
+                        var sourceTime = File.GetLastWriteTimeUtc(source.ResolvedPath!);
+                        try
+                        {
+                            File.WriteAllText(source.ResolvedPath!, text.Replace("42", "43", StringComparison.Ordinal));
+                            File.SetLastWriteTimeUtc(source.ResolvedPath!, sourceTime);
+                            Assert.Equal(sourceTime, File.GetLastWriteTimeUtc(source.ResolvedPath!));
+                            Assert.False(sourceBytes.AsSpan().SequenceEqual(File.ReadAllBytes(source.ResolvedPath!)));
+                            Assert.Equal("provenance.savedCompilerContextsUnproven", Assert.Throws<PolicyException>(() =>
+                                SavedCompilerContexts.Validate(bundle, warm, fixture.Path, token)).Code);
+                        }
+                        finally { File.WriteAllBytes(source.ResolvedPath!, sourceBytes); File.SetLastWriteTimeUtc(source.ResolvedPath!, sourceTime); }
+                        SavedCompilerContexts.Validate(bundle, warm, fixture.Path, token);
+                        Assert.Single(File.ReadAllLines(Path.Combine(Path.GetDirectoryName(binding.Context.EvaluatedTargetPath!)!, "test-count.txt")));
+                        Assert.Single(File.ReadAllLines(Path.Combine(Path.GetDirectoryName(required.ProjectPath)!, "build-count.txt")));
+                    }
+                    Assert.Single(File.ReadAllLines(Path.Combine(fixture.Path, "Library/build-count.txt")));
+                    Assert.False(Directory.Exists(Path.Combine(fixture.Path, ".git")));
+                }
                 if (bundleEvidence)
                 {
                     // A new public invocation cannot retain the original pre-build snapshot.
@@ -1105,16 +1206,33 @@ public sealed class FreshCheckExecutionTests
                 }
                 if (compositeProof)
                 {
-                    var gate = typeof(App).Assembly.GetType("SavedCompletedProof")?.GetMethod("ValidateAsync",
-                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
-                    Assert.NotNull(gate);
-                    async Task Agree(Func<CancellationToken, Task>? mutate = null)
+                    var savedPreflight = preflight with
+                    { Request = preflight.Request with { WarmPostBuildProbe = warmSaved } };
+                    Task<CompilerGraphPhaseResult> Agree(Func<CancellationToken, Task>? mutate = null)
+                        => SavedCompletedProof.ValidateAsync(bundle, savedPreflight, token, mutate);
+                    var savedProof = await Agree();
+                    if (warmSaved)
                     {
-                        try { await (Task)gate.Invoke(null, [bundle, preflight, token, mutate])!; }
-                        catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
-                        { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); }
+                        Assert.Equal(2, currentPlan.Tests.Count);
+                        var ordinary = await SavedCompletedProof.ValidateAsync(bundle, preflight, token);
+                        const string warmSelectionDiagnostic = "Private warm selection: warm.";
+                        Assert.Single(savedProof.FinalGraph.Diagnostics, d => d == warmSelectionDiagnostic);
+                        Assert.DoesNotContain(warmSelectionDiagnostic, ordinary.FinalGraph.Diagnostics);
+                        var comparableWarmGraph = savedProof.FinalGraph with
+                        { Diagnostics = savedProof.FinalGraph.Diagnostics.Where(d => d != warmSelectionDiagnostic).ToArray() };
+                        Assert.Equal(JsonSerializer.Serialize(ordinary.FinalGraph), JsonSerializer.Serialize(comparableWarmGraph));
+                        Assert.Equal(JsonSerializer.Serialize(ordinary.Observations), JsonSerializer.Serialize(savedProof.Observations));
+                        using var cancelledSaved = CancellationTokenSource.CreateLinkedTokenSource(token);
+                        var reachedIntermediate = 0;
+                        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => SavedCompletedProof.ValidateAsync(
+                            bundle, savedPreflight, cancelledSaved.Token, _ =>
+                            {
+                                reachedIntermediate++;
+                                cancelledSaved.Cancel();
+                                return Task.CompletedTask;
+                            }));
+                        Assert.Equal(1, reachedIntermediate);
                     }
-                    await Agree();
                     var mutationProject = standaloneTest ? "Independent" : "Tests";
                     var sourcePath = Path.Combine(fixture.Path, mutationProject, "Tests.cs");
                     var originalBytes = File.ReadAllBytes(sourcePath); var originalTime = File.GetLastWriteTimeUtc(sourcePath);
@@ -1637,7 +1755,9 @@ public sealed class FreshCheckExecutionTests
                     Assert.True(finalProof.Reusable); Assert.True(outerProof.Reusable);
                     // Same original execution, physical bundle and current observations:
                     // numeric diagnostics must not affect the complete proof verdict.
-                    var unobservedProof = await FreshCompletedCapture.ValidateAsync(evidence, finalBundle, token);
+                    var ordinaryEvidence = warmPostBuild ? evidence with
+                    { Preflight = evidence.Preflight with { Request = evidence.Preflight.Request with { WarmPostBuildProbe = false } } } : evidence;
+                    var unobservedProof = await FreshCompletedCapture.ValidateAsync(ordinaryEvidence, finalBundle, token);
                     Assert.Equal(JsonSerializer.Serialize(unobservedProof), JsonSerializer.Serialize(finalProof));
                     Assert.Equal(JsonSerializer.Serialize(unobservedProof), JsonSerializer.Serialize(outerProof));
                     if (!promotionDrift)

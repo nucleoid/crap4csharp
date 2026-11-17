@@ -16,7 +16,10 @@ internal sealed class CompletedProofTiming
                 "worker.runnerMetadata" or "worker.contextMetadata" or "worker.workspace" or
                 "worker.documents" or "worker.compilation" or "worker.context" or
                 "worker.authoredBefore" or "worker.authoredAfter" or "worker.trackedInputs" or
-                "worker.generatorDiscovery" or "worker.generatorValidation" &&
+                "worker.generatorDiscovery" or "worker.generatorValidation" or
+                "worker.warmEvaluation" or "worker.warmTargets" or "worker.warmCommandLine" or "worker.warmReconstruction" or
+                "worker.warmWorkspaceCreation" or "worker.warmProjectInfo" or
+                "worker.warmProjectInfoAdjustment" or "worker.warmAddProject" &&
                 double.IsFinite(span.Milliseconds) && span.Milliseconds >= 0)
                 spans.Add(new Span(prefix + "." + span.Phase, span.Milliseconds));
     }
